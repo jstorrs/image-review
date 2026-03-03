@@ -26,8 +26,8 @@ image-review status
 
 ## Step 1: Preprocess
 
-Preprocessing converts raw DICOM files into optimized JPGs and packs them
-into grid canvases. This is the slow step -- run it once, then review is fast.
+Preprocessing converts raw DICOM files into optimized JPGs. This is the slow
+step -- run it once, then review is fast.
 
 ```bash
 image-review preprocess SOURCE [SOURCE ...] [options]
@@ -67,14 +67,11 @@ image-review preprocess scans.zip --output-dir /data/review_session_1
 ```
 review_work/
   manifest.tsv        # Master list: image_id, batch, source, preprocessed path
-  grids.tsv           # Grid-to-image mapping
   review.tsv          # (created later during review)
   batch_001/
     img_00001.jpg      # Individual preprocessed images
     img_00002.jpg
     ...
-    grid_001.jpg       # Packed grid canvases
-    grid_002.jpg
   batch_002/
     ...
 ```
@@ -85,7 +82,6 @@ The DICOM preprocessing pipeline:
 3. Applies CLAHE (adaptive histogram equalization, 96 tiles)
 4. Strips uniform rows/columns (letterboxing removal)
 5. Applies colormap and saves as JPG
-6. Packs images into grid canvases via bin-packing
 
 Non-DICOM images (JPG/PNG) get optional CLAHE if grayscale, then are saved directly.
 
@@ -115,8 +111,9 @@ Best for careful inspection of flagged images.
 image-review review --mode single
 ```
 
-**Grid mode** shows packed grid canvases, each containing many images.
-Best for rapid first-pass scanning -- you can review hundreds of images per minute.
+**Grid mode** packs images into grid canvases at review time, sized to your
+screen resolution. Each grid contains many images. Best for rapid first-pass
+scanning -- you can review hundreds of images per minute.
 
 ```bash
 image-review review --mode grid
@@ -258,19 +255,17 @@ All state lives in the work directory (default `./review_work`):
 | File | Format | Description |
 |------|--------|-------------|
 | `manifest.tsv` | TSV | Master image list (image_id, batch, source, path) |
-| `grids.tsv` | TSV | Grid-to-image membership mapping |
 | `review.tsv` | TSV | Review decisions (image_id, batch, status, pass, timestamp) |
 | `batch_NNN/img_NNNNN.jpg` | JPG | Preprocessed individual images |
-| `batch_NNN/grid_NNN.jpg` | JPG | Packed grid canvases |
 
 `review.tsv` is written atomically (temp file + rename) after every rating
 action, so it is safe to kill the process at any time without data loss.
 
 ## Tips
 
-- **Grid mode first**: A single grid contains dozens of images. Marking a
-  grid CLEAN clears all of them at once. Reserve single mode for the DIRTY
-  remainder.
+- **Grid mode first**: Grids are packed at review time to fit your screen,
+  so each grid contains as many images as possible. Marking a grid CLEAN
+  clears all of them at once. Reserve single mode for the DIRTY remainder.
 - **Autoplay**: Press `Space` to start auto-advancing through images at
   500ms intervals. Press any key to stop. Useful for a quick visual scan.
 - **Gamepad**: A game controller makes long review sessions more

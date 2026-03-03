@@ -5,6 +5,7 @@ from pathlib import Path
 import pygame as pg
 import skimage as ski
 
+from .grid_packer import pack_into_grids
 from .review_db import ReviewDB
 from .viewer import ImageViewer
 
@@ -20,14 +21,6 @@ def _load_surface(path: str) -> pg.Surface:
 def load_manifest(work_dir: Path) -> list[dict]:
     manifest_path = work_dir / "manifest.tsv"
     with open(manifest_path, newline="") as f:
-        return list(csv.DictReader(f, delimiter="\t"))
-
-
-def load_grids(work_dir: Path) -> list[dict]:
-    grids_path = work_dir / "grids.tsv"
-    if not grids_path.exists():
-        return []
-    with open(grids_path, newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
@@ -76,24 +69,19 @@ class ReviewSession:
         self._viewer = ImageViewer()
 
     def _init_grid_mode(self):
-        grid_rows = load_grids(self.work_dir)
-        review_ids = {
-            row["image_id"]
-            for row in self.db.images_for_review(self.manifest, self.pass_number, self.batch)
-        }
-        items = []
-        for grow in grid_rows:
-            member_ids = grow["image_ids"].split(",")
-            if any(iid in review_ids for iid in member_ids):
-                batch = self._image_batch.get(member_ids[0], "unknown")
-                items.append({
-                    "grid_path": grow["grid_path"],
-                    "image_ids": member_ids,
-                    "batch": batch,
-                })
+        self._viewer = ImageViewer()
+        grid_w, grid_h = self._viewer.screen.get_size()
+        grid_h -= self._viewer.border
+
+        review_rows = self.db.images_for_review(self.manifest, self.pass_number, self.batch)
+        grid_specs = pack_into_grids(review_rows, self.work_dir, grid_w, grid_h)
+
+        items = [
+            {"surface": gs.surface, "image_ids": gs.image_ids, "batch": gs.batch}
+            for gs in grid_specs
+        ]
         random.shuffle(items)
         self._items = items
-        self._viewer = ImageViewer()
 
     def _show_current(self):
         if not self._items:
@@ -102,10 +90,9 @@ class ReviewSession:
         info = f"{self._cursor + 1} / {len(self._items)}"
 
         if self.mode == "grid":
-            path = self.work_dir / item["grid_path"]
-            surface = _load_surface(str(path))
+            surface = item["surface"]
             status = _grid_status(self.db, item["image_ids"])
-            self._viewer.set_image(surface, item["grid_path"], status, info)
+            self._viewer.set_image(surface, f"grid ({len(item['image_ids'])} images)", status, info)
         else:
             path = self.work_dir / item["preprocessed_path"]
             surface = _load_surface(str(path))
@@ -134,8 +121,7 @@ class ReviewSession:
             return
         item = self._items[self._cursor]
         if self.mode == "grid":
-            batch = self._image_batch.get(item["image_ids"][0], "unknown")
-            self.db.mark_many(item["image_ids"], batch, status, self.pass_number)
+            self.db.mark_many(item["image_ids"], item["batch"], status, self.pass_number)
         else:
             self.db.mark(item["image_id"], item["batch"], status, self.pass_number)
         self._viewer.set_status(status)

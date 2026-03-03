@@ -1,6 +1,5 @@
 import csv
 import io
-from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 from zipfile import ZipFile
@@ -9,11 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pydicom
 import skimage as ski
-from rectpack import newPacker
 from tqdm import tqdm
-
-GRID_X = 1080 * 2
-GRID_Y = 1920 * 2
 
 
 def compress_image(image):
@@ -42,32 +37,6 @@ def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
     img = np.clip(img, 0, 1)
     img = ski.exposure.equalize_adapthist(img, 96)
     return compress_image(img)
-
-
-def pack_images(
-    images: list[np.ndarray],
-) -> tuple[list[np.ndarray], dict[int, list[int]], set[int]]:
-    """Pack images into grid canvases using rectpack.
-
-    Returns (canvases, bin_members, unused) where bin_members maps
-    bin index -> list of image indices packed into that bin.
-    """
-    packer = newPacker()
-    packer.add_bin(GRID_X, GRID_Y, float("inf"))
-    for i, image in enumerate(images):
-        packer.add_rect(*image.shape, i)
-    packer.pack()
-    canvas = [np.zeros((GRID_X, GRID_Y), dtype=np.float32) for _ in range(len(packer))]
-    unused = set(range(len(images)))
-    bin_members = defaultdict(list)
-    for i, x, y, w, h, j in packer.rect_list():
-        if (w, h) == images[j].shape:
-            canvas[i][x : x + w, y : y + h] = images[j]
-        else:
-            canvas[i][x : x + w, y : y + h] = np.rot90(images[j])
-        unused.remove(j)
-        bin_members[i].append(j)
-    return canvas, dict(bin_members), unused
 
 
 def load_from_zip(path: Path) -> Iterator[tuple[str, np.ndarray]]:
@@ -153,13 +122,11 @@ def run_preprocess(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.tsv"
-    grids_path = output_dir / "grids.tsv"
 
     # Partition sources once to avoid repeated is_dir() calls
     sources_dirs = [(s, s.is_dir()) for s in sources]
 
     manifest_rows = []
-    grid_rows = []
     batch_num = 0
 
     # Stream batches from the generator to avoid holding all arrays in memory
@@ -173,9 +140,6 @@ def run_preprocess(
         batch_dir = output_dir / batch_id
         batch_dir.mkdir(parents=True, exist_ok=True)
 
-        dicom_arrays = []
-        batch_image_ids = []
-
         for idx, (image_id, source_path, array, resolved) in enumerate(entries):
             img_filename = f"img_{idx + 1:05d}.jpg"
             img_path = batch_dir / img_filename
@@ -183,52 +147,17 @@ def run_preprocess(
             if array is not None:
                 rgb = apply_colormap(array, colormap)
                 ski.io.imsave(str(img_path), rgb)
-                dicom_arrays.append((idx, array))
             else:
                 img = preprocess_non_dicom(resolved)
                 ski.io.imsave(str(img_path), img)
 
             manifest_rows.append((image_id, batch_id, source_path, str(img_path.relative_to(output_dir))))
-            batch_image_ids.append(image_id)
-
-        # Generate grid canvases for DICOM images in this batch
-        if dicom_arrays:
-            arrays = [a for _, a in dicom_arrays]
-            batch_indices = [i for i, _ in dicom_arrays]
-            grids, bin_members, unused = pack_images(arrays)
-
-            for grid_idx, canvas in enumerate(grids):
-                grid_filename = f"grid_{grid_idx + 1:03d}.jpg"
-                grid_path = batch_dir / grid_filename
-                rgb = apply_colormap(canvas, colormap)
-                ski.io.imsave(str(grid_path), rgb)
-
-                member_ids = [
-                    batch_image_ids[batch_indices[rect_idx]]
-                    for rect_idx in bin_members.get(grid_idx, [])
-                ]
-                grid_rows.append((str(grid_path.relative_to(output_dir)), ",".join(member_ids)))
-
-            for ui in unused:
-                orig_batch_idx = batch_indices[ui]
-                image_id = batch_image_ids[orig_batch_idx]
-                grid_filename = f"grid_overflow_{ui + 1:03d}.jpg"
-                grid_path = batch_dir / grid_filename
-                rgb = apply_colormap(arrays[ui], colormap)
-                ski.io.imsave(str(grid_path), rgb)
-                grid_rows.append((str(grid_path.relative_to(output_dir)), image_id))
 
     # Write manifest
     with open(manifest_path, "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(["image_id", "batch", "source_path", "preprocessed_path"])
         writer.writerows(manifest_rows)
-
-    # Write grids manifest
-    with open(grids_path, "w", newline="") as f:
-        writer = csv.writer(f, delimiter="\t")
-        writer.writerow(["grid_path", "image_ids"])
-        writer.writerows(grid_rows)
 
     print(f"Preprocessed {len(manifest_rows)} images in {batch_num} batches -> {output_dir}")
 
