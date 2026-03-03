@@ -48,7 +48,7 @@ def preprocess(sources, batch_size, work_dir, colormap):
     """
     from .preprocess import run_preprocess
 
-    source_paths = [Path(s) for s in sources]
+    source_paths = [Path(s).resolve() for s in sources]
     run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap)
 
 
