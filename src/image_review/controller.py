@@ -97,7 +97,7 @@ class ReviewSession:
             path = self.work_dir / item["preprocessed_path"]
             surface = _load_surface(str(path))
             status = self.db.get_status(item["image_id"])
-            self._viewer.set_image(surface, item["image_id"], status, info)
+            self._viewer.set_image(surface, item["preprocessed_path"], status, info)
         self._dirty = True
 
     def next_image(self, *, autoplay=False):
