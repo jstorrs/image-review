@@ -76,5 +76,17 @@ class ImageViewer:
             text,
         )
 
+    def show_message(self, text: str) -> None:
+        X, Y = self.screen.get_size()
+        self.screen.fill(pg.Color(64, 64, 64))
+        bbox = self.font.get_rect(text)
+        self.font.render_to(
+            self.screen,
+            (int((X - bbox.width) / 2), int((Y - bbox.height) / 2)),
+            text,
+            fgcolor=pg.Color(200, 200, 200),
+        )
+        pg.display.flip()
+
     def cleanup(self) -> None:
         pass

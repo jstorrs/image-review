@@ -70,6 +70,7 @@ class ReviewSession:
 
     def _init_grid_mode(self):
         self._viewer = ImageViewer()
+        self._viewer.show_message("Loading grids...")
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
 
