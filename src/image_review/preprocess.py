@@ -14,7 +14,7 @@ from tqdm import tqdm
 def compress_image(image):
     i = image == np.roll(image, 1, axis=0)
     j = image == np.roll(image, 1, axis=1)
-    k = ski.morphology.binary_erosion(i & j, np.ones((5, 5), dtype=bool))
+    k = ski.morphology.erosion(i & j, np.ones((5, 5), dtype=bool))
     image = np.delete(image, np.all(k, axis=1), axis=0)
     image = np.delete(image, np.all(k, axis=0), axis=1)
     return image
