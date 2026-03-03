@@ -1,15 +1,17 @@
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "image-review"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "click",
     "matplotlib",
     "numpy",
     "pydicom",
+    "Pillow",
     "scikit-image",
     "rectpack",
     "tqdm",

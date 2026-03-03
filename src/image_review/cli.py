@@ -1,17 +1,72 @@
-import argparse
-import sys
 from pathlib import Path
 
+import click
 
-def cmd_preprocess(args):
+
+class FullHelpGroup(click.Group):
+    """A click Group that shows all subcommand help in the top-level --help."""
+
+    def format_help(self, ctx, formatter):
+        # Render the group's own help (docstring + options)
+        super().format_help(ctx, formatter)
+
+        # Append each subcommand's full help
+        for name in self.list_commands(ctx):
+            cmd = self.get_command(ctx, name)
+            if cmd is None:
+                continue
+
+            formatter.write("\n")
+            with formatter.section(f"Command: {name}"):
+                sub_ctx = click.Context(cmd, info_name=name, parent=ctx)
+                cmd.format_help(sub_ctx, formatter)
+
+
+@click.group(cls=FullHelpGroup)
+@click.version_option()
+def cli():
+    """Review DICOM / medical images for burned-in PHI.
+
+    Workflow:
+
+    \b
+      1. preprocess  — convert source DICOMs/images to JPG batches
+      2. review      — interactively classify images as CLEAN or DIRTY
+      3. status      — check review progress and counts
+    """
+
+
+@cli.command()
+@click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("--batch-size", type=int, default=300, show_default=True, help="Images per batch.")
+@click.option("--work-dir", "--output-dir", type=click.Path(), default="./review_work", show_default=True, help="Work directory for output.")
+@click.option("--colormap", type=str, default="inferno", show_default=True, help="Matplotlib colormap for rendering.")
+def preprocess(sources, batch_size, work_dir, colormap):
+    """Normalize DICOM and image files to JPGs and organize them into batches.
+
+    SOURCES are one or more ZIP files, directories, or image files to process.
+    """
     from .preprocess import run_preprocess
 
-    sources = [Path(s) for s in args.sources]
-    output_dir = Path(args.output_dir)
-    run_preprocess(sources, output_dir, batch_size=args.batch_size, colormap=args.colormap)
+    source_paths = [Path(s) for s in sources]
+    run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap)
 
 
-def cmd_review(args):
+@cli.command()
+@click.option("--mode", type=click.Choice(["single", "grid"]), default="single", show_default=True, help="Review display mode.")
+@click.option("--pass", "pass_number", type=int, default=None, help="Pass number (auto-detected if omitted).")
+@click.option("--batch", type=str, default=None, help="Restrict to a specific batch.")
+@click.option("--work-dir", type=click.Path(exists=True), default="./review_work", show_default=True, help="Work directory containing preprocessed data.")
+def review(mode, pass_number, batch, work_dir):
+    """Open an interactive review session for classifying images.
+
+    \b
+    Keyboard controls:
+      c / d       — mark image CLEAN / DIRTY
+      Arrow keys  — navigate between images
+      Space       — toggle autoplay
+      q           — quit
+    """
     import pygame as pg
 
     from .controller import ReviewSession
@@ -19,26 +74,24 @@ def cmd_review(args):
     pg.init()
     try:
         session = ReviewSession(
-            work_dir=Path(args.work_dir),
-            mode=args.mode,
-            pass_number=args.pass_number,
-            batch=args.batch,
+            work_dir=Path(work_dir),
+            mode=mode,
+            pass_number=pass_number,
+            batch=batch,
         )
         session.run()
     finally:
         pg.quit()
 
 
-def cmd_status(args):
+@cli.command()
+@click.option("--work-dir", type=click.Path(exists=True), default="./review_work", show_default=True, help="Work directory containing preprocessed data.")
+def status(work_dir):
+    """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED counts)."""
     from .controller import load_manifest
     from .review_db import ReviewDB
 
-    work_dir = Path(args.work_dir)
-    manifest_path = work_dir / "manifest.tsv"
-    if not manifest_path.exists():
-        print(f"No manifest found at {manifest_path}", file=sys.stderr)
-        sys.exit(1)
-
+    work_dir = Path(work_dir)
     manifest = load_manifest(work_dir)
 
     db = ReviewDB(work_dir)
@@ -65,32 +118,7 @@ def cmd_status(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="image-review", description="DICOM image review for burned-in PHI")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # preprocess
-    p_pre = subparsers.add_parser("preprocess", help="Preprocess images for review")
-    p_pre.add_argument("sources", nargs="+", help="ZIP files, directories, or image files")
-    p_pre.add_argument("--batch-size", type=int, default=300, help="Images per batch (default: 300)")
-    p_pre.add_argument("--output-dir", default="./review_work", help="Work directory (default: ./review_work)")
-    p_pre.add_argument("--colormap", default="inferno", help="Matplotlib colormap (default: inferno)")
-    p_pre.set_defaults(func=cmd_preprocess)
-
-    # review
-    p_rev = subparsers.add_parser("review", help="Review images interactively")
-    p_rev.add_argument("--mode", choices=["single", "grid"], default="single", help="Review mode (default: single)")
-    p_rev.add_argument("--pass", dest="pass_number", type=int, default=None, help="Pass number (auto-detected if omitted)")
-    p_rev.add_argument("--batch", default=None, help="Restrict to a specific batch")
-    p_rev.add_argument("--work-dir", default="./review_work", help="Work directory (default: ./review_work)")
-    p_rev.set_defaults(func=cmd_review)
-
-    # status
-    p_stat = subparsers.add_parser("status", help="Show review progress")
-    p_stat.add_argument("--work-dir", default="./review_work", help="Work directory (default: ./review_work)")
-    p_stat.set_defaults(func=cmd_status)
-
-    args = parser.parse_args()
-    args.func(args)
+    cli()
 
 
 if __name__ == "__main__":
