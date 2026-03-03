@@ -56,11 +56,23 @@ class ReviewSession:
         self.autoplay = False
         self._cursor = -1
         self._dirty = True
+        self._showing_help = False
+
+        if self.batch is None:
+            self.batch = self._auto_select_batch()
 
         if mode == "grid":
             self._init_grid_mode()
         else:
             self._init_single_mode()
+
+    def _auto_select_batch(self) -> str | None:
+        """Find the first batch that still has images needing review."""
+        batches = sorted({row["batch"] for row in self.manifest})
+        for batch in batches:
+            if self.db.images_for_review(self.manifest, self.pass_number, batch):
+                return batch
+        return None
 
     def _init_single_mode(self):
         rows = self.db.images_for_review(self.manifest, self.pass_number, self.batch)
@@ -140,7 +152,8 @@ class ReviewSession:
             print(f"No images to review for pass {self.pass_number}.")
             return
 
-        print(f"Starting {self.mode} review, pass {self.pass_number}, {len(self._items)} items")
+        batch_info = f", batch {self.batch}" if self.batch else ""
+        print(f"Starting {self.mode} review, pass {self.pass_number}{batch_info}, {len(self._items)} items")
         self.next_image()
 
         joysticks = {}
@@ -149,6 +162,10 @@ class ReviewSession:
             for event in pg.event.get():
                 match event.type:
                     case pg.JOYBUTTONDOWN:
+                        if self._showing_help:
+                            self._showing_help = False
+                            self._show_current()
+                            continue
                         match event.button:
                             case 1:
                                 self.mark_clean()
@@ -157,25 +174,40 @@ class ReviewSession:
                             case 7:
                                 running = False
                     case pg.JOYHATMOTION:
+                        if self._showing_help:
+                            self._showing_help = False
+                            self._show_current()
+                            continue
                         if event.hat == 0:
                             if event.value[0] < -0.5:
                                 self.prev_image()
                             elif event.value[0] > 0.5:
                                 self.next_image()
                     case pg.KEYDOWN:
-                        self.autoplay = False
+                        if self._showing_help:
+                            self._showing_help = False
+                            self._show_current()
+                            continue
                         match event.key:
                             case pg.K_ESCAPE | pg.K_q:
                                 running = False
                             case pg.K_c:
+                                self.autoplay = False
                                 self.mark_clean()
                             case pg.K_d:
+                                self.autoplay = False
                                 self.mark_dirty()
                             case pg.K_w:
                                 pg.display.toggle_fullscreen()
                                 self._dirty = True
                             case pg.K_SPACE:
-                                self.next_image(autoplay=True)
+                                if self.autoplay:
+                                    self.autoplay = False
+                                else:
+                                    self.next_image(autoplay=True)
+                            case pg.K_h:
+                                self._showing_help = True
+                                self._viewer.show_help()
                             case pg.K_LEFT:
                                 self.prev_image()
                             case pg.K_RIGHT:

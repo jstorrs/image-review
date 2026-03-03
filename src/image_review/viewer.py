@@ -76,6 +76,30 @@ class ImageViewer:
             text,
         )
 
+    def show_help(self) -> None:
+        help_lines = [
+            "Keyboard                 Controller",
+            "  c        Mark CLEAN      B / East   Mark CLEAN",
+            "  d        Mark DIRTY      Y / North  Mark DIRTY",
+            "  Left/Right  Navigate     D-pad      Navigate",
+            "  Space    Autoplay        Start      Quit",
+            "  w        Fullscreen",
+            "  h        This help",
+            "  q / Esc  Quit",
+        ]
+        X, Y = self.screen.get_size()
+        self.screen.fill(pg.Color(64, 64, 64))
+        help_font = pg.freetype.SysFont("ubuntu", 24)
+        help_font.fgcolor = pg.Color(200, 200, 200)
+        line_height = help_font.get_sized_height() + 6
+        total_height = line_height * len(help_lines)
+        y_start = (Y - total_height) // 2
+        for i, line in enumerate(help_lines):
+            bbox = help_font.get_rect(line)
+            x = (X - bbox.width) // 2
+            help_font.render_to(self.screen, (x, y_start + i * line_height), line)
+        pg.display.flip()
+
     def show_message(self, text: str) -> None:
         X, Y = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
