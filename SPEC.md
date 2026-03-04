@@ -32,7 +32,7 @@ Entry point: `image-review` (mapped to `image_review.cli:main`).
 
 ```
 image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
-                                            [--output-dir DIR]
+                                            [--work-dir DIR]
                                             [--colormap NAME]
 ```
 
@@ -40,7 +40,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 |----------|---------|-------------|
 | `SOURCE` | (required) | One or more ZIP files, directories, or image files |
 | `--batch-size` | 300 | Maximum images per batch subdirectory |
-| `--output-dir` | `./review_work` | Work directory for all output |
+| `--work-dir` | `./review_work` | Work directory for all output (alias: `--output-dir`) |
 | `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale |
 
 **Source loading** dispatches by type:
@@ -51,10 +51,10 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 | Directory | Globs `**/*.dcm`, then `**/*.jpg`, `**/*.jpeg`, `**/*.png` |
 | Single file | Reads as DICOM (`.dcm`) or passes through (other extensions) |
 
-**Image IDs** are derived from the source:
-- ZIP: `{zip_name}:{dcm_filename}`
-- Directory: `{dir_name}/{relative_path}`
-- Single file: `{filename}`
+**Image IDs** are fully-resolved absolute paths derived from the source:
+- ZIP: `{absolute_zip_path}:{dcm_filename}`
+- Directory: fully-resolved absolute path to each file
+- Single file: fully-resolved absolute path
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
@@ -111,10 +111,9 @@ Written by `preprocess`. Tab-separated, one row per image.
 
 | Column | Description |
 |--------|-------------|
-| `image_id` | Unique string identifier for the image |
 | `batch` | Batch subdirectory name (e.g. `batch_001`) |
-| `source_path` | Original source (ZIP name, directory, or file path) |
 | `preprocessed_path` | Relative path to the JPG within the work directory |
+| `image_id` | Unique string identifier (fully-resolved absolute path) |
 
 ### `review.tsv`
 
@@ -144,7 +143,9 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 3. Auto-detect pass number if not specified:
    - Pass 1 if any image is UNREVIEWED
    - Otherwise max(pass_number) + 1
-4. Determine review items based on mode
+4. Auto-select batch if not specified: pick the first batch (sorted
+   alphabetically) that still has images needing review
+5. Determine review items based on mode
 
 ### Single Mode
 
@@ -155,6 +156,7 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 ### Grid Mode
 
 - Create the `ImageViewer` first (opens fullscreen pygame window)
+- Display a "Loading grids..." message while packing
 - Read screen dimensions, subtract the 50px status bar height
 - Query `ReviewDB.images_for_review()` for the current pass/batch
 - Pass the review items to `pack_into_grids()` with the screen dimensions
@@ -184,6 +186,7 @@ The session runs a pygame event loop processing:
 | Left arrow / Hat left | Previous item |
 | Space | Toggle autoplay (500ms auto-advance) |
 | `w` key | Toggle fullscreen |
+| `h` key | Show help screen (any key dismisses) |
 | `q` / Escape / Button 7 | Quit |
 | Window resize | Refit current image |
 | Joystick added/removed | Hot-plug handling |
@@ -234,7 +237,9 @@ vertically within the content area. Uses `pg.transform.smoothscale`.
 Color encodes review status (green=CLEAN, red=DIRTY, gray=UNREVIEWED).
 The image name is rendered right-aligned, position info is centered.
 
-**Font**: Ubuntu 36pt bold, dark gray (`Color(64,64,64)`).
+**Font**: DejaVu Sans 36pt bold, dark gray (`Color(64,64,64)`). Bundled in
+the `fonts/` subdirectory for cross-platform consistency. The help screen
+uses DejaVu Sans Mono 24pt.
 
 ### Interface
 
@@ -244,6 +249,8 @@ The image name is rendered right-aligned, position info is centered.
 | `set_status(status)` | Update status bar color without changing image |
 | `resize()` | Recalculate scaling for current screen size |
 | `refresh()` | Render frame: background, status bar, text, scaled image |
+| `show_help()` | Render centered help overlay with keyboard/controller mappings |
+| `show_message(text)` | Render centered text message (e.g. loading indicator) |
 | `cleanup()` | No-op (reserved for future resource cleanup) |
 
 ## Review Database (`review_db.py`)
