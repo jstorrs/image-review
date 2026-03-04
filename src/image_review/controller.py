@@ -24,8 +24,8 @@ def load_manifest(work_dir: Path) -> list[dict]:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
-def _grid_status(db: ReviewDB, image_ids: list[str]) -> str:
-    statuses = {db.get_status(iid) for iid in image_ids}
+def _grid_status(db: ReviewDB, image_ids: list[str], pass_number: int) -> str:
+    statuses = {db.get_status(iid, pass_number) for iid in image_ids}
     if statuses == {"CLEAN"}:
         return "CLEAN"
     if "UNREVIEWED" in statuses:
@@ -104,12 +104,12 @@ class ReviewSession:
 
         if self.mode == "grid":
             surface = item["surface"]
-            status = _grid_status(self.db, item["image_ids"])
+            status = _grid_status(self.db, item["image_ids"], self.pass_number)
             self._viewer.set_image(surface, f"grid ({len(item['image_ids'])} images)", status, info)
         else:
             path = self.work_dir / item["preprocessed_path"]
             surface = _load_surface(str(path))
-            status = self.db.get_status(item["image_id"])
+            status = self.db.get_status(item["image_id"], self.pass_number)
             self._viewer.set_image(surface, item["preprocessed_path"], status, info)
         self._dirty = True
 

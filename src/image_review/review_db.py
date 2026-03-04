@@ -55,37 +55,35 @@ class ReviewDB:
             }
         self._save()
 
-    def get_status(self, image_id: str) -> str:
+    def get_status(self, image_id: str, current_pass: int) -> str:
         row = self._rows.get(image_id)
-        return row["status"] if row else "UNREVIEWED"
+        if not row:
+            return "UNREVIEWED"
+        if int(row["pass_number"]) == current_pass:
+            return row["status"]
+        if row["status"] == "CLEAN":
+            return "CLEAN"
+        # DIRTY from a prior pass → treat as UNREVIEWED
+        return "UNREVIEWED"
 
     def images_for_review(self, manifest_rows: list[dict], pass_number: int, batch: str | None = None) -> list[dict]:
-        """Return manifest rows that need review for the given pass.
-
-        Pass 1: all images.
-        Pass N>1: only images marked DIRTY in pass N-1.
-        """
+        """Return manifest rows that need review for the given pass."""
         result = []
         for row in manifest_rows:
             if batch and row["batch"] != batch:
                 continue
-            status = self.get_status(row["image_id"])
-            if pass_number == 1:
-                if status == "UNREVIEWED":
-                    result.append(row)
-            else:
-                if status == "DIRTY":
-                    result.append(row)
+            if self.get_status(row["image_id"], pass_number) == "UNREVIEWED":
+                result.append(row)
         return result
 
     def current_pass(self, manifest_rows: list[dict]) -> int:
         """Auto-detect the current pass number.
 
-        If any images are UNREVIEWED, we're on pass 1.
+        If any manifest image has no row in _rows, we're on pass 1.
         Otherwise, next pass = max pass_number + 1.
         """
         has_unreviewed = any(
-            self.get_status(row["image_id"]) == "UNREVIEWED"
+            row["image_id"] not in self._rows
             for row in manifest_rows
         )
         if has_unreviewed:
@@ -98,7 +96,7 @@ class ReviewDB:
     def summary(self, manifest_rows: list[dict]) -> dict[str, int]:
         counts = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
         for row in manifest_rows:
-            status = self.get_status(row["image_id"])
+            status = self._rows.get(row["image_id"], {}).get("status", "UNREVIEWED")
             counts[status] = counts.get(status, 0) + 1
             counts["total"] += 1
         return counts
@@ -109,7 +107,7 @@ class ReviewDB:
             batch = row["batch"]
             if batch not in batches:
                 batches[batch] = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
-            status = self.get_status(row["image_id"])
+            status = self._rows.get(row["image_id"], {}).get("status", "UNREVIEWED")
             batches[batch][status] = batches[batch].get(status, 0) + 1
             batches[batch]["total"] += 1
         return batches
