@@ -44,8 +44,9 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 ```
 
 Accepts ZIP files, directories, or individual image files. DICOM images are
-normalized with CLAHE and a configurable colormap. Non-DICOM images are
-passed through (with CLAHE applied to grayscale). Output is organized into
+normalized with adaptive histogram equalization to enhance local contrast
+and a configurable colormap. Non-DICOM images are passed through (with
+the same contrast enhancement applied to grayscale). Output is organized into
 batch subdirectories with a `manifest.tsv` index.
 
 ### `image-review review`
