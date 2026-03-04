@@ -43,7 +43,7 @@ image-review preprocess SOURCE [SOURCE ...] [options]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--batch-size` | 300 | Number of images per batch |
-| `--output-dir` | `./review_work` | Where to write preprocessed output |
+| `--work-dir` | `./review_work` | Where to write preprocessed output |
 | `--colormap` | `inferno` | Matplotlib colormap for DICOM rendering |
 
 **Examples:**
@@ -59,14 +59,14 @@ image-review preprocess batch1.zip batch2.zip /path/to/loose_dicoms/
 image-review preprocess scans.zip --batch-size 100 --colormap viridis
 
 # Custom output directory
-image-review preprocess scans.zip --output-dir /data/review_session_1
+image-review preprocess scans.zip --work-dir /data/review_session_1
 ```
 
 **What it produces:**
 
 ```
 review_work/
-  manifest.tsv        # Master list: image_id, batch, source, preprocessed path
+  manifest.tsv        # Master list: batch, preprocessed_path, image_id
   review.tsv          # (created later during review)
   batch_001/
     img_00001.jpg      # Individual preprocessed images
@@ -79,11 +79,11 @@ review_work/
 The DICOM preprocessing pipeline:
 1. Converts to float32, corrects photometric interpretation
 2. Removes quantile outliers (1st/99th percentile)
-3. Applies CLAHE (adaptive histogram equalization, 96 tiles)
+3. Applies adaptive histogram equalization (96 tiles)
 4. Strips uniform rows/columns (letterboxing removal)
 5. Applies colormap and saves as JPG
 
-Non-DICOM images (JPG/PNG) get optional CLAHE if grayscale, then are saved directly.
+Non-DICOM images (JPG/PNG) get adaptive histogram equalization if grayscale, then are saved directly.
 
 ## Step 2: Review
 
@@ -131,6 +131,7 @@ The viewer accepts keyboard and gamepad input:
 | Previous image | `Left` | Hat left |
 | Autoplay (auto-advance) | `Space` | -- |
 | Toggle fullscreen | `w` | -- |
+| Help screen | `h` | -- |
 | Quit (saves automatically) | `q` or `Esc` | Button 7 |
 
 **Status bar** at the bottom of the screen:
@@ -254,7 +255,7 @@ All state lives in the work directory (default `./review_work`):
 
 | File | Format | Description |
 |------|--------|-------------|
-| `manifest.tsv` | TSV | Master image list (image_id, batch, source, path) |
+| `manifest.tsv` | TSV | Master image list (batch, preprocessed_path, image_id) |
 | `review.tsv` | TSV | Review decisions (image_id, batch, status, pass, timestamp) |
 | `batch_NNN/img_NNNNN.jpg` | JPG | Preprocessed individual images |
 
