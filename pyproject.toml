@@ -18,5 +18,8 @@ dependencies = [
     "pygame-ce",
 ]
 
+[tool.setuptools.package-data]
+image_review = ["fonts/*.ttf"]
+
 [project.scripts]
 image-review = "image_review.cli:main"

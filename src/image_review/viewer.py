@@ -1,5 +1,9 @@
+from pathlib import Path
+
 import pygame as pg
 import pygame.freetype
+
+_FONTS_DIR = Path(__file__).parent / "fonts"
 
 
 class ImageViewer:
@@ -14,7 +18,7 @@ class ImageViewer:
     def __init__(self):
         self.screen = pg.display.set_mode((0, 0), pg.FULLSCREEN | pg.RESIZABLE)
         pg.mouse.set_visible(False)
-        self.font = pg.freetype.SysFont("ubuntu", 36)
+        self.font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSans.ttf"), 36)
         self.font.fgcolor = pg.Color(64, 64, 64)
         self.font.strong = True
         self._image = None
@@ -89,7 +93,7 @@ class ImageViewer:
         ]
         X, Y = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
-        help_font = pg.freetype.SysFont("ubuntu", 24)
+        help_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
         help_font.fgcolor = pg.Color(200, 200, 200)
         line_height = help_font.get_sized_height() + 6
         total_height = line_height * len(help_lines)
