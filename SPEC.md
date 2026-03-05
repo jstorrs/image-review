@@ -22,6 +22,7 @@ controller.py       Review session orchestration and event loop
 viewer.py           Fullscreen pygame display
 grid_packer.py      Review-time bin-packing of images into grids
 review_db.py        Persistent review state (review.tsv)
+util.py             Shared utilities (surface loading)
 ```
 
 ## CLI Interface
@@ -98,8 +99,8 @@ shuts down pygame.
 image-review status [--work-dir DIR]
 ```
 
-Prints overall and per-batch counts of CLEAN / DIRTY / UNREVIEWED images,
-plus the auto-detected next pass number.
+Prints overall and per-batch counts of CLEAN / DIRTY / UNREVIEWED images
+(pass-aware), plus the current pass number.
 
 ## Data Files
 
@@ -186,7 +187,8 @@ The session runs a pygame event loop processing:
 | Left arrow / Hat left | Previous item |
 | Space | Toggle autoplay (500ms auto-advance) |
 | `w` key | Toggle fullscreen |
-| `h` key | Show help screen (any key dismisses) |
+| `m` key | Switch between single/grid mode |
+| `h` key | Show help/splash screen |
 | `q` / Escape / Button 7 | Quit |
 | Window resize | Refit current image |
 | Joystick added/removed | Hot-plug handling |
@@ -214,7 +216,7 @@ is set, to minimize CPU usage.
 2. **Pack**: Create a `rectpack` packer with `(grid_w, grid_h)` bins
    (unlimited bin count). Add each image as a rect.
 3. **Composite**: For each bin, create a black `pg.Surface(grid_w, grid_h)`.
-   Load each member image via `skimage.io.imread` + `pg.surfarray.make_surface`.
+   Load each member image via `util.load_surface`.
    Blit at the packed position. If rectpack rotated the rect (packed size
    differs from original), apply `pg.transform.rotate(-90)` before blitting.
 4. **Overflow**: Any image too large to fit in any bin becomes a single-image
@@ -249,9 +251,8 @@ uses DejaVu Sans Mono 24pt.
 | `set_status(status)` | Update status bar color without changing image |
 | `resize()` | Recalculate scaling for current screen size |
 | `refresh()` | Render frame: background, status bar, text, scaled image |
-| `show_help()` | Render centered help overlay with keyboard/controller mappings |
+| `show_splash(lines, footer, mode)` | Render centered splash/help overlay |
 | `show_message(text)` | Render centered text message (e.g. loading indicator) |
-| `cleanup()` | No-op (reserved for future resource cleanup) |
 
 ## Review Database (`review_db.py`)
 
@@ -269,18 +270,18 @@ at any point.
 |--------|-------------|
 | `mark(image_id, batch, status, pass_number)` | Record a single review decision |
 | `mark_many(image_ids, batch, status, pass_number)` | Record decisions for multiple images (same timestamp) |
-| `get_status(image_id) -> str` | Returns status or `"UNREVIEWED"` if absent |
+| `get_status(image_id, current_pass) -> str` | Returns pass-aware status or `"UNREVIEWED"` if absent |
 | `images_for_review(manifest, pass_number, batch?) -> list[dict]` | Filter manifest to reviewable items for the given pass |
 | `current_pass(manifest) -> int` | Auto-detect pass number |
-| `summary(manifest) -> dict` | Count CLEAN/DIRTY/UNREVIEWED/total |
-| `batch_summary(manifest) -> dict` | Per-batch status counts |
+| `summary(manifest, pass_number) -> dict` | Pass-aware count of CLEAN/DIRTY/UNREVIEWED/total |
+| `batch_summary(manifest, pass_number) -> dict` | Pass-aware per-batch status counts |
 
 ### Pass Logic
 
 | Pass | Shows |
 |------|-------|
 | 1 | All UNREVIEWED images |
-| N > 1 | All DIRTY images (regardless of which pass marked them) |
+| N > 1 | Images marked DIRTY in a prior pass (treated as UNREVIEWED for the current pass) plus any still-UNREVIEWED images |
 
 `current_pass` returns 1 if any UNREVIEWED images exist, otherwise
 `max(pass_number) + 1`.

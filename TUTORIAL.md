@@ -130,6 +130,7 @@ The viewer accepts keyboard and gamepad input:
 | Next image | `Right` | Hat right |
 | Previous image | `Left` | Hat left |
 | Autoplay (auto-advance) | `Space` | -- |
+| Switch mode (single/grid) | `m` | -- |
 | Toggle fullscreen | `w` | -- |
 | Help screen | `h` | -- |
 | Quit (saves automatically) | `q` or `Esc` | Button 7 |
@@ -204,7 +205,7 @@ image-review status [--work-dir ./review_work]
 **Example output:**
 
 ```
-Overall: 40320 images
+Overall: 40320 images (pass 2)
   CLEAN:       38100
   DIRTY:         820
   UNREVIEWED:   1400
@@ -216,7 +217,7 @@ batch_002          300    285     12      3
 batch_003          300    280     15      5
 ...
 
-Next pass: 2
+Current pass: 2
 ```
 
 ## Full Workflow Example

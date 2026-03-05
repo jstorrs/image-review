@@ -66,6 +66,7 @@ are shown one at a time for detailed inspection.
 | `d` | Mark DIRTY |
 | Left / Right | Navigate |
 | Space | Toggle autoplay |
+| `m` | Switch mode (single/grid) |
 | `h` | Help screen |
 | `w` | Toggle fullscreen |
 | `q` / Escape | Quit |
