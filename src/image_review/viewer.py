@@ -80,13 +80,24 @@ class ImageViewer:
             text,
         )
 
+    HELP_LINES = [
+        "Keyboard                 Controller",
+        "  c        Mark CLEAN      B / East   Mark CLEAN",
+        "  d        Mark DIRTY      Y / North  Mark DIRTY",
+        "  Left/Right  Navigate     D-pad      Navigate",
+        "  Space    Autoplay        Start      Quit",
+        "  w        Fullscreen",
+        "  h        This help",
+        "  q / Esc  Quit",
+    ]
+
     def show_splash(self, lines: list[str], footer: str = "Press [space] to continue") -> None:
         X, Y = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
         splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
         splash_font.fgcolor = pg.Color(200, 200, 200)
         line_height = splash_font.get_sized_height() + 6
-        all_lines = lines + ["", footer]
+        all_lines = self.HELP_LINES + [""] + lines + ["", footer]
         max_width = max(splash_font.get_rect(l).width for l in all_lines if l)
         total_height = line_height * len(all_lines)
         x_start = (X - max_width) // 2
@@ -98,16 +109,7 @@ class ImageViewer:
         pg.display.flip()
 
     def show_help(self) -> None:
-        help_lines = [
-            "Keyboard                 Controller",
-            "  c        Mark CLEAN      B / East   Mark CLEAN",
-            "  d        Mark DIRTY      Y / North  Mark DIRTY",
-            "  Left/Right  Navigate     D-pad      Navigate",
-            "  Space    Autoplay        Start      Quit",
-            "  w        Fullscreen",
-            "  h        This help",
-            "  q / Esc  Quit",
-        ]
+        help_lines = self.HELP_LINES
         X, Y = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
         help_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
