@@ -72,7 +72,7 @@ def load_from_zip(path: Path) -> Iterator[tuple[str, np.ndarray]]:
             try:
                 with zf.open(file, "r") as fp:
                     data = fp.read()
-                if file.endswith(".dcm"):
+                if file.lower().endswith(".dcm"):
                     dcm = pydicom.dcmread(io.BytesIO(data))
                     yield image_id, preprocess_dicom(dcm)
                 else:
@@ -182,9 +182,11 @@ def run_preprocess(
             img_filename = f"img_{idx + 1:05d}.jpg"
             img_path = batch_dir / img_filename
 
-            if array is not None:
+            if array is not None and array.dtype in (np.float32, np.float64):
                 rgb = apply_colormap(array, colormap)
                 ski.io.imsave(str(img_path), rgb)
+            elif array is not None:
+                ski.io.imsave(str(img_path), array)
             else:
                 img = preprocess_non_dicom(resolved)
                 ski.io.imsave(str(img_path), img)

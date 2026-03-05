@@ -369,8 +369,10 @@ class ReviewSession:
                             continue
                         match event.button:
                             case 1:
+                                self._stop_autoplay()
                                 self._mark("CLEAN")
                             case 3:
+                                self._stop_autoplay()
                                 self._mark("DIRTY")
                             case 7:
                                 running = False
@@ -378,6 +380,7 @@ class ReviewSession:
                         if self._ui_state != UIState.REVIEWING:
                             continue
                         if event.hat == 0:
+                            pg.time.set_timer(ADVANCE_EVENT, 0)
                             if event.value[0] < 0:
                                 self.prev_image()
                             elif event.value[0] > 0:
@@ -408,7 +411,7 @@ class ReviewSession:
                         self._viewer.set_joystick_count(len(self._joysticks))
                         self._dirty = True
                     case pg.JOYDEVICEREMOVED:
-                        del self._joysticks[event.instance_id]
+                        self._joysticks.pop(event.instance_id, None)
                         self._viewer.set_joystick_count(len(self._joysticks))
                         self._dirty = True
                     case pg.QUIT:
