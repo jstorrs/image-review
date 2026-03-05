@@ -129,10 +129,13 @@ class ReviewSession:
         return " - ".join(parts)
 
     def _restart_in_mode(self, new_mode: str):
+        pg.time.set_timer(ADVANCE_EVENT, 0)
+        pg.time.set_timer(AUTOPLAY_EVENT, 0)
         self.mode = new_mode
         self._cursor = -1
         self.autoplay = False
         self._dirty = True
+        self._showing_splash = False
 
         if new_mode == "grid":
             self._init_grid_mode()
@@ -212,7 +215,10 @@ class ReviewSession:
             self._restart_in_mode(new_mode)
         elif key == pg.K_h:
             self._showing_splash = False
-            self._show_current()
+            if self._cursor == -1:
+                self.next_image()
+            else:
+                self._show_current()
         return False
 
     def _handle_review_key(self, key) -> bool:
@@ -293,7 +299,8 @@ class ReviewSession:
                         if self.autoplay:
                             self.next_image()
                     case x if x == ADVANCE_EVENT:
-                        self.next_image()
+                        if not self._showing_splash:
+                            self.next_image()
                     case pg.JOYDEVICEADDED:
                         joy = pg.joystick.Joystick(event.device_index)
                         joysticks[joy.get_instance_id()] = joy

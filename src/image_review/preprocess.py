@@ -36,11 +36,16 @@ def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
         case "MONOCHROME2":
             pass
     bot, top = img.min(), img.max()
-    margin_initial = OUTLIER_PERCENTILE * (top - bot) / 100
+    margin_initial = OUTLIER_PERCENTILE * (top - bot)
     bot, top = bot + margin_initial, top - margin_initial
-    bot, top = np.quantile(img[(img > bot) & (img < top)], [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
+    filtered = img[(img > bot) & (img < top)]
+    if filtered.size == 0:
+        return compress_image(img)
+    bot, top = np.quantile(filtered, [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
     margin_final = INTENSITY_MARGIN * (top - bot)
     bot, top = bot + margin_final, top - margin_final
+    if bot >= top:
+        return compress_image(img)
     img = ski.exposure.rescale_intensity(img, (bot, top))
     img = np.clip(img, 0, 1)
     img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
