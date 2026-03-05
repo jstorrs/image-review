@@ -11,7 +11,7 @@ interactively in a fullscreen viewer, and report **status** on review progress.
 
 - Python >= 3.12
 - Dependencies: matplotlib, numpy, pydicom, scikit-image, rectpack, tqdm,
-  pygame-ce, Pillow (implicit via scikit-image)
+  pygame-ce
 
 ## Architecture
 
@@ -48,12 +48,12 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 
 | Source type | Behavior |
 |-------------|----------|
-| `.zip` | Scans for `*.dcm` entries; reads each via pydicom |
+| `.zip` | Scans for `*.dcm`, `*.jpg`, `*.jpeg`, `*.png` entries |
 | Directory | Globs `**/*.dcm`, then `**/*.jpg`, `**/*.jpeg`, `**/*.png` |
 | Single file | Reads as DICOM (`.dcm`) or passes through (other extensions) |
 
 **Image IDs** are fully-resolved absolute paths derived from the source:
-- ZIP: `{absolute_zip_path}:{dcm_filename}`
+- ZIP: `{absolute_zip_path}:{filename}`
 - Directory: fully-resolved absolute path to each file
 - Single file: fully-resolved absolute path
 
@@ -66,9 +66,15 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 5. Strip uniform rows/columns (`compress_image` -- removes letterboxing)
 6. Apply colormap, save as 8-bit RGB JPG
 
-**Non-DICOM preprocessing** (`preprocess_non_dicom`):
-- Read image; if grayscale, apply CLAHE and convert to 8-bit
+**Non-DICOM preprocessing** (`preprocess_non_dicom` / `preprocess_non_dicom_bytes`):
+- Read image from path or in-memory bytes (the bytes variant is used for
+  non-DICOM files inside ZIP archives); if grayscale, apply CLAHE and
+  convert to 8-bit
 - Color images are saved as-is
+
+**Error handling**: If a single file fails to load or preprocess (corrupt
+DICOM, unreadable image, etc.), a warning is logged to stderr and the file
+is skipped. This prevents one bad file from aborting the entire batch.
 
 **Batching**: Sources are streamed through a generator. Each batch of up to
 `batch_size` images is written to a `batch_NNN/` subdirectory. This bounds
@@ -142,8 +148,9 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 1. Load `manifest.tsv` into a list of dicts
 2. Open `ReviewDB` (loads existing `review.tsv` if present)
 3. Auto-detect pass number if not specified:
-   - Pass 1 if any image is UNREVIEWED
-   - Otherwise max(pass_number) + 1
+   - Pass 1 if any image has never been reviewed
+   - Otherwise stays on max(pass_number) if it has unfinished work,
+     or advances to max(pass_number) + 1
 4. Auto-select batch if not specified: pick the first batch (sorted
    alphabetically) that still has images needing review
 5. Determine review items based on mode
@@ -211,14 +218,14 @@ is set, to minimize CPU usage.
 
 ### `pack_into_grids(items, work_dir, grid_w, grid_h) -> list[GridSpec]`
 
-1. **Measure**: Read each image's pixel dimensions via `PIL.Image.open().size`
-   (header-only, does not decode pixel data)
+1. **Load**: Load all image surfaces upfront via `util.load_surface` and read
+   dimensions from `surface.get_size()`. This avoids opening each file twice.
 2. **Pack**: Create a `rectpack` packer with `(grid_w, grid_h)` bins
    (unlimited bin count). Add each image as a rect.
 3. **Composite**: For each bin, create a black `pg.Surface(grid_w, grid_h)`.
-   Load each member image via `util.load_surface`.
-   Blit at the packed position. If rectpack rotated the rect (packed size
-   differs from original), apply `pg.transform.rotate(-90)` before blitting.
+   Blit each pre-loaded surface at the packed position. If rectpack rotated
+   the rect (packed size differs from original), apply
+   `pg.transform.rotate(-90)` before blitting.
 4. **Overflow**: Any image too large to fit in any bin becomes a single-image
    `GridSpec` with its original surface.
 
@@ -283,8 +290,9 @@ at any point.
 | 1 | All UNREVIEWED images |
 | N > 1 | Images marked DIRTY in a prior pass (treated as UNREVIEWED for the current pass) plus any still-UNREVIEWED images |
 
-`current_pass` returns 1 if any UNREVIEWED images exist, otherwise
-`max(pass_number) + 1`.
+`current_pass` returns 1 if any image has never been reviewed. Otherwise it
+returns `max(pass_number)` if that pass still has UNREVIEWED work remaining,
+or `max(pass_number) + 1` if the pass is fully complete.
 
 ## Multi-Pass Review Workflow
 

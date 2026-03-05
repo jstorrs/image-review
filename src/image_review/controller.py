@@ -1,5 +1,6 @@
 import csv
 import random
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -161,7 +162,12 @@ class ReviewSession:
             self._viewer.set_image(surface, f"grid ({len(item['image_ids'])} images)", status, info)
         else:
             path = safe_path(self.work_dir, item["preprocessed_path"])
-            surface = load_surface(str(path))
+            try:
+                surface = load_surface(str(path))
+            except Exception as exc:
+                print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
+                self.next_image()
+                return
             status = self.db.get_status(item["image_id"], self.pass_number)
             self._viewer.set_image(surface, item["preprocessed_path"], status, info)
         self._dirty = True
@@ -204,7 +210,7 @@ class ReviewSession:
         """Handle key press while splash is shown. Returns True to quit."""
         if key in (pg.K_ESCAPE, pg.K_q):
             return True
-        if key == pg.K_SPACE:
+        if key in (pg.K_SPACE, pg.K_h):
             self._showing_splash = False
             if self._cursor == -1:
                 self.next_image()
@@ -213,12 +219,6 @@ class ReviewSession:
         elif key == pg.K_m:
             new_mode = "grid" if self.mode == "single" else "single"
             self._restart_in_mode(new_mode)
-        elif key == pg.K_h:
-            self._showing_splash = False
-            if self._cursor == -1:
-                self.next_image()
-            else:
-                self._show_current()
         return False
 
     def _handle_review_key(self, key) -> bool:

@@ -34,7 +34,7 @@ image-review preprocess SOURCE [SOURCE ...] [options]
 ```
 
 **Sources** can be:
-- ZIP files containing `.dcm` files
+- ZIP files containing `.dcm`, `.jpg`, `.jpeg`, or `.png` files
 - Directories containing `.dcm`, `.jpg`, or `.png` files
 - Individual image files
 

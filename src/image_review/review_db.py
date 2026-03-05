@@ -84,15 +84,12 @@ class ReviewDB:
         If any manifest image has no row in _rows, we're on pass 1.
         Otherwise, next pass = max pass_number + 1.
         """
-        has_unreviewed = any(
-            row["image_id"] not in self._rows
-            for row in manifest_rows
-        )
-        if has_unreviewed:
+        if any(row["image_id"] not in self._rows for row in manifest_rows):
             return 1
-        max_pass = 0
-        for row in self._rows.values():
-            max_pass = max(max_pass, row["pass_number"])
+        max_pass = max((r["pass_number"] for r in self._rows.values()), default=0)
+        # Stay on max_pass if it still has unfinished work
+        if any(self.get_status(r["image_id"], max_pass) == "UNREVIEWED" for r in manifest_rows):
+            return max_pass
         return max_pass + 1
 
     def summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, int]:

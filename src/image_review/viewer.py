@@ -27,6 +27,8 @@ class ImageViewer:
         self._name = ""
         self._content = None
         self._offset = (0, 0)
+        self._splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
+        self._splash_font.fgcolor = pg.Color(200, 200, 200)
 
     def set_image(self, surface: pg.Surface, name: str, status: str, info: str) -> None:
         self._image = surface
@@ -42,20 +44,20 @@ class ImageViewer:
     def resize(self) -> None:
         if self._image is None:
             return
-        X, Y = self.screen.get_size()
-        content_height = Y - self.border
+        screen_w, screen_h = self.screen.get_size()
+        content_height = screen_h - self.border
         iw, ih = self._image.get_size()
-        scale = min(X / iw, content_height / ih)
+        scale = min(screen_w / iw, content_height / ih)
         scaled_size = (round(iw * scale), round(ih * scale))
         self._content = pg.transform.smoothscale(self._image, scaled_size)
         cx, cy = self._content.get_size()
-        self._offset = ((X - cx) // 2, (content_height - cy) // 2)
+        self._offset = ((screen_w - cx) // 2, (content_height - cy) // 2)
 
     def refresh(self) -> None:
-        X, Y = self.screen.get_size()
+        screen_w, screen_h = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
         bar_color = self.STATUS_COLORS[self._status]
-        pg.draw.rect(self.screen, bar_color, pg.Rect(0, Y - self.border, X, self.border))
+        pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
         self._text_left("h for help")
         self._text_right(self._name)
         self._text_center(self._info)
@@ -65,28 +67,28 @@ class ImageViewer:
 
     def _text_left(self, text: str) -> None:
         bbox = self.font.get_rect(text)
-        _, Y = self.screen.get_size()
+        _, screen_h = self.screen.get_size()
         self.font.render_to(
             self.screen,
-            (int(bbox.height / 2), int(Y - (self.border + bbox.height) / 2)),
+            (int(bbox.height / 2), int(screen_h - (self.border + bbox.height) / 2)),
             text,
         )
 
     def _text_right(self, text: str) -> None:
         bbox = self.font.get_rect(text)
-        X, Y = self.screen.get_size()
+        screen_w, screen_h = self.screen.get_size()
         self.font.render_to(
             self.screen,
-            (X - int(bbox.height / 2) - bbox.width, int(Y - (self.border + bbox.height) / 2)),
+            (screen_w - int(bbox.height / 2) - bbox.width, int(screen_h - (self.border + bbox.height) / 2)),
             text,
         )
 
     def _text_center(self, text: str) -> None:
         bbox = self.font.get_rect(text)
-        X, Y = self.screen.get_size()
+        screen_w, screen_h = self.screen.get_size()
         self.font.render_to(
             self.screen,
-            (int((X - bbox.width) / 2), int(Y - (self.border + bbox.height) / 2)),
+            (int((screen_w - bbox.width) / 2), int(screen_h - (self.border + bbox.height) / 2)),
             text,
         )
 
@@ -107,35 +109,33 @@ class ImageViewer:
         return [l.format(other_mode=other_mode) for l in self.HELP_LINES]
 
     def show_splash(self, lines: list[str], footer: str | list[str] = "Press [space] to continue", mode: str = "single") -> None:
-        X, Y = self.screen.get_size()
+        screen_w, screen_h = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
-        splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
-        splash_font.fgcolor = pg.Color(200, 200, 200)
+        splash_font = self._splash_font
         line_height = splash_font.get_sized_height() + 6
         footer_lines = [footer] if isinstance(footer, str) else footer
-        help = self._format_help(mode)
-        all_lines = lines + [""] + help + [""] + footer_lines
-        info_start = 0
+        help_lines = self._format_help(mode)
+        all_lines = lines + [""] + help_lines + [""] + footer_lines
         info_end = len(lines)
         bright = pg.Color(255, 255, 255)
         max_width = max(splash_font.get_rect(l).width for l in all_lines if l)
         total_height = line_height * len(all_lines)
-        x_start = (X - max_width) // 2
-        y_start = (Y - total_height) // 2
+        x_start = (screen_w - max_width) // 2
+        y_start = (screen_h - total_height) // 2
         for i, line in enumerate(all_lines):
             if not line:
                 continue
-            color = bright if info_start <= i < info_end else None
+            color = bright if i < info_end else None
             splash_font.render_to(self.screen, (x_start, y_start + i * line_height), line, fgcolor=color)
         pg.display.flip()
 
     def show_message(self, text: str) -> None:
-        X, Y = self.screen.get_size()
+        screen_w, screen_h = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
         bbox = self.font.get_rect(text)
         self.font.render_to(
             self.screen,
-            (int((X - bbox.width) / 2), int((Y - bbox.height) / 2)),
+            (int((screen_w - bbox.width) / 2), int((screen_h - bbox.height) / 2)),
             text,
             fgcolor=pg.Color(200, 200, 200),
         )

@@ -1,5 +1,6 @@
 import csv
 import io
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from zipfile import ZipFile
@@ -52,24 +53,39 @@ def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
     return compress_image(img)
 
 
+_IMAGE_EXTENSIONS = {".dcm", ".jpg", ".jpeg", ".png"}
+
+
 def load_from_zip(path: Path) -> Iterator[tuple[str, np.ndarray]]:
     with ZipFile(path) as zf:
         files = [
-            item.filename for item in zf.infolist() if item.filename.endswith(".dcm")
+            item.filename
+            for item in zf.infolist()
+            if Path(item.filename).suffix.lower() in _IMAGE_EXTENSIONS
         ]
         for file in tqdm(files, desc=path.name, position=1, leave=False):
-            with zf.open(file, "r") as fp:
-                dcm = pydicom.dcmread(io.BytesIO(fp.read()))
-                image_id = f"{path}:{file}"
-                yield image_id, preprocess_dicom(dcm)
+            image_id = f"{path}:{file}"
+            try:
+                with zf.open(file, "r") as fp:
+                    data = fp.read()
+                if file.endswith(".dcm"):
+                    dcm = pydicom.dcmread(io.BytesIO(data))
+                    yield image_id, preprocess_dicom(dcm)
+                else:
+                    yield image_id, preprocess_non_dicom_bytes(data)
+            except Exception as exc:
+                tqdm.write(f"WARNING: skipping {image_id}: {exc}", file=sys.stderr)
 
 
 def load_from_directory(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
     dcm_files = sorted(path.glob("**/*.dcm"))
     for f in tqdm(dcm_files, desc=path.name, position=1, leave=False):
-        dcm = pydicom.dcmread(f)
         image_id = str(f)
-        yield image_id, preprocess_dicom(dcm)
+        try:
+            dcm = pydicom.dcmread(f)
+            yield image_id, preprocess_dicom(dcm)
+        except Exception as exc:
+            tqdm.write(f"WARNING: skipping {image_id}: {exc}", file=sys.stderr)
     for ext in ("*.jpg", "*.jpeg", "*.png"):
         for f in sorted(path.glob(f"**/{ext}")):
             image_id = str(f)
@@ -77,11 +93,15 @@ def load_from_directory(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
 
 
 def load_single_file(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
-    if path.suffix == ".dcm":
-        dcm = pydicom.dcmread(path)
-        yield str(path), preprocess_dicom(dcm)
-    else:
-        yield str(path), None
+    image_id = str(path)
+    try:
+        if path.suffix == ".dcm":
+            dcm = pydicom.dcmread(path)
+            yield image_id, preprocess_dicom(dcm)
+        else:
+            yield image_id, None
+    except Exception as exc:
+        tqdm.write(f"WARNING: skipping {image_id}: {exc}", file=sys.stderr)
 
 
 def load_sources(sources: list[Path]) -> Iterator[tuple[str, np.ndarray | None]]:
@@ -101,6 +121,15 @@ def apply_colormap(img: np.ndarray, colormap: str = "inferno") -> np.ndarray:
 
 def preprocess_non_dicom(path: Path) -> np.ndarray:
     img = ski.io.imread(path)
+    if img.ndim == 2:
+        img = ski.util.img_as_float32(img)
+        img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
+        img = ski.util.img_as_ubyte(img)
+    return img
+
+
+def preprocess_non_dicom_bytes(buf: bytes) -> np.ndarray:
+    img = ski.io.imread(io.BytesIO(buf))
     if img.ndim == 2:
         img = ski.util.img_as_float32(img)
         img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)

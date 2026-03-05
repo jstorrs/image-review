@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pygame as pg
 import skimage as ski
 
@@ -14,4 +15,8 @@ def safe_path(work_dir: Path, relative: str) -> Path:
 
 def load_surface(path: str) -> pg.Surface:
     img = ski.io.imread(path)
+    if img.ndim == 2:
+        img = np.stack([img, img, img], axis=-1)
+    elif img.shape[2] == 4:
+        img = img[:, :, :3]
     return pg.surfarray.make_surface(img.transpose(1, 0, 2))
