@@ -109,7 +109,7 @@ class ReviewSession:
         buckets = defaultdict(list)
         for item in items:
             n = len(item["image_ids"])
-            buckets[0 if n == 1 else n // 4].append(item)
+            buckets[0 if n == 1 else (n // 4) + 1].append(item)
         sorted_items = []
         for key in sorted(buckets, reverse=True):
             random.shuffle(buckets[key])
