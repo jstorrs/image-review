@@ -67,8 +67,8 @@ class ImageViewer:
         self.screen.fill(pg.Color(64, 64, 64))
         bar_color = self.STATUS_COLORS[self._status]
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
-        left_text = "h for help"
-        left_text += " | unreviewed only" if self._unreviewed_only else " | all images"
+        left_text = "(h)elp"
+        left_text += " | unreviewed" if self._unreviewed_only else " | all"
         if self._joystick_count == 0:
             left_text += " | no gamepad"
         elif self._joystick_count == 1:

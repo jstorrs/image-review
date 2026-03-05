@@ -150,8 +150,7 @@ class ReviewSession:
             self._viewer.show_message(f"No items for {new_mode} mode")
             return
 
-        if not self._showing_splash:
-            self._show_splash()
+        self.next_image()
 
     def _count_unreviewed(self) -> int:
         count = 0
