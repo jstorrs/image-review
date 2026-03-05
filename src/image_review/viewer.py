@@ -87,14 +87,14 @@ class ImageViewer:
         splash_font.fgcolor = pg.Color(200, 200, 200)
         line_height = splash_font.get_sized_height() + 6
         all_lines = lines + ["", footer]
+        max_width = max(splash_font.get_rect(l).width for l in all_lines if l)
         total_height = line_height * len(all_lines)
+        x_start = (X - max_width) // 2
         y_start = (Y - total_height) // 2
         for i, line in enumerate(all_lines):
             if not line:
                 continue
-            bbox = splash_font.get_rect(line)
-            x = (X - bbox.width) // 2
-            splash_font.render_to(self.screen, (x, y_start + i * line_height), line)
+            splash_font.render_to(self.screen, (x_start, y_start + i * line_height), line)
         pg.display.flip()
 
     def show_help(self) -> None:
@@ -113,12 +113,12 @@ class ImageViewer:
         help_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
         help_font.fgcolor = pg.Color(200, 200, 200)
         line_height = help_font.get_sized_height() + 6
+        max_width = max(help_font.get_rect(l).width for l in help_lines)
         total_height = line_height * len(help_lines)
+        x_start = (X - max_width) // 2
         y_start = (Y - total_height) // 2
         for i, line in enumerate(help_lines):
-            bbox = help_font.get_rect(line)
-            x = (X - bbox.width) // 2
-            help_font.render_to(self.screen, (x, y_start + i * line_height), line)
+            help_font.render_to(self.screen, (x_start, y_start + i * line_height), line)
         pg.display.flip()
 
     def show_message(self, text: str) -> None:
