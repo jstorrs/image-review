@@ -52,8 +52,9 @@ batch subdirectories with a `manifest.tsv` index.
 ### `image-review review`
 
 ```
-image-review review [--mode {single,grid}] [--pass N]
-                    [--batch BATCH_ID]     [--work-dir DIR]
+image-review review [--mode {single,grid}]            [--pass N]
+                    [--batch BATCH_ID]                 [--work-dir DIR]
+                    [--filter {unreviewed,clean,all}]
 ```
 
 Opens a fullscreen interactive session. In **grid mode**, images are
@@ -65,6 +66,8 @@ are shown one at a time for detailed inspection.
 | `c` | Mark CLEAN |
 | `d` | Mark DIRTY |
 | Left / Right | Navigate |
+| `n` | Jump to next todo item |
+| `u` | Toggle todo-only navigation |
 | Space | Toggle autoplay |
 | `m` | Switch mode (single/grid) |
 | `h` | Help screen |

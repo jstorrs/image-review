@@ -85,8 +85,9 @@ peak memory usage regardless of dataset size.
 ### `image-review review`
 
 ```
-image-review review [--mode {single,grid}] [--pass N]
-                    [--batch BATCH_ID]     [--work-dir DIR]
+image-review review [--mode {single,grid}]            [--pass N]
+                    [--batch BATCH_ID]                 [--work-dir DIR]
+                    [--filter {unreviewed,clean,all}]
 ```
 
 | Argument | Default | Description |
@@ -94,6 +95,7 @@ image-review review [--mode {single,grid}] [--pass N]
 | `--mode` | `single` | `single` = one image at a time; `grid` = packed grids |
 | `--pass` | auto-detected | Review pass number |
 | `--batch` | all | Restrict to a named batch (e.g. `batch_001`) |
+| `--filter` | `unreviewed` | Which images to show: `unreviewed`, `clean`, or `all` |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |
 
 Initializes pygame, creates a `ReviewSession`, runs the event loop, then
@@ -152,12 +154,12 @@ Preprocessed individual image files. Numbered sequentially within each batch.
    - Otherwise stays on max(pass_number) if it has unfinished work,
      or advances to max(pass_number) + 1
 4. Auto-select batch if not specified: pick the first batch (sorted
-   alphabetically) that still has images needing review
+   alphabetically) that has images matching the status filter
 5. Determine review items based on mode
 
 ### Single Mode
 
-- Query `ReviewDB.images_for_review()` for the current pass/batch
+- Query `ReviewDB.images_by_status()` for the current pass/batch/filter
 - Shuffle the resulting manifest rows
 - Each item is a manifest dict; surfaces are loaded from disk on display
 
@@ -166,7 +168,7 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 - Create the `ImageViewer` first (opens fullscreen pygame window)
 - Display a "Loading grids..." message while packing
 - Read screen dimensions, subtract the 50px status bar height
-- Query `ReviewDB.images_for_review()` for the current pass/batch
+- Query `ReviewDB.images_by_status()` for the current pass/batch/filter
 - Pass the review items to `pack_into_grids()` with the screen dimensions
 - Convert the returned `GridSpec` list into item dicts with `surface`,
   `image_ids`, and `batch` keys
@@ -194,6 +196,8 @@ The session runs a pygame event loop processing:
 | Left arrow / Hat left | Previous item |
 | Space | Toggle autoplay (500ms auto-advance) |
 | `w` key | Toggle fullscreen |
+| `n` key | Jump to next todo item |
+| `u` key | Toggle todo-only navigation |
 | `m` key | Switch between single/grid mode |
 | `h` key | Show help/splash screen |
 | `q` / Escape / Button 7 | Quit |
@@ -278,7 +282,8 @@ at any point.
 | `mark(image_id, batch, status, pass_number)` | Record a single review decision |
 | `mark_many(image_ids, batch, status, pass_number)` | Record decisions for multiple images (same timestamp) |
 | `get_status(image_id, current_pass) -> str` | Returns pass-aware status or `"UNREVIEWED"` if absent |
-| `images_for_review(manifest, pass_number, batch?) -> list[dict]` | Filter manifest to reviewable items for the given pass |
+| `images_for_review(manifest, pass_number, batch?) -> list[dict]` | Filter manifest to unreviewed items (delegates to `images_by_status`) |
+| `images_by_status(manifest, pass_number, status_filter?, batch?) -> list[dict]` | Filter manifest by status: `"unreviewed"`, `"clean"`, or `"all"` |
 | `current_pass(manifest) -> int` | Auto-detect pass number |
 | `summary(manifest, pass_number) -> dict` | Pass-aware count of CLEAN/DIRTY/UNREVIEWED/total |
 | `batch_summary(manifest, pass_number) -> dict` | Pass-aware per-batch status counts |

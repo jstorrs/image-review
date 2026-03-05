@@ -100,6 +100,7 @@ image-review review [options]
 | `--mode` | `single` | `single` (one image at a time) or `grid` (packed grids) |
 | `--pass` | auto | Pass number (auto-detected if omitted) |
 | `--batch` | all | Restrict review to a specific batch (e.g., `batch_001`) |
+| `--filter` | `unreviewed` | Which images to show: `unreviewed`, `clean`, or `all` |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |
 
 ### Review Modes
@@ -129,6 +130,8 @@ The viewer accepts keyboard and gamepad input:
 | Mark DIRTY | `d` | Button 3 |
 | Next image | `Right` | Hat right |
 | Previous image | `Left` | Hat left |
+| Next todo item | `n` | -- |
+| Toggle todo-only navigation | `u` | -- |
 | Autoplay (auto-advance) | `Space` | -- |
 | Switch mode (single/grid) | `m` | -- |
 | Toggle fullscreen | `w` | -- |
@@ -193,6 +196,23 @@ To focus on a single batch:
 ```bash
 image-review review --mode single --batch batch_003
 ```
+
+### Filtering by Status
+
+By default, only unreviewed images are shown. Use `--filter` to change this:
+
+```bash
+# Re-examine images previously marked CLEAN (e.g., to re-mark as DIRTY)
+image-review review --filter clean
+
+# Show all images regardless of status
+image-review review --filter all
+```
+
+With `--filter clean`, the "todo" counter tracks how many CLEAN images remain
+(haven't been re-marked yet). With `--filter all`, "todo" tracks unreviewed
+images. The `n` key jumps to the next todo item and `u` toggles todo-only
+navigation in all filter modes.
 
 ## Step 3: Status
 
