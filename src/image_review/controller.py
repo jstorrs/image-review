@@ -117,19 +117,16 @@ class ReviewSession:
         self._show_splash()
 
     def _show_splash(self):
+        other = "grid" if self.mode == "single" else "single"
         self._viewer.show_splash(
             [self._info_line(len(self._items))],
-            footer=self._splash_footer(),
+            footer=[
+                f"Press [space] for {self.mode} image review",
+                f"Press [m] for {other} image review",
+            ],
             mode=self.mode,
         )
         self._ui_state = UIState.SPLASH
-
-    def _splash_footer(self) -> list[str]:
-        other = "grid" if self.mode == "single" else "single"
-        return [
-            f"Press [space] for {self.mode} image review",
-            f"Press [m] for {other} image review",
-        ]
 
     def _info_line(self, n_items: int | None = None) -> str:
         parts = [f"{self.batch} pass {self.pass_number}"] if self.batch else [f"pass {self.pass_number}"]
@@ -272,12 +269,6 @@ class ReviewSession:
         self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
 
-    def mark_clean(self):
-        self._mark("CLEAN")
-
-    def mark_dirty(self):
-        self._mark("DIRTY")
-
     def _handle_splash_key(self, key) -> bool:
         """Handle key press while splash is shown. Returns True to quit."""
         if key in (pg.K_ESCAPE, pg.K_q):
@@ -323,10 +314,10 @@ class ReviewSession:
                 return True
             case pg.K_c:
                 self._stop_autoplay()
-                self.mark_clean()
+                self._mark("CLEAN")
             case pg.K_d:
                 self._stop_autoplay()
-                self.mark_dirty()
+                self._mark("DIRTY")
             case pg.K_w:
                 pg.display.toggle_fullscreen()
                 self._dirty = True
@@ -378,9 +369,9 @@ class ReviewSession:
                             continue
                         match event.button:
                             case 1:
-                                self.mark_clean()
+                                self._mark("CLEAN")
                             case 3:
-                                self.mark_dirty()
+                                self._mark("DIRTY")
                             case 7:
                                 running = False
                     case pg.JOYHATMOTION:

@@ -113,17 +113,14 @@ class ImageViewer:
         "  q / Esc  Quit",
     ]
 
-    def _format_help(self, mode: str = "single") -> list[str]:
-        other_mode = "grid" if mode == "single" else "single"
-        return [l.format(other_mode=other_mode) for l in self.HELP_LINES]
-
     def show_splash(self, lines: list[str], footer: str | list[str] = "Press [space] to continue", mode: str = "single") -> None:
         screen_w, screen_h = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
         splash_font = self._splash_font
         line_height = splash_font.get_sized_height() + 6
         footer_lines = [footer] if isinstance(footer, str) else footer
-        help_lines = self._format_help(mode)
+        other_mode = "grid" if mode == "single" else "single"
+        help_lines = [l.format(other_mode=other_mode) for l in self.HELP_LINES]
         all_lines = lines + [""] + help_lines + [""] + footer_lines
         info_end = len(lines)
         bright = pg.Color(255, 255, 255)

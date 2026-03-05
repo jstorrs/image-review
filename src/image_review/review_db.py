@@ -104,12 +104,11 @@ class ReviewDB:
         return max_pass + 1
 
     def summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, int]:
-        counts = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
-        for row in manifest_rows:
-            status = self.get_status(row["image_id"], pass_number)
-            counts[status] += 1
-            counts["total"] += 1
-        return counts
+        totals = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
+        for bc in self.batch_summary(manifest_rows, pass_number).values():
+            for k in totals:
+                totals[k] += bc[k]
+        return totals
 
     def batch_summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, dict[str, int]]:
         batches: dict[str, dict[str, int]] = {}
