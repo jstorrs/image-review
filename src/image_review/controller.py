@@ -7,7 +7,7 @@ import pygame as pg
 
 from .grid_packer import pack_into_grids
 from .review_db import ReviewDB
-from .util import load_surface
+from .util import load_surface, safe_path
 from .viewer import ImageViewer
 
 AUTOPLAY_EVENT = pg.USEREVENT + 1
@@ -160,7 +160,7 @@ class ReviewSession:
             status = _grid_status(self.db, item["image_ids"], self.pass_number)
             self._viewer.set_image(surface, f"grid ({len(item['image_ids'])} images)", status, info)
         else:
-            path = self.work_dir / item["preprocessed_path"]
+            path = safe_path(self.work_dir, item["preprocessed_path"])
             surface = load_surface(str(path))
             status = self.db.get_status(item["image_id"], self.pass_number)
             self._viewer.set_image(surface, item["preprocessed_path"], status, info)

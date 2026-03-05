@@ -5,7 +5,7 @@ import pygame as pg
 from PIL import Image
 from rectpack import newPacker
 
-from .util import load_surface
+from .util import load_surface, safe_path
 
 
 @dataclass
@@ -29,7 +29,7 @@ def pack_into_grids(
     # Read image dimensions (header-only, no pixel decode)
     sizes = []
     for item in items:
-        path = work_dir / item["preprocessed_path"]
+        path = safe_path(work_dir, item["preprocessed_path"])
         with Image.open(path) as im:
             w, h = im.size
         sizes.append((w, h))
@@ -61,7 +61,7 @@ def pack_into_grids(
             image_ids.append(item["image_id"])
             if not batch:
                 batch = item["batch"]
-            img_surface = load_surface(str(work_dir / item["preprocessed_path"]))
+            img_surface = load_surface(str(safe_path(work_dir, item["preprocessed_path"])))
             orig_w, orig_h = img_surface.get_size()
             if (w, h) == (orig_w, orig_h):
                 surface.blit(img_surface, (x, y))
@@ -74,7 +74,7 @@ def pack_into_grids(
     for idx in range(len(items)):
         if idx not in packed:
             item = items[idx]
-            img_surface = load_surface(str(work_dir / item["preprocessed_path"]))
+            img_surface = load_surface(str(safe_path(work_dir, item["preprocessed_path"])))
             grids.append(GridSpec(
                 surface=img_surface,
                 image_ids=[item["image_id"]],
