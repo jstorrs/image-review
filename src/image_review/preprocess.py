@@ -68,7 +68,7 @@ def load_from_zip(path: Path) -> Iterator[tuple[str, np.ndarray]]:
             if Path(item.filename).suffix.lower() in _IMAGE_EXTENSIONS
         ]
         for file in tqdm(files, desc=path.name, position=1, leave=False):
-            image_id = f"{path}:{file}"
+            image_id = f"{path.as_posix()}::{file}"
             try:
                 with zf.open(file, "r") as fp:
                     data = fp.read()
@@ -84,7 +84,7 @@ def load_from_zip(path: Path) -> Iterator[tuple[str, np.ndarray]]:
 def load_from_directory(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
     dcm_files = sorted(path.glob("**/*.dcm"))
     for f in tqdm(dcm_files, desc=path.name, position=1, leave=False):
-        image_id = str(f)
+        image_id = f.as_posix()
         try:
             dcm = pydicom.dcmread(f)
             yield image_id, preprocess_dicom(dcm)
@@ -92,12 +92,12 @@ def load_from_directory(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
             tqdm.write(f"WARNING: skipping {image_id}: {exc}", file=sys.stderr)
     for ext in ("*.jpg", "*.jpeg", "*.png"):
         for f in sorted(path.glob(f"**/{ext}")):
-            image_id = str(f)
+            image_id = f.as_posix()
             yield image_id, None
 
 
 def load_single_file(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
-    image_id = str(path)
+    image_id = path.as_posix()
     try:
         if path.suffix == ".dcm":
             dcm = pydicom.dcmread(path)
@@ -190,7 +190,7 @@ def run_preprocess(
                 img = preprocess_non_dicom(resolved)
                 ski.io.imsave(str(img_path), img)
 
-            manifest_rows.append((batch_id, str(img_path.relative_to(output_dir)), image_id))
+            manifest_rows.append((batch_id, img_path.relative_to(output_dir).as_posix(), image_id))
 
     # Write manifest
     with open(manifest_path, "w", newline="") as f:

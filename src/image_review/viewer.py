@@ -16,7 +16,8 @@ class ImageViewer:
     }
 
     def __init__(self):
-        self.screen = pg.display.set_mode((0, 0), pg.FULLSCREEN | pg.RESIZABLE)
+        info = pg.display.Info()
+        self.screen = pg.display.set_mode((info.current_w, info.current_h), pg.NOFRAME | pg.RESIZABLE)
         pg.mouse.set_visible(False)
         self.font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSans.ttf"), 36)
         self.font.fgcolor = pg.Color(64, 64, 64)
