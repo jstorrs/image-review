@@ -56,11 +56,21 @@ class ImageViewer:
         self.screen.fill(pg.Color(64, 64, 64))
         bar_color = self.STATUS_COLORS[self._status]
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, Y - self.border, X, self.border))
+        self._text_left("h for help")
         self._text_right(self._name)
         self._text_center(self._info)
         if self._content is not None:
             self.screen.blit(self._content, self._offset)
         pg.display.flip()
+
+    def _text_left(self, text: str) -> None:
+        bbox = self.font.get_rect(text)
+        _, Y = self.screen.get_size()
+        self.font.render_to(
+            self.screen,
+            (int(bbox.height / 2), int(Y - (self.border + bbox.height) / 2)),
+            text,
+        )
 
     def _text_right(self, text: str) -> None:
         bbox = self.font.get_rect(text)
@@ -104,9 +114,9 @@ class ImageViewer:
         line_height = splash_font.get_sized_height() + 6
         footer_lines = [footer] if isinstance(footer, str) else footer
         help = self._format_help(mode)
-        all_lines = help + [""] + lines + [""] + footer_lines
-        info_start = len(help) + 1
-        info_end = info_start + len(lines)
+        all_lines = lines + [""] + help + [""] + footer_lines
+        info_start = 0
+        info_end = len(lines)
         bright = pg.Color(255, 255, 255)
         max_width = max(splash_font.get_rect(l).width for l in all_lines if l)
         total_height = line_height * len(all_lines)

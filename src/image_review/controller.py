@@ -88,12 +88,7 @@ class ReviewSession:
         if self._viewer is None:
             self._viewer = ImageViewer()
 
-        splash_lines = [
-            f"batch: {self.batch}",
-            f"pass: {self.pass_number}",
-            f"mode: {self.mode}",
-        ]
-        self._viewer.show_splash(splash_lines, footer="Computing grids...", mode=self.mode)
+        self._viewer.show_splash([self._info_line()], footer="Computing grids...", mode=self.mode)
 
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
@@ -115,8 +110,7 @@ class ReviewSession:
             sorted_items.extend(buckets[key])
         self._items = sorted_items
 
-        splash_lines.append(f"{len(self._items)} items")
-        self._viewer.show_splash(splash_lines, footer=self._splash_footer(), mode=self.mode)
+        self._viewer.show_splash([self._info_line(len(self._items))], footer=self._splash_footer(), mode=self.mode)
         self._showing_splash = True
 
     def _splash_footer(self) -> list[str]:
@@ -125,6 +119,13 @@ class ReviewSession:
             f"Press [space] for {self.mode} image review",
             f"Press [m] for {other} image review",
         ]
+
+    def _info_line(self, n_items: int | None = None) -> str:
+        parts = [f"{self.batch} pass {self.pass_number}"]
+        if n_items is not None:
+            parts.append(f"{n_items} images")
+        parts.append(f"{self.mode} image review")
+        return " - ".join(parts)
 
     def _restart_in_mode(self, new_mode: str):
         self.mode = new_mode
@@ -141,13 +142,7 @@ class ReviewSession:
             self._viewer.show_message(f"No items for {new_mode} mode")
             return
 
-        splash_lines = [
-            f"batch: {self.batch}",
-            f"pass: {self.pass_number}",
-            f"mode: {self.mode}",
-            f"{len(self._items)} items",
-        ]
-        self._viewer.show_splash(splash_lines, footer=self._splash_footer(), mode=self.mode)
+        self._viewer.show_splash([self._info_line(len(self._items))], footer=self._splash_footer(), mode=self.mode)
         self._showing_splash = True
 
     def _show_current(self):
@@ -210,13 +205,7 @@ class ReviewSession:
         print(f"Starting {self.mode} review, pass {self.pass_number}{batch_info}, {len(self._items)} items")
 
         if not self._showing_splash:
-            splash_lines = [
-                f"batch: {self.batch}",
-                f"pass: {self.pass_number}",
-                f"mode: {self.mode}",
-                f"{len(self._items)} items",
-            ]
-            self._viewer.show_splash(splash_lines, footer=self._splash_footer(), mode=self.mode)
+            self._viewer.show_splash([self._info_line(len(self._items))], footer=self._splash_footer(), mode=self.mode)
             self._showing_splash = True
 
         joysticks = {}
@@ -280,13 +269,7 @@ class ReviewSession:
                                 new_mode = "grid" if self.mode == "single" else "single"
                                 self._restart_in_mode(new_mode)
                             case pg.K_h:
-                                splash_lines = [
-                                    f"batch: {self.batch}",
-                                    f"pass: {self.pass_number}",
-                                    f"mode: {self.mode}",
-                                    f"{len(self._items)} items",
-                                ]
-                                self._viewer.show_splash(splash_lines, footer=self._splash_footer(), mode=self.mode)
+                                self._viewer.show_splash([self._info_line(len(self._items))], footer=self._splash_footer(), mode=self.mode)
                                 self._showing_splash = True
                             case pg.K_LEFT:
                                 self.prev_image()
