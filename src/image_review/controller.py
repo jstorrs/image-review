@@ -79,6 +79,7 @@ class ReviewSession:
         rows = self.db.images_for_review(self.manifest, self.pass_number, self.batch)
         random.shuffle(rows)
         self._items = rows
+        self._unreviewed_count = self._count_unreviewed()
         if self._viewer is None:
             self._viewer = ImageViewer()
 
@@ -107,6 +108,7 @@ class ReviewSession:
             random.shuffle(buckets[key])
             sorted_items.extend(buckets[key])
         self._items = sorted_items
+        self._unreviewed_count = self._count_unreviewed()
 
         self._show_splash()
 
@@ -126,7 +128,7 @@ class ReviewSession:
         ]
 
     def _info_line(self, n_items: int | None = None) -> str:
-        parts = [f"{self.batch} pass {self.pass_number}"]
+        parts = [f"{self.batch} pass {self.pass_number}"] if self.batch else [f"pass {self.pass_number}"]
         if n_items is not None:
             parts.append(f"{n_items} images")
         parts.append(f"{self.mode} image review")
@@ -139,7 +141,6 @@ class ReviewSession:
         self._cursor = -1
         self.autoplay = False
         self._dirty = True
-        self._showing_splash = False
 
         if new_mode == "grid":
             self._init_grid_mode()
@@ -184,8 +185,7 @@ class ReviewSession:
         if not self._items:
             return
         item = self._items[self._cursor]
-        todo = self._count_unreviewed()
-        info = f"{self._cursor + 1} / {len(self._items)} ({todo} todo)"
+        info = f"{self._cursor + 1} / {len(self._items)} ({self._unreviewed_count} todo)"
 
         if self.mode == "grid":
             surface = item["surface"]
@@ -275,10 +275,13 @@ class ReviewSession:
         if not self._items:
             return
         item = self._items[self._cursor]
+        was_unreviewed = self._item_status(item) == "UNREVIEWED"
         if self.mode == "grid":
             self.db.mark_many(item["image_ids"], item["batch"], status, self.pass_number)
         else:
             self.db.mark(item["image_id"], item["batch"], status, self.pass_number)
+        if was_unreviewed:
+            self._unreviewed_count -= 1
         self._viewer.set_status(status)
         self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
@@ -388,6 +391,7 @@ class ReviewSession:
         if not self._showing_splash:
             self._show_splash()
 
+        clock = pg.time.Clock()
         running = True
         while running:
             for event in pg.event.get():
@@ -445,4 +449,6 @@ class ReviewSession:
             if self._dirty and not self._showing_splash:
                 self._viewer.refresh()
                 self._dirty = False
+
+            clock.tick(60)
 

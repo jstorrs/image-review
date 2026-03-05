@@ -90,10 +90,12 @@ def load_from_directory(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
             yield image_id, preprocess_dicom(dcm)
         except Exception as exc:
             tqdm.write(f"WARNING: skipping {image_id}: {exc}", file=sys.stderr)
+    non_dcm_files = []
     for ext in ("*.jpg", "*.jpeg", "*.png"):
-        for f in sorted(path.glob(f"**/{ext}")):
-            image_id = f.as_posix()
-            yield image_id, None
+        non_dcm_files.extend(sorted(path.glob(f"**/{ext}")))
+    for f in tqdm(non_dcm_files, desc=f"{path.name} (non-DICOM)", position=1, leave=False):
+        image_id = f.as_posix()
+        yield image_id, None
 
 
 def load_single_file(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
@@ -123,22 +125,20 @@ def apply_colormap(img: np.ndarray, colormap: str = "inferno") -> np.ndarray:
     return ski.util.img_as_ubyte(cm(img)[:, :, :3])
 
 
-def preprocess_non_dicom(path: Path) -> np.ndarray:
-    img = ski.io.imread(path)
+def _preprocess_non_dicom_array(img: np.ndarray) -> np.ndarray:
     if img.ndim == 2:
         img = ski.util.img_as_float32(img)
         img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
         img = ski.util.img_as_ubyte(img)
     return img
+
+
+def preprocess_non_dicom(path: Path) -> np.ndarray:
+    return _preprocess_non_dicom_array(ski.io.imread(path))
 
 
 def preprocess_non_dicom_bytes(buf: bytes) -> np.ndarray:
-    img = ski.io.imread(io.BytesIO(buf))
-    if img.ndim == 2:
-        img = ski.util.img_as_float32(img)
-        img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
-        img = ski.util.img_as_ubyte(img)
-    return img
+    return _preprocess_non_dicom_array(ski.io.imread(io.BytesIO(buf)))
 
 
 def _consume_batch(source_iter, batch_size):
@@ -184,7 +184,6 @@ def run_preprocess(
 
             if array is not None:
                 rgb = apply_colormap(array, colormap)
-                rgb = compress_image(rgb)
                 ski.io.imsave(str(img_path), rgb)
             else:
                 img = preprocess_non_dicom(resolved)
