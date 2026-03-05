@@ -70,12 +70,25 @@ class ReviewDB:
 
     def images_for_review(self, manifest_rows: list[dict], pass_number: int, batch: str | None = None) -> list[dict]:
         """Return manifest rows that need review for the given pass."""
+        return self.images_by_status(manifest_rows, pass_number, "unreviewed", batch)
+
+    def images_by_status(self, manifest_rows: list[dict], pass_number: int, status_filter: str = "unreviewed", batch: str | None = None) -> list[dict]:
+        """Return manifest rows filtered by status.
+
+        status_filter: "unreviewed", "clean", or "all".
+        """
         result = []
         for row in manifest_rows:
             if batch and row["batch"] != batch:
                 continue
-            if self.get_status(row["image_id"], pass_number) == "UNREVIEWED":
+            if status_filter == "all":
                 result.append(row)
+            elif status_filter == "clean":
+                if self.get_status(row["image_id"], pass_number) == "CLEAN":
+                    result.append(row)
+            else:  # unreviewed
+                if self.get_status(row["image_id"], pass_number) == "UNREVIEWED":
+                    result.append(row)
         return result
 
     def current_pass(self, manifest_rows: list[dict]) -> int:

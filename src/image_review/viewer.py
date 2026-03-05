@@ -31,7 +31,7 @@ class ImageViewer:
         self._splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
         self._splash_font.fgcolor = pg.Color(200, 200, 200)
         self._joystick_count = 0
-        self._unreviewed_only = False
+        self._todo_only = False
 
     def set_image(self, surface: pg.Surface, name: str, status: str, info: str) -> None:
         self._image = surface
@@ -44,8 +44,8 @@ class ImageViewer:
     def set_joystick_count(self, count: int) -> None:
         self._joystick_count = count
 
-    def set_unreviewed_only(self, enabled: bool) -> None:
-        self._unreviewed_only = enabled
+    def set_todo_only(self, enabled: bool) -> None:
+        self._todo_only = enabled
 
     def set_status(self, status: str) -> None:
         self._status = status
@@ -68,7 +68,7 @@ class ImageViewer:
         bar_color = self.STATUS_COLORS[self._status]
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
         left_text = "(h)elp"
-        left_text += " | unreviewed" if self._unreviewed_only else " | all"
+        left_text += " | todo-only" if self._todo_only else " | all"
         if self._joystick_count == 0:
             left_text += " | no gamepad"
         elif self._joystick_count == 1:
@@ -114,8 +114,8 @@ class ImageViewer:
         "  c        Mark CLEAN      B / East   Mark CLEAN",
         "  d        Mark DIRTY      Y / North  Mark DIRTY",
         "  Left/Right  Navigate     D-pad      Navigate",
-        "  n        Next unreviewed",
-        "  u        Unreviewed only",
+        "  n        Next todo",
+        "  u        Todo only",
         "  Space    Autoplay        Start      Quit",
         "  m        Switch to {other_mode} mode",
         "  w        Fullscreen",

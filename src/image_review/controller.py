@@ -37,10 +37,12 @@ class ReviewSession:
         mode: str = "single",
         pass_number: int | None = None,
         batch: str | None = None,
+        status_filter: str = "unreviewed",
     ):
         self.work_dir = work_dir
         self.mode = mode
         self.batch = batch
+        self.status_filter = status_filter
         self.db = ReviewDB(work_dir)
         self.manifest = load_manifest(work_dir)
 
@@ -53,7 +55,7 @@ class ReviewSession:
         self._cursor = -1
         self._dirty = True
         self._showing_splash = False
-        self._unreviewed_only = False
+        self._todo_only = False
         self._at_end = False
 
         self._viewer = None
@@ -68,18 +70,18 @@ class ReviewSession:
             self._init_single_mode()
 
     def _auto_select_batch(self) -> str | None:
-        """Find the first batch that still has images needing review."""
+        """Find the first batch that has images matching the status filter."""
         batches = sorted({row["batch"] for row in self.manifest})
         for batch in batches:
-            if self.db.images_for_review(self.manifest, self.pass_number, batch):
+            if self.db.images_by_status(self.manifest, self.pass_number, self.status_filter, batch):
                 return batch
         return None
 
     def _init_single_mode(self):
-        rows = self.db.images_for_review(self.manifest, self.pass_number, self.batch)
+        rows = self.db.images_by_status(self.manifest, self.pass_number, self.status_filter, self.batch)
         random.shuffle(rows)
         self._items = rows
-        self._unreviewed_count = self._count_unreviewed()
+        self._todo_count = self._count_todo()
         if self._viewer is None:
             self._viewer = ImageViewer()
 
@@ -92,7 +94,7 @@ class ReviewSession:
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
 
-        review_rows = self.db.images_for_review(self.manifest, self.pass_number, self.batch)
+        review_rows = self.db.images_by_status(self.manifest, self.pass_number, self.status_filter, self.batch)
         grid_specs = pack_into_grids(review_rows, self.work_dir, grid_w, grid_h)
 
         items = [
@@ -108,7 +110,7 @@ class ReviewSession:
             random.shuffle(buckets[key])
             sorted_items.extend(buckets[key])
         self._items = sorted_items
-        self._unreviewed_count = self._count_unreviewed()
+        self._todo_count = self._count_todo()
 
         self._show_splash()
 
@@ -129,6 +131,8 @@ class ReviewSession:
 
     def _info_line(self, n_items: int | None = None) -> str:
         parts = [f"{self.batch} pass {self.pass_number}"] if self.batch else [f"pass {self.pass_number}"]
+        if self.status_filter != "unreviewed":
+            parts.append(f"filter: {self.status_filter}")
         if n_items is not None:
             parts.append(f"{n_items} images")
         parts.append(f"{self.mode} image review")
@@ -154,29 +158,23 @@ class ReviewSession:
         self._showing_splash = False
         self.next_image()
 
-    def _count_unreviewed(self) -> int:
-        count = 0
-        for item in self._items:
-            if self.mode == "grid":
-                status = _grid_status(self.db, item["image_ids"], self.pass_number)
-            else:
-                status = self.db.get_status(item["image_id"], self.pass_number)
-            if status == "UNREVIEWED":
-                count += 1
-        return count
+    def _is_todo(self, status: str) -> bool:
+        if self.status_filter == "clean":
+            return status == "CLEAN"
+        return status == "UNREVIEWED"
 
-    def next_unreviewed(self):
+    def _count_todo(self) -> int:
+        return sum(1 for item in self._items if self._is_todo(self._item_status(item)))
+
+    def next_todo(self):
         if not self._items:
             return
         n = len(self._items)
         for offset in range(1, n + 1):
             idx = (self._cursor + offset) % n
             item = self._items[idx]
-            if self.mode == "grid":
-                status = _grid_status(self.db, item["image_ids"], self.pass_number)
-            else:
-                status = self.db.get_status(item["image_id"], self.pass_number)
-            if status == "UNREVIEWED":
+            status = self._item_status(item)
+            if self._is_todo(status):
                 self._cursor = idx
                 self._show_current()
                 return
@@ -185,11 +183,11 @@ class ReviewSession:
         if not self._items:
             return
         item = self._items[self._cursor]
-        info = f"{self._cursor + 1} / {len(self._items)} ({self._unreviewed_count} todo)"
+        status = self._item_status(item)
+        info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
 
         if self.mode == "grid":
             surface = item["surface"]
-            status = _grid_status(self.db, item["image_ids"], self.pass_number)
             self._viewer.set_image(surface, f"grid ({len(item['image_ids'])} images)", status, info)
         else:
             path = safe_path(self.work_dir, item["preprocessed_path"])
@@ -199,7 +197,6 @@ class ReviewSession:
                 print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
                 self.next_image()
                 return
-            status = self.db.get_status(item["image_id"], self.pass_number)
             self._viewer.set_image(surface, item["preprocessed_path"], status, info)
         self._dirty = True
 
@@ -212,24 +209,24 @@ class ReviewSession:
         if not self._items:
             return
         n = len(self._items)
-        if self._unreviewed_only:
+        if self._todo_only:
             for offset in range(1, n + 1):
                 idx = (self._cursor + offset) % n
                 if idx == 0 and self._cursor != -1 and offset > 0:
                     # Would wrap past end
                     break
-                if self._item_status(self._items[idx]) == "UNREVIEWED":
+                if self._is_todo(self._item_status(self._items[idx])):
                     self._cursor = idx
                     self._show_current()
                     if autoplay or self.autoplay:
                         self.autoplay = True
                         pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
                     return
-            # No unreviewed found before wrapping
+            # No todo items found before wrapping
             self.autoplay = False
             pg.time.set_timer(AUTOPLAY_EVENT, 0)
             self._at_end = True
-            self._viewer.show_message("No unreviewed images remaining")
+            self._viewer.show_message("No todo images remaining")
             return
         if self._cursor == len(self._items) - 1:
             self.autoplay = False
@@ -247,20 +244,20 @@ class ReviewSession:
         if not self._items:
             return
         n = len(self._items)
-        if self._unreviewed_only:
+        if self._todo_only:
             for offset in range(1, n + 1):
                 idx = (self._cursor - offset) % n
                 if idx == n - 1 and offset > 0:
                     # Would wrap past beginning
                     break
-                if self._item_status(self._items[idx]) == "UNREVIEWED":
+                if self._is_todo(self._item_status(self._items[idx])):
                     self._cursor = idx
                     self._show_current()
                     self.autoplay = False
                     return
             self.autoplay = False
             self._at_end = True
-            self._viewer.show_message("No unreviewed images remaining")
+            self._viewer.show_message("No todo images remaining")
             return
         if self._cursor == 0:
             self.autoplay = False
@@ -275,13 +272,16 @@ class ReviewSession:
         if not self._items:
             return
         item = self._items[self._cursor]
-        was_unreviewed = self._item_status(item) == "UNREVIEWED"
+        was_todo = self._is_todo(self._item_status(item))
         if self.mode == "grid":
             self.db.mark_many(item["image_ids"], item["batch"], status, self.pass_number)
         else:
             self.db.mark(item["image_id"], item["batch"], status, self.pass_number)
-        if was_unreviewed:
-            self._unreviewed_count -= 1
+        is_still_todo = self._is_todo(status)
+        if was_todo and not is_still_todo:
+            self._todo_count -= 1
+        elif not was_todo and is_still_todo:
+            self._todo_count += 1
         self._viewer.set_status(status)
         self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
@@ -313,31 +313,31 @@ class ReviewSession:
             return True
         if key in (pg.K_RIGHT, pg.K_SPACE):
             self._at_end = False
-            if self._unreviewed_only:
-                # Find first unreviewed from the start
+            if self._todo_only:
+                # Find first todo from the start
                 for idx in range(len(self._items)):
-                    if self._item_status(self._items[idx]) == "UNREVIEWED":
+                    if self._is_todo(self._item_status(self._items[idx])):
                         self._cursor = idx
                         self._show_current()
                         return False
                 # Still none — stay at end
                 self._at_end = True
-                self._viewer.show_message("No unreviewed images remaining")
+                self._viewer.show_message("No todo images remaining")
             else:
                 self._cursor = 0
                 self._show_current()
         elif key == pg.K_LEFT:
             self._at_end = False
-            if self._unreviewed_only:
+            if self._todo_only:
                 n = len(self._items)
                 for offset in range(1, n + 1):
                     idx = (self._cursor - offset) % n
-                    if self._item_status(self._items[idx]) == "UNREVIEWED":
+                    if self._is_todo(self._item_status(self._items[idx])):
                         self._cursor = idx
                         self._show_current()
                         return False
                 self._at_end = True
-                self._viewer.show_message("No unreviewed images remaining")
+                self._viewer.show_message("No todo images remaining")
             else:
                 self._cursor = len(self._items) - 1
                 self._show_current()
@@ -367,10 +367,10 @@ class ReviewSession:
                 self._restart_in_mode(new_mode)
             case pg.K_n:
                 self.autoplay = False
-                self.next_unreviewed()
+                self.next_todo()
             case pg.K_u:
-                self._unreviewed_only = not self._unreviewed_only
-                self._viewer.set_unreviewed_only(self._unreviewed_only)
+                self._todo_only = not self._todo_only
+                self._viewer.set_todo_only(self._todo_only)
                 self._dirty = True
             case pg.K_h:
                 self._show_splash()
@@ -382,11 +382,13 @@ class ReviewSession:
 
     def run(self):
         if not self._items:
-            print(f"No images to review for pass {self.pass_number}.")
+            filter_msg = f" (filter: {self.status_filter})" if self.status_filter != "unreviewed" else ""
+            print(f"No images to review for pass {self.pass_number}{filter_msg}.")
             return
 
         batch_info = f", batch {self.batch}" if self.batch else ""
-        print(f"Starting {self.mode} review, pass {self.pass_number}{batch_info}, {len(self._items)} items")
+        filter_info = f", filter {self.status_filter}" if self.status_filter != "unreviewed" else ""
+        print(f"Starting {self.mode} review, pass {self.pass_number}{batch_info}{filter_info}, {len(self._items)} items")
 
         if not self._showing_splash:
             self._show_splash()
