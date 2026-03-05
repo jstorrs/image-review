@@ -79,39 +79,25 @@ class ImageViewer:
             left_text += " | gamepad connected"
         else:
             left_text += f" | {self._joystick_count} gamepads"
-        self._text_left(left_text)
-        self._text_right(self._name)
-        self._text_center(self._info)
+        self._bar_text(left_text, "left")
+        self._bar_text(self._name, "right")
+        self._bar_text(self._info, "center")
         if self._content is not None:
             self.screen.blit(self._content, self._offset)
         pg.display.flip()
 
-    def _text_left(self, text: str) -> None:
-        bbox = self.font.get_rect(text)
-        _, screen_h = self.screen.get_size()
-        self.font.render_to(
-            self.screen,
-            (int(bbox.height / 2), int(screen_h - (self.border + bbox.height) / 2)),
-            text,
-        )
-
-    def _text_right(self, text: str) -> None:
+    def _bar_text(self, text: str, align: str) -> None:
         bbox = self.font.get_rect(text)
         screen_w, screen_h = self.screen.get_size()
-        self.font.render_to(
-            self.screen,
-            (screen_w - int(bbox.height / 2) - bbox.width, int(screen_h - (self.border + bbox.height) / 2)),
-            text,
-        )
-
-    def _text_center(self, text: str) -> None:
-        bbox = self.font.get_rect(text)
-        screen_w, screen_h = self.screen.get_size()
-        self.font.render_to(
-            self.screen,
-            (int((screen_w - bbox.width) / 2), int(screen_h - (self.border + bbox.height) / 2)),
-            text,
-        )
+        y = int(screen_h - (self.border + bbox.height) / 2)
+        margin = int(bbox.height / 2)
+        if align == "left":
+            x = margin
+        elif align == "right":
+            x = screen_w - margin - bbox.width
+        else:
+            x = int((screen_w - bbox.width) / 2)
+        self.font.render_to(self.screen, (x, y), text)
 
     HELP_LINES = [
         "Keyboard                 Controller",

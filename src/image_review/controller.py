@@ -1,7 +1,6 @@
 import csv
 import random
 import sys
-from collections import defaultdict
 from enum import Enum, auto
 from pathlib import Path
 
@@ -64,7 +63,7 @@ class ReviewSession:
         self._ui_state = UIState.REVIEWING
         self._todo_only = False
 
-        self._viewer = None
+        self._viewer = ImageViewer()
         self._joysticks = {}
 
         if self.batch is None:
@@ -96,13 +95,8 @@ class ReviewSession:
         random.shuffle(rows)
         self._items = rows
         self._todo_count = self._count_todo()
-        if self._viewer is None:
-            self._viewer = ImageViewer()
 
     def _init_grid_mode(self):
-        if self._viewer is None:
-            self._viewer = ImageViewer()
-
         self._viewer.show_splash([self._info_line()], footer="Computing grids...", mode=self.mode)
 
         grid_w, grid_h = self._viewer.screen.get_size()
@@ -115,15 +109,9 @@ class ReviewSession:
             {"surface": gs.surface, "image_ids": gs.image_ids, "batch": gs.batch}
             for gs in grid_specs
         ]
-        buckets = defaultdict(list)
-        for item in items:
-            n = len(item["image_ids"])
-            buckets[0 if n == 1 else (n // 4) + 1].append(item)
-        sorted_items = []
-        for key in sorted(buckets, reverse=True):
-            random.shuffle(buckets[key])
-            sorted_items.extend(buckets[key])
-        self._items = sorted_items
+        random.shuffle(items)
+        items.sort(key=lambda item: len(item["image_ids"]), reverse=True)
+        self._items = items
         self._todo_count = self._count_todo()
 
         self._show_splash()
@@ -180,18 +168,21 @@ class ReviewSession:
     def _count_todo(self) -> int:
         return sum(1 for item in self._items if self._is_todo(self._item_status(item)))
 
-    def next_todo(self):
+    def next_todo(self, direction: int = 1, *, wrap: bool = True) -> bool:
+        """Navigate to next todo item. Returns True if found."""
         if not self._items:
-            return
+            return False
         n = len(self._items)
+        boundary = 0 if direction == 1 else n - 1
         for offset in range(1, n + 1):
-            idx = (self._cursor + offset) % n
-            item = self._items[idx]
-            status = self._item_status(item)
-            if self._is_todo(status):
+            idx = (self._cursor + direction * offset) % n
+            if not wrap and idx == boundary and self._cursor != -1:
+                return False
+            if self._is_todo(self._item_status(self._items[idx])):
                 self._cursor = idx
                 self._show_current()
-                return
+                return True
+        return False
 
     def _show_current(self):
         if not self._items:
@@ -230,29 +221,25 @@ class ReviewSession:
             return _grid_status(self.db, item["image_ids"], self.pass_number)
         return self.db.get_status(item["image_id"], self.pass_number)
 
+    def _continue_autoplay(self, direction: int, autoplay: bool = False):
+        if direction == 1 and (autoplay or self.autoplay):
+            self.autoplay = True
+            pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
+        elif direction == -1:
+            self.autoplay = False
+
     def _navigate(self, direction: int, *, autoplay: bool = False):
         if not self._items:
             return
         n = len(self._items)
-        wrap_idx = 0 if direction == 1 else n - 1
 
         if self._todo_only:
-            for offset in range(1, n + 1):
-                idx = (self._cursor + direction * offset) % n
-                if idx == wrap_idx and self._cursor != -1 and offset > 0:
-                    break
-                if self._is_todo(self._item_status(self._items[idx])):
-                    self._cursor = idx
-                    self._show_current()
-                    if direction == 1 and (autoplay or self.autoplay):
-                        self.autoplay = True
-                        pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
-                    elif direction == -1:
-                        self.autoplay = False
-                    return
-            self._stop_autoplay()
-            self._ui_state = UIState.END_MESSAGE
-            self._viewer.show_message("No todo images remaining")
+            if self.next_todo(direction, wrap=False):
+                self._continue_autoplay(direction, autoplay)
+            else:
+                self._stop_autoplay()
+                self._ui_state = UIState.END_MESSAGE
+                self._viewer.show_message("No todo images remaining")
             return
 
         at_boundary = (self._cursor == n - 1) if direction == 1 else (self._cursor == 0)
@@ -264,11 +251,7 @@ class ReviewSession:
 
         self._cursor = (self._cursor + direction) % n
         self._show_current()
-        if direction == 1 and (autoplay or self.autoplay):
-            self.autoplay = True
-            pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
-        elif direction == -1:
-            self.autoplay = False
+        self._continue_autoplay(direction, autoplay)
 
     def next_image(self, *, autoplay=False):
         self._navigate(1, autoplay=autoplay)
@@ -313,33 +296,21 @@ class ReviewSession:
         """Handle key press at end-of-list screen. Returns True to quit."""
         if key in (pg.K_ESCAPE, pg.K_q):
             return True
+        direction = None
         if key in (pg.K_RIGHT, pg.K_SPACE):
-            self._ui_state = UIState.REVIEWING
-            if self._todo_only:
-                for idx in range(len(self._items)):
-                    if self._is_todo(self._item_status(self._items[idx])):
-                        self._cursor = idx
-                        self._show_current()
-                        return False
-                self._ui_state = UIState.END_MESSAGE
-                self._viewer.show_message("No todo images remaining")
-            else:
-                self._cursor = 0
-                self._show_current()
+            direction = 1
         elif key == pg.K_LEFT:
+            direction = -1
+        if direction is not None:
             self._ui_state = UIState.REVIEWING
             if self._todo_only:
-                n = len(self._items)
-                for offset in range(1, n + 1):
-                    idx = (self._cursor - offset) % n
-                    if self._is_todo(self._item_status(self._items[idx])):
-                        self._cursor = idx
-                        self._show_current()
-                        return False
-                self._ui_state = UIState.END_MESSAGE
-                self._viewer.show_message("No todo images remaining")
+                if direction == 1:
+                    self._cursor = -1
+                if not self.next_todo(direction):
+                    self._ui_state = UIState.END_MESSAGE
+                    self._viewer.show_message("No todo images remaining")
             else:
-                self._cursor = len(self._items) - 1
+                self._cursor = 0 if direction == 1 else len(self._items) - 1
                 self._show_current()
         elif key == pg.K_m:
             self._toggle_mode()
