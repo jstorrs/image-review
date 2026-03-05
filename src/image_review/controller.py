@@ -55,6 +55,7 @@ class ReviewSession:
         self._showing_splash = False
 
         self._viewer = None
+        self._joysticks = {}
 
         if self.batch is None:
             self.batch = self._auto_select_batch()
@@ -293,7 +294,6 @@ class ReviewSession:
         if not self._showing_splash:
             self._show_splash()
 
-        joysticks = {}
         running = True
         while running:
             for event in pg.event.get():
@@ -334,9 +334,13 @@ class ReviewSession:
                             self.next_image()
                     case pg.JOYDEVICEADDED:
                         joy = pg.joystick.Joystick(event.device_index)
-                        joysticks[joy.get_instance_id()] = joy
+                        self._joysticks[joy.get_instance_id()] = joy
+                        self._viewer.set_joystick_count(len(self._joysticks))
+                        self._dirty = True
                     case pg.JOYDEVICEREMOVED:
-                        del joysticks[event.instance_id]
+                        del self._joysticks[event.instance_id]
+                        self._viewer.set_joystick_count(len(self._joysticks))
+                        self._dirty = True
                     case pg.QUIT:
                         running = False
 

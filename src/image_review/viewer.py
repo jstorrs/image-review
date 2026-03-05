@@ -29,6 +29,7 @@ class ImageViewer:
         self._offset = (0, 0)
         self._splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
         self._splash_font.fgcolor = pg.Color(200, 200, 200)
+        self._joystick_count = 0
 
     def set_image(self, surface: pg.Surface, name: str, status: str, info: str) -> None:
         self._image = surface
@@ -37,6 +38,9 @@ class ImageViewer:
         self._info = info
         pg.display.set_caption(name)
         self.resize()
+
+    def set_joystick_count(self, count: int) -> None:
+        self._joystick_count = count
 
     def set_status(self, status: str) -> None:
         self._status = status
@@ -58,7 +62,14 @@ class ImageViewer:
         self.screen.fill(pg.Color(64, 64, 64))
         bar_color = self.STATUS_COLORS[self._status]
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
-        self._text_left("h for help")
+        left_text = "h for help"
+        if self._joystick_count == 0:
+            left_text += " | no gamepad"
+        elif self._joystick_count == 1:
+            left_text += " | gamepad connected"
+        else:
+            left_text += f" | {self._joystick_count} gamepads"
+        self._text_left(left_text)
         self._text_right(self._name)
         self._text_center(self._info)
         if self._content is not None:
