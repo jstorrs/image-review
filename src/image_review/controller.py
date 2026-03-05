@@ -4,19 +4,14 @@ from collections import defaultdict
 from pathlib import Path
 
 import pygame as pg
-import skimage as ski
 
 from .grid_packer import pack_into_grids
 from .review_db import ReviewDB
+from .util import load_surface
 from .viewer import ImageViewer
 
 AUTOPLAY_EVENT = pg.USEREVENT + 1
 ADVANCE_EVENT = pg.USEREVENT + 2
-
-
-def _load_surface(path: str) -> pg.Surface:
-    img = ski.io.imread(path)
-    return pg.surfarray.make_surface(img.transpose(1, 0, 2))
 
 
 def load_manifest(work_dir: Path) -> list[dict]:
@@ -47,7 +42,6 @@ class ReviewSession:
         self.batch = batch
         self.db = ReviewDB(work_dir)
         self.manifest = load_manifest(work_dir)
-        self._image_batch = {row["image_id"]: row["batch"] for row in self.manifest}
 
         if pass_number is None:
             self.pass_number = self.db.current_pass(self.manifest)
@@ -110,7 +104,14 @@ class ReviewSession:
             sorted_items.extend(buckets[key])
         self._items = sorted_items
 
-        self._viewer.show_splash([self._info_line(len(self._items))], footer=self._splash_footer(), mode=self.mode)
+        self._show_splash()
+
+    def _show_splash(self):
+        self._viewer.show_splash(
+            [self._info_line(len(self._items))],
+            footer=self._splash_footer(),
+            mode=self.mode,
+        )
         self._showing_splash = True
 
     def _splash_footer(self) -> list[str]:
@@ -142,8 +143,8 @@ class ReviewSession:
             self._viewer.show_message(f"No items for {new_mode} mode")
             return
 
-        self._viewer.show_splash([self._info_line(len(self._items))], footer=self._splash_footer(), mode=self.mode)
-        self._showing_splash = True
+        if not self._showing_splash:
+            self._show_splash()
 
     def _show_current(self):
         if not self._items:
@@ -157,7 +158,7 @@ class ReviewSession:
             self._viewer.set_image(surface, f"grid ({len(item['image_ids'])} images)", status, info)
         else:
             path = self.work_dir / item["preprocessed_path"]
-            surface = _load_surface(str(path))
+            surface = load_surface(str(path))
             status = self.db.get_status(item["image_id"], self.pass_number)
             self._viewer.set_image(surface, item["preprocessed_path"], status, info)
         self._dirty = True
@@ -196,6 +197,54 @@ class ReviewSession:
     def mark_dirty(self):
         self._mark("DIRTY")
 
+    def _handle_splash_key(self, key) -> bool:
+        """Handle key press while splash is shown. Returns True to quit."""
+        if key in (pg.K_ESCAPE, pg.K_q):
+            return True
+        if key == pg.K_SPACE:
+            self._showing_splash = False
+            if self._cursor == -1:
+                self.next_image()
+            else:
+                self._show_current()
+        elif key == pg.K_m:
+            new_mode = "grid" if self.mode == "single" else "single"
+            self._restart_in_mode(new_mode)
+        elif key == pg.K_h:
+            self._showing_splash = False
+            self._show_current()
+        return False
+
+    def _handle_review_key(self, key) -> bool:
+        """Handle key press during review. Returns True to quit."""
+        match key:
+            case pg.K_ESCAPE | pg.K_q:
+                return True
+            case pg.K_c:
+                self.autoplay = False
+                self.mark_clean()
+            case pg.K_d:
+                self.autoplay = False
+                self.mark_dirty()
+            case pg.K_w:
+                pg.display.toggle_fullscreen()
+                self._dirty = True
+            case pg.K_SPACE:
+                if self.autoplay:
+                    self.autoplay = False
+                else:
+                    self.next_image(autoplay=True)
+            case pg.K_m:
+                new_mode = "grid" if self.mode == "single" else "single"
+                self._restart_in_mode(new_mode)
+            case pg.K_h:
+                self._show_splash()
+            case pg.K_LEFT:
+                self.prev_image()
+            case pg.K_RIGHT:
+                self.next_image()
+        return False
+
     def run(self):
         if not self._items:
             print(f"No images to review for pass {self.pass_number}.")
@@ -205,8 +254,7 @@ class ReviewSession:
         print(f"Starting {self.mode} review, pass {self.pass_number}{batch_info}, {len(self._items)} items")
 
         if not self._showing_splash:
-            self._viewer.show_splash([self._info_line(len(self._items))], footer=self._splash_footer(), mode=self.mode)
-            self._showing_splash = True
+            self._show_splash()
 
         joysticks = {}
         running = True
@@ -233,48 +281,11 @@ class ReviewSession:
                                 self.next_image()
                     case pg.KEYDOWN:
                         if self._showing_splash:
-                            if event.key in (pg.K_ESCAPE, pg.K_q):
+                            if self._handle_splash_key(event.key):
                                 running = False
-                            elif event.key == pg.K_SPACE:
-                                self._showing_splash = False
-                                if self._cursor == -1:
-                                    self.next_image()
-                                else:
-                                    self._show_current()
-                            elif event.key == pg.K_m:
-                                new_mode = "grid" if self.mode == "single" else "single"
-                                self._restart_in_mode(new_mode)
-                            elif event.key == pg.K_h:
-                                self._showing_splash = False
-                                self._show_current()
                             continue
-                        match event.key:
-                            case pg.K_ESCAPE | pg.K_q:
-                                running = False
-                            case pg.K_c:
-                                self.autoplay = False
-                                self.mark_clean()
-                            case pg.K_d:
-                                self.autoplay = False
-                                self.mark_dirty()
-                            case pg.K_w:
-                                pg.display.toggle_fullscreen()
-                                self._dirty = True
-                            case pg.K_SPACE:
-                                if self.autoplay:
-                                    self.autoplay = False
-                                else:
-                                    self.next_image(autoplay=True)
-                            case pg.K_m:
-                                new_mode = "grid" if self.mode == "single" else "single"
-                                self._restart_in_mode(new_mode)
-                            case pg.K_h:
-                                self._viewer.show_splash([self._info_line(len(self._items))], footer=self._splash_footer(), mode=self.mode)
-                                self._showing_splash = True
-                            case pg.K_LEFT:
-                                self.prev_image()
-                            case pg.K_RIGHT:
-                                self.next_image()
+                        if self._handle_review_key(event.key):
+                            running = False
                     case pg.WINDOWRESIZED:
                         self._viewer.resize()
                         self._dirty = True
@@ -295,4 +306,3 @@ class ReviewSession:
                 self._viewer.refresh()
                 self._dirty = False
 
-        self._viewer.cleanup()

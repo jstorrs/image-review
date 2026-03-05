@@ -96,15 +96,17 @@ def status(work_dir):
 
     db = ReviewDB(work_dir)
 
+    current = db.current_pass(manifest)
+
     # Overall summary
-    counts = db.summary(manifest)
-    print(f"\nOverall: {counts['total']} images")
+    counts = db.summary(manifest, current)
+    print(f"\nOverall: {counts['total']} images (pass {current})")
     print(f"  CLEAN:      {counts['CLEAN']:>6}")
     print(f"  DIRTY:      {counts['DIRTY']:>6}")
     print(f"  UNREVIEWED: {counts['UNREVIEWED']:>6}")
 
     # Per-batch summary
-    batch_counts = db.batch_summary(manifest)
+    batch_counts = db.batch_summary(manifest, current)
     if len(batch_counts) > 1:
         print(f"\n{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6}")
         print("-" * 45)
@@ -112,9 +114,7 @@ def status(work_dir):
             bc = batch_counts[batch_id]
             print(f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6}")
 
-    # Current pass
-    current = db.current_pass(manifest)
-    print(f"\nNext pass: {current}")
+    print(f"\nCurrent pass: {current}")
 
 
 def main():

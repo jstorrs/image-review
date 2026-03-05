@@ -10,13 +10,21 @@ import pydicom
 import skimage as ski
 from tqdm import tqdm
 
+EROSION_KERNEL_SIZE = 5
+OUTLIER_PERCENTILE = 0.01
+INTENSITY_MARGIN = 0.02
+CLAHE_BINS = 96
+
 
 def compress_image(image):
-    i = image == np.roll(image, 1, axis=0)
-    j = image == np.roll(image, 1, axis=1)
-    k = ski.morphology.erosion(i & j, np.ones((5, 5), dtype=bool))
-    image = np.delete(image, np.all(k, axis=1), axis=0)
-    image = np.delete(image, np.all(k, axis=0), axis=1)
+    same_vert = image == np.roll(image, 1, axis=0)
+    same_horiz = image == np.roll(image, 1, axis=1)
+    uniform = ski.morphology.erosion(
+        same_vert & same_horiz,
+        np.ones((EROSION_KERNEL_SIZE, EROSION_KERNEL_SIZE), dtype=bool),
+    )
+    image = np.delete(image, np.all(uniform, axis=1), axis=0)
+    image = np.delete(image, np.all(uniform, axis=0), axis=1)
     return image
 
 
@@ -28,14 +36,14 @@ def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
         case "MONOCHROME2":
             pass
     bot, top = img.min(), img.max()
-    d = 0.01 * (top - bot) / 100
-    bot, top = bot + d, top - d
-    bot, top = np.quantile(img[(img > bot) & (img < top)], [0.01, 0.99])
-    d = 0.02 * (top - bot)
-    bot, top = bot + d, top - d
+    margin_initial = OUTLIER_PERCENTILE * (top - bot) / 100
+    bot, top = bot + margin_initial, top - margin_initial
+    bot, top = np.quantile(img[(img > bot) & (img < top)], [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
+    margin_final = INTENSITY_MARGIN * (top - bot)
+    bot, top = bot + margin_final, top - margin_final
     img = ski.exposure.rescale_intensity(img, (bot, top))
     img = np.clip(img, 0, 1)
-    img = ski.exposure.equalize_adapthist(img, 96)
+    img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
     return compress_image(img)
 
 
@@ -90,7 +98,7 @@ def preprocess_non_dicom(path: Path) -> np.ndarray:
     img = ski.io.imread(path)
     if img.ndim == 2:
         img = ski.util.img_as_float32(img)
-        img = ski.exposure.equalize_adapthist(img, 96)
+        img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
         img = ski.util.img_as_ubyte(img)
     return img
 

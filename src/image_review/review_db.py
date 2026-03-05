@@ -19,6 +19,7 @@ class ReviewDB:
         with open(self.review_path, newline="") as f:
             reader = csv.DictReader(f, delimiter="\t")
             for row in reader:
+                row["pass_number"] = int(row["pass_number"])
                 self._rows[row["image_id"]] = row
 
     def _save(self) -> None:
@@ -27,7 +28,8 @@ class ReviewDB:
             with os.fdopen(fd, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=self.HEADER, delimiter="\t")
                 writer.writeheader()
-                writer.writerows(self._rows.values())
+                for row in self._rows.values():
+                    writer.writerow({**row, "pass_number": str(row["pass_number"])})
             os.replace(tmp, self.review_path)
         except BaseException:
             os.unlink(tmp)
@@ -38,7 +40,7 @@ class ReviewDB:
             "image_id": image_id,
             "batch": batch,
             "status": status,
-            "pass_number": str(pass_number),
+            "pass_number": pass_number,
             "timestamp": datetime.now(UTC).isoformat(),
         }
         self._save()
@@ -50,7 +52,7 @@ class ReviewDB:
                 "image_id": image_id,
                 "batch": batch,
                 "status": status,
-                "pass_number": str(pass_number),
+                "pass_number": pass_number,
                 "timestamp": ts,
             }
         self._save()
@@ -59,7 +61,7 @@ class ReviewDB:
         row = self._rows.get(image_id)
         if not row:
             return "UNREVIEWED"
-        if int(row["pass_number"]) == current_pass:
+        if row["pass_number"] == current_pass:
             return row["status"]
         if row["status"] == "CLEAN":
             return "CLEAN"
@@ -90,24 +92,24 @@ class ReviewDB:
             return 1
         max_pass = 0
         for row in self._rows.values():
-            max_pass = max(max_pass, int(row["pass_number"]))
+            max_pass = max(max_pass, row["pass_number"])
         return max_pass + 1
 
-    def summary(self, manifest_rows: list[dict]) -> dict[str, int]:
+    def summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, int]:
         counts = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
         for row in manifest_rows:
-            status = self._rows.get(row["image_id"], {}).get("status", "UNREVIEWED")
-            counts[status] = counts.get(status, 0) + 1
+            status = self.get_status(row["image_id"], pass_number)
+            counts[status] += 1
             counts["total"] += 1
         return counts
 
-    def batch_summary(self, manifest_rows: list[dict]) -> dict[str, dict[str, int]]:
+    def batch_summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, dict[str, int]]:
         batches: dict[str, dict[str, int]] = {}
         for row in manifest_rows:
             batch = row["batch"]
             if batch not in batches:
                 batches[batch] = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
-            status = self._rows.get(row["image_id"], {}).get("status", "UNREVIEWED")
-            batches[batch][status] = batches[batch].get(status, 0) + 1
+            status = self.get_status(row["image_id"], pass_number)
+            batches[batch][status] += 1
             batches[batch]["total"] += 1
         return batches

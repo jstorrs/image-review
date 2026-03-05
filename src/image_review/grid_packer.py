@@ -2,9 +2,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pygame as pg
-import skimage as ski
 from PIL import Image
 from rectpack import newPacker
+
+from .util import load_surface
 
 
 @dataclass
@@ -12,11 +13,6 @@ class GridSpec:
     surface: pg.Surface
     image_ids: list[str] = field(default_factory=list)
     batch: str = ""
-
-
-def _load_surface(path: str) -> pg.Surface:
-    img = ski.io.imread(path)
-    return pg.surfarray.make_surface(img.transpose(1, 0, 2))
 
 
 def pack_into_grids(
@@ -65,7 +61,7 @@ def pack_into_grids(
             image_ids.append(item["image_id"])
             if not batch:
                 batch = item["batch"]
-            img_surface = _load_surface(str(work_dir / item["preprocessed_path"]))
+            img_surface = load_surface(str(work_dir / item["preprocessed_path"]))
             orig_w, orig_h = img_surface.get_size()
             if (w, h) == (orig_w, orig_h):
                 surface.blit(img_surface, (x, y))
@@ -78,7 +74,7 @@ def pack_into_grids(
     for idx in range(len(items)):
         if idx not in packed:
             item = items[idx]
-            img_surface = _load_surface(str(work_dir / item["preprocessed_path"]))
+            img_surface = load_surface(str(work_dir / item["preprocessed_path"]))
             grids.append(GridSpec(
                 surface=img_surface,
                 image_ids=[item["image_id"]],

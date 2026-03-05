@@ -140,6 +140,3 @@ class ImageViewer:
             fgcolor=pg.Color(200, 200, 200),
         )
         pg.display.flip()
-
-    def cleanup(self) -> None:
-        pass
