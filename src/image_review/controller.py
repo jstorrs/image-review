@@ -1,5 +1,6 @@
 import csv
 import random
+from collections import defaultdict
 from pathlib import Path
 
 import pygame as pg
@@ -59,6 +60,8 @@ class ReviewSession:
         self._showing_help = False
         self._showing_splash = False
 
+        self._viewer = None
+
         if self.batch is None:
             self.batch = self._auto_select_batch()
 
@@ -79,10 +82,12 @@ class ReviewSession:
         rows = self.db.images_for_review(self.manifest, self.pass_number, self.batch)
         random.shuffle(rows)
         self._items = rows
-        self._viewer = ImageViewer()
+        if self._viewer is None:
+            self._viewer = ImageViewer()
 
     def _init_grid_mode(self):
-        self._viewer = ImageViewer()
+        if self._viewer is None:
+            self._viewer = ImageViewer()
 
         splash_lines = [
             f"batch: {self.batch}",
@@ -101,10 +106,41 @@ class ReviewSession:
             {"surface": gs.surface, "image_ids": gs.image_ids, "batch": gs.batch}
             for gs in grid_specs
         ]
-        random.shuffle(items)
-        self._items = items
+        buckets = defaultdict(list)
+        for item in items:
+            n = len(item["image_ids"])
+            buckets[0 if n == 1 else n // 4].append(item)
+        sorted_items = []
+        for key in sorted(buckets, reverse=True):
+            random.shuffle(buckets[key])
+            sorted_items.extend(buckets[key])
+        self._items = sorted_items
 
         splash_lines.append(f"{len(self._items)} items")
+        self._viewer.show_splash(splash_lines)
+        self._showing_splash = True
+
+    def _restart_in_mode(self, new_mode: str):
+        self.mode = new_mode
+        self._cursor = -1
+        self.autoplay = False
+        self._dirty = True
+
+        if new_mode == "grid":
+            self._init_grid_mode()
+        else:
+            self._init_single_mode()
+
+        if not self._items:
+            self._viewer.show_message(f"No items for {new_mode} mode")
+            return
+
+        splash_lines = [
+            f"batch: {self.batch}",
+            f"pass: {self.pass_number}",
+            f"mode: {self.mode}",
+            f"{len(self._items)} items",
+        ]
         self._viewer.show_splash(splash_lines)
         self._showing_splash = True
 
@@ -237,6 +273,9 @@ class ReviewSession:
                                     self.autoplay = False
                                 else:
                                     self.next_image(autoplay=True)
+                            case pg.K_m:
+                                new_mode = "grid" if self.mode == "single" else "single"
+                                self._restart_in_mode(new_mode)
                             case pg.K_h:
                                 self._showing_help = True
                                 self._viewer.show_help()

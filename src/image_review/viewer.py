@@ -86,6 +86,7 @@ class ImageViewer:
         "  d        Mark DIRTY      Y / North  Mark DIRTY",
         "  Left/Right  Navigate     D-pad      Navigate",
         "  Space    Autoplay        Start      Quit",
+        "  m        Toggle mode",
         "  w        Fullscreen",
         "  h        This help",
         "  q / Esc  Quit",
