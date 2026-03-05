@@ -20,8 +20,11 @@ CLAHE_BINS = 96
 def compress_image(image):
     same_vert = image == np.roll(image, 1, axis=0)
     same_horiz = image == np.roll(image, 1, axis=1)
+    both = same_vert & same_horiz
+    if both.ndim == 3:
+        both = np.all(both, axis=2)
     uniform = ski.morphology.erosion(
-        same_vert & same_horiz,
+        both,
         np.ones((EROSION_KERNEL_SIZE, EROSION_KERNEL_SIZE), dtype=bool),
     )
     image = np.delete(image, np.all(uniform, axis=1), axis=0)
@@ -49,6 +52,7 @@ def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
         return compress_image(img)
     img = ski.exposure.rescale_intensity(img, (bot, top))
     img = np.clip(img, 0, 1)
+    img = compress_image(img)
     img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
     return compress_image(img)
 
@@ -180,6 +184,7 @@ def run_preprocess(
 
             if array is not None:
                 rgb = apply_colormap(array, colormap)
+                rgb = compress_image(rgb)
                 ski.io.imsave(str(img_path), rgb)
             else:
                 img = preprocess_non_dicom(resolved)
