@@ -53,7 +53,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 | Single file | Reads as DICOM (`.dcm`) or passes through (other extensions) |
 
 **Image IDs** are fully-resolved absolute paths derived from the source:
-- ZIP: `{absolute_zip_path}:{filename}`
+- ZIP: `{absolute_zip_path}::{filename}`
 - Directory: fully-resolved absolute path to each file
 - Single file: fully-resolved absolute path
 
@@ -165,14 +165,13 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 
 ### Grid Mode
 
-- Create the `ImageViewer` first (opens fullscreen pygame window)
-- Display a "Loading grids..." message while packing
+- Display a "Computing grids..." message while packing
 - Read screen dimensions, subtract the 50px status bar height
 - Query `ReviewDB.images_by_status()` for the current pass/batch/filter
 - Pass the review items to `pack_into_grids()` with the screen dimensions
 - Convert the returned `GridSpec` list into item dicts with `surface`,
   `image_ids`, and `batch` keys
-- Shuffle the grid items
+- Shuffle the grid items, then sort by image count (largest grids first)
 
 When a grid is marked CLEAN or DIRTY, all constituent `image_ids` receive
 that status via `ReviewDB.mark_many()`.
@@ -205,10 +204,10 @@ The session runs a pygame event loop processing:
 | Joystick added/removed | Hot-plug handling |
 
 After marking, the viewer auto-advances to the next item after 200ms.
-Navigation wraps around (cursor modulo item count).
+Navigation stops at list boundaries with an "End of list" message.
 
-Any key press cancels autoplay. The display only redraws when a dirty flag
-is set, to minimize CPU usage.
+Marking, navigation, `n`, `Space`, and `m` cancel autoplay. The display
+only redraws when a dirty flag is set, to minimize CPU usage.
 
 ## Grid Packer (`grid_packer.py`)
 
@@ -282,7 +281,6 @@ at any point.
 | `mark(image_id, batch, status, pass_number)` | Record a single review decision |
 | `mark_many(image_ids, batch, status, pass_number)` | Record decisions for multiple images (same timestamp) |
 | `get_status(image_id, current_pass) -> str` | Returns pass-aware status or `"UNREVIEWED"` if absent |
-| `images_for_review(manifest, pass_number, batch?) -> list[dict]` | Filter manifest to unreviewed items (delegates to `images_by_status`) |
 | `images_by_status(manifest, pass_number, status_filter?, batch?) -> list[dict]` | Filter manifest by status: `"unreviewed"`, `"clean"`, or `"all"` |
 | `current_pass(manifest) -> int` | Auto-detect pass number |
 | `summary(manifest, pass_number) -> dict` | Pass-aware count of CLEAN/DIRTY/UNREVIEWED/total |
@@ -311,9 +309,3 @@ or `max(pass_number) + 1` if the pass is fully complete.
 Sessions are resumable: quitting mid-session saves all progress. Re-running
 the same command shows only remaining unreviewed (pass 1) or dirty (pass 2+)
 images.
-
-## Backward Compatibility
-
-- Stale `grids.tsv` and `grid_*.jpg` files from older preprocessing runs
-  are ignored. No re-preprocessing is required.
-- `manifest.tsv` format is unchanged across versions.
