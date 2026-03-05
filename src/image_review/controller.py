@@ -150,11 +150,39 @@ class ReviewSession:
         if not self._showing_splash:
             self._show_splash()
 
+    def _count_unreviewed(self) -> int:
+        count = 0
+        for item in self._items:
+            if self.mode == "grid":
+                status = _grid_status(self.db, item["image_ids"], self.pass_number)
+            else:
+                status = self.db.get_status(item["image_id"], self.pass_number)
+            if status == "UNREVIEWED":
+                count += 1
+        return count
+
+    def next_unreviewed(self):
+        if not self._items:
+            return
+        n = len(self._items)
+        for offset in range(1, n + 1):
+            idx = (self._cursor + offset) % n
+            item = self._items[idx]
+            if self.mode == "grid":
+                status = _grid_status(self.db, item["image_ids"], self.pass_number)
+            else:
+                status = self.db.get_status(item["image_id"], self.pass_number)
+            if status == "UNREVIEWED":
+                self._cursor = idx
+                self._show_current()
+                return
+
     def _show_current(self):
         if not self._items:
             return
         item = self._items[self._cursor]
-        info = f"{self._cursor + 1} / {len(self._items)}"
+        todo = self._count_unreviewed()
+        info = f"{self._cursor + 1} / {len(self._items)} ({todo} todo)"
 
         if self.mode == "grid":
             surface = item["surface"]
@@ -243,6 +271,9 @@ class ReviewSession:
             case pg.K_m:
                 new_mode = "grid" if self.mode == "single" else "single"
                 self._restart_in_mode(new_mode)
+            case pg.K_n:
+                self.autoplay = False
+                self.next_unreviewed()
             case pg.K_h:
                 self._show_splash()
             case pg.K_LEFT:

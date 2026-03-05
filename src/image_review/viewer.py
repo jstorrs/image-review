@@ -97,6 +97,7 @@ class ImageViewer:
         "  c        Mark CLEAN      B / East   Mark CLEAN",
         "  d        Mark DIRTY      Y / North  Mark DIRTY",
         "  Left/Right  Navigate     D-pad      Navigate",
+        "  n        Next unreviewed",
         "  Space    Autoplay        Start      Quit",
         "  m        Switch to {other_mode} mode",
         "  w        Fullscreen",
