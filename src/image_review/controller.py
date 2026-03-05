@@ -57,7 +57,6 @@ class ReviewSession:
         self.autoplay = False
         self._cursor = -1
         self._dirty = True
-        self._showing_help = False
         self._showing_splash = False
 
         self._viewer = None
@@ -94,7 +93,7 @@ class ReviewSession:
             f"pass: {self.pass_number}",
             f"mode: {self.mode}",
         ]
-        self._viewer.show_splash(splash_lines, footer="Computing grids...")
+        self._viewer.show_splash(splash_lines, footer="Computing grids...", mode=self.mode)
 
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
@@ -117,8 +116,15 @@ class ReviewSession:
         self._items = sorted_items
 
         splash_lines.append(f"{len(self._items)} items")
-        self._viewer.show_splash(splash_lines)
+        self._viewer.show_splash(splash_lines, footer=self._splash_footer(), mode=self.mode)
         self._showing_splash = True
+
+    def _splash_footer(self) -> list[str]:
+        other = "grid" if self.mode == "single" else "single"
+        return [
+            f"Press [space] for {self.mode} image review",
+            f"Press [m] for {other} image review",
+        ]
 
     def _restart_in_mode(self, new_mode: str):
         self.mode = new_mode
@@ -141,7 +147,7 @@ class ReviewSession:
             f"mode: {self.mode}",
             f"{len(self._items)} items",
         ]
-        self._viewer.show_splash(splash_lines)
+        self._viewer.show_splash(splash_lines, footer=self._splash_footer(), mode=self.mode)
         self._showing_splash = True
 
     def _show_current(self):
@@ -210,7 +216,7 @@ class ReviewSession:
                 f"mode: {self.mode}",
                 f"{len(self._items)} items",
             ]
-            self._viewer.show_splash(splash_lines)
+            self._viewer.show_splash(splash_lines, footer=self._splash_footer(), mode=self.mode)
             self._showing_splash = True
 
         joysticks = {}
@@ -221,10 +227,6 @@ class ReviewSession:
                     case pg.JOYBUTTONDOWN:
                         if self._showing_splash:
                             continue
-                        if self._showing_help:
-                            self._showing_help = False
-                            self._show_current()
-                            continue
                         match event.button:
                             case 1:
                                 self.mark_clean()
@@ -234,10 +236,6 @@ class ReviewSession:
                                 running = False
                     case pg.JOYHATMOTION:
                         if self._showing_splash:
-                            continue
-                        if self._showing_help:
-                            self._showing_help = False
-                            self._show_current()
                             continue
                         if event.hat == 0:
                             if event.value[0] < -0.5:
@@ -250,11 +248,16 @@ class ReviewSession:
                                 running = False
                             elif event.key == pg.K_SPACE:
                                 self._showing_splash = False
-                                self.next_image()
-                            continue
-                        if self._showing_help:
-                            self._showing_help = False
-                            self._show_current()
+                                if self._cursor == -1:
+                                    self.next_image()
+                                else:
+                                    self._show_current()
+                            elif event.key == pg.K_m:
+                                new_mode = "grid" if self.mode == "single" else "single"
+                                self._restart_in_mode(new_mode)
+                            elif event.key == pg.K_h:
+                                self._showing_splash = False
+                                self._show_current()
                             continue
                         match event.key:
                             case pg.K_ESCAPE | pg.K_q:
@@ -277,8 +280,14 @@ class ReviewSession:
                                 new_mode = "grid" if self.mode == "single" else "single"
                                 self._restart_in_mode(new_mode)
                             case pg.K_h:
-                                self._showing_help = True
-                                self._viewer.show_help()
+                                splash_lines = [
+                                    f"batch: {self.batch}",
+                                    f"pass: {self.pass_number}",
+                                    f"mode: {self.mode}",
+                                    f"{len(self._items)} items",
+                                ]
+                                self._viewer.show_splash(splash_lines, footer=self._splash_footer(), mode=self.mode)
+                                self._showing_splash = True
                             case pg.K_LEFT:
                                 self.prev_image()
                             case pg.K_RIGHT:

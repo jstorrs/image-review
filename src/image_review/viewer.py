@@ -86,19 +86,28 @@ class ImageViewer:
         "  d        Mark DIRTY      Y / North  Mark DIRTY",
         "  Left/Right  Navigate     D-pad      Navigate",
         "  Space    Autoplay        Start      Quit",
-        "  m        Toggle mode",
+        "  m        Switch to {other_mode} mode",
         "  w        Fullscreen",
         "  h        This help",
         "  q / Esc  Quit",
     ]
 
-    def show_splash(self, lines: list[str], footer: str = "Press [space] to continue") -> None:
+    def _format_help(self, mode: str = "single") -> list[str]:
+        other_mode = "grid" if mode == "single" else "single"
+        return [l.format(other_mode=other_mode) for l in self.HELP_LINES]
+
+    def show_splash(self, lines: list[str], footer: str | list[str] = "Press [space] to continue", mode: str = "single") -> None:
         X, Y = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
         splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
         splash_font.fgcolor = pg.Color(200, 200, 200)
         line_height = splash_font.get_sized_height() + 6
-        all_lines = self.HELP_LINES + [""] + lines + ["", footer]
+        footer_lines = [footer] if isinstance(footer, str) else footer
+        help = self._format_help(mode)
+        all_lines = help + [""] + lines + [""] + footer_lines
+        info_start = len(help) + 1
+        info_end = info_start + len(lines)
+        bright = pg.Color(255, 255, 255)
         max_width = max(splash_font.get_rect(l).width for l in all_lines if l)
         total_height = line_height * len(all_lines)
         x_start = (X - max_width) // 2
@@ -106,22 +115,8 @@ class ImageViewer:
         for i, line in enumerate(all_lines):
             if not line:
                 continue
-            splash_font.render_to(self.screen, (x_start, y_start + i * line_height), line)
-        pg.display.flip()
-
-    def show_help(self) -> None:
-        help_lines = self.HELP_LINES
-        X, Y = self.screen.get_size()
-        self.screen.fill(pg.Color(64, 64, 64))
-        help_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
-        help_font.fgcolor = pg.Color(200, 200, 200)
-        line_height = help_font.get_sized_height() + 6
-        max_width = max(help_font.get_rect(l).width for l in help_lines)
-        total_height = line_height * len(help_lines)
-        x_start = (X - max_width) // 2
-        y_start = (Y - total_height) // 2
-        for i, line in enumerate(help_lines):
-            help_font.render_to(self.screen, (x_start, y_start + i * line_height), line)
+            color = bright if info_start <= i < info_end else None
+            splash_font.render_to(self.screen, (x_start, y_start + i * line_height), line, fgcolor=color)
         pg.display.flip()
 
     def show_message(self, text: str) -> None:
