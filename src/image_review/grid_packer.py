@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -36,17 +37,24 @@ def pack_into_grids(
     """
     # Load all surfaces upfront — avoids opening each file twice
     surfaces = []
-    for item in items:
+    skipped: set[int] = set()
+    for idx, item in enumerate(items):
         path = safe_path(work_dir, item["preprocessed_path"])
-        surfaces.append(load_surface(str(path)))
+        try:
+            surfaces.append(load_surface(str(path)))
+        except Exception as exc:
+            print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
+            surfaces.append(None)
+            skipped.add(idx)
 
-    sizes = [s.get_size() for s in surfaces]
+    sizes = [s.get_size() if s is not None else (0, 0) for s in surfaces]
 
     # Bin-pack
     packer = newPacker()
     packer.add_bin(grid_w, grid_h, float("inf"))
     for idx, (w, h) in enumerate(sizes):
-        packer.add_rect(w, h, idx)
+        if idx not in skipped:
+            packer.add_rect(w, h, idx)
     packer.pack()
 
     # Identify which items were packed into which bins
@@ -80,6 +88,8 @@ def pack_into_grids(
 
     # Overflow: images too large to fit any bin become single-image grids
     for idx in range(len(items)):
+        if idx in skipped:
+            continue
         if idx not in packed:
             item = items[idx]
             grids.append(GridSpec(

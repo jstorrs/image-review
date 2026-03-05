@@ -1,8 +1,11 @@
 import csv
 import os
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+
+VALID_STATUSES = {"CLEAN", "DIRTY"}
 
 
 class ReviewDB:
@@ -19,8 +22,11 @@ class ReviewDB:
         with open(self.review_path, newline="") as f:
             reader = csv.DictReader(f, delimiter="\t")
             for row in reader:
-                row["pass_number"] = int(row["pass_number"])
-                self._rows[row["image_id"]] = row
+                try:
+                    row["pass_number"] = int(row["pass_number"])
+                    self._rows[row["image_id"]] = row
+                except (ValueError, KeyError) as exc:
+                    print(f"WARNING: skipping malformed row in {self.review_path}: {exc}", file=sys.stderr)
 
     def _save(self) -> None:
         fd, tmp = tempfile.mkstemp(dir=self.work_dir, suffix=".tsv")
@@ -32,10 +38,15 @@ class ReviewDB:
                     writer.writerow({**row, "pass_number": str(row["pass_number"])})
             os.replace(tmp, self.review_path)
         except BaseException:
-            os.unlink(tmp)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
             raise
 
     def mark(self, image_id: str, batch: str, status: str, pass_number: int) -> None:
+        if status not in VALID_STATUSES:
+            raise ValueError(f"Invalid status {status!r}, must be one of {VALID_STATUSES}")
         self._rows[image_id] = {
             "image_id": image_id,
             "batch": batch,
@@ -46,6 +57,8 @@ class ReviewDB:
         self._save()
 
     def mark_many(self, image_ids: list[str], batch: str, status: str, pass_number: int) -> None:
+        if status not in VALID_STATUSES:
+            raise ValueError(f"Invalid status {status!r}, must be one of {VALID_STATUSES}")
         ts = datetime.now(UTC).isoformat()
         for image_id in image_ids:
             self._rows[image_id] = {
@@ -68,10 +81,6 @@ class ReviewDB:
         # DIRTY from a prior pass → treat as UNREVIEWED
         return "UNREVIEWED"
 
-    def images_for_review(self, manifest_rows: list[dict], pass_number: int, batch: str | None = None) -> list[dict]:
-        """Return manifest rows that need review for the given pass."""
-        return self.images_by_status(manifest_rows, pass_number, "unreviewed", batch)
-
     def images_by_status(self, manifest_rows: list[dict], pass_number: int, status_filter: str = "unreviewed", batch: str | None = None) -> list[dict]:
         """Return manifest rows filtered by status.
 
@@ -86,9 +95,11 @@ class ReviewDB:
             elif status_filter == "clean":
                 if self.get_status(row["image_id"], pass_number) == "CLEAN":
                     result.append(row)
-            else:  # unreviewed
+            elif status_filter == "unreviewed":
                 if self.get_status(row["image_id"], pass_number) == "UNREVIEWED":
                     result.append(row)
+            else:
+                raise ValueError(f"Invalid status_filter {status_filter!r}, must be 'unreviewed', 'clean', or 'all'")
         return result
 
     def current_pass(self, manifest_rows: list[dict]) -> int:
@@ -97,9 +108,13 @@ class ReviewDB:
         If any manifest image has no row in _rows, we're on pass 1.
         Otherwise, next pass = max pass_number + 1.
         """
-        if any(row["image_id"] not in self._rows for row in manifest_rows):
+        manifest_ids = {row["image_id"] for row in manifest_rows}
+        if any(image_id not in self._rows for image_id in manifest_ids):
             return 1
-        max_pass = max((r["pass_number"] for r in self._rows.values()), default=0)
+        max_pass = max(
+            (r["pass_number"] for r in self._rows.values() if r["image_id"] in manifest_ids),
+            default=0,
+        )
         # Stay on max_pass if it still has unfinished work
         if any(self.get_status(r["image_id"], max_pass) == "UNREVIEWED" for r in manifest_rows):
             return max_pass

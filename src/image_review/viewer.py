@@ -55,7 +55,11 @@ class ImageViewer:
             return
         screen_w, screen_h = self.screen.get_size()
         content_height = screen_h - self.border
+        if content_height <= 0:
+            return
         iw, ih = self._image.get_size()
+        if iw == 0 or ih == 0:
+            return
         scale = min(screen_w / iw, content_height / ih)
         scaled_size = (round(iw * scale), round(ih * scale))
         self._content = pg.transform.smoothscale(self._image, scaled_size)
@@ -65,7 +69,7 @@ class ImageViewer:
     def refresh(self) -> None:
         screen_w, screen_h = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
-        bar_color = self.STATUS_COLORS[self._status]
+        bar_color = self.STATUS_COLORS.get(self._status, pg.Color(128, 128, 128))
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
         left_text = "(h)elp"
         left_text += " | todo-only" if self._todo_only else " | all"

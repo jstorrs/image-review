@@ -144,6 +144,7 @@ class ReviewSession:
         self.mode = new_mode
         self._cursor = -1
         self.autoplay = False
+        self._at_end = False
         self._dirty = True
 
         if new_mode == "grid":
@@ -183,6 +184,24 @@ class ReviewSession:
         if not self._items:
             return
         item = self._items[self._cursor]
+
+        if self.mode != "grid":
+            # Iteratively skip unloadable images to avoid recursion
+            start = self._cursor
+            while True:
+                path = safe_path(self.work_dir, item["preprocessed_path"])
+                try:
+                    surface = load_surface(str(path))
+                    break
+                except Exception as exc:
+                    print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
+                    self._cursor += 1
+                    if self._cursor >= len(self._items) or self._cursor == start:
+                        self._viewer.show_message("No loadable images")
+                        self._at_end = True
+                        return
+                    item = self._items[self._cursor]
+
         status = self._item_status(item)
         info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
 
@@ -190,13 +209,6 @@ class ReviewSession:
             surface = item["surface"]
             self._viewer.set_image(surface, f"grid ({len(item['image_ids'])} images)", status, info)
         else:
-            path = safe_path(self.work_dir, item["preprocessed_path"])
-            try:
-                surface = load_surface(str(path))
-            except Exception as exc:
-                print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
-                self.next_image()
-                return
             self._viewer.set_image(surface, item["preprocessed_path"], status, info)
         self._dirty = True
 
@@ -269,19 +281,14 @@ class ReviewSession:
         self.autoplay = False
 
     def _mark(self, status: str):
-        if not self._items:
+        if not self._items or self._cursor < 0:
             return
         item = self._items[self._cursor]
-        was_todo = self._is_todo(self._item_status(item))
         if self.mode == "grid":
             self.db.mark_many(item["image_ids"], item["batch"], status, self.pass_number)
         else:
             self.db.mark(item["image_id"], item["batch"], status, self.pass_number)
-        is_still_todo = self._is_todo(status)
-        if was_todo and not is_still_todo:
-            self._todo_count -= 1
-        elif not was_todo and is_still_todo:
-            self._todo_count += 1
+        self._todo_count = self._count_todo()
         self._viewer.set_status(status)
         self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
@@ -341,6 +348,9 @@ class ReviewSession:
             else:
                 self._cursor = len(self._items) - 1
                 self._show_current()
+        elif key == pg.K_m:
+            new_mode = "grid" if self.mode == "single" else "single"
+            self._restart_in_mode(new_mode)
         return False
 
     def _handle_review_key(self, key) -> bool:
@@ -367,6 +377,7 @@ class ReviewSession:
                 self._restart_in_mode(new_mode)
             case pg.K_n:
                 self.autoplay = False
+                pg.time.set_timer(ADVANCE_EVENT, 0)
                 self.next_todo()
             case pg.K_u:
                 self._todo_only = not self._todo_only
@@ -375,8 +386,10 @@ class ReviewSession:
             case pg.K_h:
                 self._show_splash()
             case pg.K_LEFT:
+                pg.time.set_timer(ADVANCE_EVENT, 0)
                 self.prev_image()
             case pg.K_RIGHT:
+                pg.time.set_timer(ADVANCE_EVENT, 0)
                 self.next_image()
         return False
 
@@ -412,9 +425,9 @@ class ReviewSession:
                         if self._showing_splash or self._at_end:
                             continue
                         if event.hat == 0:
-                            if event.value[0] < -0.5:
+                            if event.value[0] < 0:
                                 self.prev_image()
-                            elif event.value[0] > 0.5:
+                            elif event.value[0] > 0:
                                 self.next_image()
                     case pg.KEYDOWN:
                         if self._at_end:

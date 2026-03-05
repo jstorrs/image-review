@@ -74,13 +74,17 @@ def review(mode, pass_number, batch, status_filter, work_dir):
 
     pg.init()
     try:
-        session = ReviewSession(
-            work_dir=Path(work_dir),
-            mode=mode,
-            pass_number=pass_number,
-            batch=batch,
-            status_filter=status_filter,
-        )
+        try:
+            session = ReviewSession(
+                work_dir=Path(work_dir),
+                mode=mode,
+                pass_number=pass_number,
+                batch=batch,
+                status_filter=status_filter,
+            )
+        except FileNotFoundError:
+            pg.quit()
+            raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
         session.run()
     finally:
         pg.quit()
@@ -94,7 +98,10 @@ def status(work_dir):
     from .review_db import ReviewDB
 
     work_dir = Path(work_dir)
-    manifest = load_manifest(work_dir)
+    try:
+        manifest = load_manifest(work_dir)
+    except FileNotFoundError:
+        raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
 
     db = ReviewDB(work_dir)
 
