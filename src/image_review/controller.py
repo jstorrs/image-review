@@ -57,6 +57,7 @@ class ReviewSession:
         self._cursor = -1
         self._dirty = True
         self._showing_help = False
+        self._showing_splash = False
 
         if self.batch is None:
             self.batch = self._auto_select_batch()
@@ -82,7 +83,14 @@ class ReviewSession:
 
     def _init_grid_mode(self):
         self._viewer = ImageViewer()
-        self._viewer.show_message("Loading grids...")
+
+        splash_lines = [
+            f"batch: {self.batch}",
+            f"pass: {self.pass_number}",
+            f"mode: {self.mode}",
+        ]
+        self._viewer.show_splash(splash_lines, footer="Computing grids...")
+
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
 
@@ -95,6 +103,10 @@ class ReviewSession:
         ]
         random.shuffle(items)
         self._items = items
+
+        splash_lines.append(f"{len(self._items)} items")
+        self._viewer.show_splash(splash_lines)
+        self._showing_splash = True
 
     def _show_current(self):
         if not self._items:
@@ -154,7 +166,16 @@ class ReviewSession:
 
         batch_info = f", batch {self.batch}" if self.batch else ""
         print(f"Starting {self.mode} review, pass {self.pass_number}{batch_info}, {len(self._items)} items")
-        self.next_image()
+
+        if not self._showing_splash:
+            splash_lines = [
+                f"batch: {self.batch}",
+                f"pass: {self.pass_number}",
+                f"mode: {self.mode}",
+                f"{len(self._items)} items",
+            ]
+            self._viewer.show_splash(splash_lines)
+            self._showing_splash = True
 
         joysticks = {}
         running = True
@@ -162,6 +183,8 @@ class ReviewSession:
             for event in pg.event.get():
                 match event.type:
                     case pg.JOYBUTTONDOWN:
+                        if self._showing_splash:
+                            continue
                         if self._showing_help:
                             self._showing_help = False
                             self._show_current()
@@ -174,6 +197,8 @@ class ReviewSession:
                             case 7:
                                 running = False
                     case pg.JOYHATMOTION:
+                        if self._showing_splash:
+                            continue
                         if self._showing_help:
                             self._showing_help = False
                             self._show_current()
@@ -184,6 +209,13 @@ class ReviewSession:
                             elif event.value[0] > 0.5:
                                 self.next_image()
                     case pg.KEYDOWN:
+                        if self._showing_splash:
+                            if event.key in (pg.K_ESCAPE, pg.K_q):
+                                running = False
+                            elif event.key == pg.K_SPACE:
+                                self._showing_splash = False
+                                self.next_image()
+                            continue
                         if self._showing_help:
                             self._showing_help = False
                             self._show_current()
@@ -228,7 +260,7 @@ class ReviewSession:
                     case pg.QUIT:
                         running = False
 
-            if self._dirty:
+            if self._dirty and not self._showing_splash:
                 self._viewer.refresh()
                 self._dirty = False
 

@@ -80,6 +80,23 @@ class ImageViewer:
             text,
         )
 
+    def show_splash(self, lines: list[str], footer: str = "Press [space] to continue") -> None:
+        X, Y = self.screen.get_size()
+        self.screen.fill(pg.Color(64, 64, 64))
+        splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
+        splash_font.fgcolor = pg.Color(200, 200, 200)
+        line_height = splash_font.get_sized_height() + 6
+        all_lines = lines + ["", footer]
+        total_height = line_height * len(all_lines)
+        y_start = (Y - total_height) // 2
+        for i, line in enumerate(all_lines):
+            if not line:
+                continue
+            bbox = splash_font.get_rect(line)
+            x = (X - bbox.width) // 2
+            splash_font.render_to(self.screen, (x, y_start + i * line_height), line)
+        pg.display.flip()
+
     def show_help(self) -> None:
         help_lines = [
             "Keyboard                 Controller",
