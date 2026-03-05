@@ -45,16 +45,7 @@ class ReviewDB:
             raise
 
     def mark(self, image_id: str, batch: str, status: str, pass_number: int) -> None:
-        if status not in VALID_STATUSES:
-            raise ValueError(f"Invalid status {status!r}, must be one of {VALID_STATUSES}")
-        self._rows[image_id] = {
-            "image_id": image_id,
-            "batch": batch,
-            "status": status,
-            "pass_number": pass_number,
-            "timestamp": datetime.now(UTC).isoformat(),
-        }
-        self._save()
+        self.mark_many([image_id], batch, status, pass_number)
 
     def mark_many(self, image_ids: list[str], batch: str, status: str, pass_number: int) -> None:
         if status not in VALID_STATUSES:
@@ -86,21 +77,13 @@ class ReviewDB:
 
         status_filter: "unreviewed", "clean", or "all".
         """
-        result = []
-        for row in manifest_rows:
-            if batch and row["batch"] != batch:
-                continue
-            if status_filter == "all":
-                result.append(row)
-            elif status_filter == "clean":
-                if self.get_status(row["image_id"], pass_number) == "CLEAN":
-                    result.append(row)
-            elif status_filter == "unreviewed":
-                if self.get_status(row["image_id"], pass_number) == "UNREVIEWED":
-                    result.append(row)
-            else:
-                raise ValueError(f"Invalid status_filter {status_filter!r}, must be 'unreviewed', 'clean', or 'all'")
-        return result
+        if status_filter not in ("all", "clean", "unreviewed"):
+            raise ValueError(f"Invalid status_filter {status_filter!r}, must be 'unreviewed', 'clean', or 'all'")
+        rows = [r for r in manifest_rows if not batch or r["batch"] == batch]
+        if status_filter == "all":
+            return rows
+        target = "CLEAN" if status_filter == "clean" else "UNREVIEWED"
+        return [r for r in rows if self.get_status(r["image_id"], pass_number) == target]
 
     def current_pass(self, manifest_rows: list[dict]) -> int:
         """Auto-detect the current pass number.

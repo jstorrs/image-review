@@ -2,6 +2,7 @@ import csv
 import random
 import sys
 from collections import defaultdict
+from enum import Enum, auto
 from pathlib import Path
 
 import pygame as pg
@@ -30,6 +31,12 @@ def _grid_status(db: ReviewDB, image_ids: list[str], pass_number: int) -> str:
     return "DIRTY"
 
 
+class UIState(Enum):
+    SPLASH = auto()
+    REVIEWING = auto()
+    END_MESSAGE = auto()
+
+
 class ReviewSession:
     def __init__(
         self,
@@ -54,9 +61,8 @@ class ReviewSession:
         self.autoplay = False
         self._cursor = -1
         self._dirty = True
-        self._showing_splash = False
+        self._ui_state = UIState.REVIEWING
         self._todo_only = False
-        self._at_end = False
 
         self._viewer = None
         self._joysticks = {}
@@ -68,6 +74,14 @@ class ReviewSession:
             self._init_grid_mode()
         else:
             self._init_single_mode()
+
+    def _stop_autoplay(self):
+        self.autoplay = False
+        pg.time.set_timer(AUTOPLAY_EVENT, 0)
+
+    def _toggle_mode(self):
+        new_mode = "grid" if self.mode == "single" else "single"
+        self._restart_in_mode(new_mode)
 
     def _auto_select_batch(self) -> str | None:
         """Find the first batch that has images matching the status filter."""
@@ -120,7 +134,7 @@ class ReviewSession:
             footer=self._splash_footer(),
             mode=self.mode,
         )
-        self._showing_splash = True
+        self._ui_state = UIState.SPLASH
 
     def _splash_footer(self) -> list[str]:
         other = "grid" if self.mode == "single" else "single"
@@ -140,11 +154,9 @@ class ReviewSession:
 
     def _restart_in_mode(self, new_mode: str):
         pg.time.set_timer(ADVANCE_EVENT, 0)
-        pg.time.set_timer(AUTOPLAY_EVENT, 0)
+        self._stop_autoplay()
         self.mode = new_mode
         self._cursor = -1
-        self.autoplay = False
-        self._at_end = False
         self._dirty = True
 
         if new_mode == "grid":
@@ -154,9 +166,10 @@ class ReviewSession:
 
         if not self._items:
             self._viewer.show_message(f"No items for {new_mode} mode")
+            self._ui_state = UIState.END_MESSAGE
             return
 
-        self._showing_splash = False
+        self._ui_state = UIState.REVIEWING
         self.next_image()
 
     def _is_todo(self, status: str) -> bool:
@@ -198,7 +211,7 @@ class ReviewSession:
                     self._cursor += 1
                     if self._cursor >= len(self._items) or self._cursor == start:
                         self._viewer.show_message("No loadable images")
-                        self._at_end = True
+                        self._ui_state = UIState.END_MESSAGE
                         return
                     item = self._items[self._cursor]
 
@@ -217,68 +230,51 @@ class ReviewSession:
             return _grid_status(self.db, item["image_ids"], self.pass_number)
         return self.db.get_status(item["image_id"], self.pass_number)
 
-    def next_image(self, *, autoplay=False):
+    def _navigate(self, direction: int, *, autoplay: bool = False):
         if not self._items:
             return
         n = len(self._items)
+        wrap_idx = 0 if direction == 1 else n - 1
+
         if self._todo_only:
             for offset in range(1, n + 1):
-                idx = (self._cursor + offset) % n
-                if idx == 0 and self._cursor != -1 and offset > 0:
-                    # Would wrap past end
+                idx = (self._cursor + direction * offset) % n
+                if idx == wrap_idx and self._cursor != -1 and offset > 0:
                     break
                 if self._is_todo(self._item_status(self._items[idx])):
                     self._cursor = idx
                     self._show_current()
-                    if autoplay or self.autoplay:
+                    if direction == 1 and (autoplay or self.autoplay):
                         self.autoplay = True
                         pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
+                    elif direction == -1:
+                        self.autoplay = False
                     return
-            # No todo items found before wrapping
-            self.autoplay = False
-            pg.time.set_timer(AUTOPLAY_EVENT, 0)
-            self._at_end = True
+            self._stop_autoplay()
+            self._ui_state = UIState.END_MESSAGE
             self._viewer.show_message("No todo images remaining")
             return
-        if self._cursor == len(self._items) - 1:
-            self.autoplay = False
-            pg.time.set_timer(AUTOPLAY_EVENT, 0)
-            self._at_end = True
+
+        at_boundary = (self._cursor == n - 1) if direction == 1 else (self._cursor == 0)
+        if at_boundary:
+            self._stop_autoplay()
+            self._ui_state = UIState.END_MESSAGE
             self._viewer.show_message("End of list")
             return
-        self._cursor = (self._cursor + 1) % n
+
+        self._cursor = (self._cursor + direction) % n
         self._show_current()
-        if autoplay or self.autoplay:
+        if direction == 1 and (autoplay or self.autoplay):
             self.autoplay = True
             pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
+        elif direction == -1:
+            self.autoplay = False
+
+    def next_image(self, *, autoplay=False):
+        self._navigate(1, autoplay=autoplay)
 
     def prev_image(self):
-        if not self._items:
-            return
-        n = len(self._items)
-        if self._todo_only:
-            for offset in range(1, n + 1):
-                idx = (self._cursor - offset) % n
-                if idx == n - 1 and offset > 0:
-                    # Would wrap past beginning
-                    break
-                if self._is_todo(self._item_status(self._items[idx])):
-                    self._cursor = idx
-                    self._show_current()
-                    self.autoplay = False
-                    return
-            self.autoplay = False
-            self._at_end = True
-            self._viewer.show_message("No todo images remaining")
-            return
-        if self._cursor == 0:
-            self.autoplay = False
-            self._at_end = True
-            self._viewer.show_message("End of list")
-            return
-        self._cursor = (self._cursor - 1) % n
-        self._show_current()
-        self.autoplay = False
+        self._navigate(-1)
 
     def _mark(self, status: str):
         if not self._items or self._cursor < 0:
@@ -304,14 +300,13 @@ class ReviewSession:
         if key in (pg.K_ESCAPE, pg.K_q):
             return True
         if key in (pg.K_SPACE, pg.K_h):
-            self._showing_splash = False
+            self._ui_state = UIState.REVIEWING
             if self._cursor == -1:
                 self.next_image()
             else:
                 self._show_current()
         elif key == pg.K_m:
-            new_mode = "grid" if self.mode == "single" else "single"
-            self._restart_in_mode(new_mode)
+            self._toggle_mode()
         return False
 
     def _handle_end_key(self, key) -> bool:
@@ -319,22 +314,20 @@ class ReviewSession:
         if key in (pg.K_ESCAPE, pg.K_q):
             return True
         if key in (pg.K_RIGHT, pg.K_SPACE):
-            self._at_end = False
+            self._ui_state = UIState.REVIEWING
             if self._todo_only:
-                # Find first todo from the start
                 for idx in range(len(self._items)):
                     if self._is_todo(self._item_status(self._items[idx])):
                         self._cursor = idx
                         self._show_current()
                         return False
-                # Still none — stay at end
-                self._at_end = True
+                self._ui_state = UIState.END_MESSAGE
                 self._viewer.show_message("No todo images remaining")
             else:
                 self._cursor = 0
                 self._show_current()
         elif key == pg.K_LEFT:
-            self._at_end = False
+            self._ui_state = UIState.REVIEWING
             if self._todo_only:
                 n = len(self._items)
                 for offset in range(1, n + 1):
@@ -343,14 +336,13 @@ class ReviewSession:
                         self._cursor = idx
                         self._show_current()
                         return False
-                self._at_end = True
+                self._ui_state = UIState.END_MESSAGE
                 self._viewer.show_message("No todo images remaining")
             else:
                 self._cursor = len(self._items) - 1
                 self._show_current()
         elif key == pg.K_m:
-            new_mode = "grid" if self.mode == "single" else "single"
-            self._restart_in_mode(new_mode)
+            self._toggle_mode()
         return False
 
     def _handle_review_key(self, key) -> bool:
@@ -359,24 +351,23 @@ class ReviewSession:
             case pg.K_ESCAPE | pg.K_q:
                 return True
             case pg.K_c:
-                self.autoplay = False
+                self._stop_autoplay()
                 self.mark_clean()
             case pg.K_d:
-                self.autoplay = False
+                self._stop_autoplay()
                 self.mark_dirty()
             case pg.K_w:
                 pg.display.toggle_fullscreen()
                 self._dirty = True
             case pg.K_SPACE:
                 if self.autoplay:
-                    self.autoplay = False
+                    self._stop_autoplay()
                 else:
                     self.next_image(autoplay=True)
             case pg.K_m:
-                new_mode = "grid" if self.mode == "single" else "single"
-                self._restart_in_mode(new_mode)
+                self._toggle_mode()
             case pg.K_n:
-                self.autoplay = False
+                self._stop_autoplay()
                 pg.time.set_timer(ADVANCE_EVENT, 0)
                 self.next_todo()
             case pg.K_u:
@@ -403,7 +394,7 @@ class ReviewSession:
         filter_info = f", filter {self.status_filter}" if self.status_filter != "unreviewed" else ""
         print(f"Starting {self.mode} review, pass {self.pass_number}{batch_info}{filter_info}, {len(self._items)} items")
 
-        if not self._showing_splash:
+        if self._ui_state != UIState.SPLASH:
             self._show_splash()
 
         clock = pg.time.Clock()
@@ -412,7 +403,7 @@ class ReviewSession:
             for event in pg.event.get():
                 match event.type:
                     case pg.JOYBUTTONDOWN:
-                        if self._showing_splash or self._at_end:
+                        if self._ui_state != UIState.REVIEWING:
                             continue
                         match event.button:
                             case 1:
@@ -422,7 +413,7 @@ class ReviewSession:
                             case 7:
                                 running = False
                     case pg.JOYHATMOTION:
-                        if self._showing_splash or self._at_end:
+                        if self._ui_state != UIState.REVIEWING:
                             continue
                         if event.hat == 0:
                             if event.value[0] < 0:
@@ -430,11 +421,11 @@ class ReviewSession:
                             elif event.value[0] > 0:
                                 self.next_image()
                     case pg.KEYDOWN:
-                        if self._at_end:
+                        if self._ui_state == UIState.END_MESSAGE:
                             if self._handle_end_key(event.key):
                                 running = False
                             continue
-                        if self._showing_splash:
+                        if self._ui_state == UIState.SPLASH:
                             if self._handle_splash_key(event.key):
                                 running = False
                             continue
@@ -444,10 +435,10 @@ class ReviewSession:
                         self._viewer.resize()
                         self._dirty = True
                     case x if x == AUTOPLAY_EVENT:
-                        if self.autoplay and not self._at_end:
+                        if self.autoplay and self._ui_state != UIState.END_MESSAGE:
                             self.next_image()
                     case x if x == ADVANCE_EVENT:
-                        if not self._showing_splash and not self._at_end:
+                        if self._ui_state == UIState.REVIEWING:
                             self.next_image()
                     case pg.JOYDEVICEADDED:
                         joy = pg.joystick.Joystick(event.device_index)
@@ -461,9 +452,8 @@ class ReviewSession:
                     case pg.QUIT:
                         running = False
 
-            if self._dirty and not self._showing_splash:
+            if self._dirty and self._ui_state != UIState.SPLASH:
                 self._viewer.refresh()
                 self._dirty = False
 
             clock.tick(60)
-
