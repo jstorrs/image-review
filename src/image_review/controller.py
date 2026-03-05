@@ -53,6 +53,8 @@ class ReviewSession:
         self._cursor = -1
         self._dirty = True
         self._showing_splash = False
+        self._unreviewed_only = False
+        self._at_end = False
 
         self._viewer = None
         self._joysticks = {}
@@ -201,10 +203,41 @@ class ReviewSession:
             self._viewer.set_image(surface, item["preprocessed_path"], status, info)
         self._dirty = True
 
+    def _item_status(self, item) -> str:
+        if self.mode == "grid":
+            return _grid_status(self.db, item["image_ids"], self.pass_number)
+        return self.db.get_status(item["image_id"], self.pass_number)
+
     def next_image(self, *, autoplay=False):
         if not self._items:
             return
-        self._cursor = (self._cursor + 1) % len(self._items)
+        n = len(self._items)
+        if self._unreviewed_only:
+            for offset in range(1, n + 1):
+                idx = (self._cursor + offset) % n
+                if idx == 0 and self._cursor != -1 and offset > 0:
+                    # Would wrap past end
+                    break
+                if self._item_status(self._items[idx]) == "UNREVIEWED":
+                    self._cursor = idx
+                    self._show_current()
+                    if autoplay or self.autoplay:
+                        self.autoplay = True
+                        pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
+                    return
+            # No unreviewed found before wrapping
+            self.autoplay = False
+            pg.time.set_timer(AUTOPLAY_EVENT, 0)
+            self._at_end = True
+            self._viewer.show_message("No unreviewed images remaining")
+            return
+        if self._cursor == len(self._items) - 1:
+            self.autoplay = False
+            pg.time.set_timer(AUTOPLAY_EVENT, 0)
+            self._at_end = True
+            self._viewer.show_message("End of list")
+            return
+        self._cursor = (self._cursor + 1) % n
         self._show_current()
         if autoplay or self.autoplay:
             self.autoplay = True
@@ -213,7 +246,28 @@ class ReviewSession:
     def prev_image(self):
         if not self._items:
             return
-        self._cursor = (self._cursor - 1) % len(self._items)
+        n = len(self._items)
+        if self._unreviewed_only:
+            for offset in range(1, n + 1):
+                idx = (self._cursor - offset) % n
+                if idx == n - 1 and offset > 0:
+                    # Would wrap past beginning
+                    break
+                if self._item_status(self._items[idx]) == "UNREVIEWED":
+                    self._cursor = idx
+                    self._show_current()
+                    self.autoplay = False
+                    return
+            self.autoplay = False
+            self._at_end = True
+            self._viewer.show_message("No unreviewed images remaining")
+            return
+        if self._cursor == 0:
+            self.autoplay = False
+            self._at_end = True
+            self._viewer.show_message("End of list")
+            return
+        self._cursor = (self._cursor - 1) % n
         self._show_current()
         self.autoplay = False
 
@@ -250,6 +304,42 @@ class ReviewSession:
             self._restart_in_mode(new_mode)
         return False
 
+    def _handle_end_key(self, key) -> bool:
+        """Handle key press at end-of-list screen. Returns True to quit."""
+        if key in (pg.K_ESCAPE, pg.K_q):
+            return True
+        if key in (pg.K_RIGHT, pg.K_SPACE):
+            self._at_end = False
+            if self._unreviewed_only:
+                # Find first unreviewed from the start
+                for idx in range(len(self._items)):
+                    if self._item_status(self._items[idx]) == "UNREVIEWED":
+                        self._cursor = idx
+                        self._show_current()
+                        return False
+                # Still none — stay at end
+                self._at_end = True
+                self._viewer.show_message("No unreviewed images remaining")
+            else:
+                self._cursor = 0
+                self._show_current()
+        elif key == pg.K_LEFT:
+            self._at_end = False
+            if self._unreviewed_only:
+                n = len(self._items)
+                for offset in range(1, n + 1):
+                    idx = (self._cursor - offset) % n
+                    if self._item_status(self._items[idx]) == "UNREVIEWED":
+                        self._cursor = idx
+                        self._show_current()
+                        return False
+                self._at_end = True
+                self._viewer.show_message("No unreviewed images remaining")
+            else:
+                self._cursor = len(self._items) - 1
+                self._show_current()
+        return False
+
     def _handle_review_key(self, key) -> bool:
         """Handle key press during review. Returns True to quit."""
         match key:
@@ -275,6 +365,10 @@ class ReviewSession:
             case pg.K_n:
                 self.autoplay = False
                 self.next_unreviewed()
+            case pg.K_u:
+                self._unreviewed_only = not self._unreviewed_only
+                self._viewer.set_unreviewed_only(self._unreviewed_only)
+                self._dirty = True
             case pg.K_h:
                 self._show_splash()
             case pg.K_LEFT:
@@ -299,7 +393,7 @@ class ReviewSession:
             for event in pg.event.get():
                 match event.type:
                     case pg.JOYBUTTONDOWN:
-                        if self._showing_splash:
+                        if self._showing_splash or self._at_end:
                             continue
                         match event.button:
                             case 1:
@@ -309,7 +403,7 @@ class ReviewSession:
                             case 7:
                                 running = False
                     case pg.JOYHATMOTION:
-                        if self._showing_splash:
+                        if self._showing_splash or self._at_end:
                             continue
                         if event.hat == 0:
                             if event.value[0] < -0.5:
@@ -317,6 +411,10 @@ class ReviewSession:
                             elif event.value[0] > 0.5:
                                 self.next_image()
                     case pg.KEYDOWN:
+                        if self._at_end:
+                            if self._handle_end_key(event.key):
+                                running = False
+                            continue
                         if self._showing_splash:
                             if self._handle_splash_key(event.key):
                                 running = False
@@ -327,10 +425,10 @@ class ReviewSession:
                         self._viewer.resize()
                         self._dirty = True
                     case x if x == AUTOPLAY_EVENT:
-                        if self.autoplay:
+                        if self.autoplay and not self._at_end:
                             self.next_image()
                     case x if x == ADVANCE_EVENT:
-                        if not self._showing_splash:
+                        if not self._showing_splash and not self._at_end:
                             self.next_image()
                     case pg.JOYDEVICEADDED:
                         joy = pg.joystick.Joystick(event.device_index)
