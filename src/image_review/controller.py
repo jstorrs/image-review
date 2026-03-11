@@ -65,6 +65,8 @@ class ReviewSession:
 
         self._viewer = ImageViewer()
         self._joysticks = {}
+        self._display_select = False
+        self._pre_display_index = 0
 
         if self.batch is None:
             self.batch = self._auto_select_batch()
@@ -115,6 +117,13 @@ class ReviewSession:
         self._todo_count = self._count_todo()
 
         self._show_splash()
+
+    def _show_display_select(self):
+        self._viewer.show_splash(
+            self._viewer.display_lines(),
+            footer="Press [1]-[9] to switch, [space] to confirm",
+            mode=self.mode,
+        )
 
     def _show_splash(self):
         other = "grid" if self.mode == "single" else "single"
@@ -273,7 +282,18 @@ class ReviewSession:
         """Handle key press while splash is shown. Returns True to quit."""
         if key in (pg.K_ESCAPE, pg.K_q):
             return True
+        if self._display_select and pg.K_1 <= key <= pg.K_9:
+            idx = key - pg.K_1
+            if self._viewer.switch_display(idx):
+                self._show_display_select()
+            return False
         if key in (pg.K_SPACE, pg.K_h):
+            if self._display_select:
+                self._display_select = False
+                if self._viewer._display_index != self._pre_display_index:
+                    if self.mode == "grid":
+                        self._restart_in_mode("grid")
+                        return False
             self._ui_state = UIState.REVIEWING
             if self._cursor == -1:
                 self.next_image()
@@ -319,14 +339,11 @@ class ReviewSession:
                 self._stop_autoplay()
                 self._mark("DIRTY")
             case pg.K_w:
-                num_displays = len(pg.display.get_desktop_sizes())
-                if num_displays > 1:
-                    next_idx = (self._viewer._display_index + 1) % num_displays
-                    if self._viewer.switch_display(next_idx):
-                        if self.mode == "grid":
-                            self._restart_in_mode("grid")
-                        else:
-                            self._dirty = True
+                self._stop_autoplay()
+                self._display_select = True
+                self._pre_display_index = self._viewer._display_index
+                self._show_display_select()
+                self._ui_state = UIState.SPLASH
             case pg.K_SPACE:
                 if self.autoplay:
                     self._stop_autoplay()

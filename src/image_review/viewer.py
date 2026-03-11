@@ -56,6 +56,15 @@ class ImageViewer:
         self.resize()
         return True
 
+    def display_lines(self) -> list[str]:
+        """Return lines describing available displays for the selection overlay."""
+        sizes = pg.display.get_desktop_sizes()
+        lines = ["Select display:"]
+        for i, (w, h) in enumerate(sizes):
+            marker = "  <--" if i == self._display_index else ""
+            lines.append(f"  {i + 1}  {w}x{h}{marker}")
+        return lines
+
     def set_joystick_count(self, count: int) -> None:
         self._joystick_count = count
 
@@ -123,7 +132,7 @@ class ImageViewer:
         "  u        Todo only",
         "  Space    Autoplay        Start      Quit",
         "  m        Switch to {other_mode} mode",
-        "  w        Next display",
+        "  w        Select display",
         "  h        This help",
         "  q / Esc  Quit",
     ]
