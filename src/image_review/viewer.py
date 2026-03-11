@@ -16,8 +16,11 @@ class ImageViewer:
     }
 
     def __init__(self):
-        info = pg.display.Info()
-        self.screen = pg.display.set_mode((info.current_w, info.current_h), pg.NOFRAME | pg.RESIZABLE)
+        sizes = pg.display.get_desktop_sizes()
+        best = max(range(len(sizes)), key=lambda i: sizes[i][0] * sizes[i][1])
+        self._display_index = best
+        w, h = sizes[best]
+        self.screen = pg.display.set_mode((w, h), pg.NOFRAME | pg.RESIZABLE, display=best)
         pg.mouse.set_visible(False)
         self.font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSans.ttf"), 36)
         self.font.fgcolor = pg.Color(64, 64, 64)
@@ -40,6 +43,18 @@ class ImageViewer:
         self._info = info
         pg.display.set_caption(name)
         self.resize()
+
+    def switch_display(self, display_index: int) -> bool:
+        """Switch to the given display (0-based). Returns True if the display changed."""
+        sizes = pg.display.get_desktop_sizes()
+        if display_index < 0 or display_index >= len(sizes) or display_index == self._display_index:
+            return False
+        self._display_index = display_index
+        w, h = sizes[display_index]
+        self.screen = pg.display.set_mode((w, h), pg.NOFRAME | pg.RESIZABLE, display=display_index)
+        pg.mouse.set_visible(False)
+        self.resize()
+        return True
 
     def set_joystick_count(self, count: int) -> None:
         self._joystick_count = count
@@ -108,7 +123,7 @@ class ImageViewer:
         "  u        Todo only",
         "  Space    Autoplay        Start      Quit",
         "  m        Switch to {other_mode} mode",
-        "  w        Fullscreen",
+        "  w        Next display",
         "  h        This help",
         "  q / Esc  Quit",
     ]

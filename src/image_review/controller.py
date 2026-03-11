@@ -319,8 +319,14 @@ class ReviewSession:
                 self._stop_autoplay()
                 self._mark("DIRTY")
             case pg.K_w:
-                pg.display.toggle_fullscreen()
-                self._dirty = True
+                num_displays = len(pg.display.get_desktop_sizes())
+                if num_displays > 1:
+                    next_idx = (self._viewer._display_index + 1) % num_displays
+                    if self._viewer.switch_display(next_idx):
+                        if self.mode == "grid":
+                            self._restart_in_mode("grid")
+                        else:
+                            self._dirty = True
             case pg.K_SPACE:
                 if self.autoplay:
                     self._stop_autoplay()
