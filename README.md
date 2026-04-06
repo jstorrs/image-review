@@ -54,7 +54,7 @@ batch subdirectories with a `manifest.tsv` index.
 ```
 image-review review [--mode {single,grid}]            [--pass N]
                     [--batch BATCH_ID]                 [--work-dir DIR]
-                    [--filter {unreviewed,clean,all}]
+                    [--filter {unreviewed,clean,all}]  [--rotate/--no-rotate]
 ```
 
 Opens a fullscreen interactive session. In **grid mode**, images are
@@ -69,9 +69,12 @@ are shown one at a time for detailed inspection.
 | `n` | Jump to next todo item |
 | `u` | Toggle todo-only navigation |
 | Space | Toggle autoplay |
-| `m` | Switch mode (single/grid) |
+| `s` | Single mode |
+| `m` | Grid mode (rotation allowed) |
+| `M` | Grid mode (no rotation) |
 | `h` | Help screen |
-| `w` | Toggle fullscreen |
+| `w` | Select display |
+| `f` | Toggle fullscreen |
 | `q` / Escape | Quit |
 
 Xbox-style controllers are also supported (see help screen for mappings).

@@ -87,7 +87,7 @@ peak memory usage regardless of dataset size.
 ```
 image-review review [--mode {single,grid}]            [--pass N]
                     [--batch BATCH_ID]                 [--work-dir DIR]
-                    [--filter {unreviewed,clean,all}]
+                    [--filter {unreviewed,clean,all}]  [--rotate/--no-rotate]
 ```
 
 | Argument | Default | Description |
@@ -96,6 +96,7 @@ image-review review [--mode {single,grid}]            [--pass N]
 | `--pass` | auto-detected | Review pass number |
 | `--batch` | all | Restrict to a named batch (e.g. `batch_001`) |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed`, `clean`, or `all` |
+| `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images 90° for tighter grid packing |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |
 
 Initializes pygame, creates a `ReviewSession`, runs the event loop, then
@@ -194,10 +195,13 @@ The session runs a pygame event loop processing:
 | Right arrow / Hat right | Next item |
 | Left arrow / Hat left | Previous item |
 | Space | Toggle autoplay (500ms auto-advance) |
-| `w` key | Toggle fullscreen |
+| `w` key | Select display |
+| `f` key | Toggle fullscreen |
 | `n` key | Jump to next todo item |
 | `u` key | Toggle todo-only navigation |
-| `m` key | Switch between single/grid mode |
+| `s` key | Switch to single mode |
+| `m` key | Switch to grid mode (rotation allowed) |
+| `M` key (shift+m) | Switch to grid mode (no rotation) |
 | `h` key | Show help/splash screen |
 | `q` / Escape / Button 7 | Quit |
 | Window resize | Refit current image |
@@ -206,7 +210,7 @@ The session runs a pygame event loop processing:
 After marking, the viewer auto-advances to the next item after 200ms.
 Navigation stops at list boundaries with an "End of list" message.
 
-Marking, navigation, `n`, `Space`, and `m` cancel autoplay. The display
+Marking, navigation, `n`, `Space`, and mode switches cancel autoplay. The display
 only redraws when a dirty flag is set, to minimize CPU usage.
 
 ## Grid Packer (`grid_packer.py`)
@@ -219,12 +223,12 @@ only redraws when a dirty flag is set, to minimize CPU usage.
 | `image_ids` | `list[str]` | IDs of all images packed into this grid |
 | `batch` | `str` | Batch of the first packed image |
 
-### `pack_into_grids(items, work_dir, grid_w, grid_h) -> list[GridSpec]`
+### `pack_into_grids(items, work_dir, grid_w, grid_h, *, allow_rotation=True) -> list[GridSpec]`
 
 1. **Load**: Load all image surfaces upfront via `util.load_surface` and read
    dimensions from `surface.get_size()`. This avoids opening each file twice.
-2. **Pack**: Create a `rectpack` packer with `(grid_w, grid_h)` bins
-   (unlimited bin count). Add each image as a rect.
+2. **Pack**: Create a `rectpack` packer with `rotation=allow_rotation` and
+   `(grid_w, grid_h)` bins (unlimited bin count). Add each image as a rect.
 3. **Composite**: For each bin, create a black `pg.Surface(grid_w, grid_h)`.
    Blit each pre-loaded surface at the packed position. If rectpack rotated
    the rect (packed size differs from original), apply
@@ -261,7 +265,7 @@ uses DejaVu Sans Mono 24pt.
 | `set_status(status)` | Update status bar color without changing image |
 | `resize()` | Recalculate scaling for current screen size |
 | `refresh()` | Render frame: background, status bar, text, scaled image |
-| `show_splash(lines, footer, mode)` | Render centered splash/help overlay |
+| `show_splash(lines, footer)` | Render centered splash/help overlay |
 | `show_message(text)` | Render centered text message (e.g. loading indicator) |
 
 ## Review Database (`review_db.py`)

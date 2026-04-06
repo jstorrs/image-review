@@ -101,6 +101,7 @@ image-review review [options]
 | `--pass` | auto | Pass number (auto-detected if omitted) |
 | `--batch` | all | Restrict review to a specific batch (e.g., `batch_001`) |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed`, `clean`, or `all` |
+| `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images for tighter grid packing |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |
 
 ### Review Modes
@@ -114,7 +115,9 @@ image-review review --mode single
 
 **Grid mode** packs images into grid canvases at review time, sized to your
 screen resolution. Each grid contains many images. Best for rapid first-pass
-scanning -- you can review hundreds of images per minute.
+scanning -- you can review hundreds of images per minute. By default, images
+may be rotated 90° for tighter packing; use `--no-rotate` to disable this,
+or press `M` during review to switch to grid mode without rotation.
 
 ```bash
 image-review review --mode grid
@@ -133,8 +136,11 @@ The viewer accepts keyboard and gamepad input:
 | Next todo item | `n` | -- |
 | Toggle todo-only navigation | `u` | -- |
 | Autoplay (auto-advance) | `Space` | -- |
-| Switch mode (single/grid) | `m` | -- |
-| Toggle fullscreen | `w` | -- |
+| Single mode | `s` | -- |
+| Grid mode (rotation allowed) | `m` | -- |
+| Grid mode (no rotation) | `M` | -- |
+| Select display | `w` | -- |
+| Toggle fullscreen | `f` | -- |
 | Help screen | `h` | -- |
 | Quit (saves automatically) | `q` or `Esc` | Button 7 |
 
