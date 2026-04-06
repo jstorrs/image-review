@@ -166,9 +166,6 @@ class ReviewSession:
 
         self._ui_state = UIState.REVIEWING
         self.next_image()
-        print(f"DEBUG _restart_in_mode: calling refresh, _content={'set' if self._viewer._content else 'None'}, state={self._ui_state}", flush=True)
-        self._viewer.refresh()
-        self._dirty = False
 
     def _is_todo(self, status: str) -> bool:
         if self.status_filter == "clean":
