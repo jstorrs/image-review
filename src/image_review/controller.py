@@ -74,6 +74,7 @@ class ReviewSession:
             self.batch = self._auto_select_batch()
 
         if mode == "grid":
+            self._viewer.show_message("Computing grids...")
             self._init_grid_mode()
         else:
             self._init_single_mode()
@@ -104,8 +105,6 @@ class ReviewSession:
         self._todo_count = self._count_todo()
 
     def _init_grid_mode(self):
-        self._viewer.show_splash([self._info_line()], footer="Computing grids...")
-
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
 
@@ -156,6 +155,7 @@ class ReviewSession:
         self._dirty = True
 
         if new_mode == "grid":
+            self._viewer.show_message("Computing grids...")
             self._init_grid_mode()
         else:
             self._init_single_mode()
