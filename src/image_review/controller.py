@@ -121,8 +121,6 @@ class ReviewSession:
         self._items = items
         self._todo_count = self._count_todo()
 
-        self._show_splash()
-
     def _show_display_select(self):
         self._viewer.show_splash(
             self._viewer.display_lines(),
