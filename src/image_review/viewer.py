@@ -93,6 +93,10 @@ class ImageViewer:
         self._offset = ((screen_w - cx) // 2, (content_height - cy) // 2)
 
     def refresh(self) -> None:
+        actual = pg.display.get_surface()
+        if actual is not self.screen:
+            print(f"DEBUG refresh: screen surface changed! old={self.screen.get_size()} new={actual.get_size()}", flush=True)
+            self.screen = actual
         screen_w, screen_h = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
         bar_color = self.STATUS_COLORS.get(self._status, pg.Color(128, 128, 128))
@@ -110,6 +114,8 @@ class ImageViewer:
         self._bar_text(self._info, "center")
         if self._content is not None:
             self.screen.blit(self._content, self._offset)
+        else:
+            print("DEBUG refresh: _content is None!", flush=True)
         pg.display.flip()
 
     def _bar_text(self, text: str, align: str) -> None:
