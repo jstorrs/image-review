@@ -82,9 +82,12 @@ class ReviewSession:
         self.autoplay = False
         pg.time.set_timer(AUTOPLAY_EVENT, 0)
 
-    def _toggle_mode(self):
-        new_mode = "grid" if self.mode == "single" else "single"
-        self._restart_in_mode(new_mode)
+    def _switch_to_grid(self, allow_rotation: bool):
+        self.allow_rotation = allow_rotation
+        self._restart_in_mode("grid")
+
+    def _switch_to_single(self):
+        self._restart_in_mode("single")
 
     def _auto_select_batch(self) -> str | None:
         """Find the first batch that has images matching the status filter."""
@@ -101,7 +104,7 @@ class ReviewSession:
         self._todo_count = self._count_todo()
 
     def _init_grid_mode(self):
-        self._viewer.show_splash([self._info_line()], footer="Computing grids...", mode=self.mode)
+        self._viewer.show_splash([self._info_line()], footer="Computing grids...")
 
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
@@ -124,23 +127,17 @@ class ReviewSession:
         self._viewer.show_splash(
             self._viewer.display_lines(),
             footer="Press [1]-[9] to switch, [space] to confirm",
-            mode=self.mode,
         )
 
     def _show_splash(self):
-        other = "grid" if self.mode == "single" else "single"
         footer_lines = [
             f"Press [space] for {self.mode} image review",
-            f"Press [m] for {other} image review",
+            "[s] single  [m] grid  [M] grid (no rotation)",
             "[f] toggle fullscreen",
         ]
-        if self.mode == "grid":
-            rot_state = "on" if self.allow_rotation else "off"
-            footer_lines.append(f"[r] toggle rotation (currently {rot_state})")
         self._viewer.show_splash(
             [self._info_line(len(self._items))],
             footer=footer_lines,
-            mode=self.mode,
         )
         self._ui_state = UIState.SPLASH
 
@@ -307,7 +304,12 @@ class ReviewSession:
             else:
                 self._show_current()
         elif key == pg.K_m:
-            self._toggle_mode()
+            if pg.key.get_mods() & pg.KMOD_SHIFT:
+                self._switch_to_grid(False)
+            else:
+                self._switch_to_grid(True)
+        elif key == pg.K_s:
+            self._switch_to_single()
         return False
 
     def _handle_end_key(self, key) -> bool:
@@ -331,7 +333,12 @@ class ReviewSession:
                 self._cursor = 0 if direction == 1 else len(self._items) - 1
                 self._show_current()
         elif key == pg.K_m:
-            self._toggle_mode()
+            if pg.key.get_mods() & pg.KMOD_SHIFT:
+                self._switch_to_grid(False)
+            else:
+                self._switch_to_grid(True)
+        elif key == pg.K_s:
+            self._switch_to_single()
         return False
 
     def _handle_review_key(self, key) -> bool:
@@ -357,7 +364,12 @@ class ReviewSession:
                 else:
                     self.next_image(autoplay=True)
             case pg.K_m:
-                self._toggle_mode()
+                if pg.key.get_mods() & pg.KMOD_SHIFT:
+                    self._switch_to_grid(False)
+                else:
+                    self._switch_to_grid(True)
+            case pg.K_s:
+                self._switch_to_single()
             case pg.K_n:
                 self._stop_autoplay()
                 pg.time.set_timer(ADVANCE_EVENT, 0)
@@ -368,10 +380,6 @@ class ReviewSession:
                 self._dirty = True
             case pg.K_f:
                 pg.display.toggle_fullscreen()
-            case pg.K_r:
-                if self.mode == "grid":
-                    self.allow_rotation = not self.allow_rotation
-                    self._restart_in_mode("grid")
             case pg.K_h:
                 self._show_splash()
             case pg.K_LEFT:

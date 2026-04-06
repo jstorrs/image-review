@@ -133,20 +133,21 @@ class ImageViewer:
         "  n        Next todo",
         "  u        Todo only",
         "  Space    Autoplay        Start      Quit",
-        "  m        Switch to {other_mode} mode",
+        "  s        Single mode",
+        "  m        Grid mode (rotation allowed)",
+        "  M        Grid mode (no rotation)",
         "  w        Select display",
         "  h        This help",
         "  q / Esc  Quit",
     ]
 
-    def show_splash(self, lines: list[str], footer: str | list[str] = "Press [space] to continue", mode: str = "single") -> None:
+    def show_splash(self, lines: list[str], footer: str | list[str] = "Press [space] to continue") -> None:
         screen_w, screen_h = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
         splash_font = self._splash_font
         line_height = splash_font.get_sized_height() + 6
         footer_lines = [footer] if isinstance(footer, str) else footer
-        other_mode = "grid" if mode == "single" else "single"
-        help_lines = [l.format(other_mode=other_mode) for l in self.HELP_LINES]
+        help_lines = self.HELP_LINES
         all_lines = lines + [""] + help_lines + [""] + footer_lines
         info_end = len(lines)
         bright = pg.Color(255, 255, 255)
