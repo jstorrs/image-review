@@ -155,6 +155,7 @@ class ReviewSession:
         self._dirty = True
 
         if new_mode == "grid":
+            self._viewer.show_message("Computing grids...")
             self._init_grid_mode()
         else:
             self._init_single_mode()
