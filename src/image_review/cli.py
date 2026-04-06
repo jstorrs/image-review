@@ -57,8 +57,9 @@ def preprocess(sources, batch_size, work_dir, colormap):
 @click.option("--pass", "pass_number", type=int, default=None, help="Pass number (auto-detected if omitted).")
 @click.option("--batch", type=str, default=None, help="Restrict to a specific batch.")
 @click.option("--filter", "status_filter", type=click.Choice(["unreviewed", "clean", "all"]), default="unreviewed", show_default=True, help="Which images to show.")
+@click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
 @click.option("--work-dir", type=click.Path(exists=True), default="./review_work", show_default=True, help="Work directory containing preprocessed data.")
-def review(mode, pass_number, batch, status_filter, work_dir):
+def review(mode, pass_number, batch, status_filter, rotate, work_dir):
     """Open an interactive review session for classifying images.
 
     \b
@@ -81,6 +82,7 @@ def review(mode, pass_number, batch, status_filter, work_dir):
                 pass_number=pass_number,
                 batch=batch,
                 status_filter=status_filter,
+                allow_rotation=rotate,
             )
         except FileNotFoundError:
             pg.quit()

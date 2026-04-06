@@ -29,6 +29,8 @@ def pack_into_grids(
     work_dir: Path,
     grid_w: int,
     grid_h: int,
+    *,
+    allow_rotation: bool = True,
 ) -> list[GridSpec]:
     """Pack review items into grid canvases sized for the current screen.
 
@@ -50,7 +52,7 @@ def pack_into_grids(
     sizes = [s.get_size() if s is not None else (0, 0) for s in surfaces]
 
     # Bin-pack
-    packer = newPacker()
+    packer = newPacker(rotation=allow_rotation)
     packer.add_bin(grid_w, grid_h, float("inf"))
     for idx, (w, h) in enumerate(sizes):
         if idx not in skipped:

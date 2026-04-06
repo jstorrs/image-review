@@ -44,11 +44,13 @@ class ReviewSession:
         pass_number: int | None = None,
         batch: str | None = None,
         status_filter: str = "unreviewed",
+        allow_rotation: bool = True,
     ):
         self.work_dir = work_dir
         self.mode = mode
         self.batch = batch
         self.status_filter = status_filter
+        self.allow_rotation = allow_rotation
         self.db = ReviewDB(work_dir)
         self.manifest = load_manifest(work_dir)
 
@@ -105,7 +107,7 @@ class ReviewSession:
         grid_h -= self._viewer.border
 
         review_rows = self.db.images_by_status(self.manifest, self.pass_number, self.status_filter, self.batch)
-        grid_specs = pack_into_grids(review_rows, self.work_dir, grid_w, grid_h)
+        grid_specs = pack_into_grids(review_rows, self.work_dir, grid_w, grid_h, allow_rotation=self.allow_rotation)
 
         items = [
             {"surface": gs.surface, "image_ids": gs.image_ids, "batch": gs.batch}
@@ -127,13 +129,17 @@ class ReviewSession:
 
     def _show_splash(self):
         other = "grid" if self.mode == "single" else "single"
+        footer_lines = [
+            f"Press [space] for {self.mode} image review",
+            f"Press [m] for {other} image review",
+            "[f] toggle fullscreen",
+        ]
+        if self.mode == "grid":
+            rot_state = "on" if self.allow_rotation else "off"
+            footer_lines.append(f"[r] toggle rotation (currently {rot_state})")
         self._viewer.show_splash(
             [self._info_line(len(self._items))],
-            footer=[
-                f"Press [space] for {self.mode} image review",
-                f"Press [m] for {other} image review",
-                "[f] toggle fullscreen",
-            ],
+            footer=footer_lines,
             mode=self.mode,
         )
         self._ui_state = UIState.SPLASH
@@ -362,6 +368,10 @@ class ReviewSession:
                 self._dirty = True
             case pg.K_f:
                 pg.display.toggle_fullscreen()
+            case pg.K_r:
+                if self.mode == "grid":
+                    self.allow_rotation = not self.allow_rotation
+                    self._restart_in_mode("grid")
             case pg.K_h:
                 self._show_splash()
             case pg.K_LEFT:
