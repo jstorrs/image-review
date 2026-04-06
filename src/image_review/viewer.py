@@ -21,6 +21,7 @@ class ImageViewer:
         self._display_index = best
         w, h = sizes[best]
         self.screen = pg.display.set_mode((w, h), pg.NOFRAME | pg.RESIZABLE, display=best)
+        pg.display.toggle_fullscreen()
         pg.mouse.set_visible(False)
         self.font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSans.ttf"), 36)
         self.font.fgcolor = pg.Color(64, 64, 64)
@@ -52,6 +53,7 @@ class ImageViewer:
         self._display_index = display_index
         w, h = sizes[display_index]
         self.screen = pg.display.set_mode((w, h), pg.NOFRAME | pg.RESIZABLE, display=display_index)
+        pg.display.toggle_fullscreen()
         pg.mouse.set_visible(False)
         self.resize()
         return True

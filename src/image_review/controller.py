@@ -132,6 +132,7 @@ class ReviewSession:
             footer=[
                 f"Press [space] for {self.mode} image review",
                 f"Press [m] for {other} image review",
+                "[f] toggle fullscreen",
             ],
             mode=self.mode,
         )
@@ -359,6 +360,8 @@ class ReviewSession:
                 self._todo_only = not self._todo_only
                 self._viewer.set_todo_only(self._todo_only)
                 self._dirty = True
+            case pg.K_f:
+                pg.display.toggle_fullscreen()
             case pg.K_h:
                 self._show_splash()
             case pg.K_LEFT:
