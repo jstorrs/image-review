@@ -155,7 +155,6 @@ class ReviewSession:
         self._dirty = True
 
         if new_mode == "grid":
-            self._viewer.show_message("Computing grids...")
             self._init_grid_mode()
         else:
             self._init_single_mode()
@@ -167,6 +166,8 @@ class ReviewSession:
 
         self._ui_state = UIState.REVIEWING
         self.next_image()
+        self._viewer.refresh()
+        self._dirty = False
 
     def _is_todo(self, status: str) -> bool:
         if self.status_filter == "clean":
