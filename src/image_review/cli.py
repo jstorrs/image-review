@@ -1,3 +1,7 @@
+import ipaddress
+import signal
+import socket
+import sys
 from pathlib import Path
 
 import click
@@ -125,6 +129,81 @@ def status(work_dir):
             print(f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6}")
 
     print(f"\nCurrent pass: {current}")
+
+
+@cli.command()
+@click.option("--work-dir", type=click.Path(exists=True), default="./review_work", show_default=True, help="Work directory containing preprocessed data.")
+@click.option("--bind", default=None, help="Hostname/IPv4 address to bind and advertise [default: this machine's FQDN].")
+@click.option("--port", type=click.IntRange(0, 65535), default=0, help="Port to listen on (0 picks a free port).")
+def serve(work_dir, bind, port):
+    """Serve a work directory over HTTPS so a remote client can review it.
+
+    Images never leave this machine except to a client holding the connection
+    string. The string contains an access token: treat it like a password.
+    When stdout is not a terminal (e.g. sbatch), it is written to a private
+    file under ~/.image-review/ instead of being printed.
+    """
+    from .connection import RemoteTarget
+    from .server import make_server, write_connection_file
+    from .store import LocalStore
+
+    if bind is not None and bind.strip() in ("", "0.0.0.0", "::"):
+        raise click.ClickException("Refusing to bind a wildcard address; pass this node's hostname with --bind.")
+    try:
+        store = LocalStore(Path(work_dir))
+    except FileNotFoundError:
+        raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
+
+    host = bind or socket.getfqdn()
+    try:
+        server, target = make_server(store, host, port)
+    except OSError as e:
+        raise click.ClickException(f"Cannot listen on {host}:{port} (IPv4 hostnames/addresses only): {e}")
+
+    connection_file = None
+    previous_handlers = {}
+    try:
+        if ipaddress.ip_address(server.server_address[0]).is_unspecified:
+            raise click.ClickException("Refusing to bind a wildcard address; pass this node's hostname with --bind.")
+        uri = target.to_uri()
+        try:
+            RemoteTarget.parse(uri)
+        except ValueError as e:
+            raise click.ClickException(f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address.")
+        # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            previous_handlers[sig] = signal.signal(sig, _raise_interrupt)
+        if sys.stdout.isatty():
+            print("Serving review data. The connection string grants access; treat it like a password.\n")
+            print(uri)
+            remote_arg = f"'{uri}'"
+        else:
+            try:
+                connection_file = write_connection_file(target)
+            except OSError as e:
+                raise click.ClickException(f"Cannot write connection file: {e}")
+            print("Serving review data. Stdout is not a terminal, so the connection string (an access token;")
+            print(f"treat it like a password) was written to {connection_file} (mode 0600) on this node.")
+            print("Home directories are usually shared with the login node, so on your laptop use:")
+            remote_arg = f'"$(ssh <user>@<login-node> cat {connection_file})"'
+        print("\nOn your laptop, directly:")
+        print(f"  image-review review --remote {remote_arg}")
+        print("or through an SSH tunnel via the login node:")
+        print(f"  image-review review --remote {remote_arg} --via <user>@<login-node>")
+        print("\nPress Ctrl-C to stop.", flush=True)
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+        server.server_close()
+        if connection_file is not None:
+            connection_file.unlink(missing_ok=True)
+
+
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
 
 
 def main():

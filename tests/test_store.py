@@ -7,9 +7,8 @@ from unittest import mock
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
-import numpy as np
 import pygame as pg
-import skimage as ski
+from fixtures import ROWS, make_work_dir
 
 from image_review.controller import ReviewSession
 from image_review.review_db import ReviewDB
@@ -21,25 +20,6 @@ from image_review.store import (
     summary,
 )
 from image_review.util import load_surface
-
-# (batch, preprocessed_path, image_id); image_ids deliberately differ from keys
-ROWS = [
-    ("batch_001", "batch_001/a.jpg", "/src/patient_smith/a.dcm"),
-    ("batch_001", "batch_001/b.jpg", "/src/patient_jones/b.dcm"),
-    ("batch_002", "batch_002/c.jpg", "/src/patient_lee/c.dcm"),
-    ("batch_002", "batch_002/d.jpg", "/src/patient_kim/d.dcm"),
-]
-
-
-def make_work_dir(root: Path) -> None:
-    for _, key, _ in ROWS:
-        path = root / key
-        path.parent.mkdir(exist_ok=True)
-        ski.io.imsave(path, np.full((12, 20, 3), 128, dtype=np.uint8), check_contrast=False)
-    with open(root / "manifest.tsv", "w", newline="") as f:
-        writer = csv.writer(f, delimiter="\t")
-        writer.writerow(["batch", "preprocessed_path", "image_id"])
-        writer.writerows(ROWS)
 
 
 class StoreTestCase(unittest.TestCase):

@@ -16,6 +16,7 @@ dependencies = [
     "rectpack",
     "tqdm",
     "pygame-ce",
+    "cryptography",
 ]
 
 [tool.setuptools.package-data]
