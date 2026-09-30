@@ -72,12 +72,13 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir):
     import pygame as pg
 
     from .controller import ReviewSession
+    from .store import LocalStore
 
     pg.init()
     try:
         try:
             session = ReviewSession(
-                work_dir=Path(work_dir),
+                store=LocalStore(Path(work_dir)),
                 mode=mode,
                 pass_number=pass_number,
                 batch=batch,
@@ -96,28 +97,26 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir):
 @click.option("--work-dir", type=click.Path(exists=True), default="./review_work", show_default=True, help="Work directory containing preprocessed data.")
 def status(work_dir):
     """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED counts)."""
-    from .controller import load_manifest
-    from .review_db import ReviewDB
+    from .store import LocalStore, batch_summary, summary
 
-    work_dir = Path(work_dir)
     try:
-        manifest = load_manifest(work_dir)
+        store = LocalStore(Path(work_dir))
     except FileNotFoundError:
         raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
 
-    db = ReviewDB(work_dir)
-
-    current = db.current_pass(manifest)
+    manifest = store.manifest()
+    current = store.current_pass()
+    statuses = store.statuses(current)
 
     # Overall summary
-    counts = db.summary(manifest, current)
+    counts = summary(manifest, statuses)
     print(f"\nOverall: {counts['total']} images (pass {current})")
     print(f"  CLEAN:      {counts['CLEAN']:>6}")
     print(f"  DIRTY:      {counts['DIRTY']:>6}")
     print(f"  UNREVIEWED: {counts['UNREVIEWED']:>6}")
 
     # Per-batch summary
-    batch_counts = db.batch_summary(manifest, current)
+    batch_counts = batch_summary(manifest, statuses)
     if len(batch_counts) > 1:
         print(f"\n{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6}")
         print("-" * 45)

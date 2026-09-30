@@ -1,18 +1,18 @@
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import NamedTuple
 
 import pygame as pg
 from rectpack import newPacker
 
-from .util import load_surface, safe_path
+from .store import ManifestRow, ReviewStore
+from .util import load_surface
 
 
 @dataclass
 class GridSpec:
     surface: pg.Surface
-    image_ids: list[str] = field(default_factory=list)
+    keys: list[str] = field(default_factory=list)
     batch: str = ""
 
 
@@ -25,8 +25,8 @@ class PlacedRect(NamedTuple):
 
 
 def pack_into_grids(
-    items: list[dict],
-    work_dir: Path,
+    items: list[ManifestRow],
+    store: ReviewStore,
     grid_w: int,
     grid_h: int,
     *,
@@ -34,18 +34,17 @@ def pack_into_grids(
 ) -> list[GridSpec]:
     """Pack review items into grid canvases sized for the current screen.
 
-    Each item is a manifest dict with keys: image_id, batch, preprocessed_path.
+    Each item is a ManifestRow; image bytes are fetched via the store.
     Returns a list of GridSpec, each holding a composited pygame surface.
     """
     # Load all surfaces upfront — avoids opening each file twice
     surfaces = []
     skipped: set[int] = set()
     for idx, item in enumerate(items):
-        path = safe_path(work_dir, item["preprocessed_path"])
         try:
-            surfaces.append(load_surface(str(path)))
+            surfaces.append(load_surface(store.image_bytes(item.key)))
         except Exception as exc:
-            print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
+            print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
             surfaces.append(None)
             skipped.add(idx)
 
@@ -72,13 +71,13 @@ def pack_into_grids(
     for bin_idx in sorted(bins):
         canvas = pg.Surface((grid_w, grid_h))
         canvas.fill((0, 0, 0))
-        image_ids = []
+        keys = []
         batch = ""
         for rect_id, x, y, w, h in bins[bin_idx]:
             item = items[rect_id]
-            image_ids.append(item["image_id"])
+            keys.append(item.key)
             if not batch:
-                batch = item["batch"]
+                batch = item.batch
             img_surface = surfaces[rect_id]
             orig_w, orig_h = img_surface.get_size()
             if (w, h) == (orig_w, orig_h):
@@ -86,7 +85,7 @@ def pack_into_grids(
             else:
                 rotated = pg.transform.rotate(img_surface, -90)
                 canvas.blit(rotated, (x, y))
-        grids.append(GridSpec(surface=canvas, image_ids=image_ids, batch=batch))
+        grids.append(GridSpec(surface=canvas, keys=keys, batch=batch))
 
     # Overflow: images too large to fit any bin become single-image grids
     for idx in range(len(items)):
@@ -96,8 +95,8 @@ def pack_into_grids(
             item = items[idx]
             grids.append(GridSpec(
                 surface=surfaces[idx],
-                image_ids=[item["image_id"]],
-                batch=item["batch"],
+                keys=[item.key],
+                batch=item.batch,
             ))
 
     return grids

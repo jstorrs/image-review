@@ -1,28 +1,20 @@
-import csv
 import random
 import sys
 from enum import Enum, auto
-from pathlib import Path
 
 import pygame as pg
 
 from .grid_packer import pack_into_grids
-from .review_db import ReviewDB
-from .util import load_surface, safe_path
+from .store import ManifestRow, ReviewStore, Status, Verdict, filter_rows
+from .util import load_surface
 from .viewer import ImageViewer
 
 AUTOPLAY_EVENT = pg.USEREVENT + 1
 ADVANCE_EVENT = pg.USEREVENT + 2
 
 
-def load_manifest(work_dir: Path) -> list[dict]:
-    manifest_path = work_dir / "manifest.tsv"
-    with open(manifest_path, newline="") as f:
-        return list(csv.DictReader(f, delimiter="\t"))
-
-
-def _grid_status(db: ReviewDB, image_ids: list[str], pass_number: int) -> str:
-    statuses = {db.get_status(iid, pass_number) for iid in image_ids}
+def _grid_status(snapshot: dict[str, Status], keys: list[str]) -> str:
+    statuses = {snapshot[key] for key in keys}
     if statuses == {"CLEAN"}:
         return "CLEAN"
     if "UNREVIEWED" in statuses:
@@ -39,25 +31,25 @@ class UIState(Enum):
 class ReviewSession:
     def __init__(
         self,
-        work_dir: Path,
+        store: ReviewStore,
         mode: str = "single",
         pass_number: int | None = None,
         batch: str | None = None,
         status_filter: str = "unreviewed",
         allow_rotation: bool = True,
     ):
-        self.work_dir = work_dir
+        self.store = store
         self.mode = mode
         self.batch = batch
         self.status_filter = status_filter
         self.allow_rotation = allow_rotation
-        self.db = ReviewDB(work_dir)
-        self.manifest = load_manifest(work_dir)
+        self.manifest = store.manifest()
 
         if pass_number is None:
-            self.pass_number = self.db.current_pass(self.manifest)
+            self.pass_number = store.current_pass()
         else:
             self.pass_number = pass_number
+        self._statuses = store.statuses(self.pass_number)
 
         self.autoplay = False
         self._cursor = -1
@@ -92,14 +84,14 @@ class ReviewSession:
 
     def _auto_select_batch(self) -> str | None:
         """Find the first batch that has images matching the status filter."""
-        batches = sorted({row["batch"] for row in self.manifest})
+        batches = sorted({row.batch for row in self.manifest})
         for batch in batches:
-            if self.db.images_by_status(self.manifest, self.pass_number, self.status_filter, batch):
+            if filter_rows(self.manifest, self._statuses, self.status_filter, batch):
                 return batch
         return None
 
     def _init_single_mode(self):
-        rows = self.db.images_by_status(self.manifest, self.pass_number, self.status_filter, self.batch)
+        rows = filter_rows(self.manifest, self._statuses, self.status_filter, self.batch)
         random.shuffle(rows)
         self._items = rows
         self._todo_count = self._count_todo()
@@ -108,15 +100,15 @@ class ReviewSession:
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
 
-        review_rows = self.db.images_by_status(self.manifest, self.pass_number, self.status_filter, self.batch)
-        grid_specs = pack_into_grids(review_rows, self.work_dir, grid_w, grid_h, allow_rotation=self.allow_rotation)
+        review_rows = filter_rows(self.manifest, self._statuses, self.status_filter, self.batch)
+        grid_specs = pack_into_grids(review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation)
 
         items = [
-            {"surface": gs.surface, "image_ids": gs.image_ids, "batch": gs.batch}
+            {"surface": gs.surface, "keys": gs.keys, "batch": gs.batch}
             for gs in grid_specs
         ]
         random.shuffle(items)
-        items.sort(key=lambda item: len(item["image_ids"]), reverse=True)
+        items.sort(key=lambda item: len(item["keys"]), reverse=True)
         self._items = items
         self._todo_count = self._count_todo()
 
@@ -153,6 +145,7 @@ class ReviewSession:
         self.mode = new_mode
         self._cursor = -1
         self._dirty = True
+        self._statuses = self.store.statuses(self.pass_number)
 
         if new_mode == "grid":
             self._viewer.show_message("Computing grids...")
@@ -201,12 +194,11 @@ class ReviewSession:
             # Iteratively skip unloadable images to avoid recursion
             start = self._cursor
             while True:
-                path = safe_path(self.work_dir, item["preprocessed_path"])
                 try:
-                    surface = load_surface(str(path))
+                    surface = load_surface(self.store.image_bytes(item.key))
                     break
                 except Exception as exc:
-                    print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
+                    print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
                     self._cursor += 1
                     if self._cursor >= len(self._items) or self._cursor == start:
                         self._viewer.show_message("No loadable images")
@@ -219,15 +211,15 @@ class ReviewSession:
 
         if self.mode == "grid":
             surface = item["surface"]
-            self._viewer.set_image(surface, f"grid ({len(item['image_ids'])} images)", status, info)
+            self._viewer.set_image(surface, f"grid ({len(item['keys'])} images)", status, info)
         else:
-            self._viewer.set_image(surface, item["preprocessed_path"], status, info)
+            self._viewer.set_image(surface, item.key, status, info)
         self._dirty = True
 
-    def _item_status(self, item) -> str:
+    def _item_status(self, item: ManifestRow | dict) -> str:
         if self.mode == "grid":
-            return _grid_status(self.db, item["image_ids"], self.pass_number)
-        return self.db.get_status(item["image_id"], self.pass_number)
+            return _grid_status(self._statuses, item["keys"])
+        return self._statuses[item.key]
 
     def _continue_autoplay(self, direction: int, autoplay: bool = False):
         if direction == 1 and (autoplay or self.autoplay):
@@ -267,14 +259,15 @@ class ReviewSession:
     def prev_image(self):
         self._navigate(-1)
 
-    def _mark(self, status: str):
+    def _mark(self, status: Verdict):
         if not self._items or self._cursor < 0:
             return
         item = self._items[self._cursor]
         if self.mode == "grid":
-            self.db.mark_many(item["image_ids"], item["batch"], status, self.pass_number)
+            keys, batch = item["keys"], item["batch"]
         else:
-            self.db.mark(item["image_id"], item["batch"], status, self.pass_number)
+            keys, batch = [item.key], item.batch
+        self._statuses.update(self.store.mark(keys, batch, status, self.pass_number))
         self._todo_count = self._count_todo()
         self._viewer.set_status(status)
         self._dirty = True
