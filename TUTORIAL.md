@@ -9,7 +9,9 @@ The workflow has three phases: **preprocess**, **review**, and **status**.
 pip install -e .
 ```
 
-This installs the `image-review` command.
+This installs the `image-review` command. `--via` (HPC tunnelling, below)
+also needs an OpenSSH client on the machine you run it on (built into macOS,
+Linux and Windows 10+).
 
 ## Quick Start
 
@@ -103,6 +105,8 @@ image-review review [options]
 | `--filter` | `unreviewed` | Which images to show: `unreviewed`, `clean`, or `all` |
 | `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images for tighter grid packing |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |
+| `--remote` | -- | Review a server started with `image-review serve` instead (also `$IMAGE_REVIEW_REMOTE`); see [Reviewing on an HPC Cluster](#reviewing-on-an-hpc-cluster) |
+| `--via` | -- | With `--remote`: reach the server through an SSH tunnel via this login node (also `$IMAGE_REVIEW_VIA`) |
 
 ### Review Modes
 
@@ -226,6 +230,7 @@ Check review progress at any time:
 
 ```bash
 image-review status [--work-dir ./review_work]
+image-review status --remote 'ir://...' [--via user@login-node]
 ```
 
 **Example output:**
@@ -245,6 +250,148 @@ batch_003          300    280     15      5
 
 Current pass: 2
 ```
+
+## Reviewing on an HPC Cluster
+
+If the images live on a cluster, you can review them from your laptop
+without copying them off. `image-review serve` runs on a compute node and
+serves the preprocessed work directory over HTTPS; `image-review review
+--remote` on your laptop is the viewer.
+
+### 1. Preprocess on the cluster
+
+Unchanged. Run it as a batch or interactive job:
+
+```bash
+image-review preprocess /data/scans.zip --work-dir /scratch/me/review_work
+```
+
+### 2. Serve from an interactive session
+
+```bash
+salloc ...                       # your site's usual options
+srun --pty bash                  # or your site's interactive command
+image-review serve --work-dir /scratch/me/review_work
+```
+
+On many Slurm sites `salloc` leaves you on the login node, so first get a
+shell on the allocated node (as above), or run `srun --pty image-review serve
+--work-dir ...` directly. `--pty` keeps stdout a terminal so the string is
+printed; plain `srun` without `--pty` takes the connection-file path described
+under batch mode below.
+
+The server binds the node's hostname by default (`--bind` to override;
+wildcard addresses are refused) and picks a free port (`--port` to choose
+one). It prints the connection string plus ready-to-paste client commands:
+
+```
+ir://node042.cluster.example:41733/?token=...&fp=sha256:...
+```
+
+Treat the string like a password. Each server start generates a new token and
+certificate, so a string from an earlier run no longer works.
+
+### 3. Connect from your laptop
+
+**Direct**, if compute nodes are reachable from your network:
+
+```bash
+image-review review --remote 'ir://node042.cluster.example:41733/?token=...'
+```
+
+**Through the login node**, if you can only reach that:
+
+```bash
+image-review review --remote 'ir://...' --via user@login-node
+```
+
+With `--via` the client runs `ssh` for you to forward a local port to the
+compute node. Password or MFA prompts appear in your terminal, and the tunnel
+closes when the client exits.
+
+To keep the token out of your shell history, put it in the environment:
+
+```bash
+export IMAGE_REVIEW_REMOTE='ir://...'
+export IMAGE_REVIEW_VIA=user@login-node     # optional
+image-review review --mode grid
+image-review status
+```
+
+The viewer behaves as it does locally (same flags, keys, passes and
+resumption); `--work-dir` cannot be combined with `--remote`. `status
+--remote` works too.
+
+### 4. Batch mode (`sbatch`)
+
+When stdout is not a terminal, `serve` does not print the string. It writes it
+to `~/.image-review/connection-<host>-<port>.txt` (mode 0600) and removes the
+file when the server stops (Ctrl-C, `scancel`, or the time limit). The path is
+written to the job's output file.
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=image-review
+#SBATCH --time=04:00:00
+#SBATCH --output=image-review-%j.out
+
+source /path/to/venv/bin/activate   # or your site's module load
+image-review serve --work-dir /scratch/me/review_work
+```
+
+Then, on your laptop, copy the absolute path from the job output (do not use
+`~`: your laptop's shell would expand it locally) and keep the string out of
+`ps` and shell history by putting it in the environment:
+
+```bash
+export IMAGE_REVIEW_REMOTE="$(ssh user@login-node cat /home/me/.image-review/connection-node042.cluster.example-41733.txt)"
+image-review review
+```
+
+This assumes your home directory is shared between the login and compute nodes.
+
+### 5. Stopping and reconnecting
+
+Stop the server with Ctrl-C, `scancel`, or by letting the allocation end.
+Progress is saved on the server at every mark. If the connection drops, the
+viewer shows "Lost connection to server - progress saved"; press `q`, then
+reconnect with the same string while the server is still running.
+
+### Security Model and Limitations
+
+**What stays on the cluster:** the original files, DICOM headers, source
+paths and `image_id`s, and `review.tsv`. The client only sees preprocessed
+paths like `batch_001/img_00001.jpg`.
+
+**What travels:** the preprocessed JPGs, over TLS, held only in the client's
+memory. The tool makes no deliberate attempt to persist them, but swap, crash
+dumps, and screenshots or screen recording are outside its control.
+
+**Authentication and encryption:** the server uses a self-signed certificate
+generated at start-up. Its SHA-256 fingerprint is part of the connection
+string and the client checks it on every connection before sending the token,
+so a wrong or replaced server is rejected. Requests also need the bearer
+token. With `--via`, ssh protects laptop to login node and TLS covers the
+whole path to the compute node.
+
+**Limitations:**
+- Anyone holding the connection string can view the images and record review
+  marks while the server runs. Do not paste it into chat or tickets.
+- One review process per work directory. Do not run `serve` and a local
+  `review` on the same work directory at the same time (marks can be lost),
+  and use one reviewer per server.
+
+**Troubleshooting `--via`:**
+- The server logs one `connection error: SSLEOFError` line per client start.
+  This is the client's readiness probe and is harmless.
+- `channel N: open failed` from ssh means the login node cannot reach
+  `NODE:PORT`.
+- `--via` always authenticates afresh (ControlMaster sharing is disabled so no
+  forward is left behind), so expect an MFA prompt each time.
+- If your `ssh_config` has `LocalForward` lines for the login node (e.g. for
+  Jupyter), `--via` can fail with "Address already in use". Use a separate
+  `Host` alias without `LocalForward`.
+- If ssh backgrounds itself (`ForkAfterAuthentication`), remove that option.
 
 ## Full Workflow Example
 
