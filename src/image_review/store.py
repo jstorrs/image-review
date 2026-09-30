@@ -1,4 +1,5 @@
 import csv
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -15,10 +16,18 @@ class ManifestRow:
     batch: str
 
 
+class StoreUnavailable(Exception):
+    """The store cannot be reached (as opposed to a key or image being bad)."""
+
+
 class ReviewStore(Protocol):
     def manifest(self) -> list[ManifestRow]: ...
 
     def image_bytes(self, key: str) -> bytes: ...
+
+    def image_bytes_many(self, keys: list[str]) -> dict[str, bytes]:
+        """Bytes for the keys that loaded; missing or unloadable keys are omitted with a stderr warning."""
+        ...
 
     def statuses(self, pass_number: int) -> dict[str, Status]:
         """Key -> status for every manifest row."""
@@ -63,6 +72,15 @@ class LocalStore:
         if key not in self._image_ids:
             raise KeyError(key)
         return safe_path(self.work_dir, key).read_bytes()
+
+    def image_bytes_many(self, keys: list[str]) -> dict[str, bytes]:
+        found: dict[str, bytes] = {}
+        for key in keys:
+            try:
+                found[key] = self.image_bytes(key)
+            except (KeyError, ValueError, OSError) as exc:
+                print(f"WARNING: cannot load {key}: {exc}", file=sys.stderr)
+        return found
 
     def statuses(self, pass_number: int) -> dict[str, Status]:
         return {key: self._db.get_status(iid, pass_number) for key, iid in self._image_ids.items()}

@@ -1,10 +1,70 @@
+import contextlib
 import ipaddress
 import signal
 import socket
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import click
+
+from .store import ReviewStore
+
+DEFAULT_WORK_DIR = "./review_work"
+
+
+def work_dir_option(f):
+    return click.option("--work-dir", type=click.Path(exists=True), default=None, help=f"Work directory containing preprocessed data [default: {DEFAULT_WORK_DIR}].")(f)
+
+
+def remote_option(f):
+    return click.option("--remote", envvar="IMAGE_REVIEW_REMOTE", default=None, help="Review a server started with `image-review serve` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).")(f)
+
+
+@contextlib.contextmanager
+def open_store(work_dir: str | None, remote: str | None) -> Iterator[ReviewStore]:
+    """Open the local or remote store, translating startup failures into ClickExceptions."""
+    if remote is None:
+        raw = work_dir if work_dir is not None else DEFAULT_WORK_DIR
+        path = Path(raw)
+        if not path.exists():
+            raise click.BadParameter(f"Path '{raw}' does not exist.", param_hint="'--work-dir'")
+        from .store import LocalStore
+
+        try:
+            store = LocalStore(path)
+        except FileNotFoundError:
+            raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
+        yield store
+        return
+
+    if work_dir is not None:
+        if click.get_current_context().get_parameter_source("remote") is click.core.ParameterSource.ENVIRONMENT:
+            raise click.UsageError("IMAGE_REVIEW_REMOTE is set; unset it to use --work-dir.")
+        raise click.UsageError("--remote and --work-dir are mutually exclusive.")
+    from .connection import RemoteTarget
+    from .remote import FingerprintMismatch, RemoteError, RemoteStore
+
+    try:
+        target = RemoteTarget.parse(remote)
+    except ValueError as e:
+        raise click.ClickException(f"Invalid --remote connection string: {e}")
+    try:
+        with RemoteStore(target) as store:
+            yield store
+    except FingerprintMismatch:
+        raise click.ClickException(
+            f"The certificate presented by {target.host}:{target.port} does NOT match the connection string. "
+            "The connection was aborted before any credentials were sent. "
+            "Do not continue unless you know why the server's identity changed."
+        )
+    except RemoteError as e:
+        where = f"{target.host}:{target.port}"
+        if e.status == 401:
+            raise click.ClickException(f"Server at {where} rejected the access token (connection string from a different or restarted server?)")
+        if e.status is not None:
+            raise click.ClickException(f"Server at {where} returned HTTP {e.status}")
+        raise click.ClickException(f"Cannot reach server at {where}: {e}")
 
 
 class FullHelpGroup(click.Group):
@@ -62,8 +122,9 @@ def preprocess(sources, batch_size, work_dir, colormap):
 @click.option("--batch", type=str, default=None, help="Restrict to a specific batch.")
 @click.option("--filter", "status_filter", type=click.Choice(["unreviewed", "clean", "all"]), default="unreviewed", show_default=True, help="Which images to show.")
 @click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
-@click.option("--work-dir", type=click.Path(exists=True), default="./review_work", show_default=True, help="Work directory containing preprocessed data.")
-def review(mode, pass_number, batch, status_filter, rotate, work_dir):
+@work_dir_option
+@remote_option
+def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote):
     """Open an interactive review session for classifying images.
 
     \b
@@ -76,41 +137,34 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir):
     import pygame as pg
 
     from .controller import ReviewSession
-    from .store import LocalStore
 
     pg.init()
     try:
-        try:
+        with open_store(work_dir, remote) as store:
             session = ReviewSession(
-                store=LocalStore(Path(work_dir)),
+                store=store,
                 mode=mode,
                 pass_number=pass_number,
                 batch=batch,
                 status_filter=status_filter,
                 allow_rotation=rotate,
             )
-        except FileNotFoundError:
-            pg.quit()
-            raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
-        session.run()
+            session.run()
     finally:
         pg.quit()
 
 
 @cli.command()
-@click.option("--work-dir", type=click.Path(exists=True), default="./review_work", show_default=True, help="Work directory containing preprocessed data.")
-def status(work_dir):
+@work_dir_option
+@remote_option
+def status(work_dir, remote):
     """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED counts)."""
-    from .store import LocalStore, batch_summary, summary
+    from .store import batch_summary, summary
 
-    try:
-        store = LocalStore(Path(work_dir))
-    except FileNotFoundError:
-        raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
-
-    manifest = store.manifest()
-    current = store.current_pass()
-    statuses = store.statuses(current)
+    with open_store(work_dir, remote) as store:
+        manifest = store.manifest()
+        current = store.current_pass()
+        statuses = store.statuses(current)
 
     # Overall summary
     counts = summary(manifest, statuses)

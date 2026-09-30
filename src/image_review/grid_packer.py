@@ -37,15 +37,19 @@ def pack_into_grids(
     Each item is a ManifestRow; image bytes are fetched via the store.
     Returns a list of GridSpec, each holding a composited pygame surface.
     """
-    # Load all surfaces upfront — avoids opening each file twice
+    # Load all surfaces upfront — avoids fetching each image twice
+    blobs = store.image_bytes_many([item.key for item in items])
     surfaces = []
     skipped: set[int] = set()
     for idx, item in enumerate(items):
-        try:
-            surfaces.append(load_surface(store.image_bytes(item.key)))
-        except Exception as exc:
-            print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
-            surfaces.append(None)
+        surface = None
+        if item.key in blobs:  # absent: the store already warned
+            try:
+                surface = load_surface(blobs[item.key])
+            except Exception as exc:
+                print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
+        surfaces.append(surface)
+        if surface is None:
             skipped.add(idx)
 
     sizes = [s.get_size() if s is not None else (0, 0) for s in surfaces]

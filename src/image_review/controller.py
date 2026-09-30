@@ -5,7 +5,14 @@ from enum import Enum, auto
 import pygame as pg
 
 from .grid_packer import pack_into_grids
-from .store import ManifestRow, ReviewStore, Status, Verdict, filter_rows
+from .store import (
+    ManifestRow,
+    ReviewStore,
+    Status,
+    StoreUnavailable,
+    Verdict,
+    filter_rows,
+)
 from .util import load_surface
 from .viewer import ImageViewer
 
@@ -70,6 +77,14 @@ class ReviewSession:
             self._init_grid_mode()
         else:
             self._init_single_mode()
+
+    def _store_lost(self, exc: StoreUnavailable):
+        pg.time.set_timer(ADVANCE_EVENT, 0)
+        self._stop_autoplay()
+        print(f"Lost connection to server: {exc}. Progress up to the last mark is saved on the server.", file=sys.stderr)
+        self._viewer.show_message("Lost connection to server - progress saved. Press q to quit.")
+        self._ui_state = UIState.END_MESSAGE
+        self._dirty = False  # a refresh would paint over the message
 
     def _stop_autoplay(self):
         self.autoplay = False
@@ -145,13 +160,17 @@ class ReviewSession:
         self.mode = new_mode
         self._cursor = -1
         self._dirty = True
-        self._statuses = self.store.statuses(self.pass_number)
-
-        if new_mode == "grid":
-            self._viewer.show_message("Computing grids...")
-            self._init_grid_mode()
-        else:
-            self._init_single_mode()
+        try:
+            self._statuses = self.store.statuses(self.pass_number)
+            if new_mode == "grid":
+                self._viewer.show_message("Computing grids...")
+                self._init_grid_mode()
+            else:
+                self._init_single_mode()
+        except StoreUnavailable as exc:
+            self._items = []  # half-switched state: nothing consistent to show
+            self._store_lost(exc)
+            return
 
         if not self._items:
             self._viewer.show_message(f"No items for {new_mode} mode")
@@ -197,6 +216,9 @@ class ReviewSession:
                 try:
                     surface = load_surface(self.store.image_bytes(item.key))
                     break
+                except StoreUnavailable as exc:
+                    self._store_lost(exc)
+                    return
                 except Exception as exc:
                     print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
                     self._cursor += 1
@@ -235,7 +257,8 @@ class ReviewSession:
 
         if self._todo_only:
             if self.next_todo(direction, wrap=False):
-                self._continue_autoplay(direction, autoplay)
+                if self._ui_state == UIState.REVIEWING:
+                    self._continue_autoplay(direction, autoplay)
             else:
                 self._stop_autoplay()
                 self._ui_state = UIState.END_MESSAGE
@@ -251,7 +274,8 @@ class ReviewSession:
 
         self._cursor = (self._cursor + direction) % n
         self._show_current()
-        self._continue_autoplay(direction, autoplay)
+        if self._ui_state == UIState.REVIEWING:
+            self._continue_autoplay(direction, autoplay)
 
     def next_image(self, *, autoplay=False):
         self._navigate(1, autoplay=autoplay)
@@ -267,7 +291,12 @@ class ReviewSession:
             keys, batch = item["keys"], item["batch"]
         else:
             keys, batch = [item.key], item.batch
-        self._statuses.update(self.store.mark(keys, batch, status, self.pass_number))
+        try:
+            changed = self.store.mark(keys, batch, status, self.pass_number)
+        except StoreUnavailable as exc:
+            self._store_lost(exc)
+            return
+        self._statuses.update(changed)
         self._todo_count = self._count_todo()
         self._viewer.set_status(status)
         self._dirty = True

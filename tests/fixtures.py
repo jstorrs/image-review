@@ -22,3 +22,22 @@ def make_work_dir(root: Path) -> None:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(["batch", "preprocessed_path", "image_id"])
         writer.writerows(ROWS)
+
+
+def start_server(work_dir: Path, port: int = 0):
+    """Serve work_dir on 127.0.0.1 in a thread; returns (server, target, stop)."""
+    import threading
+
+    from image_review.server import make_server
+    from image_review.store import LocalStore
+
+    server, target = make_server(LocalStore(work_dir), "127.0.0.1", port)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+
+    def stop() -> None:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    return server, target, stop
