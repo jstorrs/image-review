@@ -246,7 +246,7 @@ class TestParsing(unittest.TestCase):
 
 class TestCli(RemoteTestCase):
     def invoke(self, *args, **kwargs):
-        kwargs.setdefault("env", {"IMAGE_REVIEW_REMOTE": None})  # ignore the developer's environment
+        kwargs.setdefault("env", {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None})  # ignore the developer's environment
         return CliRunner().invoke(cli, list(args), **kwargs)
 
     def test_status_identical_to_local(self):
@@ -259,7 +259,7 @@ class TestCli(RemoteTestCase):
         self.assertEqual(remote.stdout, local.stdout)
 
     def test_status_envvar(self):
-        result = self.invoke("status", env={"IMAGE_REVIEW_REMOTE": self.target.to_uri()})
+        result = self.invoke("status", env={"IMAGE_REVIEW_REMOTE": self.target.to_uri(), "IMAGE_REVIEW_VIA": None})
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Overall: 4 images", result.output)
 
@@ -270,7 +270,7 @@ class TestCli(RemoteTestCase):
         self.assertNotIn(self.target.token, result.output)
 
     def test_envvar_with_explicit_work_dir_says_so(self):
-        result = self.invoke("status", "--work-dir", str(self.work_dir), env={"IMAGE_REVIEW_REMOTE": self.target.to_uri()})
+        result = self.invoke("status", "--work-dir", str(self.work_dir), env={"IMAGE_REVIEW_REMOTE": self.target.to_uri(), "IMAGE_REVIEW_VIA": None})
         self.assertEqual(result.exit_code, 2)
         self.assertIn("IMAGE_REVIEW_REMOTE is set; unset it to use --work-dir", result.output)
         self.assertNotIn(self.target.token, result.output)

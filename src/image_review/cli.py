@@ -21,10 +21,16 @@ def remote_option(f):
     return click.option("--remote", envvar="IMAGE_REVIEW_REMOTE", default=None, help="Review a server started with `image-review serve` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).")(f)
 
 
+def via_option(f):
+    return click.option("--via", envvar="IMAGE_REVIEW_VIA", default=None, help="With --remote: reach the server through an SSH tunnel via this login node, e.g. user@login.cluster (also read from $IMAGE_REVIEW_VIA).")(f)
+
+
 @contextlib.contextmanager
-def open_store(work_dir: str | None, remote: str | None) -> Iterator[ReviewStore]:
+def open_store(work_dir: str | None, remote: str | None, via: str | None = None) -> Iterator[ReviewStore]:
     """Open the local or remote store, translating startup failures into ClickExceptions."""
     if remote is None:
+        if via is not None and click.get_current_context().get_parameter_source("via") is not click.core.ParameterSource.ENVIRONMENT:
+            raise click.UsageError("--via requires --remote.")
         raw = work_dir if work_dir is not None else DEFAULT_WORK_DIR
         path = Path(raw)
         if not path.exists():
@@ -44,27 +50,48 @@ def open_store(work_dir: str | None, remote: str | None) -> Iterator[ReviewStore
         raise click.UsageError("--remote and --work-dir are mutually exclusive.")
     from .connection import RemoteTarget
     from .remote import FingerprintMismatch, RemoteError, RemoteStore
+    from .tunnel import TunnelError
 
     try:
         target = RemoteTarget.parse(remote)
     except ValueError as e:
         raise click.ClickException(f"Invalid --remote connection string: {e}")
+    if via is not None:
+        from .tunnel import parse_via
+
+        try:
+            via = parse_via(via)
+        except ValueError as e:
+            raise click.ClickException(f"Invalid --via: {e}")
+    where = f"{target.host}:{target.port}" + (f" (via {via})" if via else "")
     try:
-        with RemoteStore(target) as store:
+        with contextlib.ExitStack() as stack:
+            if via is None:
+                store = RemoteStore(target)
+            else:
+                from .tunnel import ssh_tunnel
+
+                local_port = stack.enter_context(ssh_tunnel(via, target.host, target.port))
+                store = RemoteStore(target, connect_host="127.0.0.1", connect_port=local_port)
+            stack.enter_context(store)  # closed before the tunnel
             yield store
+    except TunnelError as e:
+        raise click.ClickException(str(e))
     except FingerprintMismatch:
         raise click.ClickException(
-            f"The certificate presented by {target.host}:{target.port} does NOT match the connection string. "
+            f"The certificate presented by {where} does NOT match the connection string. "
             "The connection was aborted before any credentials were sent. "
             "Do not continue unless you know why the server's identity changed."
+            + (" With --via, this can also happen if another local process grabbed the forwarded port; retry." if via else "")
         )
     except RemoteError as e:
-        where = f"{target.host}:{target.port}"
         if e.status == 401:
             raise click.ClickException(f"Server at {where} rejected the access token (connection string from a different or restarted server?)")
         if e.status is not None:
             raise click.ClickException(f"Server at {where} returned HTTP {e.status}")
-        raise click.ClickException(f"Cannot reach server at {where}: {e}")
+        transport_failure = isinstance(e.__cause__, OSError)
+        hint = " (the login node may not be able to reach the server; see the ssh output above)" if via and transport_failure else ""
+        raise click.ClickException(f"Cannot reach server at {where}: {e}{hint}")
 
 
 class FullHelpGroup(click.Group):
@@ -124,7 +151,8 @@ def preprocess(sources, batch_size, work_dir, colormap):
 @click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
 @work_dir_option
 @remote_option
-def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote):
+@via_option
+def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote, via):
     """Open an interactive review session for classifying images.
 
     \b
@@ -138,9 +166,10 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote):
 
     from .controller import ReviewSession
 
-    pg.init()
-    try:
-        with open_store(work_dir, remote) as store:
+    with open_store(work_dir, remote, via) as store:
+        # after the store: SDL must not steal terminal focus during ssh password/MFA prompts
+        pg.init()
+        try:
             session = ReviewSession(
                 store=store,
                 mode=mode,
@@ -150,18 +179,19 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote):
                 allow_rotation=rotate,
             )
             session.run()
-    finally:
-        pg.quit()
+        finally:
+            pg.quit()
 
 
 @cli.command()
 @work_dir_option
 @remote_option
-def status(work_dir, remote):
+@via_option
+def status(work_dir, remote, via):
     """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED counts)."""
     from .store import batch_summary, summary
 
-    with open_store(work_dir, remote) as store:
+    with open_store(work_dir, remote, via) as store:
         manifest = store.manifest()
         current = store.current_pass()
         statuses = store.statuses(current)
@@ -226,6 +256,8 @@ def serve(work_dir, bind, port):
             raise click.ClickException(f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address.")
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs
         for sig in (signal.SIGTERM, signal.SIGHUP):
+            if signal.getsignal(sig) is signal.SIG_IGN:  # e.g. nohup
+                continue
             previous_handlers[sig] = signal.signal(sig, _raise_interrupt)
         if sys.stdout.isatty():
             print("Serving review data. The connection string grants access; treat it like a password.\n")
