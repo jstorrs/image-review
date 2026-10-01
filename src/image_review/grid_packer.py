@@ -13,7 +13,6 @@ from .util import load_surface
 class GridSpec:
     surface: pg.Surface
     keys: list[str] = field(default_factory=list)
-    batch: str = ""
 
 
 class PlacedRect(NamedTuple):
@@ -31,35 +30,33 @@ def pack_into_grids(
     grid_h: int,
     *,
     allow_rotation: bool = True,
-) -> list[GridSpec]:
+) -> tuple[list[GridSpec], list[str]]:
     """Pack review items into grid canvases sized for the current screen.
 
     Each item is a ManifestRow; image bytes are fetched via the store.
-    Returns a list of GridSpec, each holding a composited pygame surface.
+    Returns the GridSpecs, each holding a composited pygame surface, and the
+    unloadable keys (missing or undecodable), in input order. No grid holds an
+    unloadable key.
     """
     # Load all surfaces upfront — avoids fetching each image twice
     blobs = store.image_bytes_many([item.key for item in items])
-    surfaces = []
-    skipped: set[int] = set()
+    loaded: dict[int, pg.Surface] = {}
+    unloadable: list[str] = []
     for idx, item in enumerate(items):
-        surface = None
-        if item.key in blobs:  # absent: the store already warned
-            try:
-                surface = load_surface(blobs[item.key])
-            except Exception as exc:
-                print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
-        surfaces.append(surface)
-        if surface is None:
-            skipped.add(idx)
-
-    sizes = [s.get_size() if s is not None else (0, 0) for s in surfaces]
+        if item.key not in blobs:  # absent: the store already warned
+            unloadable.append(item.key)
+            continue
+        try:
+            loaded[idx] = load_surface(blobs[item.key])
+        except Exception as exc:  # noqa: BLE001 - any decode failure makes the image unloadable, not fatal
+            print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
+            unloadable.append(item.key)
 
     # Bin-pack
     packer = newPacker(rotation=allow_rotation)
     packer.add_bin(grid_w, grid_h, float("inf"))
-    for idx, (w, h) in enumerate(sizes):
-        if idx not in skipped:
-            packer.add_rect(w, h, idx)
+    for idx, surface in loaded.items():
+        packer.add_rect(*surface.get_size(), idx)
     packer.pack()
 
     # Identify which items were packed into which bins
@@ -76,31 +73,20 @@ def pack_into_grids(
         canvas = pg.Surface((grid_w, grid_h))
         canvas.fill((0, 0, 0))
         keys = []
-        batch = ""
         for rect_id, x, y, w, h in bins[bin_idx]:
-            item = items[rect_id]
-            keys.append(item.key)
-            if not batch:
-                batch = item.batch
-            img_surface = surfaces[rect_id]
+            keys.append(items[rect_id].key)
+            img_surface = loaded[rect_id]
             orig_w, orig_h = img_surface.get_size()
             if (w, h) == (orig_w, orig_h):
                 canvas.blit(img_surface, (x, y))
             else:
                 rotated = pg.transform.rotate(img_surface, -90)
                 canvas.blit(rotated, (x, y))
-        grids.append(GridSpec(surface=canvas, keys=keys, batch=batch))
+        grids.append(GridSpec(surface=canvas, keys=keys))
 
     # Overflow: images too large to fit any bin become single-image grids
-    for idx in range(len(items)):
-        if idx in skipped:
-            continue
+    for idx, surface in loaded.items():
         if idx not in packed:
-            item = items[idx]
-            grids.append(GridSpec(
-                surface=surfaces[idx],
-                keys=[item.key],
-                batch=item.batch,
-            ))
+            grids.append(GridSpec(surface=surface, keys=[items[idx].key]))
 
-    return grids
+    return grids, unloadable

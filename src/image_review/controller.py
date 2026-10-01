@@ -19,7 +19,7 @@ from .store import (
     filter_rows,
 )
 from .util import load_surface
-from .viewer import ImageViewer
+from .viewer import ImageViewer, placeholder_surface
 
 AUTOPLAY_EVENT = pg.USEREVENT + 1
 ADVANCE_EVENT = pg.USEREVENT + 2
@@ -41,6 +41,11 @@ def _dwell_elapsed(shown_at: int | None, now: int) -> bool:
 GRID_ELIGIBLE: frozenset[Status] = frozenset({"UNREVIEWED", "CLEAN"})
 GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in single mode"
 NOTHING_TO_UNDO = "Nothing to undo"
+UNLOADABLE_CLEAN = "cannot mark CLEAN: image could not be loaded"
+
+
+def _placeholder(key: str, reason: str) -> pg.Surface:
+    return placeholder_surface(f"Cannot load image: {key}\n{reason}\nIt can only be marked DIRTY")
 
 
 def _grid_status(snapshot: dict[str, Status], keys: tuple[str, ...]) -> str:
@@ -127,6 +132,7 @@ class ReviewSession:
         self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
         self._todo_only = False
         self._undoable = 0  # this session's marks since the current mode started, less those undone
+        self._unloadable: set[str] = set()  # keys that failed to load: shown as placeholders, never marked CLEAN
 
         self._viewer = ImageViewer()
         self._joysticks = {}
@@ -207,7 +213,7 @@ class ReviewSession:
         grid_h -= self._viewer.border
 
         review_rows = self._review_rows(self.batch)
-        grid_specs = pack_into_grids(review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation)
+        grid_specs, unloadable = pack_into_grids(review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation)
 
         items = [
             ReviewItem(keys=tuple(gs.keys), label=f"grid ({len(gs.keys)} images)", surface=gs.surface, grid=True)
@@ -215,6 +221,9 @@ class ReviewSession:
         ]
         random.shuffle(items)
         items.sort(key=lambda item: len(item.keys), reverse=True)
+        # Each unloadable image becomes a single image after the grids: it follows the single-image rules,
+        # and _show_current retries it and draws its placeholder only when it is shown
+        items += [ReviewItem(keys=(key,), label=key, surface=None, grid=False) for key in unloadable]
         self._items = items
         self._todo_count = self._count_todo()
 
@@ -307,23 +316,23 @@ class ReviewSession:
 
         surface = item.surface
         if surface is None:
-            # Iteratively skip unloadable images to avoid recursion
-            start = self._cursor
-            while True:
-                try:
-                    surface = load_surface(self.store.image_bytes(item.keys[0]))
-                    break
-                except StoreUnavailable as exc:
-                    self._store_lost(exc)
-                    return
-                except Exception as exc:
-                    print(f"WARNING: cannot load {item.keys[0]}: {exc}", file=sys.stderr)
-                    self._cursor += 1
-                    if self._cursor >= len(self._items) or self._cursor == start:
-                        self._viewer.show_message("No loadable images")
-                        self._ui_state = UIState.END_MESSAGE
-                        return
-                    item = self._items[self._cursor]
+            key = item.keys[0]
+            reason = detail = None  # reason: shown on the placeholder; detail: the error, for stderr only
+            try:
+                surface = load_surface(self.store.image_bytes(key))
+            except StoreUnavailable as exc:
+                self._store_lost(exc)
+                return
+            except KeyError:
+                reason = detail = "image could not be fetched"
+            except Exception as exc:  # noqa: BLE001 - a read or decode failure is an unloadable image, not an outage
+                reason, detail = "image could not be read or decoded", f"{type(exc).__name__}: {exc}"
+            if reason is None:
+                self._unloadable.discard(key)
+            else:
+                print(f"WARNING: cannot load {key}: {detail}", file=sys.stderr)
+                self._unloadable.add(key)
+                surface = _placeholder(key, reason)
 
         status = self._item_status(item)
         info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
@@ -378,6 +387,11 @@ class ReviewSession:
         if not self._items or self._cursor < 0:
             return
         item = self._items[self._cursor]
+        if status == "CLEAN" and not self._unloadable.isdisjoint(item.keys):
+            print(f"WARNING: {UNLOADABLE_CLEAN}: {', '.join(k for k in item.keys if k in self._unloadable)}", file=sys.stderr)
+            self._viewer.set_info(UNLOADABLE_CLEAN)
+            self._dirty = True
+            return
         if item.grid and status == "CLEAN" and _grid_clean_refused(self._statuses, item.keys):
             print(f"WARNING: {GRID_HAS_DIRTY}", file=sys.stderr)
             self._viewer.set_info(GRID_HAS_DIRTY)

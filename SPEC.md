@@ -370,6 +370,9 @@ so that a fully reviewed manifest is not mistaken for a complete input set.
 Nothing extra is printed when `skipped.tsv` is absent (work dirs from older
 versions) or has no rows. A malformed `skipped.tsv` (`ValueError`) is a
 `ClickException` (exit 1). Does not start pygame.
+`status` cannot count unloadable images (see *Unloadable Images*): they are
+only discovered when `review` tries to show them, and until marked DIRTY they
+count as UNREVIEWED.
 
 ### `image-review serve`
 
@@ -638,7 +641,8 @@ Every item is a `ReviewItem`, a frozen dataclass: `keys` (a tuple of manifest
 keys), `label` (shown in the status bar: the key, or
 "grid (N images)"), `surface` (a grid's composited surface, or `None` for a
 single image, loaded when displayed) and `grid` (a grid's status and CLEAN
-refusal follow the grid rules below, even for a one-image overflow grid).
+refusal follow the grid rules below, even for a one-image overflow grid; an
+unloadable image's item in grid mode is a single image, not a grid).
 
 ### Status Snapshot
 
@@ -658,8 +662,7 @@ shows "Lost connection to server - progress saved. Press q to quit." and the
 reason is printed to stderr. The session is then `DISCONNECTED`: only `q`/Esc
 and closing the window do anything (no navigation, mode switch or `z` reaches
 the store again). A failed mode restart clears the item list. Any
-other exception while loading a single-mode image logs a warning and skips the
-image.
+other failure to load an image is an unloadable image (see *Unloadable Images*).
 
 ### Single Mode
 
@@ -667,7 +670,9 @@ image.
   pass/batch/filter
 - Shuffle the resulting rows
 - Each row becomes a one-key `ReviewItem` with no surface; the image is fetched with
-  `store.image_bytes(key)` and decoded with `load_surface(bytes)` on display
+  `store.image_bytes(key)` and decoded with `load_surface(bytes)` on display. An
+  image that cannot be fetched or decoded is shown as a placeholder in its place
+  (see *Unloadable Images*); the cursor stays on it
 
 ### Grid Mode
 
@@ -682,6 +687,11 @@ image.
 - Convert each returned `GridSpec` into a `ReviewItem` with its `surface`
   and `keys`
 - Shuffle the grid items, then sort by image count (largest grids first)
+- Append one item per unloadable key `pack_into_grids()` reported:
+  `ReviewItem(keys=(key,), label=key, surface=None, grid=False)`. Like a
+  single-mode item it is loaded (retried) when shown, so its placeholder is
+  drawn only then, and it follows the single-image status rules, not the grid
+  rules. No grid ever holds an unloadable key
 
 When a grid is marked CLEAN or DIRTY, `store.mark()` is called with all its
 `keys`, and every key in the result is written into the snapshot.
@@ -698,6 +708,28 @@ session says so instead of implying the review is done: `run()` prints, and a
 mode restart shows, "No grid items for pass N; K FLAGGED/DIRTY image(s) need(s)
 single-mode review (--mode single)" (K counted over the selected batch, or all
 batches when none is selected).
+
+### Unloadable Images
+
+An image whose bytes are missing (`KeyError`, e.g. a 404 from the server) or
+cannot be read or decoded is not an outage (see *Store Failures*). A warning
+naming the key is printed to stderr, the key is added to the session's
+`_unloadable` set, and the item is shown as a placeholder from
+`viewer.placeholder_surface`: a dark surface reading `Cannot load image: <key>`
+with a short reason ("image could not be fetched" or "image could not be read
+or decoded"; the error itself goes only to stderr). Navigation, `n`, todo-only and autoplay treat it
+like any other item (autoplay does not stop at it), so the cursor always points
+at a real item. An item with no surface (every single-mode item, and an
+unloadable image's item in grid mode) is loaded each time it is shown, so the
+key joins `_unloadable` before any verdict can count, and a key that loads
+again leaves it. Placeholders are never built up front.
+
+A placeholder can be marked DIRTY but never CLEAN: CLEAN on an item holding
+any unloadable key is refused (no store call; the status bar shows "cannot mark
+CLEAN: image could not be loaded", also printed to stderr). DIRTY is recorded
+normally, so the image stops being todo, batch auto-selection moves on and the
+pass can finish; in later passes it is FLAGGED and, if still unloadable, again
+a placeholder that only takes DIRTY.
 
 ### Grid Status Derivation
 
@@ -805,17 +837,19 @@ shows that item again before any verdict counts. Key repeat stays off
 |-------|------|-------------|
 | `surface` | `pg.Surface` | Composited grid image, ready for display |
 | `keys` | `list[str]` | Keys (preprocessed paths) of all images packed into this grid |
-| `batch` | `str` | Batch of the first packed image |
 
-### `pack_into_grids(items, store, grid_w, grid_h, *, allow_rotation=True) -> list[GridSpec]`
+### `pack_into_grids(items, store, grid_w, grid_h, *, allow_rotation=True) -> tuple[list[GridSpec], dict[str, str]]`
 
-`items` is a list of `ManifestRow`.
+`items` is a list of `ManifestRow`. Returns the grids and the unloadable
+keys, in input order; no grid holds an unloadable key. What to do with
+unloadable keys is left to the caller.
 
 1. **Load**: Fetch all image bytes with `store.image_bytes_many()` (an
    8-worker pool for `RemoteStore`, a simple loop for `LocalStore`), decode each
    with `util.load_surface(bytes)` and read dimensions from
    `surface.get_size()`. This avoids fetching each image twice. Images that are
-   missing or fail to decode are skipped with a stderr warning.
+   missing (the store warns) or fail to decode (warned here) are left out of
+   the packing and reported as unloadable.
 2. **Pack**: Create a `rectpack` packer with `rotation=allow_rotation` and
    `(grid_w, grid_h)` bins (unlimited bin count). Add each image as a rect.
 3. **Composite**: For each bin, create a black `pg.Surface(grid_w, grid_h)`.
@@ -860,6 +894,11 @@ uses DejaVu Sans Mono 24pt.
 | `refresh()` | Render frame: background, status bar, text, scaled image |
 | `show_splash(lines, footer)` | Render centered splash/help overlay |
 | `show_message(text)` | Render centered text message (e.g. loading indicator) |
+
+The module-level `placeholder_surface(text) -> pg.Surface` renders `text`
+(one line per newline) centred on a dark 1280x720 surface (wider or taller if
+the text needs it), in the status bar font, for an image that could not be
+loaded. The font file is read once and cached.
 
 ## Review Database (`review_db.py`)
 

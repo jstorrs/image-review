@@ -34,12 +34,14 @@ from image_review.controller import (
     GRID_HAS_DIRTY,
     MIN_DWELL_MS,
     NOTHING_TO_UNDO,
+    UNLOADABLE_CLEAN,
     ReviewItem,
     ReviewSession,
     UIState,
     _dwell_elapsed,
     next_index,
 )
+from image_review.grid_packer import pack_into_grids
 from image_review.review_db import HEADER, ReviewDB
 from image_review.store import (
     LOCK_NAME,
@@ -980,7 +982,7 @@ def key(k: int) -> pg.event.Event:
     return pg.event.Event(pg.KEYDOWN, key=k, mod=0)
 
 
-class TestEventLoop(SessionTestCase):
+class EventLoopTestCase(SessionTestCase):
     """Drive the run loop's two halves, handle_events and refresh_if_needed, with synthetic events."""
 
     def setUp(self):
@@ -1009,6 +1011,8 @@ class TestEventLoop(SessionTestCase):
             s.refresh_if_needed()
         refresh.assert_called_once()
 
+
+class TestEventLoop(EventLoopTestCase):
     def test_verdict_after_dwell_marks(self):
         s = self.reviewing()
         s.handle_events([key(pg.K_c)])
@@ -1314,6 +1318,119 @@ class TestEventLoop(SessionTestCase):
     def test_key_repeat_is_off(self):
         ReviewSession(self.store, reviewer="tester", mode="single")
         self.assertEqual(pg.key.get_repeat(), (0, 0))  # a held z undoes one mark, not many
+
+
+CORRUPT = "batch_001/a.jpg"
+
+
+class TestUnloadable(EventLoopTestCase):
+    """One preprocessed JPG is garbage: it is shown as a placeholder that can only be marked DIRTY."""
+
+    def setUp(self):
+        super().setUp()
+        (self.work_dir / CORRUPT).write_bytes(b"not a jpeg")
+        stderr = mock.patch("sys.stderr", io.StringIO())
+        self.stderr = stderr.start()
+        self.addCleanup(stderr.stop)
+
+    def show(self, s: ReviewSession, index: int) -> None:
+        """Put item `index` on screen and let its dwell elapse."""
+        s._cursor = index
+        s._show_current()
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+
+    @staticmethod
+    def index_of(s: ReviewSession, key: str) -> int:
+        return next(i for i, item in enumerate(s._items) if key in item.keys)
+
+    def walk(self, s: ReviewSession, arrow: int) -> list[str]:
+        """Labels shown while pressing `arrow` until the end of the list; the cursor stays in range."""
+        labels = []
+        while s._ui_state == UIState.REVIEWING:
+            self.assertIn(s._cursor, range(len(s._items)))
+            labels.append(s._viewer._name)
+            s.handle_events([key(arrow)])
+            if s._ui_state == UIState.REVIEWING:
+                self.paint(s)
+        self.assertIn(s._cursor, range(len(s._items)))
+        return labels
+
+    def test_single_navigation_reaches_placeholder_both_ways(self):
+        s = self.reviewing()
+        self.assertEqual(s.batch, "batch_001")
+        forward = self.walk(s, pg.K_RIGHT)
+        self.assertEqual(sorted(forward), ["batch_001/a.jpg", "batch_001/b.jpg"])
+        self.assertEqual(s._cursor, len(s._items) - 1)
+        self.assertIn(CORRUPT, s._unloadable)
+        self.assertIn(f"cannot load {CORRUPT}", self.stderr.getvalue())
+        s.handle_events([key(pg.K_LEFT)])  # from "End of list" back onto the last item
+        self.paint(s)
+        self.assertEqual(self.walk(s, pg.K_LEFT), forward[::-1])
+        self.assertEqual(s._cursor, 0)
+
+    def test_single_placeholder_refuses_clean_and_records_dirty(self):
+        s = self.reviewing()
+        self.show(s, self.index_of(s, CORRUPT))
+        self.assertEqual(s._viewer._name, CORRUPT)
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_not_called()
+        self.assertEqual(s._viewer._info, UNLOADABLE_CLEAN)
+        self.assertEqual(s._statuses[CORRUPT], "UNREVIEWED")
+        s.handle_events([key(pg.K_d)])
+        self.mark.assert_called_once()
+        self.assertEqual(self.store.statuses(1)[CORRUPT], "DIRTY")
+
+    def test_grid_mode_has_single_placeholder_item(self):
+        s = self.reviewing("grid")
+        grids = [item for item in s._items if item.grid]
+        self.assertTrue(grids)
+        self.assertNotIn(CORRUPT, {k for item in grids for k in item.keys})
+        index = self.index_of(s, CORRUPT)
+        self.assertEqual(s._items[index], ReviewItem(keys=(CORRUPT,), label=CORRUPT, surface=None, grid=False))
+        self.show(s, index)  # the placeholder is drawn only when the item is shown
+        self.assertEqual(s._unloadable, {CORRUPT})
+        self.assertEqual(s._viewer._name, CORRUPT)
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_not_called()
+        self.assertEqual(s._viewer._info, UNLOADABLE_CLEAN)
+        s.handle_events([key(pg.K_d)])
+        self.assertEqual(self.mark.call_args.args[:2], ([CORRUPT], "DIRTY"))
+        self.assertEqual(self.store.statuses(1)[CORRUPT], "DIRTY")
+
+    def test_image_that_loads_again_can_be_marked_clean(self):
+        s = self.reviewing()
+        index = self.index_of(s, CORRUPT)
+        self.show(s, index)
+        self.assertIn(CORRUPT, s._unloadable)
+        (self.work_dir / CORRUPT).write_bytes((self.work_dir / "batch_001/b.jpg").read_bytes())
+        self.show(s, index)
+        self.assertNotIn(CORRUPT, s._unloadable)
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_called_once()
+        self.assertEqual(self.store.statuses(1)[CORRUPT], "CLEAN")
+
+    def test_marking_placeholder_dirty_lets_batch_and_pass_advance(self):
+        s = self.reviewing()
+        for index in range(len(s._items)):
+            self.show(s, index)
+            s.handle_events([key(pg.K_d if s._items[index].keys[0] == CORRUPT else pg.K_c)])
+        self.assertEqual(s._count_todo(), 0)
+        self.assertEqual(ReviewSession(self.store, reviewer="tester", mode="single").batch, "batch_002")
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        self.store.close()
+        with LocalStore(self.work_dir, read_only=True) as fresh:
+            self.assertEqual(fresh.current_pass(), 2)
+            self.assertEqual(fresh.statuses(2)[CORRUPT], "FLAGGED")
+
+    def test_pack_into_grids_reports_unloadable_key(self):
+        rows = [row for row in self.store.manifest() if row.batch == "batch_001"]
+        grids, unloadable = pack_into_grids(rows, self.store, 400, 300)
+        self.assertEqual(list(unloadable), [CORRUPT])
+        self.assertEqual([gs.keys for gs in grids], [["batch_001/b.jpg"]])
+        missing = [*rows, ManifestRow(key="batch_009/missing.jpg", batch="batch_009")]
+        _, unloadable = pack_into_grids(missing, self.store, 400, 300)
+        self.assertEqual(list(unloadable), [CORRUPT, "batch_009/missing.jpg"])
 
 
 class TestDwell(unittest.TestCase):

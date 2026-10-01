@@ -1,9 +1,38 @@
+import io
+from functools import cache
 from pathlib import Path
 
 import pygame as pg
 import pygame.freetype
 
 _FONTS_DIR = Path(__file__).parent / "fonts"
+
+PLACEHOLDER_SIZE = (1280, 720)
+
+
+@cache
+def _placeholder_font_bytes() -> bytes:
+    # The file is cached, not the Font: a Font does not survive pg.quit() and a later pg.init()
+    return (_FONTS_DIR / "DejaVuSans.ttf").read_bytes()
+
+
+def placeholder_surface(text: str) -> pg.Surface:
+    """A dark surface with `text` (one line per newline) centred on it, shown in place of an image
+    that could not be loaded. It widens to fit long lines; the viewer scales it like any image."""
+    font = pg.freetype.Font(io.BytesIO(_placeholder_font_bytes()), 36)
+    lines = text.splitlines() or [""]
+    rects = [font.get_rect(line) for line in lines]
+    line_height = font.get_sized_height(0) + 12
+    margin = 2 * line_height
+    width = max(PLACEHOLDER_SIZE[0], max(r.width for r in rects) + 2 * margin)
+    height = max(PLACEHOLDER_SIZE[1], line_height * len(lines) + 2 * margin)
+    surface = pg.Surface((width, height))
+    surface.fill(pg.Color(24, 24, 24))
+    y = (height - line_height * len(lines)) // 2
+    for line, rect in zip(lines, rects):
+        font.render_to(surface, ((width - rect.width) // 2, y), line, fgcolor=pg.Color(200, 200, 200))
+        y += line_height
+    return surface
 
 
 class ImageViewer:

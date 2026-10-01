@@ -552,6 +552,39 @@ class TestSession(RemoteTestCase):
         self.assertEqual(s._ui_state, UIState.DISCONNECTED)
         self.assert_no_repaint(s)
 
+    def test_corrupt_image_is_a_placeholder_not_an_outage(self):
+        corrupt = KEYS[0]
+        (self.work_dir / corrupt).write_bytes(b"not a jpeg")
+        for mode in ("single", "grid"):
+            with self.subTest(mode=mode), redirect_stderr(io.StringIO()) as err:
+                s = ReviewSession(self.store, reviewer="tester", mode=mode)
+                s._cursor = next(i for i, item in enumerate(s._items) if corrupt in item.keys)
+                s._show_current()
+                self.assertEqual(s._ui_state, UIState.REVIEWING)
+                self.assertEqual(s._viewer._name, corrupt)
+                self.assertEqual(s._unloadable, {corrupt})
+                self.assertNotIn("Lost connection", err.getvalue())
+                with mock.patch.object(self.store, "mark") as mark:
+                    s._mark("CLEAN")
+                mark.assert_not_called()
+
+    def test_missing_image_is_a_placeholder_not_an_outage(self):
+        missing = KEYS[0]
+        (self.work_dir / missing).unlink()  # the server answers 404, which the client raises as KeyError
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
+        s._cursor = next(i for i, item in enumerate(s._items) if item.keys == (missing,))
+        with redirect_stderr(io.StringIO()) as err:
+            s._show_current()
+            self.assertEqual(s._ui_state, UIState.REVIEWING)
+            self.assertEqual(s._unloadable, {missing})
+            with mock.patch.object(self.store, "mark", wraps=self.store.mark) as mark:
+                s._mark("CLEAN")
+                mark.assert_not_called()
+                s._mark("DIRTY")
+                mark.assert_called_once()
+        self.assertIn(f"cannot load {missing}: image could not be fetched", err.getvalue())
+        self.assertEqual(self.local_copy().statuses(1)[missing], "DIRTY")
+
 
 class TestImports(unittest.TestCase):
     def test_remote_is_lightweight(self):
