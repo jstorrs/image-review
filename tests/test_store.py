@@ -33,12 +33,14 @@ from image_review.controller import (
     AUTOPLAY_EVENT,
     GRID_HAS_DIRTY,
     MIN_DWELL_MS,
+    NO_TODO_MESSAGE,
     NOTHING_TO_UNDO,
     UNLOADABLE_CLEAN,
     ReviewItem,
     ReviewSession,
     UIState,
     _dwell_elapsed,
+    next_batch,
     next_index,
 )
 from image_review.grid_packer import pack_into_grids
@@ -1073,6 +1075,17 @@ class EventLoopTestCase(SessionTestCase):
             s.refresh_if_needed()
         refresh.assert_called_once()
 
+    def assert_message_stays(self, s: ReviewSession, state: UIState = UIState.END_MESSAGE) -> None:
+        """With no items, the message survives the loop's refresh and the navigation keys."""
+        self.assertEqual(s._ui_state, state)
+        with mock.patch.object(s._viewer, "refresh") as refresh:
+            s.refresh_if_needed()
+            for k in (pg.K_SPACE, pg.K_RIGHT, pg.K_LEFT):
+                self.assertTrue(s.handle_events([key(k)]))
+                self.assertEqual(s._ui_state, state)
+                s.refresh_if_needed()
+        refresh.assert_not_called()
+
 
 class TestEventLoop(EventLoopTestCase):
     def test_verdict_after_dwell_marks(self):
@@ -1155,18 +1168,7 @@ class TestEventLoop(EventLoopTestCase):
         with mock.patch.object(s._viewer, "show_message") as show_message:
             s.handle_events([key(pg.K_RIGHT)])
         self.assertEqual(s._ui_state, UIState.END_MESSAGE)
-        show_message.assert_called_once_with("No todo images remaining")
-
-    def assert_message_stays(self, s: ReviewSession, state: UIState = UIState.END_MESSAGE) -> None:
-        """With no items, the message survives the loop's refresh and the navigation keys."""
-        self.assertEqual(s._ui_state, state)
-        with mock.patch.object(s._viewer, "refresh") as refresh:
-            s.refresh_if_needed()
-            for k in (pg.K_SPACE, pg.K_RIGHT, pg.K_LEFT):
-                self.assertTrue(s.handle_events([key(k)]))
-                self.assertEqual(s._ui_state, state)
-                s.refresh_if_needed()
-        refresh.assert_not_called()
+        show_message.assert_called_once_with("No more todo images this way - 1 todo left - [b] next batch")
 
     def test_empty_mode_message_is_not_painted_over(self):
         s = self.reviewing()
@@ -1348,7 +1350,7 @@ class TestEventLoop(EventLoopTestCase):
         ):
             s.handle_events([key(pg.K_z)])
             self.assertEqual(s._ui_state, UIState.DISCONNECTED)
-            for k in (pg.K_z, pg.K_RIGHT, pg.K_SPACE, pg.K_LEFT, pg.K_n, pg.K_m, pg.K_s, pg.K_c):
+            for k in (pg.K_z, pg.K_RIGHT, pg.K_SPACE, pg.K_LEFT, pg.K_n, pg.K_m, pg.K_s, pg.K_c, pg.K_b):
                 self.assertTrue(s.handle_events([key(k)]))
             undo.assert_called_once()
         self.mark.assert_called_once()
@@ -1380,6 +1382,254 @@ class TestEventLoop(EventLoopTestCase):
     def test_key_repeat_is_off(self):
         ReviewSession(self.store, reviewer="tester", mode="single")
         self.assertEqual(pg.key.get_repeat(), (0, 0))  # a held z undoes one mark, not many
+
+
+class TestNextBatchKey(EventLoopTestCase):
+    """b on the end-of-list screen moves on to the next batch (batch_001: a, b; batch_002: c, d)."""
+
+    def start(self, **kwargs) -> ReviewSession:
+        """A session (single mode unless given) past the splash, its first item seen for the full dwell."""
+        s = ReviewSession(self.store, reviewer="tester", **{"mode": "single", **kwargs})
+        s._show_splash()
+        s.handle_events([key(pg.K_SPACE)])
+        if s._ui_state == UIState.REVIEWING:
+            self.paint(s)
+        self.now += MIN_DWELL_MS
+        return s
+
+    def finish(self, s: ReviewSession, dirty: str | None = None) -> None:
+        """Mark every item of the batch (an item holding `dirty` DIRTY, the rest CLEAN), reaching the end of the list."""
+        for _ in range(len(s._items)):
+            s.handle_events([key(pg.K_d if dirty in s._items[s._cursor].keys else pg.K_c)])
+            s.handle_events([pg.event.Event(ADVANCE_EVENT)])
+            if s._ui_state == UIState.REVIEWING:
+                self.paint(s)
+            self.now += MIN_DWELL_MS
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+
+    @staticmethod
+    def skip(s: ReviewSession) -> None:
+        """Walk past every item without marking, to the end of the list."""
+        for _ in s._items:
+            s.handle_events([key(pg.K_RIGHT)])
+
+    def press_b(self, s: ReviewSession) -> mock.Mock:
+        with mock.patch.object(s._viewer, "show_message") as show_message:
+            s.handle_events([key(pg.K_b)])
+        if s._ui_state == UIState.REVIEWING:
+            self.paint(s)
+            self.now += MIN_DWELL_MS
+        return show_message
+
+    def test_end_of_list_message_counts_todo_and_offers_b(self):
+        s = self.reviewing()
+        with mock.patch.object(s._viewer, "show_message") as show_message:
+            self.skip(s)
+        show_message.assert_called_once_with("End of list - 2 todo left - [b] next batch")
+        s = self.reviewing()
+        with mock.patch.object(s._viewer, "show_message") as show_message:
+            self.finish(s)
+        show_message.assert_called_once_with("End of list - [b] next batch")
+
+    def test_todo_only_end_with_nothing_left(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_u)])
+        with mock.patch.object(s._viewer, "show_message") as show_message:
+            self.finish(s)
+        show_message.assert_called_once_with(f"{NO_TODO_MESSAGE} - [b] next batch")
+
+    def test_b_loads_the_next_batch(self):
+        s = self.reviewing()
+        self.assertEqual(s.batch, "batch_001")
+        self.assertIn("batch 1/2", s._info_line())
+        self.finish(s)
+        with mock.patch.object(self.store, "statuses", wraps=self.store.statuses) as statuses:
+            self.press_b(s)
+        statuses.assert_called_once()  # the rebuild reuses the snapshot b fetched
+        self.assertEqual((s.batch, s.pass_number), ("batch_002", 1))
+        self.assertEqual((s._ui_state, s._cursor), (UIState.REVIEWING, 0))
+        self.assertEqual({item.keys[0] for item in s._items}, {"batch_002/c.jpg", "batch_002/d.jpg"})
+        self.assertIn("batch 2/2", s._info_line())
+
+    def test_b_in_grid_mode_rebuilds_grids(self):
+        s = self.reviewing("grid")
+        self.finish(s)
+        self.press_b(s)
+        self.assertEqual((s.batch, s.mode, s._ui_state), ("batch_002", "grid", UIState.REVIEWING))
+        self.assertEqual({k for item in s._items for k in item.keys}, {"batch_002/c.jpg", "batch_002/d.jpg"})
+
+    def test_explicit_pass_is_kept_after_the_pass_advances(self):
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        s = self.start(pass_number=1)
+        self.finish(s, dirty="batch_001/a.jpg")
+        self.assertEqual(self.store.current_pass(), 2)
+        show_message = self.press_b(s)
+        show_message.assert_called_once_with("All batches done for pass 1 (current pass is 2)")
+        self.assertEqual((s._ui_state, s.pass_number), (UIState.END_MESSAGE, 1))
+        self.assert_message_stays(s)
+        self.assertTrue(s.handle_events([key(pg.K_b)]))
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertFalse(s.handle_events([key(pg.K_q)]))
+
+    def test_undo_after_all_done_is_nothing_to_undo(self):
+        s = self.start(pass_number=1)
+        self.finish(s)
+        self.press_b(s)
+        self.finish(s)
+        self.press_b(s)
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        with mock.patch.object(self.store, "undo", wraps=self.store.undo) as undo:
+            show_message = self.press_key(s, pg.K_z)
+        undo.assert_not_called()
+        show_message.assert_called_once_with(NOTHING_TO_UNDO)
+
+    @staticmethod
+    def press_key(s: ReviewSession, k: int) -> mock.Mock:
+        with mock.patch.object(s._viewer, "show_message") as show_message:
+            s.handle_events([key(k)])
+        return show_message
+
+    def test_auto_pass_advances_to_the_flagged_batch(self):
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        s = self.reviewing()
+        self.assertEqual(s.batch, "batch_001")
+        self.finish(s, dirty="batch_001/a.jpg")
+        self.press_b(s)
+        self.assertEqual((s.pass_number, s.batch), (2, "batch_001"))
+        self.assertEqual([item.keys[0] for item in s._items], ["batch_001/a.jpg"])
+        self.assertEqual(s._statuses["batch_001/a.jpg"], "FLAGGED")
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertEqual(s._viewer._info, "Now pass 2")
+
+    def test_new_pass_starts_from_the_first_batch(self):
+        self.store.mark(["batch_002/c.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
+        self.store.mark(["batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        s = self.reviewing()
+        self.assertEqual(s.batch, "batch_001")
+        self.finish(s, dirty="batch_001/a.jpg")
+        self.press_b(s)
+        self.assertEqual((s.pass_number, s.batch), (2, "batch_001"))  # not batch_002, the next one after it
+
+    def test_auto_pass_with_nothing_in_the_new_pass(self):
+        s = self.reviewing()
+        self.finish(s)
+        self.press_b(s)
+        self.finish(s)
+        show_message = self.press_b(s)
+        show_message.assert_called_once_with("Pass 1 complete - nothing to review in pass 2")
+        self.assertEqual((s._ui_state, s.pass_number), (UIState.END_MESSAGE, 2))
+
+    def test_grid_mode_names_flagged_images_held_back(self):
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        s = self.reviewing("grid")
+        self.assertEqual(s.batch, "batch_001")
+        self.finish(s, dirty="batch_001/a.jpg")  # the one grid holds a and b: both DIRTY
+        show_message = self.press_b(s)
+        self.assertEqual(s.pass_number, 2)
+        show_message.assert_called_once_with(
+            "No grid items for pass 2; 2 FLAGGED/DIRTY images need single-mode review - press [s]"
+        )
+        self.assertEqual((s._ui_state, s.batch), (UIState.END_MESSAGE, "batch_001"))
+        s.handle_events([key(pg.K_s)])
+        self.assertEqual((s.mode, s._ui_state), ("single", UIState.REVIEWING))
+        self.assertEqual({item.keys[0] for item in s._items}, {"batch_001/a.jpg", "batch_001/b.jpg"})
+
+    def test_held_back_images_move_the_batch_for_s(self):
+        self.store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
+        self.store.mark(["batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        s = self.reviewing("grid")
+        self.assertEqual(s.batch, "batch_002")
+        self.finish(s)
+        show_message = self.press_b(s)
+        self.assertEqual(s.pass_number, 2)
+        show_message.assert_called_once_with(
+            "No grid items for pass 2; 1 FLAGGED/DIRTY image needs single-mode review - press [s]"
+        )
+        self.assertEqual(s.batch, "batch_001")
+        s.handle_events([key(pg.K_s)])
+        self.assertEqual([item.keys[0] for item in s._items], ["batch_001/a.jpg"])
+
+    def test_grid_all_filter_does_not_hold_back_a_judged_dirty_image(self):
+        s = self.start(status_filter="all", pass_number=1)
+        self.finish(s, dirty="batch_001/a.jpg")  # a DIRTY in this pass and marked here: done, not held back
+        s.handle_events([key(pg.K_m)])
+        self.assertEqual((s.mode, s.batch), ("grid", "batch_001"))
+        self.skip(s)
+        self.press_b(s)
+        self.assertEqual(s.batch, "batch_002")
+        self.finish(s)
+        show_message = self.press_b(s)
+        show_message.assert_called_once_with("All batches done for pass 1 (current pass is 2)")
+
+    def test_all_filter_finds_a_marked_image_flagged_in_the_new_pass(self):
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        s = self.start(status_filter="all")
+        self.assertEqual(s.batch, "batch_001")
+        self.finish(s, dirty="batch_001/a.jpg")  # a was marked in this session, and is FLAGGED in pass 2
+        self.press_b(s)
+        self.assertEqual((s.pass_number, s.batch, s._ui_state), (2, "batch_001", UIState.REVIEWING))
+        self.assertEqual(s._todo_count, 1)
+        a = next(item for item in s._items if item.keys == ("batch_001/a.jpg",))
+        self.assertTrue(s._is_todo(a))
+
+    def test_explicit_batch_after_the_pass_ends(self):
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        s = self.start(batch="batch_001")
+        self.finish(s)
+        show_message = self.press_b(s)
+        show_message.assert_called_once_with("Pass 1 complete - nothing to review in batch_001 for pass 2")
+
+    def test_unreviewed_wraps_to_todo_left_in_an_earlier_batch(self):
+        s = self.reviewing()
+        self.skip(s)  # batch_001 left unmarked
+        self.press_b(s)
+        self.assertEqual(s.batch, "batch_002")
+        self.skip(s)
+        self.press_b(s)
+        self.assertEqual((s.batch, s.pass_number, s._ui_state), ("batch_001", 1, UIState.REVIEWING))
+
+    def test_clean_filter_wraps_until_everything_is_rechecked(self):
+        for batch_keys in (["batch_001/a.jpg", "batch_001/b.jpg"], ["batch_002/c.jpg", "batch_002/d.jpg"]):
+            self.store.mark(batch_keys, "CLEAN", 1, reviewer="tester", mode="single")
+        s = self.start(status_filter="clean")
+        self.assertEqual(s.batch, "batch_001")
+        self.skip(s)  # batch_001 shown but not re-checked
+        self.press_b(s)
+        self.assertEqual((s.batch, s._ui_state), ("batch_002", UIState.REVIEWING))
+        self.finish(s)
+        self.press_b(s)
+        self.assertEqual((s.batch, s._ui_state), ("batch_001", UIState.REVIEWING))  # found again by wrapping
+        self.finish(s)
+        show_message = self.press_b(s)
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        show_message.assert_called_once()
+        show_message.assert_called_once_with(f"All batches done for pass {s.pass_number}")
+
+    def test_explicit_batch_restricts_b(self):
+        s = self.start(batch="batch_002")
+        self.skip(s)  # c and d skipped
+        self.press_b(s)
+        self.assertEqual((s.batch, s._ui_state), ("batch_002", UIState.REVIEWING))  # reloaded with its todo
+        self.finish(s)
+        show_message = self.press_b(s)
+        show_message.assert_called_once_with("Batch batch_002 done for pass 1")
+        self.assertEqual((s.batch, s._ui_state), ("batch_002", UIState.END_MESSAGE))  # batch_001 still todo
+
+    def test_b_outage_is_a_lost_connection(self):
+        s = self.reviewing()
+        self.skip(s)
+        with (
+            mock.patch.object(self.store, "statuses", side_effect=store_module.StoreUnavailable("down")),
+            mock.patch("sys.stderr"),
+        ):
+            s.handle_events([key(pg.K_b)])
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
+        self.assert_message_stays(s, UIState.DISCONNECTED)
+
+    def test_b_while_reviewing_does_nothing(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_b)])
+        self.assertEqual((s.batch, s._cursor, s._ui_state), ("batch_001", 0, UIState.REVIEWING))
 
 
 CORRUPT = "batch_001/a.jpg"
@@ -1543,6 +1793,38 @@ class TestNextIndex(unittest.TestCase):
         self.assertEqual(next_index(4, -1, 1, is_todo={3}.__contains__, wrap=False), 3)
         self.assertEqual(next_index(4, -1, -1, is_todo=None, wrap=False), 2)  # the inherited formula's result; unreachable in production
         self.assertEqual(next_index(1, -1, -1, is_todo=None, wrap=False), 0)
+
+
+class TestNextBatch(unittest.TestCase):
+    BATCHES = ("b1", "b2", "b3", "b4")
+
+    def check(self, current: str | None, with_rows: set[str], *, wrap: bool) -> str | None:
+        return next_batch(list(self.BATCHES), current, with_rows.__contains__, wrap=wrap)
+
+    def test_first_later_batch_with_rows(self):
+        self.assertEqual(self.check("b1", {"b1", "b3", "b4"}, wrap=False), "b3")
+        self.assertEqual(self.check("b1", {"b1", "b3", "b4"}, wrap=True), "b3")
+
+    def test_without_wrap_stops_after_the_last_batch(self):
+        self.assertIsNone(self.check("b4", set(self.BATCHES), wrap=False))
+        self.assertIsNone(self.check("b2", {"b1", "b2"}, wrap=False))
+
+    def test_wrap_goes_round_to_earlier_batches_then_the_current_one(self):
+        self.assertEqual(self.check("b3", {"b1", "b2"}, wrap=True), "b1")
+        self.assertEqual(self.check("b3", {"b3"}, wrap=True), "b3")
+        self.assertIsNone(self.check("b3", set(), wrap=True))
+
+    def test_no_current_searches_from_the_first(self):
+        for wrap in (False, True):
+            with self.subTest(wrap=wrap):
+                self.assertEqual(self.check(None, {"b2", "b4"}, wrap=wrap), "b2")
+                self.assertIsNone(self.check(None, set(), wrap=wrap))
+
+    def test_unknown_current_searches_from_the_first(self):
+        self.assertEqual(self.check("b9", {"b1"}, wrap=False), "b1")
+
+    def test_no_batches(self):
+        self.assertIsNone(next_batch([], None, lambda b: True, wrap=True))
 
 
 class TestPureFunctions(StoreTestCase):

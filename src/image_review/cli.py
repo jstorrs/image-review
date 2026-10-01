@@ -266,7 +266,7 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
 @cli.command()
 @click.option("--mode", type=click.Choice(["single", "grid"]), default="single", show_default=True, help="Review display mode.")
 @click.option("--pass", "pass_number", type=click.IntRange(min=1), default=None, help="Pass number, 1 or more (auto-detected if omitted).")
-@click.option("--batch", type=str, default=None, help="Restrict to a specific batch [default: the first batch with images matching the filter].")
+@click.option("--batch", type=str, default=None, help="Restrict to a specific batch; [b] at the end of the list stays in it [default: the first batch with images matching the filter, and [b] moves on to the next].")
 @click.option("--filter", "status_filter", type=click.Choice(get_args(StatusFilter)), default="unreviewed", show_default=True, help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).")
 @click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
 @click.option(

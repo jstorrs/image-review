@@ -208,7 +208,7 @@ image-review review [options]
 |------|---------|-------------|
 | `--mode` | `single` | `single` (one image at a time) or `grid` (packed grids) |
 | `--pass` | auto | Pass number, 1 or more (auto-detected if omitted) |
-| `--batch` | first batch with images matching the filter | Restrict review to a specific batch (e.g., `batch_001`); an unknown or empty name is rejected with the list of known batches |
+| `--batch` | first batch with images matching the filter | Restrict review to a specific batch (e.g., `batch_001`), also for `b` at the end of the list; an unknown or empty name is rejected with the list of known batches |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
 | `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images for tighter grid packing |
 | `--reviewer` | your login name | Name recorded with each verdict in `review.tsv`, 1-64 printable characters, not all spaces (also `$IMAGE_REVIEW_REVIEWER`). An unauthenticated claim: it is recorded as given, not verified |
@@ -244,6 +244,7 @@ The viewer accepts keyboard and gamepad input:
 | Mark CLEAN | `c` | Button 1 |
 | Mark DIRTY | `d` | Button 3 |
 | Undo your last mark in this mode | `z` | -- |
+| Next batch (end-of-list screen) | `b` | -- |
 | Next image | `Right` | Hat right |
 | Previous image | `Left` | Hat left |
 | Next todo item | `n` | -- |
@@ -278,6 +279,28 @@ works on the "End of list" screen, so you can undo the last mark of a batch.
 (`s`, `m` or `M`); past those it says "Nothing to undo". The history is kept in
 memory and is gone once the program exits. After "Lost connection to server",
 `z` and the other keys do nothing; press `q`.
+
+Finished a batch? On the "End of list" screen (in todo-only navigation, "No
+todo images remaining", or "No more todo images this way" when todo images are
+left in the other direction), which also shows how many todo images the batch
+has left, if any, press `b` to move on to the next batch without restarting
+the program. The viewer re-reads the current pass (keeping it if you gave
+`--pass`) and the statuses, then opens the next batch, in sorted order, that
+still has todo images in the current mode, starting at its first item. The
+help screen shows "batch k/B", the batch's position among all batches. `b`
+goes round once, so batches you skipped earlier come back; with
+`--filter clean` or `--filter all` an image counts as todo until you have
+marked it in this session, and again if it becomes UNREVIEWED or FLAGGED (for
+example, DIRTY images come back FLAGGED in the next pass). When the pass
+changes (the pass ended with DIRTY images) it starts again from the first
+batch, which in single mode means the first batch with FLAGGED images, and the
+info bar says "Now pass N". When nothing is left you see "All batches done for
+pass N", or, with the default `--filter unreviewed`, "Pass P complete -
+nothing to review in pass N" when the pass has just ended. In grid mode, which
+leaves FLAGGED and DIRTY images out, it instead tells you how many need
+single-mode review: press `s` to review them. Press `q` to quit. If you started with `--batch`, `b` stays
+in that batch: it reloads it while images are still todo, then says "Batch
+NAME done for pass N". `z` cannot undo marks made in the previous batch.
 
 ### Multi-Pass Workflow
 
@@ -333,6 +356,9 @@ To focus on a single batch:
 ```bash
 image-review review --mode single --batch batch_003
 ```
+
+`--batch` restricts the whole session to that batch: pressing `b` at the end
+of the list reloads it while it has todo images, and never moves on to another.
 
 ### Filtering by Status
 

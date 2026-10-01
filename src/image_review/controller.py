@@ -42,6 +42,9 @@ GRID_ELIGIBLE: frozenset[Status] = frozenset({"UNREVIEWED", "CLEAN"})
 GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in single mode"
 NOTHING_TO_UNDO = "Nothing to undo"
 UNLOADABLE_CLEAN = "cannot mark CLEAN: image could not be loaded"
+END_OF_LIST_MESSAGE = "End of list"
+NO_TODO_MESSAGE = "No todo images remaining"
+NO_TODO_THIS_WAY_MESSAGE = "No more todo images this way"
 
 
 def _placeholder(key: str, reason: str) -> pg.Surface:
@@ -92,6 +95,17 @@ def next_index(n: int, cursor: int, direction: int, *, is_todo: Callable[[int], 
     return None
 
 
+def next_batch(batches: list[str], current: str | None, has_rows: Callable[[str], bool], *, wrap: bool) -> str | None:
+    """The first of the sorted `batches` after `current` (None: from the first) that `has_rows`
+    accepts, or None when there is none.
+
+    Without `wrap` the search stops after the last batch. With `wrap` it goes round once, back to
+    `current` itself, so todo images left behind in earlier batches (or skipped in this one) are found."""
+    cursor = batches.index(current) if current in batches else -1
+    idx = next_index(len(batches), cursor, 1, is_todo=lambda i: has_rows(batches[i]), wrap=wrap)
+    return None if idx is None else batches[idx]
+
+
 class UIState(Enum):
     SPLASH = auto()
     REVIEWING = auto()
@@ -114,10 +128,12 @@ class ReviewSession:
         self.reviewer = reviewer  # checked by the CLI (connection.parse_reviewer); recorded with each verdict
         self.mode = mode
         self.batch = batch
+        self._explicit_batch = batch is not None  # --batch restricts the session: b never leaves it
         self.status_filter = status_filter
         self.allow_rotation = allow_rotation
         self.manifest = store.manifest()
 
+        self._explicit_pass = pass_number is not None  # --pass: b keeps it rather than re-reading the current pass
         if pass_number is None:
             self.pass_number = store.current_pass()
         else:
@@ -184,24 +200,40 @@ class ReviewSession:
             rows = [r for r in rows if self._statuses[r.key] in GRID_ELIGIBLE]
         return rows
 
-    def _held_back_count(self) -> int:
-        """Rows the status filter selects that the current mode leaves out (grid mode: DIRTY and FLAGGED)."""
-        return len(filter_rows(self.manifest, self._statuses, self.status_filter, self.batch)) - len(self._review_rows(self.batch))
+    def _held_back_count(self, batch: str | None) -> int:
+        """Todo rows (see _key_todo) of `batch` (None: every batch) the status filter selects that the
+        current mode leaves out (grid mode: DIRTY and FLAGGED)."""
+        shown = {row.key for row in self._review_rows(batch)}
+        selected = filter_rows(self.manifest, self._statuses, self.status_filter, batch)
+        return sum(1 for row in selected if row.key not in shown and self._key_todo(row.key))
 
-    def _held_back_message(self) -> str | None:
-        held = self._held_back_count()
+    def _held_back_message(self, batch: str | None, *, in_session: bool) -> str | None:
+        """Names the todo rows of `batch` that grid mode leaves out, or None when there are none. In the
+        session the hint is the s key; in the terminal, the --mode option."""
+        held = self._held_back_count(batch)
         if not held:
             return None
         images = "image needs" if held == 1 else "images need"
-        return f"No grid items for pass {self.pass_number}; {held} FLAGGED/DIRTY {images} single-mode review (--mode single)"
+        hint = " - press [s]" if in_session else " (--mode single)"
+        return f"No grid items for pass {self.pass_number}; {held} FLAGGED/DIRTY {images} single-mode review{hint}"
+
+    def _batches(self) -> list[str]:
+        return sorted({row.batch for row in self.manifest})
 
     def _auto_select_batch(self) -> str | None:
         """Find the first batch that has images the current mode may show."""
-        batches = sorted({row.batch for row in self.manifest})
-        for batch in batches:
-            if self._review_rows(batch):
-                return batch
-        return None
+        return next_batch(self._batches(), None, lambda b: bool(self._review_rows(b)), wrap=False)
+
+    def _key_todo(self, key: str) -> bool:
+        """A key is todo while its status is UNREVIEWED or FLAGGED; under clean/all, where every key is
+        a re-check, also until it is marked in this session."""
+        if self._statuses[key] in TODO_STATUSES:
+            return True
+        return self.status_filter != "unreviewed" and key not in self._marked_this_session
+
+    def _batch_has_todo(self, batch: str) -> bool:
+        """Whether `batch` has rows the current mode may show that are todo (see _key_todo)."""
+        return any(self._key_todo(row.key) for row in self._review_rows(batch))
 
     def _init_single_mode(self):
         rows = self._review_rows(self.batch)
@@ -252,6 +284,9 @@ class ReviewSession:
 
     def _info_line(self, n_items: int | None = None) -> str:
         parts = [f"{self.batch} pass {self.pass_number}"] if self.batch else [f"pass {self.pass_number}"]
+        batches = self._batches()
+        if self.batch in batches:
+            parts.append(f"batch {batches.index(self.batch) + 1}/{len(batches)}")
         if self.status_filter != "unreviewed":
             parts.append(f"filter: {self.status_filter}")
         if n_items is not None:
@@ -259,7 +294,9 @@ class ReviewSession:
         parts.append(f"{self.mode} image review")
         return " - ".join(parts)
 
-    def _restart_in_mode(self, new_mode: MarkMode):
+    def _restart_in_mode(self, new_mode: MarkMode, *, refetch_statuses: bool = True):
+        """Rebuild the items for `new_mode` and the current batch and start at the first item.
+        Without `refetch_statuses` the snapshot the caller just fetched is used."""
         self._stop_timers()
         self.mode = new_mode
         self._cursor = -1
@@ -267,7 +304,8 @@ class ReviewSession:
         self._shown_at = None
         self._dirty = True
         try:
-            self._statuses = self.store.statuses(self.pass_number)
+            if refetch_statuses:
+                self._statuses = self.store.statuses(self.pass_number)
             if new_mode == "grid":
                 self._viewer.show_message("Computing grids...")
                 self._init_grid_mode()
@@ -281,21 +319,82 @@ class ReviewSession:
             pg.event.clear(VERDICT_INPUT_EVENTS)  # pressed while blocked, before anything new was shown
 
         if not self._items:
-            self._viewer.show_message(self._held_back_message() or f"No items for {new_mode} mode")
+            self._viewer.show_message(self._held_back_message(self.batch, in_session=True) or f"No items for {new_mode} mode")
             self._ui_state = UIState.END_MESSAGE
             return
 
         self._ui_state = UIState.REVIEWING
         self.next_image()
 
-    def _is_todo(self, item: ReviewItem) -> bool:
-        """Under clean/all every item is a re-check, so it is todo until marked in this session.
+    def _next_batch(self):
+        """Move on to the next batch with todo images, re-reading the pass (adopted unless --pass
+        fixed it) and the statuses, and start it at its first item.
 
-        Any unmarked key keeps a grid todo, so a partly undone grid comes back.
+        The search wraps round once, so todo left behind in earlier batches (or skipped in this one)
+        is found under every filter. On a pass change it starts from the first batch, and the
+        marked set is kept (under clean/all a re-check of a finished pass advances the auto-detected
+        pass itself); a marked key that is UNREVIEWED or FLAGGED again is todo anyway (_key_todo).
+        --batch restricts it to that batch."""
+        self._stop_timers()
+        old_pass = self.pass_number
+        try:
+            current_pass = self.store.current_pass()
+            if not self._explicit_pass:
+                self.pass_number = current_pass
+            self._statuses = self.store.statuses(self.pass_number)
+        except StoreUnavailable as exc:
+            self._items = []
+            self._store_lost(exc)
+            return
+        pass_changed = self.pass_number != old_pass
+        batches = [b for b in self._batches() if not self._explicit_batch or b == self.batch]
+        batch = next_batch(batches, None if pass_changed else self.batch, self._batch_has_todo, wrap=True)
+        if batch is None:
+            # The items may belong to a pass that has ended: drop them, so only quitting (or a mode switch) remains
+            self._items = []
+            self._undoable = 0
+            self._ui_state = UIState.END_MESSAGE
+            message = self._held_back_message(self.batch if self._explicit_batch else None, in_session=True)
+            if message:  # so s opens the first batch with images grid mode left out
+                self.batch = next_batch(batches, None, lambda b: self._held_back_count(b) > 0, wrap=False)
+            self._viewer.show_message(message or self._all_done_message(old_pass, current_pass))
+            return
+        self.batch = batch
+        self._restart_in_mode(self.mode, refetch_statuses=False)
+        if pass_changed and self._ui_state == UIState.REVIEWING:
+            self._notify(f"Now pass {self.pass_number}")
+
+    def _all_done_message(self, old_pass: int, current_pass: int) -> str:
+        """What b shows when no batch has todo left (and none holds images back from grid mode)."""
+        if self.pass_number > old_pass and self.status_filter == "unreviewed":  # under clean/all a re-check advances the pass
+            where = f"{self.batch} for pass" if self._explicit_batch else "pass"
+            message = f"Pass {old_pass} complete - nothing to review in {where} {self.pass_number}"
+        elif self._explicit_batch:
+            message = f"Batch {self.batch} done for pass {self.pass_number}"
+        else:
+            message = f"All batches done for pass {self.pass_number}"
+        if current_pass != self.pass_number:
+            message += f" (current pass is {current_pass})"
+        return message
+
+    def _no_todo_message(self) -> str:
+        """The end message of todo-only navigation: none left at all, or none in that direction."""
+        return self._end_message(NO_TODO_THIS_WAY_MESSAGE if self._todo_count else NO_TODO_MESSAGE)
+
+    def _end_message(self, text: str) -> str:
+        """An end-of-list message with the batch's todo count and the b hint."""
+        todo = f" - {self._todo_count} todo left" if self._todo_count else ""
+        return f"{text}{todo} - [b] next batch"
+
+    def _is_todo(self, item: ReviewItem) -> bool:
+        """Under clean/all every item is a re-check, so it is todo until marked in this session, and
+        again once a key is UNREVIEWED or FLAGGED (see _key_todo).
+
+        Any todo key keeps a grid todo, so a partly undone grid comes back.
         """
         if self.status_filter == "unreviewed":
             return self._item_status(item) in TODO_STATUSES
-        return not self._marked_this_session.issuperset(item.keys)
+        return any(self._key_todo(key) for key in item.keys)
 
     def _count_todo(self) -> int:
         return sum(1 for item in self._items if self._is_todo(item))
@@ -367,14 +466,14 @@ class ReviewSession:
             else:
                 self._stop_autoplay()
                 self._ui_state = UIState.END_MESSAGE
-                self._viewer.show_message("No todo images remaining")
+                self._viewer.show_message(self._no_todo_message())
             return
 
         idx = next_index(len(self._items), self._cursor, direction, is_todo=None, wrap=False)
         if idx is None:
             self._stop_autoplay()
             self._ui_state = UIState.END_MESSAGE
-            self._viewer.show_message("End of list")
+            self._viewer.show_message(self._end_message(END_OF_LIST_MESSAGE))
             return
 
         self._cursor = idx
@@ -506,7 +605,7 @@ class ReviewSession:
                     self._cursor = -1
                 if not self.next_todo(direction):
                     self._ui_state = UIState.END_MESSAGE
-                    self._viewer.show_message("No todo images remaining")
+                    self._viewer.show_message(self._no_todo_message())
             else:
                 self._cursor = 0 if direction == 1 else len(self._items) - 1
                 self._show_current()
@@ -519,6 +618,8 @@ class ReviewSession:
             self._switch_to_single()
         elif key == pg.K_z:
             self._undo()
+        elif key == pg.K_b:
+            self._next_batch()
         return False
 
     def _handle_review_key(self, key, now: int) -> bool:
@@ -572,7 +673,7 @@ class ReviewSession:
     def run(self):
         if not self._items:
             filter_msg = f" (filter: {self.status_filter})" if self.status_filter != "unreviewed" else ""
-            print(self._held_back_message() or f"No images to review for pass {self.pass_number}{filter_msg}.")
+            print(self._held_back_message(self.batch, in_session=False) or f"No images to review for pass {self.pass_number}{filter_msg}.")
             return
 
         batch_info = f", batch {self.batch}" if self.batch else ""

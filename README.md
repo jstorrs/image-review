@@ -149,6 +149,7 @@ are shown one at a time for detailed inspection.
 | `c` | Mark CLEAN |
 | `d` | Mark DIRTY |
 | `z` | Undo your last mark in this mode (also on the end-of-list screen) |
+| `b` | Next batch (on the end-of-list screen) |
 | Left / Right | Navigate |
 | `n` | Jump to next todo item |
 | `u` | Toggle todo-only navigation |
@@ -173,13 +174,35 @@ After a lost connection `z` does nothing; only `q` works. An undo appends rows t
 (`mode` `undo`) that restore each image's previous verdict and pass, or, for an
 image that had none, mark it `UNREVIEWED` again (a tombstone).
 
+At the end of a batch, `b` moves on to the next batch without restarting. The
+end screen says "End of list", or in todo-only navigation "No todo images
+remaining" (or "No more todo images this way" when todo images are left in
+the other direction), with the batch's todo count when it is not 0. `b`
+re-reads the current pass (keeping `--pass` if given) and the statuses, then
+opens the next batch, in sorted order, that still has todo images in the
+current mode, at its first item. The search goes round once, so batches you
+skipped earlier (or images skipped in this one) come back. Under
+`--filter clean` or `all` an image is todo until you have marked it in this
+session, and again if it becomes UNREVIEWED or FLAGGED. When the pass changes
+(the last pass ended with DIRTY images) the search starts again from the first
+batch, and the info bar says "Now pass N". With `--batch`, `b` stays in that
+batch: it reloads it while it has todo images, then says "Batch NAME done for
+pass N". When nothing is left it says "All batches done for pass N", or, under
+the default `--filter unreviewed` when the pass has just ended, "Pass P
+complete - nothing to review in pass N"; "(current pass is M)" is added when
+`--pass` differs from the current pass. In grid mode it instead counts the
+FLAGGED/DIRTY images grids leave out and asks you to press `s`, which opens
+the first batch holding one in single mode. `q` quits. The undo history does
+not carry over to the new batch.
+
 The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
 orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
 verdict). Grids are built without DIRTY or FLAGGED images.
 
 `--pass` must be 1 or more. `--batch` defaults to the first batch with images
 matching the filter; an empty or unknown batch name is rejected (exit 2) with a
-list of known batches.
+list of known batches. It restricts the session to that batch: `b` at the end
+of the list never leaves it.
 
 Every verdict is saved to `review.tsv` in the work directory with who gave it
 and how: the columns are `image_id`, `batch`, `status`, `pass_number`,
@@ -286,4 +309,6 @@ If `--remote` reports "server speaks API vN, this client vM" (or "server is too 
 3. **Pass 3+**: Repeat on the shrinking DIRTY pool until confident.
 
 Sessions are resumable -- quitting saves all progress. The batch and pass
-number are auto-detected when not specified.
+number are auto-detected when not specified. Press `b` at the end of a batch to
+move on to the next one, and into the next pass once this one is done (not
+with `--batch`, which keeps you in that batch).

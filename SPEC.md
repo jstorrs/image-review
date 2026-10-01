@@ -314,7 +314,7 @@ image-review review [--mode {single,grid}]            [--pass N]
 |----------|---------|-------------|
 | `--mode` | `single` | `single` = one image at a time; `grid` = packed grids |
 | `--pass` | auto-detected | Review pass number (integer >= 1) |
-| `--batch` | first batch with images matching the filter | Restrict to a named batch (e.g. `batch_001`); an empty or unknown name exits 2 listing up to 5 known batches |
+| `--batch` | first batch with images matching the filter | Restrict to a named batch (e.g. `batch_001`), also for `b` at the end of the list (see *Next Batch*); an empty or unknown name exits 2 listing up to 5 known batches |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
 | `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images 90° for tighter grid packing |
 | `--reviewer` | `getpass.getuser()` at run time | Name recorded in the `reviewer` column of every verdict; also read from `$IMAGE_REVIEW_REVIEWER`. Checked by `connection.parse_reviewer` (1-64 characters, all `str.isprintable()`, so no tab, newline or other control character, and not all whitespace); a bad value, or no login name to default to, exits 2. It is the client's unauthenticated claim, recorded as given |
@@ -637,6 +637,10 @@ the session's current display mode, to every `store.mark()`, and to every `store
    todo images are FLAGGED is therefore not auto-selected for grid mode
 5. Determine review items based on mode
 
+The session remembers whether the pass (`--pass`) and the batch (`--batch`)
+were given: `b` (see *Next Batch*) adopts the current pass only when the pass
+was not given, and never leaves a given batch.
+
 Every item is a `ReviewItem`, a frozen dataclass: `keys` (a tuple of manifest
 keys), `label` (shown in the status bar: the key, or
 "grid (N images)"), `surface` (a grid's composited surface, or `None` for a
@@ -648,20 +652,20 @@ unloadable image's item in grid mode is a single image, not a grid).
 
 All status decisions (filtering, item status, todo counts, grid status) read a
 local dict, not the store. It is refreshed from `store.statuses()` at init and
-on every mode restart, and updated after each mark from the returned
+on every mode restart and next-batch move, and updated after each mark from the returned
 `mark()` result (which includes other keys sharing an `image_id`). Marking
 therefore costs one store call and no re-fetch.
 
 ### Store Failures
 
 `StoreUnavailable` (raised by `RemoteStore` as `RemoteError`) while loading an
-image, marking, or restarting a mode is treated as a lost connection, not an
+image, marking, restarting a mode, or moving to the next batch is treated as a lost connection, not an
 unloadable image: autoplay and the pending auto-advance are cancelled, the
 status snapshot is left unchanged (a failed mark is not applied), the viewer
 shows "Lost connection to server - progress saved. Press q to quit." and the
 reason is printed to stderr. The session is then `DISCONNECTED`: only `q`/Esc
 and closing the window do anything (no navigation, mode switch or `z` reaches
-the store again). A failed mode restart clears the item list. Any
+the store again). A failed mode restart or next-batch move clears the item list. Any
 other failure to load an image is an unloadable image (see *Unloadable Images*).
 
 ### Single Mode
@@ -706,8 +710,9 @@ grid's own verdict.
 If grid mode has no items but the status filter selected rows it left out, the
 session says so instead of implying the review is done: `run()` prints, and a
 mode restart shows, "No grid items for pass N; K FLAGGED/DIRTY image(s) need(s)
-single-mode review (--mode single)" (K counted over the selected batch, or all
-batches when none is selected).
+single-mode review", ending " (--mode single)" in the terminal and " - press
+[s]" on screen (K counts the left-out rows that are todo as in *Todo*, over the
+selected batch, or all batches when none is selected).
 
 ### Unloadable Images
 
@@ -744,8 +749,10 @@ A grid's aggregate status is derived from the snapshot statuses of its keys:
 With `--filter unreviewed`, an item is todo if its status is in `TODO_STATUSES` (UNREVIEWED or
 FLAGGED); in single mode a FLAGGED image is therefore todo, and grids are never built with one.
 With `--filter clean` or `all`, every loaded item is a re-check: it is todo while at least one of
-its keys is not in the session's marked set. A successful mark adds the item's keys; a successful
-undo removes the keys it restored. The set is in memory only. Any unmarked key keeps a grid todo,
+its keys is todo, i.e. not in the session's marked set or with a status in `TODO_STATUSES` (a key
+marked earlier that is FLAGGED in a new pass, or restored to UNREVIEWED, is todo again). A
+successful mark adds the item's keys; a successful undo removes the keys it restored. The set is in
+memory only and is kept across a pass change (see *Next Batch*). Any todo key keeps a grid todo,
 so a partly undone grid comes back.
 
 ### Event Loop
@@ -757,6 +764,7 @@ The session runs a pygame event loop processing:
 | `c` key / Button 1 | Mark current item CLEAN |
 | `d` key / Button 3 | Mark current item DIRTY |
 | `z` key | Undo this session's latest mark since the mode started (see *Undo*); also on the end-of-list screen |
+| `b` key | On the end-of-list screen only: move on to the next batch (see *Next Batch*) |
 | Right arrow / Hat right | Next item |
 | Left arrow / Hat left | Previous item |
 | Space | Toggle autoplay (500ms auto-advance) |
@@ -773,7 +781,15 @@ The session runs a pygame event loop processing:
 | Joystick added/removed | Hot-plug handling |
 
 After marking, the viewer auto-advances to the next item after 200ms.
-Navigation stops at list boundaries with an "End of list" message.
+Navigation stops at list boundaries with an "End of list - K todo left - [b]
+next batch" message, where K is the batch's todo count; the "K todo left" part
+is left out when K is 0. In todo-only navigation the message is "No todo
+images remaining - [b] next batch" when K is 0, and "No more todo images this
+way - K todo left - [b] next batch" when todo items remain in the other
+direction.
+On that screen Right/Space and Left wrap round to the first or last item, `s`,
+`m` and `M` switch mode, `z` undoes, `b` moves on to the next batch and
+`q`/Esc quits.
 
 Marking, Left / hat left, `n`, `Space` (while playing), mode switches, the help
 screen (`h`) and display select (`w`) cancel autoplay; Right / hat right keeps
@@ -789,9 +805,10 @@ the help, display-select or message screens.
 `refresh_if_needed()` repaints. The display only redraws when a dirty flag is
 set, to minimize CPU usage, and only while reviewing: the splash, help,
 display-select and message screens ("End of list", "No items for grid mode",
-"Lost connection to server ...") are painted once by the viewer and stay until
-the state changes. When there are no items (an empty mode), the navigation keys
-leave the message up; only `q`/Esc, `s`, `m`, `M` and `z` act. On the lost
+"All batches done for pass N", "Lost connection to server ...") are painted once
+by the viewer and stay until the state changes. When there are no items (an
+empty mode, or no batch left), the navigation keys leave the message up; only
+`q`/Esc, `s`, `m`, `M`, `z` and `b` act. On the lost
 connection screen only `q`/Esc act (see *Store Failures*).
 
 **Verdicts need a seen item.** A verdict (`c`/`d`, Button 1/3) applies only to
@@ -831,6 +848,59 @@ the status bar then names up to three of its keys with their new status. `z`
 is not dwell-gated: it only undoes a mark on an item this mode showed, and
 shows that item again before any verdict counts. Key repeat stays off
 (pygame's default), so a held `z` undoes one mark.
+
+### Next Batch
+
+`b` on the end-of-list screen (not the lost connection screen) moves the
+session on to another batch without restarting. It cancels autoplay and a
+pending post-mark advance, reads `store.current_pass()` (adopted as the
+session's pass unless `--pass` was given) and re-fetches the status snapshot.
+The batch is then chosen by the pure function
+`next_batch(batches, current, has_rows, *, wrap)`, which returns the first of
+the sorted `batches` after `current` (from the first when `current` is `None`)
+that `has_rows` accepts, or `None`; with `wrap` the search goes round once,
+through the batches before `current` and finally `current` itself. `b` calls it
+with:
+
+- `batches`: the manifest's batches sorted alphabetically, or only the
+  `--batch` one when it was given, so `b` never leaves a restricted batch (it
+  reloads it while it has todo).
+- `current`: the session's batch, or `None` when the pass changed (the search
+  starts again from the first batch).
+- `has_rows(batch)`: the batch has todo rows the mode may show, i.e. rows of
+  the status filter (minus DIRTY and FLAGGED in grid mode, as in
+  auto-selection) that are todo as in *Todo*: any such row under
+  `--filter unreviewed`; under `clean`/`all`, a row whose key is not in the
+  session's marked set or whose status is UNREVIEWED or FLAGGED. The set is
+  kept across a pass change: under clean/all a re-check of a finished pass is
+  itself recorded in a new pass, and `current_pass()` then advances; a key it
+  holds that the new pass shows as FLAGGED is still todo by its status.
+- `wrap=True` under every filter, so todo left behind (e.g. skipped images or
+  batches) is found.
+
+A found batch becomes the session's batch and its items are rebuilt in the
+current mode as for a mode restart ("Computing grids..." in grid mode,
+`_undoable` reset), from the snapshot `b` just fetched, starting at the first
+item. After a pass change the info bar says "Now pass N". When nothing is found the session drops its items (they may belong to an
+ended pass), resets `_undoable` (so `z` says "Nothing to undo") and shows:
+
+- when the mode holds back todo rows of the status filter (grid mode:
+  FLAGGED and DIRTY; counted over all batches, or the `--batch` one): "No grid
+  items for pass N; K FLAGGED/DIRTY image(s) need(s) single-mode review -
+  press [s]", with the session's batch moved to the first batch holding one
+  (the `--batch` one itself when given), so `s` opens it;
+- otherwise, under `--filter unreviewed` when the pass has just advanced:
+  "Pass P complete - nothing to review in pass N" (with `--batch`, "... in
+  NAME for pass N");
+- otherwise, with `--batch`: "Batch NAME done for pass N";
+- otherwise "All batches done for pass N".
+
+The last three get " (current pass is M)" appended when an explicit `--pass`
+differs from `current_pass()`. `q`/Esc quit. A `StoreUnavailable` from any of
+these calls is a lost connection (see *Store Failures*). The
+splash/help info line shows the batch's position, "batch k/B", among all the
+manifest's batches. There is no gamepad binding: the gamepad buttons act only
+on the review screen.
 
 ## Grid Packer (`grid_packer.py`)
 

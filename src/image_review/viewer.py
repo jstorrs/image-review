@@ -165,6 +165,7 @@ class ImageViewer:
         "  c        Mark CLEAN      B / East   Mark CLEAN",
         "  d        Mark DIRTY      Y / North  Mark DIRTY",
         "  z        Undo last mark",
+        "  b        Next batch (end of list)",
         "  Left/Right  Navigate     D-pad      Navigate",
         "  n        Next todo",
         "  u        Todo only",
