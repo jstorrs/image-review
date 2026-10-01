@@ -1,4 +1,5 @@
 import io
+import math
 from functools import cache
 from pathlib import Path
 
@@ -35,6 +36,12 @@ def placeholder_surface(text: str) -> pg.Surface:
     return surface
 
 
+def scale_percent(scale: float) -> int:
+    """`scale` as an integer percent, truncated so a scale just under 1.0 never reads "100%"
+    (the epsilon keeps float error, e.g. 0.29 * 100, from dropping a point)."""
+    return math.floor(scale * 100 + 1e-9)
+
+
 class ImageViewer:
     border: int = 50
 
@@ -44,6 +51,8 @@ class ImageViewer:
         "UNREVIEWED": pg.Color(128, 128, 128),
         "FLAGGED": pg.Color(255, 176, 64),
     }
+
+    SCALE_WARNING_COLOR = pg.Color(192, 0, 0)
 
     def __init__(self):
         sizes = pg.display.get_desktop_sizes()
@@ -62,13 +71,16 @@ class ImageViewer:
         self._name = ""
         self._content = None
         self._offset = (0, 0)
+        self._scale = 1.0  # displayed size / source size of the current image
+        self._source_scale = 1.0  # the image's own scale vs. its source: a grid shrinks the images in it
         self._splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
         self._splash_font.fgcolor = pg.Color(200, 200, 200)
         self._joystick_count = 0
         self._todo_only = False
 
-    def set_image(self, surface: pg.Surface, name: str, status: str, info: str) -> None:
+    def set_image(self, surface: pg.Surface, name: str, status: str, info: str, source_scale: float = 1.0) -> None:
         self._image = surface
+        self._source_scale = source_scale
         self._name = name
         self._status = status
         self._info = info
@@ -113,6 +125,7 @@ class ImageViewer:
     def resize(self) -> None:
         if self._image is None:
             return
+        self.screen = pg.display.get_surface()  # a resize may have replaced the window surface
         screen_w, screen_h = self.screen.get_size()
         content_height = screen_h - self.border
         if content_height <= 0:
@@ -121,6 +134,7 @@ class ImageViewer:
         if iw == 0 or ih == 0:
             return
         scale = min(screen_w / iw, content_height / ih)
+        self._scale = scale  # above 1.0 when a small image is enlarged to fit
         scaled_size = (round(iw * scale), round(ih * scale))
         self._content = pg.transform.smoothscale(self._image, scaled_size)
         cx, cy = self._content.get_size()
@@ -141,13 +155,22 @@ class ImageViewer:
         else:
             left_text += f" | {self._joystick_count} gamepads"
         self._bar_text(left_text, "left")
-        self._bar_text(self._name, "right")
+        name_inset = 0
+        if self._content is not None:
+            # Red below 100%: small text may be lost
+            scale = self._scale * self._source_scale
+            percent = f"{scale_percent(scale)}%"
+            color = self.SCALE_WARNING_COLOR if scale < 1.0 else None
+            self._bar_text(percent, "right", color=color)
+            name_inset = self.font.get_rect(percent).width + self.font.get_rect(percent).height
+        self._bar_text(self._name, "right", inset=name_inset)
         self._bar_text(self._info, "center")
         if self._content is not None:
             self.screen.blit(self._content, self._offset)
         pg.display.flip()
 
-    def _bar_text(self, text: str, align: str) -> None:
+    def _bar_text(self, text: str, align: str, *, color: pg.Color | None = None, inset: int = 0) -> None:
+        """Draw `text` in the status bar; `inset` moves right-aligned text left; `color` None is the font's."""
         bbox = self.font.get_rect(text)
         screen_w, screen_h = self.screen.get_size()
         y = int(screen_h - (self.border + bbox.height) / 2)
@@ -155,10 +178,10 @@ class ImageViewer:
         if align == "left":
             x = margin
         elif align == "right":
-            x = screen_w - margin - bbox.width
+            x = screen_w - margin - bbox.width - inset
         else:
             x = int((screen_w - bbox.width) / 2)
-        self.font.render_to(self.screen, (x, y), text)
+        self.font.render_to(self.screen, (x, y), text, fgcolor=color)
 
     HELP_LINES = [
         "Keyboard                 Controller",

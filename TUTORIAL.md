@@ -264,6 +264,12 @@ The viewer accepts keyboard and gamepad input:
 - **Gray** = UNREVIEWED
 - **Orange** = FLAGGED (marked DIRTY in an earlier pass; needs a verdict in this one)
 
+The right end of the bar shows the scale the image is displayed at, e.g. `27%`.
+It is red below 100%: text in the image is smaller than in the original, so
+look closely. In grid mode it is the smallest image's effective scale, counting
+any shrinking done to fit the grid. Resizing the window in grid mode recomputes the grids for the new
+size.
+
 After marking an image, the viewer auto-advances to the next image after a
 short delay (200ms). Images are shuffled at review time to counter attention
 fatigue. A verdict (`c`/`d` or gamepad Button 1/3) only counts once the image

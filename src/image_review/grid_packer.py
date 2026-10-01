@@ -16,6 +16,7 @@ from .util import load_surface
 class GridSpec:
     surface: pg.Surface
     keys: list[str] = field(default_factory=list)
+    min_scale: float = 1.0  # the smallest fit_size / source size ratio among the images drawn
 
 
 class PlacedRect(NamedTuple):
@@ -61,6 +62,7 @@ def _composite_bin(
     canvas = pg.Surface((grid_w, grid_h))
     canvas.fill((0, 0, 0))
     keys: list[str] = []
+    min_scale = 1.0
     failed: list[int] = []
     for rect_id, x, y, w, h in placed:
         key = items[rect_id].key
@@ -81,8 +83,9 @@ def _composite_bin(
         else:
             canvas.blit(surface, (x, y))
             keys.append(key)
+            min_scale = min(min_scale, target[0] / sizes[rect_id][0], target[1] / sizes[rect_id][1])
         on_done()
-    return GridSpec(surface=canvas, keys=keys), failed
+    return GridSpec(surface=canvas, keys=keys, min_scale=min_scale), failed
 
 
 def pack_into_grids(

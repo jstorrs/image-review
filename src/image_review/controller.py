@@ -81,6 +81,7 @@ class ReviewItem:
     label: str
     surface: pg.Surface | None
     grid: bool
+    source_scale: float = 1.0  # a grid's smallest image scale vs. its source; shown with the display scale
 
 
 def next_index(n: int, cursor: int, direction: int, *, is_todo: Callable[[int], bool] | None, wrap: bool) -> int | None:
@@ -147,6 +148,7 @@ class ReviewSession:
         self.autoplay = False
         self._cursor = -1
         self._dirty = True
+        self._grids_stale = False  # grid mode: the window was resized since the grids were packed
         self._ui_state = UIState.REVIEWING
         self._shown_at: int | None = None  # ticks when the current item was first painted
         self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
@@ -254,8 +256,7 @@ class ReviewSession:
             pg.event.pump()  # keeps the OS from flagging the window; leaves queued key events alone
 
     def _init_grid_mode(self):
-        grid_w, grid_h = self._viewer.screen.get_size()
-        grid_h -= self._viewer.border
+        grid_w, grid_h = self._grid_size()
 
         review_rows = self._review_rows(self.batch)
         # A mark that changes which rows are eligible changes the key, so a cached grid never holds
@@ -270,7 +271,7 @@ class ReviewSession:
         _, grid_specs, left_out = self._grid_cache
 
         items = [
-            ReviewItem(keys=tuple(gs.keys), label=f"grid ({len(gs.keys)} images)", surface=gs.surface, grid=True)
+            ReviewItem(keys=tuple(gs.keys), label=f"grid ({len(gs.keys)} images)", surface=gs.surface, grid=True, source_scale=gs.min_scale)
             for gs in grid_specs
         ]
         random.shuffle(items)
@@ -325,6 +326,7 @@ class ReviewSession:
         self._undoable = 0  # z only undoes marks it can show; the old mode's items are gone
         self._shown_at = None
         self._dirty = True
+        self._grids_stale = False  # the items are rebuilt at the current size below
         try:
             if refetch_statuses:
                 self._statuses = self.store.statuses(self.pass_number)
@@ -463,7 +465,7 @@ class ReviewSession:
 
         status = self._item_status(item)
         info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
-        self._viewer.set_image(surface, item.label, status, info)
+        self._viewer.set_image(surface, item.label, status, info, item.source_scale)
         self._dirty = True
 
     def _item_status(self, item: ReviewItem) -> str:
@@ -752,6 +754,7 @@ class ReviewSession:
             case pg.WINDOWRESIZED:
                 self._viewer.resize()
                 self._dirty = True
+                self._grids_stale = self._grids_stale or self.mode == "grid"
             case x if x == AUTOPLAY_EVENT:
                 if self.autoplay and self._ui_state == UIState.REVIEWING:
                     self.next_image()
@@ -772,10 +775,49 @@ class ReviewSession:
                 return True
         return False
 
+    def _grid_size(self) -> tuple[int, int]:
+        """The size grids are packed for: the window less the status bar."""
+        surface = pg.display.get_surface()
+        assert surface is not None  # the viewer opened the window
+        w, h = surface.get_size()
+        return w, h - self._viewer.border
+
+    def _rebuild_grids_for_resize(self):
+        """Repack the grids at the new window size (one rebuild however many resize events came).
+        The cursor stays on the grid holding the current item's first key, else goes to the start; the
+        dwell restarts, so a verdict never lands on a re-composited grid that has not been seen."""
+        self._grids_stale = False
+        if not self._items or self._grid_cache is None or self._grid_cache[0][1] == self._grid_size():
+            return  # nothing to rebuild, or the size is the one the grids were packed for
+        self._stop_timers()
+        self._undoable = 0  # a repack drops grids marked DIRTY, so z could no longer show what it undoes
+        current = self._items[self._cursor].keys[0] if self._cursor >= 0 else None
+        self._viewer.show_message("Computing grids...")
+        try:
+            self._init_grid_mode()
+        except StoreUnavailable as exc:
+            self._items = []
+            self._store_lost(exc)
+            return
+        finally:
+            pg.event.clear(VERDICT_INPUT_EVENTS)
+        if not self._items:  # everything left was marked meanwhile (or is held back): as _restart_in_mode
+            self._ui_state = UIState.END_MESSAGE
+            self._viewer.show_message(self._held_back_message(self.batch, in_session=True) or self._end_message(END_OF_LIST_MESSAGE))
+            return
+        self._cursor = next((i for i, item in enumerate(self._items) if current in item.keys), 0)
+        self._show_current()
+
     def refresh_if_needed(self):
         """Repaint the current item if something changed. Only in REVIEWING: the splash, help and
         message screens are painted once by the viewer and a repaint would cover them."""
-        if not self._dirty or self._ui_state != UIState.REVIEWING:
+        if self._ui_state != UIState.REVIEWING:
+            return
+        if self._grids_stale:
+            self._rebuild_grids_for_resize()
+            if self._ui_state != UIState.REVIEWING:  # the rebuild ended on a message screen
+                return
+        if not self._dirty:
             return
         self._viewer.refresh()
         self._dirty = False

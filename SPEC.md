@@ -684,6 +684,7 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
   "Computing grids... i/N" about every 25 images (via `pack_into_grids`'s
   `on_progress`; repainted and `pg.event.pump()`ed, which does not consume key events)
 - Read screen dimensions, subtract the 50px status bar height
+- A window resize rebuilds the grids (see *Resize rebuild* below)
 - `filter_rows()` for the current pass/batch/filter, then keep only rows whose
   status is in `controller.GRID_ELIGIBLE` (UNREVIEWED or CLEAN), in every
   filter including `all`. A grid mark applies to all its images, so one
@@ -725,6 +726,28 @@ mode restart shows, "No grid items for pass N; K FLAGGED/DIRTY image(s) need(s)
 single-mode review", ending " (--mode single)" in the terminal and " - press
 [s]" on screen (K counts the left-out rows that are todo as in *Todo*, over the
 selected batch, or all batches when none is selected).
+
+**Resize rebuild.** In grid mode a `WINDOWRESIZED` event refits the current
+grid and marks the grids stale. On the next `refresh_if_needed` (only while
+reviewing, so one rebuild however many resize events a batch holds) the session
+repacks for the new size, unless the size is the one the grids were last packed
+for (a resize back to it before the tick costs nothing): it stops autoplay and
+a pending advance, shows "Computing grids...", and rebuilds the items (the
+cache key includes the size, so a changed size misses the cache). Queued
+`KEYDOWN` and `JOYBUTTONDOWN` events are discarded, as on a mode restart;
+`JOYHATMOTION` is not. The repack uses the current statuses, so under the
+default filter it drops grids already marked CLEAN as well as DIRTY or FLAGGED
+ones. The cursor goes to the grid that holds the first key of the item that was
+current, or to the first item if none does (that grid was marked, or the new
+packing left the key out of the grids). The dwell restarts, so a verdict never
+lands on a re-composited grid the reviewer has not seen. Undo history is
+cleared, as on a mode switch: the repack drops grids marked DIRTY, so `z` could
+no longer show what it undoes. If nothing is left to show, the session goes to
+the end-of-list state with the held-back message or "End of list - [b] next
+batch", as a mode restart does. If the store is unavailable during the repack
+the session goes to the lost-connection screen, which is not repainted over.
+Single mode only rescales. A restart (mode switch, `b`, display change) clears
+the stale flag.
 
 ### Unloadable Images
 
@@ -789,7 +812,7 @@ The session runs a pygame event loop processing:
 | `M` key (shift+m) | Switch to grid mode (no rotation) |
 | `h` key | Show help/splash screen |
 | `q` / Escape / Button 7 | Quit |
-| Window resize | Refit current image |
+| Window resize | Refit current image; in grid mode also rebuild the grids (see *Resize rebuild*) |
 | Joystick added/removed | Hot-plug handling |
 
 After marking, the viewer auto-advances to the next item after 200ms.
@@ -922,6 +945,7 @@ on the review screen.
 |-------|------|-------------|
 | `surface` | `pg.Surface` | Composited grid image, ready for display |
 | `keys` | `list[str]` | Keys (preprocessed paths) of the images drawn in this grid |
+| `min_scale` | `float` | Smallest `fit_size` / header-size ratio among the images drawn (1.0 if none was shrunk) |
 
 ### `pack_into_grids(items, store, grid_w, grid_h, *, allow_rotation=True, on_progress=None) -> tuple[list[GridSpec], list[str]]`
 
@@ -981,6 +1005,20 @@ Color encodes review status (green=CLEAN, red=DIRTY, gray=UNREVIEWED,
 orange=FLAGGED).
 The image name is rendered right-aligned, position info is centered.
 
+**Scale indicator**: `resize()` stores the factor it applied (displayed size /
+source size). It never caps the factor, so an image smaller than the content
+area is enlarged and shows more than 100%. The status bar shows it as an
+integer percent (truncated, so a scale just under 1.0 never reads "100%") at the
+right edge, with the image name to its left. Below 100% (any scale under 1.0)
+the percent is drawn in red (`SCALE_WARNING_COLOR`), because small text such as
+burned-in PHI can be lost when an image is scaled down; at or above 100% it uses
+the normal font colour. In grid mode the percent is the smallest image's
+effective scale: `GridSpec.min_scale` (the smallest `fit_size` / header-size
+ratio among the images drawn, 1.0 if none was shrunk) is carried by
+`ReviewItem.source_scale` to `set_image(..., source_scale=1.0)`, and the
+percent is that times the canvas's display scale. A single image has
+`source_scale` 1.0.
+
 **Font**: DejaVu Sans 36pt bold, dark gray (`Color(64,64,64)`). Bundled in
 the `fonts/` subdirectory for cross-platform consistency. The help screen
 uses DejaVu Sans Mono 24pt.
@@ -989,9 +1027,9 @@ uses DejaVu Sans Mono 24pt.
 
 | Method | Description |
 |--------|-------------|
-| `set_image(surface, name, status, info)` | Set new image; triggers resize/scale |
+| `set_image(surface, name, status, info, source_scale=1.0)` | Set new image; triggers resize/scale |
 | `set_status(status)` | Update status bar color without changing image |
-| `resize()` | Recalculate scaling for current screen size |
+| `resize()` | Recalculate scaling (and the scale percent) for current screen size |
 | `refresh()` | Render frame: background, status bar, text, scaled image |
 | `show_splash(lines, footer)` | Render centered splash/help overlay |
 | `show_message(text)` | Render centered text message (e.g. loading indicator) |

@@ -63,6 +63,7 @@ from image_review.store import (
     summary,
 )
 from image_review.util import load_surface
+from image_review.viewer import ImageViewer, scale_percent
 
 
 class StoreTestCase(unittest.TestCase):
@@ -1147,9 +1148,9 @@ class EventLoopTestCase(SessionTestCase):
             self.addCleanup(patcher.stop)
         self.mark = patched
 
-    def reviewing(self, mode: str = "single") -> ReviewSession:
+    def reviewing(self, mode: str = "single", **kwargs) -> ReviewSession:
         """A session past the splash with its first item painted and seen for the full dwell."""
-        s = ReviewSession(self.store, reviewer="tester", mode=mode)
+        s = ReviewSession(self.store, reviewer="tester", mode=mode, **kwargs)
         s._show_splash()
         self.assertTrue(s.handle_events([key(pg.K_SPACE)]))
         self.paint(s)
@@ -1469,6 +1470,185 @@ class TestEventLoop(EventLoopTestCase):
     def test_key_repeat_is_off(self):
         ReviewSession(self.store, reviewer="tester", mode="single")
         self.assertEqual(pg.key.get_repeat(), (0, 0))  # a held z undoes one mark, not many
+
+
+class TestScaleAndResize(EventLoopTestCase):
+    resized = pg.event.Event(pg.WINDOWRESIZED)
+
+    def bar_texts(self, viewer) -> dict[str, tuple]:
+        """Draw the status bar and return the text -> (align, colour) of each _bar_text call."""
+        with mock.patch.object(viewer, "_bar_text", wraps=viewer._bar_text) as bar_text:
+            viewer.refresh()
+        return {c.args[0]: (c.args[1], c.kwargs.get("color")) for c in bar_text.call_args_list}
+
+    def test_scale_percent_shown_and_red_below_100(self):
+        viewer = ImageViewer()
+        pg.display.set_mode((800, 600))
+        # Content area is 800 x (600 - 50 border): scale = min(800/2000, 550/2000) = 0.275 = 27.5%,
+        # truncated to 27% (the plan's figure)
+        viewer.set_image(pg.Surface((2000, 2000)), "big", "UNREVIEWED", "info")
+        self.assertEqual(viewer._scale, 0.275)
+        texts = self.bar_texts(viewer)
+        self.assertEqual(texts["27%"], ("right", ImageViewer.SCALE_WARNING_COLOR))
+
+    def test_scale_at_or_above_100_uses_normal_colour(self):
+        viewer = ImageViewer()
+        pg.display.set_mode((800, 600))
+        viewer.set_image(pg.Surface((800, 550)), "exact", "UNREVIEWED", "info")
+        self.assertEqual(self.bar_texts(viewer)["100%"], ("right", None))
+        viewer.set_image(pg.Surface((400, 275)), "small", "UNREVIEWED", "info")  # resize enlarges it
+        self.assertEqual(viewer._scale, 2.0)
+        self.assertEqual(self.bar_texts(viewer)["200%"], ("right", None))
+
+    def test_grid_resize_repacks_at_new_size_and_resets_dwell(self):
+        s = self.reviewing("grid")
+        self.assertIsNotNone(s._shown_at)
+        keep = s._items[s._cursor].keys[0]
+        w, h = s._viewer.screen.get_size()
+        pg.display.set_mode((w // 2, h // 2))
+        with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
+            s.handle_events([self.resized])
+            pack.assert_not_called()  # only marked stale; rebuilt on the next tick
+            self.now += MIN_DWELL_MS
+            s.refresh_if_needed()
+        pack.assert_called_once()
+        self.assertEqual(pack.call_args.args[2:4], (w // 2, h // 2 - s._viewer.border))
+        self.assertIn(keep, s._items[s._cursor].keys)  # the cursor follows the current item's first key
+        self.assertEqual(s._shown_at, self.now)  # repainted, so the dwell restarts
+        s.handle_events([key(pg.K_c)])  # same batch time: not yet seen
+        self.mark.assert_not_called()
+        self.now += MIN_DWELL_MS
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_called_once()
+
+    def test_grid_resize_stops_timers(self):
+        s = self.reviewing("grid")
+        s.autoplay = True
+        s._advance_pending = True
+        w, h = s._viewer.screen.get_size()
+        pg.display.set_mode((w // 2, h // 2))
+        s.handle_events([self.resized])
+        s.refresh_if_needed()
+        self.assertFalse(s.autoplay)
+        self.assertFalse(s._advance_pending)
+
+    def test_two_resize_events_in_a_batch_repack_once(self):
+        s = self.reviewing("grid")
+        w, h = s._viewer.screen.get_size()
+        pg.display.set_mode((w // 2, h // 2))
+        with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
+            s.handle_events([self.resized, self.resized])
+            s.refresh_if_needed()
+            s.refresh_if_needed()
+        self.assertEqual(pack.call_count, 1)
+
+    def test_single_mode_resize_does_not_repack(self):
+        s = self.reviewing("single")
+        w, h = s._viewer.screen.get_size()
+        pg.display.set_mode((w // 2, h // 2))
+        with mock.patch.object(controller_module, "pack_into_grids") as pack:
+            s.handle_events([self.resized])
+            s.refresh_if_needed()
+        pack.assert_not_called()
+        self.assertFalse(s._grids_stale)
+
+    def test_scale_percent_truncates_without_float_error(self):
+        self.assertEqual(scale_percent(0.29), 29)  # 0.29 * 100 is 28.999999999999996
+        self.assertEqual(scale_percent(0.275), 27)
+        self.assertEqual(scale_percent(0.999), 99)
+        self.assertEqual(scale_percent(1.0), 100)
+
+    def test_grid_percent_is_the_smallest_images_effective_scale(self):
+        Image.new("RGB", (4000, 3000)).save(self.work_dir / "batch_001/a.jpg")
+        s = self.reviewing("grid")
+        viewer = s._viewer
+        item = s._items[s._cursor]
+        w, h = s._grid_size()
+        w4, h3 = fit_size(4000, 3000, w, h, True)
+        self.assertEqual(item.source_scale, min(w4 / 4000, h3 / 3000))
+        self.assertLess(item.source_scale, 1.0)
+        percent = f"{scale_percent(viewer._scale * item.source_scale)}%"
+        self.assertEqual(self.bar_texts(viewer)[percent], ("right", ImageViewer.SCALE_WARNING_COLOR))
+        self.assertNotEqual(percent, "100%")
+
+    def shrink(self, s: ReviewSession, size: tuple[int, int]) -> None:
+        pg.display.set_mode(size)
+        s.handle_events([self.resized])
+
+    def test_resize_back_to_the_packed_size_does_not_repack(self):
+        s = self.reviewing("grid")
+        size = pg.display.get_surface().get_size()
+        self.shrink(s, (size[0] // 2, size[1] // 2))
+        self.shrink(s, size)  # back before the next tick
+        with mock.patch.object(controller_module, "pack_into_grids") as pack:
+            s.refresh_if_needed()
+        pack.assert_not_called()
+        self.assertFalse(s._grids_stale)
+
+    def test_undo_after_rebuild_has_nothing_to_undo(self):
+        s = self.reviewing("grid", status_filter="all")  # a CLEAN grid stays eligible, so the repack has items
+        s._mark("CLEAN")
+        self.assertEqual(s._undoable, 1)
+        size = pg.display.get_surface().get_size()
+        self.shrink(s, (size[0] // 2, size[1] // 2))
+        s.refresh_if_needed()
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        with mock.patch.object(self.store, "undo") as undo:
+            s.handle_events([key(pg.K_z)])
+        undo.assert_not_called()
+        self.assertEqual(s._viewer._info, NOTHING_TO_UNDO)
+
+    def test_store_lost_during_rebuild_keeps_the_message(self):
+        s = self.reviewing("grid")
+        size = pg.display.get_surface().get_size()
+        self.shrink(s, (size[0] // 2, size[1] // 2))
+        with (
+            mock.patch.object(controller_module, "pack_into_grids", side_effect=store_module.StoreUnavailable("down")),
+            mock.patch.object(s._viewer, "refresh") as refresh,
+            mock.patch("sys.stderr", io.StringIO()),
+        ):
+            s.refresh_if_needed()
+            s.refresh_if_needed()
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
+        refresh.assert_not_called()
+
+    def test_everything_marked_then_resize_ends_the_list(self):
+        s = self.reviewing("grid")
+        s._mark("CLEAN")  # the only grid: nothing is left to repack
+        size = pg.display.get_surface().get_size()
+        self.shrink(s, (size[0] // 2, size[1] // 2))
+        with mock.patch.object(s._viewer, "refresh") as refresh:
+            s.refresh_if_needed()
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertEqual(s._items, [])
+        refresh.assert_not_called()
+
+    def test_cursor_falls_back_to_start_when_current_grid_was_marked(self):
+        s = self.reviewing("grid")
+        self.shrink(s, (30, 62))  # a 30 x 12 bin holds one image: two grids
+        s.refresh_if_needed()
+        self.assertEqual(len(s._items), 2)
+        s._cursor = 1
+        s._show_current()
+        marked = s._items[1].keys
+        s._mark("CLEAN")
+        self.shrink(s, (31, 62))
+        s.refresh_if_needed()
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertEqual(s._cursor, 0)
+        self.assertEqual(len(s._items), 1)
+        self.assertFalse(set(marked) & set(s._items[0].keys))
+
+    def test_queued_verdict_is_cleared_by_the_rebuild(self):
+        s = self.reviewing("grid")
+        size = pg.display.get_surface().get_size()
+        self.shrink(s, (size[0] // 2, size[1] // 2))
+        pg.event.clear()
+        pg.event.post(key(pg.K_c))
+        s.refresh_if_needed()
+        self.now += MIN_DWELL_MS
+        s.handle_events(pg.event.get())
+        self.mark.assert_not_called()
 
 
 class TestNextBatchKey(EventLoopTestCase):
