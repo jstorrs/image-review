@@ -88,7 +88,11 @@ def parse_manifest(data: bytes) -> list[ManifestRow]:
         raise RemoteError("malformed manifest from server")
     rows = []
     for entry in payload:
-        if not isinstance(entry, dict) or not isinstance(entry.get("key"), str) or not isinstance(entry.get("batch"), str):
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("key"), str)
+            or not isinstance(entry.get("batch"), str)
+        ):
             raise RemoteError("malformed manifest from server")
         rows.append(ManifestRow(key=entry["key"], batch=entry["batch"]))
     return rows
@@ -235,8 +239,12 @@ class RemoteStore:
     def statuses(self, pass_number: int) -> dict[str, Status]:
         return parse_statuses(self._get(f"/statuses?{urlencode({'pass': pass_number})}"))
 
-    def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
-        body = json.dumps({"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}).encode()
+    def mark(
+        self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> dict[str, Status]:
+        body = json.dumps(
+            {"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}
+        ).encode()
         code, data = self._request("POST", "/mark", body)
         if code != 200:
             raise RemoteError(f"server returned HTTP {code}", code)

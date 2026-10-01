@@ -136,7 +136,18 @@ class TestParseVia(unittest.TestCase):
                 self.assertEqual(parse_via(ok), ok)
 
     def test_rejects(self):
-        for bad in ["-oProxyCommand=x", "", "a b", "a\nb", "a\tb", "a\x00b", "a\x1bb", "login$(cmd)", "login`cmd`", "a;b"]:
+        for bad in [
+            "-oProxyCommand=x",
+            "",
+            "a b",
+            "a\nb",
+            "a\tb",
+            "a\x00b",
+            "a\x1bb",
+            "login$(cmd)",
+            "login`cmd`",
+            "a;b",
+        ]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_via(bad)
 
@@ -237,7 +248,13 @@ class TestSshTunnel(FakeSshTestCase):
             "with ssh_tunnel('login', 'node1', 1):\n"
             "    print('up', flush=True); sys.stdin.read()\n"
         )
-        proc = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
         self.addCleanup(proc.stdout.close)
         self.addCleanup(proc.stdin.close)
         self.assertEqual(proc.stdout.readline().strip(), "up")
@@ -269,12 +286,24 @@ class TestUnreachableHint(unittest.TestCase):
         target = RemoteTarget("127.0.0.1", 1, "tok", "0" * 64)
 
         class Boom:
-            def __init__(self, *a, **k): pass
-            def __enter__(self): raise error
-            def __exit__(self, *a): pass
+            def __init__(self, *a, **k):
+                pass
 
-        with mock.patch("image_review.remote.RemoteStore", Boom), mock.patch("image_review.tunnel.ssh_tunnel", lambda *a, **k: contextlib.nullcontext(1)):
-            return CliRunner().invoke(cli, ["status", "--remote", target.to_uri(), "--via", "me@login"], env={"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None})
+            def __enter__(self):
+                raise error
+
+            def __exit__(self, *a):
+                pass
+
+        with (
+            mock.patch("image_review.remote.RemoteStore", Boom),
+            mock.patch("image_review.tunnel.ssh_tunnel", lambda *a, **k: contextlib.nullcontext(1)),
+        ):
+            return CliRunner().invoke(
+                cli,
+                ["status", "--remote", target.to_uri(), "--via", "me@login"],
+                env={"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None},
+            )
 
     def test_hint_on_transport_failure(self):
         from image_review.remote import RemoteError
@@ -315,7 +344,9 @@ class TestCliVia(FakeSshTestCase):
         self.assertEqual(tunneled.stdout, direct.stdout)
         record = self.ssh_record()
         self.assertEqual(record["argv"][-1], "me@login")
-        self.assertRegex(record["argv"][record["argv"].index("-L") + 1], rf"127\.0\.0\.1:\d+:{self.target.host}:{self.target.port}")
+        self.assertRegex(
+            record["argv"][record["argv"].index("-L") + 1], rf"127\.0\.0\.1:\d+:{self.target.host}:{self.target.port}"
+        )
         self.assertFalse(pid_alive(record["pid"]))
 
     def test_via_envvar(self):

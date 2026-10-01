@@ -182,7 +182,9 @@ class ReviewSession:
 
     def _store_lost(self, exc: StoreUnavailable):
         self._stop_timers()
-        print(f"Lost connection to server: {exc}. Progress up to the last mark is saved on the server.", file=sys.stderr)
+        print(
+            f"Lost connection to server: {exc}. Progress up to the last mark is saved on the server.", file=sys.stderr
+        )
         self._viewer.show_message("Lost connection to server - progress saved. Press q to quit.")
         self._ui_state = UIState.DISCONNECTED
 
@@ -276,7 +278,13 @@ class ReviewSession:
         _, grid_specs, left_out = self._grid_cache
 
         items = [
-            ReviewItem(keys=tuple(gs.keys), label=f"grid ({len(gs.keys)} images)", surface=gs.surface, grid=True, source_scale=gs.min_scale)
+            ReviewItem(
+                keys=tuple(gs.keys),
+                label=f"grid ({len(gs.keys)} images)",
+                surface=gs.surface,
+                grid=True,
+                source_scale=gs.min_scale,
+            )
             for gs in grid_specs
         ]
         random.shuffle(items)
@@ -348,7 +356,9 @@ class ReviewSession:
             pg.event.clear(VERDICT_INPUT_EVENTS)  # pressed while blocked, before anything new was shown
 
         if not self._items:
-            self._viewer.show_message(self._held_back_message(self.batch, in_session=True) or f"No items for {new_mode} mode")
+            self._viewer.show_message(
+                self._held_back_message(self.batch, in_session=True) or f"No items for {new_mode} mode"
+            )
             self._ui_state = UIState.END_MESSAGE
             return
 
@@ -396,7 +406,9 @@ class ReviewSession:
 
     def _all_done_message(self, old_pass: int, current_pass: int) -> str:
         """What b shows when no batch has todo left (and none holds images back from grid mode)."""
-        if self.pass_number > old_pass and self.status_filter == "unreviewed":  # under clean/all a re-check advances the pass
+        if (
+            self.pass_number > old_pass and self.status_filter == "unreviewed"
+        ):  # under clean/all a re-check advances the pass
             where = f"{self.batch} for pass" if self._explicit_batch else "pass"
             message = f"Pass {old_pass} complete - nothing to review in {where} {self.pass_number}"
         elif self._explicit_batch:
@@ -435,8 +447,11 @@ class ReviewSession:
     def next_todo(self, direction: int = 1, *, wrap: bool = True) -> bool:
         """Navigate to next todo item. Returns True if found."""
         idx = next_index(
-            len(self._items), self._cursor, direction,
-            is_todo=lambda i: self._is_todo(self._items[i]), wrap=wrap,
+            len(self._items),
+            self._cursor,
+            direction,
+            is_todo=lambda i: self._is_todo(self._items[i]),
+            wrap=wrap,
         )
         if idx is None:
             return False
@@ -525,7 +540,10 @@ class ReviewSession:
             return
         item = self._items[self._cursor]
         if status == "CLEAN" and not self._unloadable.isdisjoint(item.keys):
-            print(f"WARNING: {UNLOADABLE_CLEAN}: {', '.join(k for k in item.keys if k in self._unloadable)}", file=sys.stderr)
+            print(
+                f"WARNING: {UNLOADABLE_CLEAN}: {', '.join(k for k in item.keys if k in self._unloadable)}",
+                file=sys.stderr,
+            )
             self._viewer.set_info(UNLOADABLE_CLEAN)
             self._dirty = True
             return
@@ -734,12 +752,17 @@ class ReviewSession:
     def run(self):
         if not self._items:
             filter_msg = f" (filter: {self.status_filter})" if self.status_filter != "unreviewed" else ""
-            print(self._held_back_message(self.batch, in_session=False) or f"No images to review for pass {self.pass_number}{filter_msg}.")
+            print(
+                self._held_back_message(self.batch, in_session=False)
+                or f"No images to review for pass {self.pass_number}{filter_msg}."
+            )
             return
 
         batch_info = f", batch {self.batch}" if self.batch else ""
         filter_info = f", filter {self.status_filter}" if self.status_filter != "unreviewed" else ""
-        print(f"Starting {self.mode} review, pass {self.pass_number}{batch_info}{filter_info}, {len(self._items)} items")
+        print(
+            f"Starting {self.mode} review, pass {self.pass_number}{batch_info}{filter_info}, {len(self._items)} items"
+        )
 
         if self._ui_state != UIState.SPLASH:
             self._show_splash()
@@ -824,7 +847,9 @@ class ReviewSession:
             pg.event.clear(VERDICT_INPUT_EVENTS)
         if not self._items:  # everything left was marked meanwhile (or is held back): as _restart_in_mode
             self._ui_state = UIState.END_MESSAGE
-            self._viewer.show_message(self._held_back_message(self.batch, in_session=True) or self._end_message(END_OF_LIST_MESSAGE))
+            self._viewer.show_message(
+                self._held_back_message(self.batch, in_session=True) or self._end_message(END_OF_LIST_MESSAGE)
+            )
             return
         self._cursor = next((i for i, item in enumerate(self._items) if current in item.keys), 0)
         self._show_current()

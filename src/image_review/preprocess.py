@@ -320,7 +320,16 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
             if pixels.ndim != 2:
                 raise Unsupported(f"pixel array with shape {pixels.shape}")
             return apply_colormap(_gray_dicom(pixels, photometric, _overlay_mask(dcm, pixels.shape)), colormap)
-        case "RGB" | "PALETTE COLOR" | "YBR_FULL" | "YBR_FULL_422" | "YBR_PARTIAL_420" | "YBR_PARTIAL_422" | "YBR_ICT" | "YBR_RCT":
+        case (
+            "RGB"
+            | "PALETTE COLOR"
+            | "YBR_FULL"
+            | "YBR_FULL_422"
+            | "YBR_PARTIAL_420"
+            | "YBR_PARTIAL_422"
+            | "YBR_ICT"
+            | "YBR_RCT"
+        ):
             rgb = _colour_dicom(dcm, photometric)
             overlay = _overlay_mask(dcm, rgb.shape[:2])
             if overlay is not None:
@@ -494,7 +503,11 @@ def _is_raster(head: bytes) -> bool:
     return (
         head.startswith(_RASTER_MAGIC)
         or (head.startswith(b"RIFF") and head[8:12] == b"WEBP")
-        or (head.startswith(b"BM") and len(head) >= 18 and int.from_bytes(head[14:18], "little") in _BMP_DIB_HEADER_SIZES)
+        or (
+            head.startswith(b"BM")
+            and len(head) >= 18
+            and int.from_bytes(head[14:18], "little") in _BMP_DIB_HEADER_SIZES
+        )
         or (head[:2] in _PNM_TYPES and head[2:3].isspace())
         or (head[4:8] == b"ftyp" and head[8:12] in _HEIF_BRANDS)  # HEIF/AVIF: Pillow decides
     )
@@ -628,7 +641,9 @@ def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]
         return Skipped(link.as_posix(), "ignored", "symlink to an enclosing directory")
     for source in source_dirs:
         if target == source or source in target.parents:
-            return Skipped(link.as_posix(), "ignored", _clean_reason(f"symlinked directory already included via SOURCE {source}"))
+            return Skipped(
+                link.as_posix(), "ignored", _clean_reason(f"symlinked directory already included via SOURCE {source}")
+            )
     return Skipped(
         link.as_posix(),
         "failed",
@@ -636,7 +651,9 @@ def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]
     )
 
 
-def _discover_directory(root: Path, exclude: frozenset[Path], source_dirs: tuple[Path, ...]) -> Iterator[Candidate | Skipped]:
+def _discover_directory(
+    root: Path, exclude: frozenset[Path], source_dirs: tuple[Path, ...]
+) -> Iterator[Candidate | Skipped]:
     """Walk `root` in sorted order without entering symlinked directories (see `_symlinked_directory`) or `exclude`.
 
     An unreadable directory (including `root`) becomes a failed row. Symlinked
@@ -667,7 +684,9 @@ def discover(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> Ite
     """Yield every input under `sources`, classified by content; nothing under `exclude` (resolved paths)."""
     source_dirs = tuple(s.resolve() for s in sources if s.is_dir())
     for source in tqdm(sources, desc="Sources", position=0):
-        items = _discover_directory(source, exclude, source_dirs) if source.is_dir() else _discover_file(source, named=True)
+        items = (
+            _discover_directory(source, exclude, source_dirs) if source.is_dir() else _discover_file(source, named=True)
+        )
         yield from tqdm(items, desc=source.name, position=1, leave=False, unit="input")
 
 
@@ -733,9 +752,7 @@ def _claim_staging(output_dir: Path, dir_mode: int) -> Path:
     try:
         staging.mkdir(mode=dir_mode)
     except FileExistsError:
-        raise WorkDirExists(
-            f"a previous preprocess into {output_dir} did not finish; remove {staging}"
-        ) from None
+        raise WorkDirExists(f"a previous preprocess into {output_dir} did not finish; remove {staging}") from None
     try:
         os.chmod(staging, dir_mode)  # mkdir's mode is masked by the umask and drops setgid
     except BaseException:
@@ -810,7 +827,12 @@ def _render_into(
 
     _write_tsv(output_dir / "manifest.tsv", ["batch", "preprocessed_path", "image_id"], manifest_rows, policy.file_mode)
     skipped_path = output_dir / "skipped.tsv"
-    _write_tsv(skipped_path, ["image_id", "kind", "reason"], [(s.image_id, s.kind, s.reason) for s in skipped], policy.file_mode)
+    _write_tsv(
+        skipped_path,
+        ["image_id", "kind", "reason"],
+        [(s.image_id, s.kind, s.reason) for s in skipped],
+        policy.file_mode,
+    )
 
     written = len(manifest_rows)
     batches = -(-written // batch_size)

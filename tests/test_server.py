@@ -152,7 +152,9 @@ class TestConnectionHandling(ServerTestCase):
 
     def test_transfer_encoding_rejected(self):
         data = self.raw(
-            (f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n").encode()
+            (
+                f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+            ).encode()
         )
         self.assertTrue(data.startswith(b"HTTP/1.1 400"))
         self.assertIn(b"Connection: close", data)
@@ -164,19 +166,25 @@ class TestConnectionHandling(ServerTestCase):
 
     def test_duplicate_content_length_on_get_rejected(self):
         data = self.raw(
-            (f"GET /manifest HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Content-Length: 0\r\nContent-Length: 5\r\n\r\n").encode()
+            (
+                f"GET /manifest HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Content-Length: 0\r\nContent-Length: 5\r\n\r\n"
+            ).encode()
         )
         self.assertTrue(data.startswith(b"HTTP/1.1 400"))
 
     def test_duplicate_content_length_on_mark_rejected(self):
         data = self.raw(
-            (f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Content-Length: 2\r\nContent-Length: 2\r\n\r\n{{}}").encode()
+            (
+                f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Content-Length: 2\r\nContent-Length: 2\r\n\r\n{{}}"
+            ).encode()
         )
         self.assertTrue(data.startswith(b"HTTP/1.1 400"))
 
     def test_handler_failure_is_500_and_server_survives(self):
         err = io.StringIO()
-        body = json.dumps({"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}).encode()
+        body = json.dumps(
+            {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
+        ).encode()
         with (
             contextlib.redirect_stderr(err),
             mock.patch.object(self.server.store, "mark", side_effect=OSError("secret-detail")),
@@ -292,7 +300,9 @@ class TestServeCommand(unittest.TestCase):
 
     def test_locked_work_dir_exits_1(self):
         lock = self.work / "review.lock"
-        lock.write_text(json.dumps({"host": "node042", "user": "alice", "pid": 1234, "started": "2026-09-30T12:00:00Z"}))
+        lock.write_text(
+            json.dumps({"host": "node042", "user": "alice", "pid": 1234, "started": "2026-09-30T12:00:00Z"})
+        )
         with mock.patch.object(ReviewServer, "serve_forever") as serve_forever:
             result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
         self.assertEqual(result.exit_code, 1, result.output)
@@ -411,7 +421,10 @@ class TestServeCommand(unittest.TestCase):
             lock_held_at_close.append(servers[0].store_lock.locked())
             real_close(store)
 
-        with mock.patch.object(ReviewServer, "serve_forever", fake_serve), mock.patch.object(LocalStore, "close", close):
+        with (
+            mock.patch.object(ReviewServer, "serve_forever", fake_serve),
+            mock.patch.object(LocalStore, "close", close),
+        ):
             result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(lock_held_at_close[0])  # a handler thread's mark cannot interleave with the release
@@ -513,7 +526,13 @@ class TestReads(ServerTestCase):
 class TestMark(ServerTestCase):
     def test_mark_round_trip(self):
         resp, data = self.post_mark(
-            {"keys": ["batch_001/a.jpg", "batch_001/b.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
+            {
+                "keys": ["batch_001/a.jpg", "batch_001/b.jpg"],
+                "status": "CLEAN",
+                "pass": 1,
+                "reviewer": "tester",
+                "mode": "single",
+            }
         )
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"batch_001/a.jpg": "CLEAN", "batch_001/b.jpg": "CLEAN"})
@@ -527,11 +546,15 @@ class TestMark(ServerTestCase):
     def test_reviewer_at_limits_is_accepted(self):
         for reviewer in ("r", "r" * 64, "Dr. Émilie O'Neil"):
             with self.subTest(reviewer=reviewer):
-                resp, _ = self.post_mark({"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": reviewer, "mode": "grid"})
+                resp, _ = self.post_mark(
+                    {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": reviewer, "mode": "grid"}
+                )
                 self.assertEqual(resp.status, 200)
 
     def test_prior_pass_dirty_is_flagged(self):
-        self.post_mark({"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"})
+        self.post_mark(
+            {"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"}
+        )
         self.assertEqual(self.get_json("/statuses?pass=2")["batch_001/a.jpg"], "FLAGGED")
 
     def test_bad_bodies_are_400(self):
@@ -567,7 +590,6 @@ class TestMark(ServerTestCase):
                 self.assertEqual(resp.status, 400)
         self.assertEqual(set(self.get_json("/statuses?pass=1").values()), {"UNREVIEWED"})
 
-
     def test_oversized_body_is_400(self):
         # Declared length only: the server must reject before reading the body.
         resp, _, _ = self.request("POST", "/mark", headers={"Content-Length": str((1 << 20) + 1)})
@@ -576,8 +598,18 @@ class TestMark(ServerTestCase):
 
 class TestUndo(ServerTestCase):
     def test_undo_round_trip(self):
-        self.post_mark({"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"})
-        self.post_mark({"keys": ["batch_001/a.jpg", "batch_002/c.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "grid"})
+        self.post_mark(
+            {"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"}
+        )
+        self.post_mark(
+            {
+                "keys": ["batch_001/a.jpg", "batch_002/c.jpg"],
+                "status": "CLEAN",
+                "pass": 1,
+                "reviewer": "tester",
+                "mode": "grid",
+            }
+        )
         resp, data = self.post_undo({"pass": 1, "reviewer": "tester"})
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"batch_001/a.jpg": "DIRTY", "batch_002/c.jpg": "UNREVIEWED"})
@@ -585,12 +617,16 @@ class TestUndo(ServerTestCase):
             self.assertNotIn(image_id.encode(), data)
         statuses = self.get_json("/statuses?pass=1")
         self.assertEqual((statuses["batch_001/a.jpg"], statuses["batch_002/c.jpg"]), ("DIRTY", "UNREVIEWED"))
-        self.assertEqual(json.loads(self.post_undo({"pass": 2, "reviewer": "tester"})[1]), {"batch_001/a.jpg": "UNREVIEWED"})
+        self.assertEqual(
+            json.loads(self.post_undo({"pass": 2, "reviewer": "tester"})[1]), {"batch_001/a.jpg": "UNREVIEWED"}
+        )
         resp, data = self.post_undo({"pass": 1, "reviewer": "tester"})
         self.assertEqual((resp.status, json.loads(data)), (200, {}))
 
     def test_bad_bodies_are_400(self):
-        self.post_mark({"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"})
+        self.post_mark(
+            {"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"}
+        )
         good = {"pass": 1, "reviewer": "tester"}
         bad = {
             "missing pass": {"reviewer": "tester"},
@@ -626,9 +662,7 @@ class TestRemoteTarget(unittest.TestCase):
             with self.subTest(host=host):
                 t = RemoteTarget(host, 8443, "tok-en_1", FP)
                 self.assertEqual(RemoteTarget.parse(t.to_uri()), t)
-        self.assertEqual(
-            RemoteTarget("h", 1, "t", FP).to_uri(), f"ir://h:1/?token=t&fp=sha256:{FP}"
-        )
+        self.assertEqual(RemoteTarget("h", 1, "t", FP).to_uri(), f"ir://h:1/?token=t&fp=sha256:{FP}")
 
     def test_token_not_in_repr(self):
         self.assertNotIn("tok", repr(RemoteTarget("h", 1, "tok", FP)))

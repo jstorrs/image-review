@@ -27,7 +27,9 @@ def make_work_dir(root: Path) -> None:
         writer.writerows(ROWS)
 
 
-def write_dicom(path: Path, pixels: np.ndarray, photometric: str = "MONOCHROME2", preamble: bool = True, **attrs) -> None:
+def write_dicom(
+    path: Path, pixels: np.ndarray, photometric: str = "MONOCHROME2", preamble: bool = True, **attrs
+) -> None:
     """Write a synthetic DICOM file (with preamble and file meta) holding `pixels`.
 
     `pixels` is (rows, cols) or (rows, cols, 3) for one frame, or (frames, rows, cols[, 3]).

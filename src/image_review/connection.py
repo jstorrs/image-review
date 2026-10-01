@@ -32,7 +32,12 @@ def parse_reviewer(value: object) -> str:
 
     It is the client's own, unauthenticated claim, recorded as given. ValueError otherwise.
     """
-    if not isinstance(value, str) or not 1 <= len(value) <= MAX_REVIEWER_LENGTH or not value.isprintable() or not value.strip():
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= MAX_REVIEWER_LENGTH
+        or not value.isprintable()
+        or not value.strip()
+    ):
         raise ValueError(
             f"reviewer must be 1-{MAX_REVIEWER_LENGTH} printable characters, not all spaces (no tabs, newlines or control characters)"
         )

@@ -21,15 +21,30 @@ DEFAULT_WORK_DIR = "./review_work"
 
 
 def work_dir_option(f):
-    return click.option("--work-dir", type=click.Path(exists=True), default=None, help=f"Work directory containing preprocessed data [default: {DEFAULT_WORK_DIR}].")(f)
+    return click.option(
+        "--work-dir",
+        type=click.Path(exists=True),
+        default=None,
+        help=f"Work directory containing preprocessed data [default: {DEFAULT_WORK_DIR}].",
+    )(f)
 
 
 def remote_option(f):
-    return click.option("--remote", envvar="IMAGE_REVIEW_REMOTE", default=None, help="Review a server started with `image-review serve` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).")(f)
+    return click.option(
+        "--remote",
+        envvar="IMAGE_REVIEW_REMOTE",
+        default=None,
+        help="Review a server started with `image-review serve` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).",
+    )(f)
 
 
 def via_option(f):
-    return click.option("--via", envvar="IMAGE_REVIEW_VIA", default=None, help="With --remote: reach the server through an SSH tunnel via this login node, e.g. user@login.cluster (also read from $IMAGE_REVIEW_VIA).")(f)
+    return click.option(
+        "--via",
+        envvar="IMAGE_REVIEW_VIA",
+        default=None,
+        help="With --remote: reach the server through an SSH tunnel via this login node, e.g. user@login.cluster (also read from $IMAGE_REVIEW_VIA).",
+    )(f)
 
 
 def warn_if_world_accessible(work_dir: Path) -> None:
@@ -77,13 +92,18 @@ def interrupt_on(*signals: signal.Signals) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def open_store(work_dir: str | None, remote: str | None, via: str | None = None, read_only: bool = False) -> Iterator[ReviewStore]:
+def open_store(
+    work_dir: str | None, remote: str | None, via: str | None = None, read_only: bool = False
+) -> Iterator[ReviewStore]:
     """Open the local or remote store, translating startup failures into ClickExceptions.
 
     `read_only` applies to a local store: it takes no lock and refuses marks.
     """
     if remote is None:
-        if via is not None and click.get_current_context().get_parameter_source("via") is not click.core.ParameterSource.ENVIRONMENT:
+        if (
+            via is not None
+            and click.get_current_context().get_parameter_source("via") is not click.core.ParameterSource.ENVIRONMENT
+        ):
             raise click.UsageError("--via requires --remote.")
         raw = work_dir if work_dir is not None else DEFAULT_WORK_DIR
         path = Path(raw)
@@ -134,15 +154,25 @@ def open_store(work_dir: str | None, remote: str | None, via: str | None = None,
             f"The certificate presented by {where} does NOT match the connection string. "
             "The connection was aborted before any credentials were sent. "
             "Do not continue unless you know why the server's identity changed."
-            + (" With --via, this can also happen if another local process grabbed the forwarded port; retry." if via else "")
+            + (
+                " With --via, this can also happen if another local process grabbed the forwarded port; retry."
+                if via
+                else ""
+            )
         )
     except RemoteError as e:
         if e.status == 401:
-            raise click.ClickException(f"Server at {where} rejected the access token (connection string from a different or restarted server?)")
+            raise click.ClickException(
+                f"Server at {where} rejected the access token (connection string from a different or restarted server?)"
+            )
         if e.status is not None:
             raise click.ClickException(f"Server at {where} returned HTTP {e.status}")
         transport_failure = isinstance(e.__cause__, OSError)
-        hint = " (the login node may not be able to reach the server; see the ssh output above)" if via and transport_failure else ""
+        hint = (
+            " (the login node may not be able to reach the server; see the ssh output above)"
+            if via and transport_failure
+            else ""
+        )
         raise click.ClickException(f"Cannot reach server at {where}: {e}{hint}")
 
 
@@ -201,8 +231,22 @@ def _known_colormap(ctx: click.Context, param: click.Parameter, value: str) -> s
 @cli.command()
 @click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True))
 @click.option("--batch-size", type=click.IntRange(min=1), default=300, show_default=True, help="Images per batch.")
-@click.option("--work-dir", "--output-dir", type=click.Path(), default="./review_work", show_default=True, help="Work directory for output.")
-@click.option("--colormap", type=str, callback=_known_colormap, default="inferno", show_default=True, help="Matplotlib colormap for rendering.")
+@click.option(
+    "--work-dir",
+    "--output-dir",
+    type=click.Path(),
+    default="./review_work",
+    show_default=True,
+    help="Work directory for output.",
+)
+@click.option(
+    "--colormap",
+    type=str,
+    callback=_known_colormap,
+    default="inferno",
+    show_default=True,
+    help="Matplotlib colormap for rendering.",
+)
 @click.option(
     "--access",
     type=click.Choice(["private", "group"]),
@@ -211,7 +255,12 @@ def _known_colormap(ctx: click.Context, param: click.Parameter, value: str) -> s
     show_default=True,
     help="Who can use the work directory: private = owner only (dirs 0700, files 0600); group = readable/writable by the work dir's Unix group (dirs 2770, files 0660). Never world-readable. Also read from $IMAGE_REVIEW_ACCESS.",
 )
-@click.option("--allow-skipped", is_flag=True, default=False, help="Exit 0 even if some inputs failed to preprocess (they are listed in skipped.tsv).")
+@click.option(
+    "--allow-skipped",
+    is_flag=True,
+    default=False,
+    help="Exit 0 even if some inputs failed to preprocess (they are listed in skipped.tsv).",
+)
 def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
     """Normalize DICOM and image files to JPGs and organize them into batches.
 
@@ -246,7 +295,10 @@ def _reviewer(ctx: click.Context, param: click.Parameter, value: str | None) -> 
     if value is None:
         try:
             value = getpass.getuser()
-        except (KeyError, OSError):  # no USER/LOGNAME and no passwd entry (some containers): KeyError <3.13, OSError >=3.13
+        except (
+            KeyError,
+            OSError,
+        ):  # no USER/LOGNAME and no passwd entry (some containers): KeyError <3.13, OSError >=3.13
             raise click.BadParameter("cannot determine your user name; pass --reviewer NAME") from None
     try:
         return parse_reviewer(value)
@@ -264,11 +316,37 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
 
 
 @cli.command()
-@click.option("--mode", type=click.Choice(["single", "grid"]), default="single", show_default=True, help="Review display mode.")
-@click.option("--pass", "pass_number", type=click.IntRange(min=1), default=None, help="Pass number, 1 or more (auto-detected if omitted).")
-@click.option("--batch", type=str, default=None, help="Restrict to a specific batch; [b] at the end of the list stays in it [default: the first batch with images matching the filter, and [b] moves on to the next].")
-@click.option("--filter", "status_filter", type=click.Choice(get_args(StatusFilter)), default="unreviewed", show_default=True, help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).")
-@click.option("--rotate", type=click.Choice(["auto", "always", "never"]), default="auto", show_default=True, help="Rotate images 90 degrees in grids: auto = only when that saves a grid.")
+@click.option(
+    "--mode", type=click.Choice(["single", "grid"]), default="single", show_default=True, help="Review display mode."
+)
+@click.option(
+    "--pass",
+    "pass_number",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Pass number, 1 or more (auto-detected if omitted).",
+)
+@click.option(
+    "--batch",
+    type=str,
+    default=None,
+    help="Restrict to a specific batch; [b] at the end of the list stays in it [default: the first batch with images matching the filter, and [b] moves on to the next].",
+)
+@click.option(
+    "--filter",
+    "status_filter",
+    type=click.Choice(get_args(StatusFilter)),
+    default="unreviewed",
+    show_default=True,
+    help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).",
+)
+@click.option(
+    "--rotate",
+    type=click.Choice(["auto", "always", "never"]),
+    default="auto",
+    show_default=True,
+    help="Rotate images 90 degrees in grids: auto = only when that saves a grid.",
+)
 @click.option(
     "--reviewer",
     envvar="IMAGE_REVIEW_REVIEWER",
@@ -347,17 +425,29 @@ def status(work_dir, remote, via):
         print("-" * 52)
         for batch_id in sorted(batch_counts):
             bc = batch_counts[batch_id]
-            print(f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6} {bc['FLAGGED']:>6}")
+            print(
+                f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6} {bc['FLAGGED']:>6}"
+            )
 
     print(f"\nCurrent pass: {current}")
 
     if skipped is not None and skipped.any:
-        print(f"Skipped during preprocess: {skipped.failed} failed, {skipped.ignored} ignored (see skipped.tsv in the work dir)")
+        print(
+            f"Skipped during preprocess: {skipped.failed} failed, {skipped.ignored} ignored (see skipped.tsv in the work dir)"
+        )
 
 
 @cli.command()
-@click.option("--work-dir", type=click.Path(exists=True), default="./review_work", show_default=True, help="Work directory containing preprocessed data.")
-@click.option("--bind", default=None, help="Hostname/IPv4 address to bind and advertise [default: this machine's FQDN].")
+@click.option(
+    "--work-dir",
+    type=click.Path(exists=True),
+    default="./review_work",
+    show_default=True,
+    help="Work directory containing preprocessed data.",
+)
+@click.option(
+    "--bind", default=None, help="Hostname/IPv4 address to bind and advertise [default: this machine's FQDN]."
+)
 @click.option("--port", type=click.IntRange(0, 65535), default=0, help="Port to listen on (0 picks a free port).")
 def serve(work_dir, bind, port):
     """Serve a work directory over HTTPS so a remote client can review it.
@@ -386,12 +476,16 @@ def serve(work_dir, bind, port):
             stack.callback(_close_store_after_marks, server, store)
             stack.callback(server.server_close)
             if ipaddress.ip_address(server.server_address[0]).is_unspecified:
-                raise click.ClickException("Refusing to bind a wildcard address; pass this node's hostname with --bind.")
+                raise click.ClickException(
+                    "Refusing to bind a wildcard address; pass this node's hostname with --bind."
+                )
             uri = target.to_uri()
             try:
                 RemoteTarget.parse(uri)
             except ValueError as e:
-                raise click.ClickException(f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address.")
+                raise click.ClickException(
+                    f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address."
+                )
             if sys.stdout.isatty():
                 print("Serving review data. The connection string grants access; treat it like a password.\n")
                 print(uri)

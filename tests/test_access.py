@@ -57,7 +57,18 @@ class ModesTest(unittest.TestCase):
             self.assertTrue(m.umask & 0o007 == 0o007)
 
     def test_access_of(self):
-        for mode, expected in [(0o700, "private"), (0o600, "private"), (0o2770, "group"), (0o770, "group"), (0o750, "private"), (0o775, "group"), (0o710, "private"), (0o720, "private"), (0o700 | stat.S_IFDIR, "private"), (0o2770 | stat.S_IFDIR, "group")]:
+        for mode, expected in [
+            (0o700, "private"),
+            (0o600, "private"),
+            (0o2770, "group"),
+            (0o770, "group"),
+            (0o750, "private"),
+            (0o775, "group"),
+            (0o710, "private"),
+            (0o720, "private"),
+            (0o700 | stat.S_IFDIR, "private"),
+            (0o2770 | stat.S_IFDIR, "group"),
+        ]:
             with self.subTest(mode=oct(mode)):
                 self.assertEqual(access_of(mode), expected)
 
@@ -118,7 +129,10 @@ class PreprocessAccessTest(unittest.TestCase):
     def test_umask_restored_on_error(self):
         before = os.umask(0o022)
         self.addCleanup(os.umask, before)
-        with mock.patch("image_review.preprocess._process", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+        with (
+            mock.patch("image_review.preprocess._process", side_effect=KeyboardInterrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
             self.run_pre(self.root / "work", "private")
         self.assertEqual(os.umask(0o022), 0o022)
 
@@ -232,14 +246,20 @@ class WarningTest(unittest.TestCase):
         return CliRunner().invoke(cli, ["status", "--work-dir", str(self.work)], env=ENV)
 
     def invoke_serve(self):
-        with mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt), mock.patch.dict(os.environ, {"HOME": str(self.work.parent)}):
+        with (
+            mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt),
+            mock.patch.dict(os.environ, {"HOME": str(self.work.parent)}),
+        ):
             return CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"], env=ENV)
 
     def test_warns_for_world_readable_dir(self):
         os.chmod(self.work, 0o755)
         result = self.invoke_status()
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn(f"warning: {self.work} is accessible to all users (mode 0755); run `chmod -R o-rwx {shlex.quote(str(self.work))}`", result.stderr)
+        self.assertIn(
+            f"warning: {self.work} is accessible to all users (mode 0755); run `chmod -R o-rwx {shlex.quote(str(self.work))}`",
+            result.stderr,
+        )
         self.assertNotIn("warning", result.stdout)
 
     def test_warns_for_world_readable_manifest(self):

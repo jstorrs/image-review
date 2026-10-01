@@ -61,7 +61,9 @@ def _signals_raise_interrupt() -> Iterator[None]:
         return
     sigs = [signal.SIGTERM] + ([signal.SIGHUP] if hasattr(signal, "SIGHUP") else [])
     # leave ignored signals alone so `nohup` keeps working
-    previous = {sig: signal.signal(sig, _raise_interrupt) for sig in sigs if signal.getsignal(sig) is not signal.SIG_IGN}
+    previous = {
+        sig: signal.signal(sig, _raise_interrupt) for sig in sigs if signal.getsignal(sig) is not signal.SIG_IGN
+    }
     try:
         yield
     finally:

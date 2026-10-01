@@ -132,7 +132,11 @@ class TestRoundTrips(RemoteTestCase):
                 return
             real_send(handler, reply)
 
-        with mock.patch.object(ReviewHandler, "_send", lossy_send), redirect_stderr(io.StringIO()), self.assertRaises(RemoteError):
+        with (
+            mock.patch.object(ReviewHandler, "_send", lossy_send),
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(RemoteError),
+        ):
             self.store.undo(1, reviewer="tester")
         self.assertEqual(len(dropped), 1)
         statuses = self.local_copy().statuses(1)
@@ -140,7 +144,9 @@ class TestRoundTrips(RemoteTestCase):
 
     def test_undo_after_idle_close_succeeds(self):
         with mock.patch.object(ReviewHandler, "timeout", 0.3), redirect_stderr(io.StringIO()):
-            self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")  # on a connection the server closes when idle
+            self.store.mark(
+                [KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single"
+            )  # on a connection the server closes when idle
             time.sleep(0.8)
             self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "UNREVIEWED"})
 
@@ -173,7 +179,9 @@ class TestPinning(RemoteTestCase):
         store = RemoteStore(wrong)
         self.addCleanup(store.close)
         with (
-            mock.patch.object(ReviewHandler, "_authorized", autospec=True, side_effect=ReviewHandler._authorized) as auth,
+            mock.patch.object(
+                ReviewHandler, "_authorized", autospec=True, side_effect=ReviewHandler._authorized
+            ) as auth,
             redirect_stderr(io.StringIO()) as log,
         ):
             with self.assertRaises(FingerprintMismatch):
@@ -212,7 +220,9 @@ class TestReconnect(RemoteTestCase):
 
             with mock.patch.object(PinnedHTTPSConnection, "connect", counting_connect):
                 self.assertEqual(self.store.current_pass(), 1)
-                self.assertEqual(self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")[KEYS[0]], "CLEAN")
+                self.assertEqual(
+                    self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")[KEYS[0]], "CLEAN"
+                )
             self.assertEqual(len(connects), 1)
 
     def test_second_failure_is_not_retried_again(self):
@@ -242,7 +252,9 @@ class TestRepin(unittest.TestCase):
             self.addCleanup(stop_b)
             time.sleep(0.8)  # server A's handlers drop the idle connections
             with (
-                mock.patch.object(ReviewHandler, "_authorized", autospec=True, side_effect=ReviewHandler._authorized) as auth,
+                mock.patch.object(
+                    ReviewHandler, "_authorized", autospec=True, side_effect=ReviewHandler._authorized
+                ) as auth,
                 redirect_stderr(io.StringIO()),
             ):
                 with self.assertRaises(FingerprintMismatch):
@@ -319,14 +331,25 @@ class TestSkipped(RemoteTestCase):
     def test_parse_skipped(self):
         self.assertIsNone(parse_skipped(b"null"))
         self.assertEqual(parse_skipped(b'{"failed": 0, "ignored": 4}'), SkippedCounts(0, 4))
-        for bad in (b"[]", b"{}", b'{"failed": 1}', b'{"failed": 1, "ignored": 2, "x": 3}', b'{"failed": "1", "ignored": 0}', b'{"failed": true, "ignored": 0}', b'{"failed": -1, "ignored": 0}', b"nope"):
+        for bad in (
+            b"[]",
+            b"{}",
+            b'{"failed": 1}',
+            b'{"failed": 1, "ignored": 2, "x": 3}',
+            b'{"failed": "1", "ignored": 0}',
+            b'{"failed": true, "ignored": 0}',
+            b'{"failed": -1, "ignored": 0}',
+            b"nope",
+        ):
             with self.subTest(bad=bad), self.assertRaises(RemoteError):
                 parse_skipped(bad)
 
 
 class TestCli(RemoteTestCase):
     def invoke(self, *args, **kwargs):
-        kwargs.setdefault("env", {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None})  # ignore the developer's environment
+        kwargs.setdefault(
+            "env", {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None}
+        )  # ignore the developer's environment
         return CliRunner().invoke(cli, list(args), **kwargs)
 
     def test_status_identical_to_local(self):
@@ -376,7 +399,10 @@ class TestCli(RemoteTestCase):
         with mock.patch("image_review.remote.API_VERSION", 6):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("server speaks API v5, this client v6; install the same image-review version on both machines", result.output)
+        self.assertIn(
+            "server speaks API v5, this client v6; install the same image-review version on both machines",
+            result.output,
+        )
         self.assertNotIn(self.target.token, result.output)
 
     def test_server_without_version_endpoint(self):
@@ -390,7 +416,10 @@ class TestCli(RemoteTestCase):
         with mock.patch.object(ReviewHandler, "_route", route):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("server is too old to report its API version; install the same image-review version on both machines", result.output)
+        self.assertIn(
+            "server is too old to report its API version; install the same image-review version on both machines",
+            result.output,
+        )
 
     def test_check_api(self):
         self.store.check_api()
@@ -409,7 +438,12 @@ class TestCli(RemoteTestCase):
         self.assertNotIn(self.target.token, result.output)
 
     def test_envvar_with_explicit_work_dir_says_so(self):
-        result = self.invoke("status", "--work-dir", str(self.work_dir), env={"IMAGE_REVIEW_REMOTE": self.target.to_uri(), "IMAGE_REVIEW_VIA": None})
+        result = self.invoke(
+            "status",
+            "--work-dir",
+            str(self.work_dir),
+            env={"IMAGE_REVIEW_REMOTE": self.target.to_uri(), "IMAGE_REVIEW_VIA": None},
+        )
         self.assertEqual(result.exit_code, 2)
         self.assertIn("IMAGE_REVIEW_REMOTE is set; unset it to use --work-dir", result.output)
         self.assertNotIn(self.target.token, result.output)
@@ -588,10 +622,7 @@ class TestSession(RemoteTestCase):
 
 class TestImports(unittest.TestCase):
     def test_remote_is_lightweight(self):
-        code = (
-            "import sys, image_review.remote\n"
-            "assert not {'pygame', 'numpy', 'skimage'} & set(sys.modules)"
-        )
+        code = "import sys, image_review.remote\nassert not {'pygame', 'numpy', 'skimage'} & set(sys.modules)"
         subprocess.run([sys.executable, "-c", code], check=True)
 
 

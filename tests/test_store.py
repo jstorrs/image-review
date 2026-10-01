@@ -153,7 +153,7 @@ class TestSkipped(StoreTestCase):
         self.assertFalse(self.store.skipped().any)
 
     def test_counts_kinds(self):
-        self.write("image_id\tkind\treason\na\tfailed\tx\nb\tignored\ty\nc\tfailed\t\"multi\nline\"\n")
+        self.write('image_id\tkind\treason\na\tfailed\tx\nb\tignored\ty\nc\tfailed\t"multi\nline"\n')
         self.assertEqual(self.store.skipped(), SkippedCounts(failed=2, ignored=1))
 
     def test_malformed_names_file_and_line(self):
@@ -204,9 +204,17 @@ class TestMarkAndStatuses(StoreTestCase):
         self.assertEqual(self.store.current_pass(), 2)
         self.assertEqual(
             self.store.statuses(2),
-            {"batch_001/a.jpg": "FLAGGED", "batch_001/b.jpg": "CLEAN", "batch_002/c.jpg": "CLEAN", "batch_002/d.jpg": "CLEAN"},
+            {
+                "batch_001/a.jpg": "FLAGGED",
+                "batch_001/b.jpg": "CLEAN",
+                "batch_002/c.jpg": "CLEAN",
+                "batch_002/d.jpg": "CLEAN",
+            },
         )
-        self.assertEqual(self.store.mark(["batch_001/a.jpg"], "CLEAN", 2, reviewer="tester", mode="single"), {"batch_001/a.jpg": "CLEAN"})
+        self.assertEqual(
+            self.store.mark(["batch_001/a.jpg"], "CLEAN", 2, reviewer="tester", mode="single"),
+            {"batch_001/a.jpg": "CLEAN"},
+        )
         self.assertEqual(self.store.current_pass(), 3)
 
     def test_flagged_keeps_pass_open(self):
@@ -235,7 +243,9 @@ class TestSharedImageId(unittest.TestCase):
             statuses = store.statuses(1)
             self.assertEqual({k: statuses[k] for k in changed}, changed)
             self.assertEqual(statuses["batch_002/c.jpg"], "UNREVIEWED")
-            self.assertEqual(store.undo(1, reviewer="tester"), {"batch_001/a.jpg": "UNREVIEWED", "batch_001/b.jpg": "UNREVIEWED"})
+            self.assertEqual(
+                store.undo(1, reviewer="tester"), {"batch_001/a.jpg": "UNREVIEWED", "batch_001/b.jpg": "UNREVIEWED"}
+            )
             store.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY", 1, reviewer="tester", mode="grid")
             size = (root / "review.tsv").stat().st_size
             store.undo(1, reviewer="tester")
@@ -285,7 +295,10 @@ class TestStrictLoading(unittest.TestCase):
                     LocalStore(self.work_dir)
 
     def test_review_header_problems(self):
-        for header in ("image_id\tbatch\tstatus\tpass_number", "image_id\tbatch\tstatus\tpass_number\ttimestamp\textra"):
+        for header in (
+            "image_id\tbatch\tstatus\tpass_number",
+            "image_id\tbatch\tstatus\tpass_number\ttimestamp\textra",
+        ):
             with self.subTest(header=header):
                 self.write_review(header)
                 with self.assertRaisesRegex(ValueError, r"review\.tsv:1: header"):
@@ -299,11 +312,31 @@ class TestStrictLoading(unittest.TestCase):
         cases = {
             "old-width row under new header": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}"),
             "bad mode": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tbogus\t1\t0.2.0"),
-            "FLAGGED status": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tsingle\t1\t0.2.0"),
-            "FLAGGED in an undo row": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tundo\t1\t0.2.0"),
-            "UNREVIEWED outside an undo row": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\talice\tsingle\t1\t0.2.0"),
-            "UNREVIEWED in a migrated row": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\t\t\t\t"),
-            "bad grid_size": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\tfour\t0.2.0"),
+            "FLAGGED status": (
+                self.NEW_HEADER,
+                good,
+                f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tsingle\t1\t0.2.0",
+            ),
+            "FLAGGED in an undo row": (
+                self.NEW_HEADER,
+                good,
+                f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tundo\t1\t0.2.0",
+            ),
+            "UNREVIEWED outside an undo row": (
+                self.NEW_HEADER,
+                good,
+                f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\talice\tsingle\t1\t0.2.0",
+            ),
+            "UNREVIEWED in a migrated row": (
+                self.NEW_HEADER,
+                good,
+                f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\t\t\t\t",
+            ),
+            "bad grid_size": (
+                self.NEW_HEADER,
+                good,
+                f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\tfour\t0.2.0",
+            ),
             "zero grid_size": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\t0\t0.2.0"),
             "new-width row under old header": (self.REVIEW_HEADER, f"/src/a.dcm\tbatch_001\tCLEAN\t1\t{ts}", good),
         }
@@ -419,14 +452,16 @@ class TestReviewLog(unittest.TestCase):
         db.mark("z", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
         after = self.path.read_bytes()
         self.assertTrue(after.startswith(intact))
-        self.assertTrue(after[len(intact):].startswith(b"z\tbatch_001\tDIRTY\t1\t"))
+        self.assertTrue(after[len(intact) :].startswith(b"z\tbatch_001\tDIRTY\t1\t"))
         self.assertEqual(len(after.splitlines()), 3)  # header, x, z: the fragment is gone
         self.assertEqual(set(self.reload()._rows), {"x", "z"})
 
     def test_torn_last_line_that_parses_is_kept(self):
         ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
         with open(self.path, "ab") as f:
-            f.write(b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\tr\tsingle\t1\t0.1")  # every field written, line ending not
+            f.write(
+                b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\tr\tsingle\t1\t0.1"
+            )  # every field written, line ending not
         db = self.reload()
         self.assertEqual(set(db._rows), {"x", "y"})
         db.mark("z", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
@@ -489,15 +524,21 @@ class TestReviewLog(unittest.TestCase):
             return real_write(fd, data[:10])
 
         short_then_full.done = False
-        with mock.patch.object(review_db_module.os, "write", short_then_full), \
-                mock.patch.object(review_db_module.os, "ftruncate", side_effect=OSError(errno.EIO, "I/O error")), \
-                self.assertRaises(OSError):
-            db.mark_many([("y", "batch_001"), ("z", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")  # the rollback fails too: the fragment stays
+        with (
+            mock.patch.object(review_db_module.os, "write", short_then_full),
+            mock.patch.object(review_db_module.os, "ftruncate", side_effect=OSError(errno.EIO, "I/O error")),
+            self.assertRaises(OSError),
+        ):
+            db.mark_many(
+                [("y", "batch_001"), ("z", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single"
+            )  # the rollback fails too: the fragment stays
         db.mark("w", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
         self.assertEqual(self.reload()._rows, db._rows)
 
     def test_stale_truncate_refuses(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001"), ("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many(
+            [("x", "batch_001"), ("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         with open(self.path, "ab") as f:
             f.write(b"z\tbatch_0")
         with contextlib.redirect_stderr(io.StringIO()):
@@ -511,7 +552,12 @@ class TestReviewLog(unittest.TestCase):
 
     def test_bare_cr_file_with_bad_middle_line_raises(self):
         ts = "2026-01-01T00:00:00+00:00"
-        lines = ["image_id\tbatch\tstatus\tpass_number\ttimestamp", f"a\tb\tCLEAN\t1\t{ts}", f"bad\tb\tdirty\t1\t{ts}", f"c\tb\tDIRTY\t2\t{ts}"]
+        lines = [
+            "image_id\tbatch\tstatus\tpass_number\ttimestamp",
+            f"a\tb\tCLEAN\t1\t{ts}",
+            f"bad\tb\tdirty\t1\t{ts}",
+            f"c\tb\tDIRTY\t2\t{ts}",
+        ]
         for name, data in [("terminated", "\r".join(lines) + "\r"), ("unterminated", "\r".join(lines))]:
             with self.subTest(name):
                 self.path.write_bytes(data.encode())
@@ -568,7 +614,9 @@ def review_rows(path: Path) -> list[dict[str, str]]:
 class TestAuditColumns(StoreTestCase):
     def test_local_mark_writes_audit_columns(self):
         self.store.mark(["batch_001/a.jpg"], "CLEAN", 1, reviewer="alice", mode="single")
-        self.store.mark(["batch_001/b.jpg", "batch_002/c.jpg", "batch_002/d.jpg"], "DIRTY", 1, reviewer="Bob Q", mode="grid")
+        self.store.mark(
+            ["batch_001/b.jpg", "batch_002/c.jpg", "batch_002/d.jpg"], "DIRTY", 1, reviewer="Bob Q", mode="grid"
+        )
         rows = review_rows(self.work_dir / "review.tsv")
         audit = [(r["reviewer"], r["mode"], r["grid_size"], r["tool_version"]) for r in rows]
         version = package_version()
@@ -633,7 +681,9 @@ class TestMigration(unittest.TestCase):
         self.assertEqual(header, HEADER)
         self.assertEqual(rows, self.expected_rows())
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o660)
-        self.assertEqual([p.name for p in self.work_dir.iterdir() if "review.tsv" in p.name], ["review.tsv"])  # no temp left
+        self.assertEqual(
+            [p.name for p in self.work_dir.iterdir() if "review.tsv" in p.name], ["review.tsv"]
+        )  # no temp left
         migrated, inode = self.path.read_bytes(), self.path.stat().st_ino
         with LocalStore(self.work_dir) as store:
             pass
@@ -644,7 +694,9 @@ class TestMigration(unittest.TestCase):
             store.mark(["batch_002/c.jpg"], "DIRTY", 1, reviewer="alice", mode="single")
         _, rows = self.stored_rows()
         self.assertEqual(rows[:3], self.expected_rows())
-        self.assertEqual(rows[3][:3] + rows[3][5:8], ["/src/patient_lee/c.dcm", "batch_002", "DIRTY", "alice", "single", "1"])
+        self.assertEqual(
+            rows[3][:3] + rows[3][5:8], ["/src/patient_lee/c.dcm", "batch_002", "DIRTY", "alice", "single", "1"]
+        )
 
     def test_read_only_store_leaves_old_file_alone(self):
         inode = self.path.stat().st_ino
@@ -677,7 +729,10 @@ class TestMigration(unittest.TestCase):
         def interrupt_replace(src, dst):
             raise KeyboardInterrupt
 
-        for name, attr, fake, exc in [("fsync", "fsync", fail_fsync, OSError), ("replace", "replace", interrupt_replace, KeyboardInterrupt)]:
+        for name, attr, fake, exc in [
+            ("fsync", "fsync", fail_fsync, OSError),
+            ("replace", "replace", interrupt_replace, KeyboardInterrupt),
+        ]:
             with self.subTest(name):
                 inode = self.path.stat().st_ino
                 fake_os = types.ModuleType("os")  # review_db's own os only: the lock file's fsync stays real
@@ -791,10 +846,19 @@ class TestUndo(StoreTestCase):
         self.assertEqual(self.store.statuses(1)[self.A], "UNREVIEWED")
         row = self.last_row()
         self.assertEqual(
-            {k: row[k] for k in ("image_id", "batch", "status", "pass_number", "reviewer", "mode", "grid_size", "tool_version")},
             {
-                "image_id": ROWS[0][2], "batch": "batch_001", "status": "UNREVIEWED", "pass_number": "1",
-                "reviewer": "bob", "mode": "undo", "grid_size": "1", "tool_version": package_version(),
+                k: row[k]
+                for k in ("image_id", "batch", "status", "pass_number", "reviewer", "mode", "grid_size", "tool_version")
+            },
+            {
+                "image_id": ROWS[0][2],
+                "batch": "batch_001",
+                "status": "UNREVIEWED",
+                "pass_number": "1",
+                "reviewer": "bob",
+                "mode": "undo",
+                "grid_size": "1",
+                "tool_version": package_version(),
             },
         )
         reloaded = LocalStore(self.work_dir, read_only=True)
@@ -868,7 +932,10 @@ class TestUndo(StoreTestCase):
 
     def test_failed_undo_keeps_the_entry(self):
         self.store.mark([self.A], "CLEAN", 1, reviewer="alice", mode="single")
-        with mock.patch.object(ReviewDB, "_append", side_effect=OSError(errno.ENOSPC, "full")), self.assertRaises(OSError):
+        with (
+            mock.patch.object(ReviewDB, "_append", side_effect=OSError(errno.ENOSPC, "full")),
+            self.assertRaises(OSError),
+        ):
             self.store.undo(1, reviewer="alice")
         with self.assertRaises(ValueError):
             self.store.undo(1, reviewer="a\tb")
@@ -877,7 +944,10 @@ class TestUndo(StoreTestCase):
 
     def test_failed_mark_is_not_pushed(self):
         self.store.mark([self.A], "CLEAN", 1, reviewer="alice", mode="single")
-        with mock.patch.object(ReviewDB, "_append", side_effect=OSError(errno.ENOSPC, "full")), self.assertRaises(OSError):
+        with (
+            mock.patch.object(ReviewDB, "_append", side_effect=OSError(errno.ENOSPC, "full")),
+            self.assertRaises(OSError),
+        ):
             self.store.mark([self.B], "DIRTY", 1, reviewer="alice", mode="single")
         self.assertEqual(self.store.undo(1, reviewer="alice"), {self.A: "UNREVIEWED"})
         self.assertEqual(self.store.undo(1, reviewer="alice"), {})
@@ -1058,8 +1128,11 @@ class TestSession(SessionTestCase):
         s._cursor = 0
         self.assertEqual(s._item_status(s._items[0]), "DIRTY")
         self.assertEqual(s._count_todo(), 0)
-        with mock.patch.object(self.store, "mark") as mark, mock.patch.object(s._viewer, "set_info") as set_info, \
-                mock.patch("sys.stderr"):
+        with (
+            mock.patch.object(self.store, "mark") as mark,
+            mock.patch.object(s._viewer, "set_info") as set_info,
+            mock.patch("sys.stderr"),
+        ):
             s._mark("CLEAN")
         mark.assert_not_called()
         set_info.assert_called_once_with(GRID_HAS_DIRTY)
@@ -1081,7 +1154,9 @@ class TestSession(SessionTestCase):
         """A pass 1 single-mode session over already reviewed images: batch_002 (c, d CLEAN), or batch_001 (a DIRTY, b CLEAN) under all."""
         self.finish_pass_one()
         batch = "batch_001" if status_filter == "all" else "batch_002"
-        s = ReviewSession(self.store, reviewer="tester", mode="single", status_filter=status_filter, batch=batch, pass_number=1)
+        s = ReviewSession(
+            self.store, reviewer="tester", mode="single", status_filter=status_filter, batch=batch, pass_number=1
+        )
         self.assertEqual(s._todo_count, len(s._items))
         return s
 
@@ -1270,7 +1345,9 @@ class TestEventLoop(EventLoopTestCase):
         with mock.patch.object(s._viewer, "show_message") as show_message:
             s.handle_events([key(pg.K_RIGHT)])
         self.assertEqual(s._ui_state, UIState.END_MESSAGE)
-        show_message.assert_called_once_with("No more todo images this way - 1 todo left - [Left/Right] wrap - [b] next batch")
+        show_message.assert_called_once_with(
+            "No more todo images this way - 1 todo left - [Left/Right] wrap - [b] next batch"
+        )
 
     def test_empty_mode_message_is_not_painted_over(self):
         s = self.reviewing()
@@ -2212,7 +2289,9 @@ class TestPackShrinksOversize(unittest.TestCase):
     def setUp(self):
         self.store = self.make_store({"big/a.jpg": (3000, 2500), "big/b.jpg": (100, 60), "big/c.jpg": (100, 60)})
 
-    def make_store(self, sizes: dict[str, tuple[int, int]], colours: dict[str, tuple[int, int, int]] | None = None) -> LocalStore:
+    def make_store(
+        self, sizes: dict[str, tuple[int, int]], colours: dict[str, tuple[int, int, int]] | None = None
+    ) -> LocalStore:
         """A store over solid JPGs of the given sizes (grey unless `colours` names one), one batch per directory."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -2310,7 +2389,9 @@ class TestPackShrinksOversize(unittest.TestCase):
         store = self.make_store({n: size for n, (size, _) in images.items()}, {n: c for n, (_, c) in images.items()})
         for rot in (True, False):
             with self.subTest(allow_rotation=rot):
-                grids, left_out = pack_into_grids(store.manifest(), store, 1920, 1030, rotation="always" if rot else "never")
+                grids, left_out = pack_into_grids(
+                    store.manifest(), store, 1920, 1030, rotation="always" if rot else "never"
+                )
                 self.assertEqual(left_out, [])
                 self.assertEqual(sorted(k for gs in grids for k in gs.keys), sorted(images))
                 for gs in grids:
@@ -2389,7 +2470,17 @@ class TestPackShrinksOversize(unittest.TestCase):
         self.assertEqual(fit_size(1500, 2500, 1920, 1030, True), (1030, 1716))
 
     def test_fit_size_always_fits_an_allowed_orientation(self):
-        for w, h in [(1921, 1), (1, 1031), (3000, 2500), (1920, 1031), (1921, 1030), (7, 4000), (4000, 7), (1031, 1921), (999, 1999)]:
+        for w, h in [
+            (1921, 1),
+            (1, 1031),
+            (3000, 2500),
+            (1920, 1031),
+            (1921, 1030),
+            (7, 4000),
+            (4000, 7),
+            (1031, 1921),
+            (999, 1999),
+        ]:
             for rot in (False, True):
                 with self.subTest(w=w, h=h, rot=rot):
                     nw, nh = fit_size(w, h, 1920, 1030, rot)
@@ -2401,6 +2492,7 @@ class TestPackShrinksOversize(unittest.TestCase):
         self.assertEqual(fit_size(3000, 2500, 1920, 1030, True), (1236, 1030))
         self.assertEqual(fit_size(1000, 1800, 1920, 1030, True), (1000, 1800))  # fits only rotated: untouched
         self.assertEqual(fit_size(1000, 1800, 1920, 1030, False), (572, 1030))
+
 
 class TestDwell(unittest.TestCase):
     def test_dwell_elapsed(self):
@@ -2448,7 +2540,9 @@ class TestNextIndex(unittest.TestCase):
         self.assertEqual(next_index(4, -1, 1, is_todo=None, wrap=False), 0)
         self.assertEqual(next_index(4, -1, 1, is_todo={2}.__contains__, wrap=False), 2)
         self.assertEqual(next_index(4, -1, 1, is_todo={3}.__contains__, wrap=False), 3)
-        self.assertEqual(next_index(4, -1, -1, is_todo=None, wrap=False), 2)  # the inherited formula's result; unreachable in production
+        self.assertEqual(
+            next_index(4, -1, -1, is_todo=None, wrap=False), 2
+        )  # the inherited formula's result; unreachable in production
         self.assertEqual(next_index(1, -1, -1, is_todo=None, wrap=False), 0)
 
 
@@ -2498,7 +2592,12 @@ class TestPureFunctions(StoreTestCase):
     def test_statuses(self):
         self.assertEqual(
             self.statuses,
-            {"batch_001/a.jpg": "FLAGGED", "batch_001/b.jpg": "CLEAN", "batch_002/c.jpg": "DIRTY", "batch_002/d.jpg": "UNREVIEWED"},
+            {
+                "batch_001/a.jpg": "FLAGGED",
+                "batch_001/b.jpg": "CLEAN",
+                "batch_002/c.jpg": "DIRTY",
+                "batch_002/d.jpg": "UNREVIEWED",
+            },
         )
 
     def test_filter(self):
@@ -2525,7 +2624,9 @@ class TestPureFunctions(StoreTestCase):
                 "batch_002": {"CLEAN": 0, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 0, "total": 2},
             },
         )
-        self.assertEqual(summary(self.rows, self.statuses), {"CLEAN": 1, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 1, "total": 4})
+        self.assertEqual(
+            summary(self.rows, self.statuses), {"CLEAN": 1, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 1, "total": 4}
+        )
 
 
 THIS_BOOT = boot_id()
@@ -2555,7 +2656,9 @@ class LockTestCase(unittest.TestCase):
 
 
 def finished_pid() -> int:
-    finished = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True, check=True)
+    finished = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True, check=True
+    )
     return int(finished.stdout)
 
 
@@ -2620,7 +2723,12 @@ class TestWorkDirLock(LockTestCase):
             LocalStore(self.work_dir)
         if THIS_BOOT:
             kill.assert_called_once_with(1234, 0)
-        for part in ("bob", "pid 1234", "2026-09-30T12:00:00Z", "by hand"):  # pid reuse: the user may still need to remove it
+        for part in (
+            "bob",
+            "pid 1234",
+            "2026-09-30T12:00:00Z",
+            "by hand",
+        ):  # pid reuse: the user may still need to remove it
             self.assertIn(part, str(ctx.exception))
         self.assertEqual(self.holder()["pid"], 1234)
 
@@ -2637,7 +2745,13 @@ class TestWorkDirLock(LockTestCase):
 
     def assert_one_reclaimer_wins(self, work_dir: Path) -> None:
         lock_path = work_dir / LOCK_NAME
-        stale = {"host": socket.gethostname(), "boot_id": THIS_BOOT, "user": "alice", "pid": finished_pid(), "started": "t"}
+        stale = {
+            "host": socket.gethostname(),
+            "boot_id": THIS_BOOT,
+            "user": "alice",
+            "pid": finished_pid(),
+            "started": "t",
+        }
         lock_path.write_text(json.dumps(stale))
         real_is_stale = store_module.is_stale
         a_started = False
@@ -2659,7 +2773,13 @@ class TestWorkDirLock(LockTestCase):
 
     @mock.patch.object(store_module, "EMPTY_LOCK_WAIT", 0.1)
     def test_corrupt_lock_is_refused(self):
-        for text in ("", "not json", "[]", '{"host": "h", "user": "u", "pid": "1", "started": "t"}', '{"host": "h", "user": "u", "pid": 0, "started": "t"}'):
+        for text in (
+            "",
+            "not json",
+            "[]",
+            '{"host": "h", "user": "u", "pid": "1", "started": "t"}',
+            '{"host": "h", "user": "u", "pid": 0, "started": "t"}',
+        ):
             with self.subTest(text=text):
                 self.lock_path.write_text(text)
                 with self.assertRaises(WorkDirLocked) as ctx:
@@ -2677,7 +2797,10 @@ class TestWorkDirLock(LockTestCase):
                 self.assertEqual(self.holder()["pid"], os.getpid())
                 self.assertEqual(set(self.holder()), {"host", "boot_id", "user", "pid", "started"})
                 self.assertEqual([p.name for p in self.work_dir.iterdir() if p.name.startswith(LOCK_NAME)], [LOCK_NAME])
-                with mock.patch("os.link", side_effect=OSError(err, os.strerror(err))), self.assertRaises(WorkDirLocked):
+                with (
+                    mock.patch("os.link", side_effect=OSError(err, os.strerror(err))),
+                    self.assertRaises(WorkDirLocked),
+                ):
                     LocalStore(self.work_dir)
                 store.close()
                 self.assertFalse(self.lock_path.exists())
@@ -2772,7 +2895,13 @@ class TestWorkDirLock(LockTestCase):
 
 class TestLockCli(LockTestCase):
     def invoke(self, *args, env=None):
-        env = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None, "IMAGE_REVIEW_REVIEWER": None, **(env or {})}
+        env = {
+            "IMAGE_REVIEW_REMOTE": None,
+            "IMAGE_REVIEW_VIA": None,
+            "IMAGE_REVIEW_ACCESS": None,
+            "IMAGE_REVIEW_REVIEWER": None,
+            **(env or {}),
+        }
         return CliRunner().invoke(cli, [*args, "--work-dir", str(self.work_dir)], env=env)
 
     def test_review_on_locked_dir_exits_1(self):
@@ -2831,17 +2960,26 @@ class TestLockCli(LockTestCase):
                 self.assertIn("printable", result.output)
 
     def test_review_passes_reviewer_to_session(self):
-        cases = [((), {}, "login"), (("--reviewer", "Dr. Lee"), {}, "Dr. Lee"), ((), {"IMAGE_REVIEW_REVIEWER": "env name"}, "env name")]
+        cases = [
+            ((), {}, "login"),
+            (("--reviewer", "Dr. Lee"), {}, "Dr. Lee"),
+            ((), {"IMAGE_REVIEW_REVIEWER": "env name"}, "env name"),
+        ]
         for args, env, expected in cases:
-            with self.subTest(args=args, env=env), mock.patch("image_review.controller.ReviewSession") as session, \
-                    mock.patch("image_review.cli.getpass.getuser", return_value="login"):
+            with (
+                self.subTest(args=args, env=env),
+                mock.patch("image_review.controller.ReviewSession") as session,
+                mock.patch("image_review.cli.getpass.getuser", return_value="login"),
+            ):
                 result = self.invoke("review", *args, env=env)
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertEqual(session.call_args.kwargs["reviewer"], expected)
 
     def test_review_migration_conflict_is_a_clean_error(self):
-        with mock.patch.object(ReviewDB, "migrate", side_effect=RuntimeError("review.tsv changed since it was loaded")), \
-                mock.patch("image_review.controller.ReviewSession") as session:
+        with (
+            mock.patch.object(ReviewDB, "migrate", side_effect=RuntimeError("review.tsv changed since it was loaded")),
+            mock.patch("image_review.controller.ReviewSession") as session,
+        ):
             result = self.invoke("review")
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("changed since it was loaded", result.output)
@@ -2862,7 +3000,11 @@ class TestLockCli(LockTestCase):
         self.assertIsNone(unknown_batch_message("batch_003", known))
 
     def test_review_valid_batch_reaches_session(self):
-        with mock.patch("image_review.controller.ReviewSession") as session, mock.patch("pygame.init"), mock.patch("pygame.quit"):
+        with (
+            mock.patch("image_review.controller.ReviewSession") as session,
+            mock.patch("pygame.init"),
+            mock.patch("pygame.quit"),
+        ):
             result = self.invoke("review", "--batch", "batch_002")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(session.call_args.kwargs["batch"], "batch_002")
@@ -2870,7 +3012,11 @@ class TestLockCli(LockTestCase):
     def test_review_rotate_reaches_session(self):
         for args, expected in (((), "auto"), (("--rotate", "never"), "never"), (("--rotate", "always"), "always")):
             with self.subTest(args=args):
-                with mock.patch("image_review.controller.ReviewSession") as session, mock.patch("pygame.init"), mock.patch("pygame.quit"):
+                with (
+                    mock.patch("image_review.controller.ReviewSession") as session,
+                    mock.patch("pygame.init"),
+                    mock.patch("pygame.quit"),
+                ):
                     result = self.invoke("review", *args)
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertEqual(session.call_args.kwargs["rotation"], expected)
@@ -2880,7 +3026,11 @@ class TestLockCli(LockTestCase):
 
     def test_review_rejects_unknown_filter(self):
         self.assert_rejected("--filter", "bogus")
-        with mock.patch("image_review.controller.ReviewSession") as session, mock.patch("pygame.init"), mock.patch("pygame.quit"):
+        with (
+            mock.patch("image_review.controller.ReviewSession") as session,
+            mock.patch("pygame.init"),
+            mock.patch("pygame.quit"),
+        ):
             result = self.invoke("review", "--filter", "clean")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(session.call_args.kwargs["status_filter"], "clean")
@@ -2905,7 +3055,13 @@ class TestLockCli(LockTestCase):
             store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
         result = self.invoke("status")
         self.assertEqual(result.exit_code, 0, result.output)
-        for line in ("  CLEAN:           3", "  DIRTY:           0", "  UNREVIEWED:      0", "  FLAGGED:         1", "Current pass: 2"):
+        for line in (
+            "  CLEAN:           3",
+            "  DIRTY:           0",
+            "  UNREVIEWED:      0",
+            "  FLAGGED:         1",
+            "Current pass: 2",
+        ):
             self.assertIn(line + "\n", result.output)
         self.assertIn(f"{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6} {'Flag':>6}", result.output)
         self.assertIn(f"{'batch_001':<15} {2:>6} {1:>6} {0:>6} {0:>6} {1:>6}", result.output)
@@ -2918,7 +3074,9 @@ class TestLockCli(LockTestCase):
         with mock.patch.object(pg.display, "toggle_fullscreen", lambda: None):
             result = self.invoke("review", "--mode", "grid")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No grid items for pass 2; 1 FLAGGED/DIRTY image needs single-mode review (--mode single)", result.output)
+        self.assertIn(
+            "No grid items for pass 2; 1 FLAGGED/DIRTY image needs single-mode review (--mode single)", result.output
+        )
         self.assertNotIn("No images to review", result.output)
 
     def test_status_works_on_locked_dir(self):
@@ -2927,6 +3085,7 @@ class TestLockCli(LockTestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("UNREVIEWED:", result.output)
         self.assertEqual(self.holder()["host"], "node042")
+
 
 if __name__ == "__main__":
     unittest.main()

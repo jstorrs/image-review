@@ -49,12 +49,18 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str] =
     """One row of a review.tsv whose header is `header` (HEADER or LEGACY_HEADER); legacy rows get empty audit columns."""
     where = f"{path}:{line}"
     if len(fields) != len(header):
-        raise ValueError(f"{where}: expected {len(header)} tab-separated fields ({', '.join(header)}), got {len(fields)}")
-    image_id, batch, status, pass_text, timestamp, reviewer, mode, size_text, tool_version = fields + [""] * (len(HEADER) - len(header))
+        raise ValueError(
+            f"{where}: expected {len(header)} tab-separated fields ({', '.join(header)}), got {len(fields)}"
+        )
+    image_id, batch, status, pass_text, timestamp, reviewer, mode, size_text, tool_version = fields + [""] * (
+        len(HEADER) - len(header)
+    )
     if not image_id:
         raise ValueError(f"{where}: image_id is empty")
     if status not in get_args(Verdict) and not (status == TOMBSTONE and mode == "undo"):
-        raise ValueError(f"{where}: status must be one of {', '.join(get_args(Verdict))} ({TOMBSTONE} only in an undo row), got {status!r}")
+        raise ValueError(
+            f"{where}: status must be one of {', '.join(get_args(Verdict))} ({TOMBSTONE} only in an undo row), got {status!r}"
+        )
     try:
         pass_number = int(pass_text)
     except ValueError:
@@ -102,7 +108,17 @@ def _format(header: bool, decisions: Iterable[Decision]) -> str:
     if header:
         writer.writerow(HEADER)
     writer.writerows(
-        [d.image_id, d.batch, d.status, d.pass_number, d.timestamp, d.reviewer, d.mode, "" if d.grid_size is None else d.grid_size, d.tool_version]
+        [
+            d.image_id,
+            d.batch,
+            d.status,
+            d.pass_number,
+            d.timestamp,
+            d.reviewer,
+            d.mode,
+            "" if d.grid_size is None else d.grid_size,
+            d.tool_version,
+        ]
         for d in decisions
     )
     return buf.getvalue()
@@ -170,11 +186,18 @@ class ReviewDB:
         try:
             decisions, legacy = parse_log(self.review_path, data)
         except ValueError as exc:
-            end = max(data.rfind(b"\n"), data.rfind(b"\r")) + 1  # just past the last complete line; csv also ends lines at a bare \r
+            end = (
+                max(data.rfind(b"\n"), data.rfind(b"\r")) + 1
+            )  # just past the last complete line; csv also ends lines at a bare \r
             if end == len(data):
                 raise
-            decisions, legacy = parse_log(self.review_path, data[:end])  # raises if the problem is not only the last line
-            print(f"WARNING: ignoring the unfinished last line of {self.review_path} (an interrupted write): {exc}", file=sys.stderr)
+            decisions, legacy = parse_log(
+                self.review_path, data[:end]
+            )  # raises if the problem is not only the last line
+            print(
+                f"WARNING: ignoring the unfinished last line of {self.review_path} (an interrupted write): {exc}",
+                file=sys.stderr,
+            )
             self._truncate = PendingTruncate(st.st_ino, len(data), end)
         self._rows = latest(decisions)
         if legacy:
@@ -224,7 +247,9 @@ class ReviewDB:
         An old-header file is refused: its rows would not match the header until migrate() rewrites it.
         """
         if self._legacy is not None:
-            raise RuntimeError(f"{self.review_path} has the old {len(LEGACY_HEADER)}-column header; migrate() it before appending")
+            raise RuntimeError(
+                f"{self.review_path} has the old {len(LEGACY_HEADER)}-column header; migrate() it before appending"
+            )
         rows = _format(False, decisions)
         file_mode = policy_of_dir(self.work_dir).file_mode
         fd = os.open(self.review_path, os.O_RDWR | os.O_APPEND | os.O_CREAT, file_mode)
@@ -233,7 +258,9 @@ class ReviewDB:
             start = st.st_size
             if self._truncate is not None:
                 if not self._truncate.matches(st):
-                    raise RuntimeError(f"{self.review_path} changed since it was loaded; not truncating its unfinished last line")
+                    raise RuntimeError(
+                        f"{self.review_path} changed since it was loaded; not truncating its unfinished last line"
+                    )
                 os.ftruncate(fd, self._truncate.offset)  # drop the torn tail
                 start = self._truncate.offset
             if start == 0:
@@ -242,12 +269,14 @@ class ReviewDB:
                 payload = _format(True, []) + rows
             else:
                 last = os.pread(fd, 1, start - 1)
-                prefix = "" if last == b"\n" else "\n" if last == b"\r" else "\r\n"  # finish a last line that parsed but lacks its ending
+                prefix = (
+                    "" if last == b"\n" else "\n" if last == b"\r" else "\r\n"
+                )  # finish a last line that parsed but lacks its ending
                 payload = prefix + rows
             remaining = payload.encode("utf-8")
             try:
                 while remaining:
-                    remaining = remaining[os.write(fd, remaining):]  # os.write may write less than asked
+                    remaining = remaining[os.write(fd, remaining) :]  # os.write may write less than asked
                 os.fsync(fd)
             except BaseException:
                 self._truncate = PendingTruncate(st.st_ino, None, start)  # whatever landed is a torn tail
@@ -259,10 +288,14 @@ class ReviewDB:
             os.close(fd)
         self._truncate = None
 
-    def mark(self, image_id: str, batch: str, status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> None:
+    def mark(
+        self, image_id: str, batch: str, status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> None:
         self.mark_many([(image_id, batch)], status, pass_number, reviewer=reviewer, mode=mode)
 
-    def mark_many(self, targets: list[tuple[str, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> list[Change]:
+    def mark_many(
+        self, targets: list[tuple[str, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> list[Change]:
         """Record one verdict on every (image_id, batch) in targets; grid_size is len(targets).
 
         Returns each row written with the decision it replaced, for undo_many.
@@ -278,9 +311,16 @@ class ReviewDB:
         for image_id, batch in targets:
             existing = self._rows.get(image_id)
             recorded_pass = max(existing.pass_number, pass_number) if existing else pass_number  # never decreases
-            changes.append(Change(Decision(image_id, batch, status, recorded_pass, ts, reviewer, mode, len(targets), tool_version), existing))
+            changes.append(
+                Change(
+                    Decision(image_id, batch, status, recorded_pass, ts, reviewer, mode, len(targets), tool_version),
+                    existing,
+                )
+            )
         decisions = [c.written for c in changes]
-        self._append(decisions)  # on disk first; a failed append changes neither memory nor, once its tail is cut, the file
+        self._append(
+            decisions
+        )  # on disk first; a failed append changes neither memory nor, once its tail is cut, the file
         self._rows.update((d.image_id, d) for d in decisions)
         return changes
 
@@ -294,9 +334,29 @@ class ReviewDB:
         tool_version = package_version()
         by_image = {c.written.image_id: c for c in changes}  # an image_id given twice (keys sharing it) is undone once
         decisions = [
-            Decision(image_id, c.previous.batch, c.previous.status, c.previous.pass_number, ts, reviewer, "undo", len(by_image), tool_version)
+            Decision(
+                image_id,
+                c.previous.batch,
+                c.previous.status,
+                c.previous.pass_number,
+                ts,
+                reviewer,
+                "undo",
+                len(by_image),
+                tool_version,
+            )
             if c.previous is not None
-            else Decision(image_id, c.written.batch, TOMBSTONE, c.written.pass_number, ts, reviewer, "undo", len(by_image), tool_version)
+            else Decision(
+                image_id,
+                c.written.batch,
+                TOMBSTONE,
+                c.written.pass_number,
+                ts,
+                reviewer,
+                "undo",
+                len(by_image),
+                tool_version,
+            )
             for image_id, c in by_image.items()
         ]
         if not decisions:

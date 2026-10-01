@@ -71,7 +71,9 @@ class ReviewStore(Protocol):
         """Key -> status for every manifest row."""
         ...
 
-    def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
+    def mark(
+        self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> dict[str, Status]:
         """Record a verdict on keys, given by `reviewer` (an unauthenticated claim) in `mode`.
 
         Returns the new status of every key affected (incl. keys sharing an image_id).
@@ -116,10 +118,14 @@ def load_manifest(work_dir: Path) -> list[ManifestEntry]:
         for fields in reader:
             line = reader.line_num
             if len(fields) != len(MANIFEST_HEADER) or not all(fields):
-                raise ValueError(f"{path}:{line}: expected {len(MANIFEST_HEADER)} non-empty tab-separated fields ({', '.join(MANIFEST_HEADER)})")
+                raise ValueError(
+                    f"{path}:{line}: expected {len(MANIFEST_HEADER)} non-empty tab-separated fields ({', '.join(MANIFEST_HEADER)})"
+                )
             batch, key, image_id = fields
             if key in key_lines:
-                raise ValueError(f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})")
+                raise ValueError(
+                    f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})"
+                )
             key_lines[key] = line
             entries.append(ManifestEntry(batch, key, image_id))
     return entries
@@ -172,7 +178,9 @@ def this_process() -> LockHolder:
         user = getpass.getuser()
     except (KeyError, OSError):  # no USER/LOGNAME and no passwd entry (some containers): KeyError <3.13, OSError >=3.13
         user = str(os.getuid())
-    return LockHolder(socket.gethostname(), boot_id(), user, os.getpid(), datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    return LockHolder(
+        socket.gethostname(), boot_id(), user, os.getpid(), datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
 
 
 def parse_lock(text: str) -> LockHolder:
@@ -181,7 +189,14 @@ def parse_lock(text: str) -> LockHolder:
     fields = data if isinstance(data, dict) else {}
     host, user, pid, started = (fields.get(k) for k in ("host", "user", "pid", "started"))
     boot = fields.get("boot_id", "")
-    if not (isinstance(host, str) and isinstance(user, str) and isinstance(started, str) and isinstance(boot, str) and type(pid) is int and pid > 0):
+    if not (
+        isinstance(host, str)
+        and isinstance(user, str)
+        and isinstance(started, str)
+        and isinstance(boot, str)
+        and type(pid) is int
+        and pid > 0
+    ):
         raise ValueError("expected a JSON object with host, user, a positive pid and started")
     return LockHolder(host, boot, user, pid, started)
 
@@ -440,10 +455,14 @@ class LocalStore:
             for k in self._keys_by_image_id[iid]
         }
 
-    def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
+    def mark(
+        self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> dict[str, Status]:
         self._require_writable()
         image_ids = [self._image_ids[key] for key in keys]
-        changes = self._db.mark_many([(self._image_ids[k], self._batches[k]) for k in keys], status, pass_number, reviewer=reviewer, mode=mode)
+        changes = self._db.mark_many(
+            [(self._image_ids[k], self._batches[k]) for k in keys], status, pass_number, reviewer=reviewer, mode=mode
+        )
         self._undo.append(changes)  # only once written
         return self._affected(image_ids, pass_number)
 

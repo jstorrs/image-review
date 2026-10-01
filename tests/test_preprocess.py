@@ -158,7 +158,13 @@ class MixedSourceTest(unittest.TestCase):
         keys = [r["preprocessed_path"] for r in _read_tsv(work / "manifest.tsv")]
         self.assertEqual(
             keys,
-            ["batch_001/img_00001.jpg", "batch_001/img_00002.jpg", "batch_001/img_00003.jpg", "batch_002/img_00001.jpg", "batch_002/img_00002.jpg"],
+            [
+                "batch_001/img_00001.jpg",
+                "batch_001/img_00002.jpg",
+                "batch_001/img_00003.jpg",
+                "batch_002/img_00001.jpg",
+                "batch_002/img_00002.jpg",
+            ],
         )
         self.assertEqual(result.batches, 2)
         self.assertEqual(sorted(p.name for p in work.glob("batch_*")), ["batch_001", "batch_002"])
@@ -194,10 +200,12 @@ class ZipSourceTest(unittest.TestCase):
             self.assertEqual([r["image_id"] for r in manifest], [f"{archive.as_posix()}::dir/good.dcm"])
             self.assertEqual(
                 [(r["image_id"], r["kind"]) for r in skipped],
-                [(f"{archive.as_posix()}::dir/broken.png", "failed"), (f"{archive.as_posix()}::dir/notes.txt", "ignored")],
+                [
+                    (f"{archive.as_posix()}::dir/broken.png", "failed"),
+                    (f"{archive.as_posix()}::dir/notes.txt", "ignored"),
+                ],
             )
             self.assertEqual(result.found, 3)
-
 
     def test_duplicate_entry_names_are_distinct_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -391,7 +399,9 @@ class ContentDiscoveryTest(unittest.TestCase):
         result = self.invoke(src, work)
         self.assertEqual(result.exit_code, 1, result.output)
         appledouble, broken = self.skipped_rows(work)
-        self.assertEqual(appledouble, ((src / "._a.dcm").as_posix(), "ignored", "AppleDouble metadata (macOS resource fork)"))
+        self.assertEqual(
+            appledouble, ((src / "._a.dcm").as_posix(), "ignored", "AppleDouble metadata (macOS resource fork)")
+        )
         self.assertEqual(broken[:2], ((src / "broken.JPG").as_posix(), "failed"))
         self.assertTrue(broken[2].startswith("UnidentifiedImageError:"), broken[2])
 
@@ -415,7 +425,9 @@ class ContentDiscoveryTest(unittest.TestCase):
                 work = self.root / f"work_{source.name}"
                 result = self.invoke(source, work)
                 self.assertEqual(result.exit_code, 1, result.output)
-                self.assertEqual(self.skipped_rows(work), [(bad.as_posix(), "failed", "unrecognized content for a .zip file")])
+                self.assertEqual(
+                    self.skipped_rows(work), [(bad.as_posix(), "failed", "unrecognized content for a .zip file")]
+                )
 
     def test_zip_without_files_is_one_ignored_row(self):
         empty, dirs_only = self.root / "empty.zip", self.root / "dirs.zip"
@@ -434,7 +446,9 @@ class ContentDiscoveryTest(unittest.TestCase):
         notes.write_text("not an image")
         result = self.invoke(notes, self.root / "work")
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertEqual(self.skipped_rows(self.root / "work"), [(notes.as_posix(), "failed", "not an image (unrecognized content)")])
+        self.assertEqual(
+            self.skipped_rows(self.root / "work"), [(notes.as_posix(), "failed", "not an image (unrecognized content)")]
+        )
 
     def test_archive_beside_dicoms_is_failed(self):
         src = self.root / "src"
@@ -513,7 +527,13 @@ class ContentDiscoveryTest(unittest.TestCase):
         self.assertEqual([r["image_id"] for r in _read_tsv(work / "manifest.tsv")], [(src / "linked.dcm").as_posix()])
         self.assertEqual(
             self.skipped_rows(work),
-            [((src / "linked_dir").as_posix(), "failed", f"symlinked directory not followed; pass its target {elsewhere} as a SOURCE")],
+            [
+                (
+                    (src / "linked_dir").as_posix(),
+                    "failed",
+                    f"symlinked directory not followed; pass its target {elsewhere} as a SOURCE",
+                )
+            ],
         )
 
     def test_link_to_an_enclosing_directory_ingests_nothing_from_siblings(self):
@@ -527,7 +547,9 @@ class ContentDiscoveryTest(unittest.TestCase):
         work = self.root / "work"
         result = self.invoke(studies / "A", work)
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual([r["image_id"] for r in _read_tsv(work / "manifest.tsv")], [(studies / "A" / "a.dcm").as_posix()])
+        self.assertEqual(
+            [r["image_id"] for r in _read_tsv(work / "manifest.tsv")], [(studies / "A" / "a.dcm").as_posix()]
+        )
         self.assertEqual(
             self.skipped_rows(work),
             [
@@ -548,7 +570,10 @@ class ContentDiscoveryTest(unittest.TestCase):
             [r["image_id"] for r in _read_tsv(self.root / "work" / "manifest.tsv")],
             [(s1 / "a.dcm").as_posix(), (s2 / "b.dcm").as_posix()],
         )
-        self.assertEqual(result.skipped, [Skipped((s1 / "s2link").as_posix(), "ignored", f"symlinked directory already included via SOURCE {s2}")])
+        self.assertEqual(
+            result.skipped,
+            [Skipped((s1 / "s2link").as_posix(), "ignored", f"symlinked directory already included via SOURCE {s2}")],
+        )
 
     def test_symlink_loop_terminates(self):
         src = self.root / "src"
@@ -591,7 +616,9 @@ class ContentDiscoveryTest(unittest.TestCase):
         with zipfile.ZipFile(archive, "w") as zf:
             zf.writestr("inner.zip", nested.getvalue())
         result = self.run_quietly([archive])
-        self.assertEqual(result.skipped, [Skipped(f"{archive.as_posix()}::inner.zip", "failed", "unsupported: nested zip")])
+        self.assertEqual(
+            result.skipped, [Skipped(f"{archive.as_posix()}::inner.zip", "failed", "unsupported: nested zip")]
+        )
 
 
 class RunErrorTest(unittest.TestCase):
@@ -637,7 +664,11 @@ class RunErrorTest(unittest.TestCase):
     def test_work_dir_write_error_aborts_and_leaves_nothing(self):
         write_dicom(self.root / "good.dcm", _good_pixels())
         work = self.root / "work"
-        with quiet(), mock.patch("image_review.preprocess._write_tsv", side_effect=OSError("disk full")), self.assertRaises(OSError):
+        with (
+            quiet(),
+            mock.patch("image_review.preprocess._write_tsv", side_effect=OSError("disk full")),
+            self.assertRaises(OSError),
+        ):
             run_preprocess([self.root / "good.dcm"], work)
         self.assertEqual(list(self.root.glob("*work*")), [])
 
@@ -699,7 +730,11 @@ class StagingTest(unittest.TestCase):
                 raise KeyboardInterrupt
             return real(*args, **kwargs)
 
-        with quiet(), mock.patch("image_review.preprocess._process", side_effect=interrupt_on_second), self.assertRaises(KeyboardInterrupt):
+        with (
+            quiet(),
+            mock.patch("image_review.preprocess._process", side_effect=interrupt_on_second),
+            self.assertRaises(KeyboardInterrupt),
+        ):
             run_preprocess([self.src], self.work)
         self.assertEqual(len(calls), 2)
         self.assertFalse(self.work.exists())
@@ -741,7 +776,9 @@ class DecodeRasterTest(unittest.TestCase):
         for arr, mode in ((rgba, "RGBA"), (la, "LA")):
             with self.subTest(mode=mode):
                 img = decode_raster(_png_bytes(arr, mode))
-                self.assertEqual(img.shape, (40, 120 + SIDE_BY_SIDE_GAP, 3) if mode == "RGBA" else (40, 120 + SIDE_BY_SIDE_GAP))
+                self.assertEqual(
+                    img.shape, (40, 120 + SIDE_BY_SIDE_GAP, 3) if mode == "RGBA" else (40, 120 + SIDE_BY_SIDE_GAP)
+                )
                 left, right = _halves(img, 60)
                 self.assertTrue((left[_text_mask()] == 0).all())
                 self.assertTrue((left[~_text_mask()] == 0.5).all())
@@ -853,6 +890,7 @@ class RenderTest(unittest.TestCase):
         def edit(ds):
             add_overlay(ds, np.ones((8, 8), dtype=bool), group=0x6002)
             ds[0x6002, 0x3000].value = b"\x00\x00"  # far too short for 8x8 bits
+
         data = self.with_elements(_good_pixels(), edit=edit)
         with self.assertRaisesRegex(ValueError, r"overlay 0x6002 cannot be decoded"):
             render("dicom", "id", data, "gray")
@@ -889,6 +927,7 @@ class RenderTest(unittest.TestCase):
             item = pydicom.Dataset()
             item.Rows = 4  # no pixel data
             ds.IconImageSequence = [item]
+
         data = self.with_elements(_good_pixels(), edit=edit)
         [main, icon] = render("dicom", "/x/a.dcm", data, "gray")
         self.assertIsInstance(main, preprocess_module.Rendered)
@@ -898,10 +937,12 @@ class RenderTest(unittest.TestCase):
         path = get_testdata_file("examples_overlay.dcm", download=False)
         if path is None:
             self.skipTest("examples_overlay.dcm not bundled")
+
         def edit(ds):
             item = pydicom.Dataset()
             item.Rows = 4
             ds.IconImageSequence = [item]
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "src").mkdir()
@@ -1120,7 +1161,9 @@ class RenderTest(unittest.TestCase):
         ds.StudyDate = "20200101"
         buf = io.BytesIO()
         ds.save_as(buf, implicit_vr=True, little_endian=True)
-        with self.assertRaisesRegex(pydicom.errors.InvalidDicomError, r"^not DICOM \(no preamble, no SOP Class UID and no pixel data\)$"):
+        with self.assertRaisesRegex(
+            pydicom.errors.InvalidDicomError, r"^not DICOM \(no preamble, no SOP Class UID and no pixel data\)$"
+        ):
             render("dicom", "id", buf.getvalue(), "inferno")
 
     def test_bare_acr_nema_image_without_sop_class_renders(self):
@@ -1149,9 +1192,15 @@ class PreprocessCliTest(unittest.TestCase):
         make_mixed_source(self.root)
 
     def invoke(self, *args, source: str = "src"):
-        env = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}  # ignore the developer's environment
+        env = {
+            "IMAGE_REVIEW_REMOTE": None,
+            "IMAGE_REVIEW_VIA": None,
+            "IMAGE_REVIEW_ACCESS": None,
+        }  # ignore the developer's environment
         with quiet():
-            return CliRunner().invoke(cli, ["preprocess", str(self.root / source), "--work-dir", str(self.root / "work"), *args], env=env)
+            return CliRunner().invoke(
+                cli, ["preprocess", str(self.root / source), "--work-dir", str(self.root / "work"), *args], env=env
+            )
 
     def test_invalid_options_exit_2_before_any_output(self):
         for args in (("--batch-size", "0"), ("--batch-size", "-3"), ("--colormap", "nope")):
