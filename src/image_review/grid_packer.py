@@ -1,4 +1,5 @@
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -23,6 +24,22 @@ class PlacedRect(NamedTuple):
     h: int
 
 
+def _fit_to_bin(surface: pg.Surface, grid_w: int, grid_h: int, allow_rotation: bool) -> pg.Surface:
+    """Smoothscale an image that cannot fit the bin, keeping its aspect ratio.
+
+    An image that fits upright, or rotated when rotation is allowed, is returned
+    unchanged. Otherwise it is shrunk by the larger of the two orientations' scales.
+    """
+    w, h = surface.get_size()
+    bounds = [(grid_w, grid_h), (grid_h, grid_w)] if allow_rotation else [(grid_w, grid_h)]
+    bound_w, bound_h = max(bounds, key=lambda b: min(b[0] / w, b[1] / h))  # orientation needing the least shrink
+    scale = min(bound_w / w, bound_h / h)
+    if scale >= 1:
+        return surface
+    new_size = (max(1, min(bound_w, int(w * scale))), max(1, min(bound_h, int(h * scale))))
+    return pg.transform.smoothscale(surface, new_size)
+
+
 def pack_into_grids(
     items: list[ManifestRow],
     store: ReviewStore,
@@ -30,13 +47,15 @@ def pack_into_grids(
     grid_h: int,
     *,
     allow_rotation: bool = True,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[GridSpec], list[str]]:
     """Pack review items into grid canvases sized for the current screen.
 
     Each item is a ManifestRow; image bytes are fetched via the store.
     Returns the GridSpecs, each holding a composited pygame surface, and the
     unloadable keys (missing or undecodable), in input order. No grid holds an
-    unloadable key.
+    unloadable key. Images larger than the bin are shrunk to fit before packing.
+    on_progress(i, n) is called after each of the n images is handled.
     """
     # Load all surfaces upfront — avoids fetching each image twice
     blobs = store.image_bytes_many([item.key for item in items])
@@ -45,12 +64,14 @@ def pack_into_grids(
     for idx, item in enumerate(items):
         if item.key not in blobs:  # absent: the store already warned
             unloadable.append(item.key)
-            continue
-        try:
-            loaded[idx] = load_surface(blobs[item.key])
-        except Exception as exc:  # noqa: BLE001 - any decode failure makes the image unloadable, not fatal
-            print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
-            unloadable.append(item.key)
+        else:
+            try:
+                loaded[idx] = _fit_to_bin(load_surface(blobs[item.key]), grid_w, grid_h, allow_rotation)
+            except Exception as exc:  # noqa: BLE001 - any decode failure makes the image unloadable, not fatal
+                print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
+                unloadable.append(item.key)
+        if on_progress is not None:
+            on_progress(idx + 1, len(items))
 
     # Bin-pack
     packer = newPacker(rotation=allow_rotation)
@@ -84,7 +105,7 @@ def pack_into_grids(
                 canvas.blit(rotated, (x, y))
         grids.append(GridSpec(surface=canvas, keys=keys))
 
-    # Overflow: images too large to fit any bin become single-image grids
+    # Overflow: images the packer left out (none are larger than the bin) become single-image grids
     for idx, surface in loaded.items():
         if idx not in packed:
             grids.append(GridSpec(surface=surface, keys=[items[idx].key]))

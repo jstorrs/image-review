@@ -241,12 +241,19 @@ class ReviewSession:
         self._items = [ReviewItem(keys=(row.key,), label=row.key, surface=None, grid=False) for row in rows]
         self._todo_count = self._count_todo()
 
+    def _show_grid_progress(self, done: int, total: int) -> None:
+        if done % 25 == 0 or done == total:
+            self._viewer.show_message(f"Computing grids... {done}/{total}")  # also flips the display
+            pg.event.pump()  # keeps the OS from flagging the window; leaves queued key events alone
+
     def _init_grid_mode(self):
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
 
         review_rows = self._review_rows(self.batch)
-        grid_specs, unloadable = pack_into_grids(review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation)
+        grid_specs, unloadable = pack_into_grids(
+            review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation, on_progress=self._show_grid_progress
+        )
 
         items = [
             ReviewItem(keys=tuple(gs.keys), label=f"grid ({len(gs.keys)} images)", surface=gs.surface, grid=True)

@@ -680,7 +680,9 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
 
 ### Grid Mode
 
-- Display a "Computing grids..." message while packing
+- Display a "Computing grids..." message while packing, updated to
+  "Computing grids... i/N" about every 25 images (via `pack_into_grids`'s
+  `on_progress`; repainted and `pg.event.pump()`ed, which does not consume key events)
 - Read screen dimensions, subtract the 50px status bar height
 - `filter_rows()` for the current pass/batch/filter, then keep only rows whose
   status is in `controller.GRID_ELIGIBLE` (UNREVIEWED or CLEAN), in every
@@ -911,7 +913,7 @@ on the review screen.
 | `surface` | `pg.Surface` | Composited grid image, ready for display |
 | `keys` | `list[str]` | Keys (preprocessed paths) of all images packed into this grid |
 
-### `pack_into_grids(items, store, grid_w, grid_h, *, allow_rotation=True) -> tuple[list[GridSpec], dict[str, str]]`
+### `pack_into_grids(items, store, grid_w, grid_h, *, allow_rotation=True, on_progress=None) -> tuple[list[GridSpec], list[str]]`
 
 `items` is a list of `ManifestRow`. Returns the grids and the unloadable
 keys, in input order; no grid holds an unloadable key. What to do with
@@ -922,18 +924,24 @@ unloadable keys is left to the caller.
    with `util.load_surface(bytes)` and read dimensions from
    `surface.get_size()`. This avoids fetching each image twice. Images that are
    missing (the store warns) or fail to decode (warned here) are left out of
-   the packing and reported as unloadable.
+   the packing and reported as unloadable. An image larger than the bin is
+   `pg.transform.smoothscale`d to fit, keeping its aspect ratio, so nothing
+   larger than the bin is kept: when rotation is allowed it is shrunk only as
+   far as the better of the upright and rotated orientations requires (an
+   image that fits rotated is not shrunk). `on_progress(i, n)`, if given, is
+   called after each of the n images is handled.
 2. **Pack**: Create a `rectpack` packer with `rotation=allow_rotation` and
    `(grid_w, grid_h)` bins (unlimited bin count). Add each image as a rect.
 3. **Composite**: For each bin, create a black `pg.Surface(grid_w, grid_h)`.
    Blit each pre-loaded surface at the packed position. If rectpack rotated
    the rect (packed size differs from original), apply
    `pg.transform.rotate(-90)` before blitting.
-4. **Overflow**: Any image too large to fit in any bin becomes a single-image
-   `GridSpec` with its original surface.
+4. **Overflow**: Any image the packer leaves out becomes a single-image
+   `GridSpec` with its surface (never larger than the bin).
 
 `util.load_surface(buf: bytes) -> pg.Surface` decodes JPG bytes with
-scikit-image (grayscale and RGBA are converted to RGB).
+Pillow (grayscale is converted to RGB). Truncated or undecodable input raises
+(Pillow is strict; `pg.image.load` would silently grey-fill missing rows).
 
 ## Image Viewer (`viewer.py`)
 

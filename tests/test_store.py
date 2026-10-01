@@ -19,9 +19,12 @@ from unittest import mock
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
+import numpy as np
 import pygame as pg
+import skimage as ski
 from click.testing import CliRunner
 from fixtures import ROWS, make_work_dir
+from PIL import Image
 
 from image_review import controller as controller_module
 from image_review import review_db as review_db_module
@@ -43,7 +46,7 @@ from image_review.controller import (
     next_batch,
     next_index,
 )
-from image_review.grid_packer import pack_into_grids
+from image_review.grid_packer import _fit_to_bin, pack_into_grids
 from image_review.review_db import HEADER, ReviewDB
 from image_review.store import (
     LOCK_NAME,
@@ -69,6 +72,25 @@ class StoreTestCase(unittest.TestCase):
         self.addCleanup(self.store.close)
 
 
+def _jpeg_bytes(mode: str) -> bytes:
+    """A 257x131 gradient-plus-noise JPG made like preprocess: Pillow, q95, 4:4:4."""
+    rng = np.random.default_rng(0)
+    y, x = np.mgrid[0:131, 0:257]
+    base = np.stack([x * 255 // 256, y * 255 // 130, (x + y) % 256], axis=-1)
+    pixels = np.clip(base + rng.integers(-20, 20, base.shape), 0, 255).astype(np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(pixels).convert(mode).save(buf, "JPEG", quality=95, subsampling=0)
+    return buf.getvalue()
+
+
+def _skimage_reference(buf: bytes) -> np.ndarray:
+    """The old skimage-based decode, as (w, h, 3) like surfarray."""
+    img = ski.io.imread(io.BytesIO(buf))
+    if img.ndim == 2:
+        img = np.stack([img, img, img], axis=-1)
+    return img.transpose(1, 0, 2)
+
+
 class TestManifestAndBytes(StoreTestCase):
     def test_manifest_keys_are_preprocessed_paths(self):
         self.assertEqual(
@@ -88,6 +110,30 @@ class TestManifestAndBytes(StoreTestCase):
     def test_load_surface_from_bytes(self):
         surface = load_surface(self.store.image_bytes("batch_002/c.jpg"))
         self.assertEqual(surface.get_size(), (20, 12))
+
+    def test_load_surface_matches_skimage_decode(self):
+        for mode in ("RGB", "L"):
+            with self.subTest(mode=mode):
+                buf = _jpeg_bytes(mode)
+                diff = np.abs(pg.surfarray.array3d(load_surface(buf)).astype(int) - _skimage_reference(buf).astype(int))
+                self.assertLessEqual(diff.max(), 1)
+
+    def test_load_surface_grayscale_is_rgb_grey(self):
+        surface = load_surface(_jpeg_bytes("L"))
+        self.assertGreaterEqual(surface.get_bitsize(), 24)
+        pixels = pg.surfarray.array3d(surface)
+        np.testing.assert_array_equal(pixels[:, :, 0], pixels[:, :, 1])
+        np.testing.assert_array_equal(pixels[:, :, 1], pixels[:, :, 2])
+
+    def test_load_surface_raises_on_truncated(self):
+        buf = _jpeg_bytes("RGB")
+        for frac in (0.5, 0.9):
+            with self.subTest(frac=frac), self.assertRaises(Exception):  # noqa: B017 - any raise means unloadable
+                load_surface(buf[: int(len(buf) * frac)])
+
+    def test_load_surface_raises_on_garbage(self):
+        with self.assertRaises(Exception):  # noqa: B017 - callers treat any raise as unloadable
+            load_surface(b"not a jpeg at all")
 
 
 class TestSkipped(StoreTestCase):
@@ -1743,6 +1789,63 @@ class TestUnloadable(EventLoopTestCase):
         missing = [*rows, ManifestRow(key="batch_009/missing.jpg", batch="batch_009")]
         _, unloadable = pack_into_grids(missing, self.store, 400, 300)
         self.assertEqual(list(unloadable), [CORRUPT, "batch_009/missing.jpg"])
+
+
+class TestPackShrinksOversize(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = self.root = Path(tmp.name)
+        (root / "big").mkdir()
+        rows = []
+        for name, size in (("big/a.jpg", (3000, 2500)), ("big/b.jpg", (100, 60)), ("big/c.jpg", (100, 60))):
+            Image.new("RGB", size, (90, 90, 90)).save(root / name, "JPEG", quality=95, subsampling=0)
+            rows.append((name.split("/")[0], name, f"/src/{name}"))
+        with open(root / "manifest.tsv", "w", newline="") as f:
+            writer = csv.writer(f, delimiter="\t")
+            writer.writerow(["batch", "preprocessed_path", "image_id"])
+            writer.writerows(rows)
+        self.store = LocalStore(root)
+        self.addCleanup(self.store.close)
+
+    def test_nothing_larger_than_the_bin_is_kept(self):
+        calls: list[tuple[int, int]] = []
+        grids, unloadable = pack_into_grids(
+            self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
+        )
+        self.assertEqual(unloadable, [])
+        self.assertEqual(sorted(k for gs in grids for k in gs.keys), ["big/a.jpg", "big/b.jpg", "big/c.jpg"])
+        for gs in grids:
+            w, h = gs.surface.get_size()
+            self.assertTrue(w <= 1920 and h <= 1030, (w, h))
+        self.assertEqual(calls, [(1, 3), (2, 3), (3, 3)])
+
+    def test_truncated_image_is_unloadable(self):
+        path = self.root / "big/b.jpg"
+        data = path.read_bytes()
+        path.write_bytes(data[: len(data) // 2])
+        grids, unloadable = pack_into_grids(self.store.manifest()[1:], self.store, 1920, 1030)
+        self.assertEqual(unloadable, ["big/b.jpg"])
+        self.assertEqual([gs.keys for gs in grids], [["big/c.jpg"]])
+
+    def test_fit_to_bin_rotated_orientation_wins(self):
+        self.assertEqual(_fit_to_bin(pg.Surface((1500, 2500), 0, 24), 1920, 1030, True).get_size(), (1030, 1716))
+
+    def test_fit_to_bin_always_fits_an_allowed_orientation(self):
+        for w, h in [(1921, 1), (1, 1031), (3000, 2500), (1920, 1031), (1921, 1030), (7, 4000), (4000, 7), (1031, 1921), (999, 1999)]:
+            for rot in (False, True):
+                with self.subTest(w=w, h=h, rot=rot):
+                    nw, nh = _fit_to_bin(pg.Surface((w, h), 0, 24), 1920, 1030, rot).get_size()
+                    self.assertTrue(nw >= 1 and nh >= 1)
+                    self.assertTrue((nw <= 1920 and nh <= 1030) or (rot and nw <= 1030 and nh <= 1920))
+
+    def test_oversize_image_keeps_aspect_ratio(self):
+        surface = pg.Surface((3000, 2500), 0, 24)
+        self.assertEqual(_fit_to_bin(surface, 1920, 1030, False).get_size(), (1236, 1030))
+        self.assertEqual(_fit_to_bin(surface, 1920, 1030, True).get_size(), (1236, 1030))
+        tall = pg.Surface((1000, 1800), 0, 24)  # fits only rotated: untouched
+        self.assertEqual(_fit_to_bin(tall, 1920, 1030, True).get_size(), (1000, 1800))
+        self.assertEqual(_fit_to_bin(tall, 1920, 1030, False).get_size(), (572, 1030))
 
 
 class TestDwell(unittest.TestCase):
