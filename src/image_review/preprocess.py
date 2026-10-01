@@ -210,20 +210,16 @@ def _compress_tails(img: np.ndarray) -> np.ndarray:
     return np.interp(img, [lo, bot, top, hi], [0, TAIL_FRACTION, 1 - TAIL_FRACTION, 1]).astype(np.float32)
 
 
-def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
-    if not _has_pixel_data(dcm):
-        sop_class = _sop_class(dcm)
-        if sop_class == MediaStorageDirectoryStorage:
-            raise NotAnImage("DICOMDIR index")
-        raise Unsupported(f"no pixel data ({sop_class.name})" if sop_class else "no pixel data")
-    photometric = dcm.get("PhotometricInterpretation")
-    if photometric not in ("MONOCHROME1", "MONOCHROME2"):
-        raise Unsupported(f"photometric interpretation {photometric}")
-    pixels = dcm.pixel_array
-    if pixels.ndim == 3:
-        raise Unsupported(f"multi-frame DICOM ({pixels.shape[0]} frames)")
-    if pixels.ndim != 2:
-        raise Unsupported(f"pixel array with shape {pixels.shape}")
+def _to_uint8(pixels: np.ndarray, bits: int) -> np.ndarray:
+    """Scale unsigned integer samples of `bits` significant bits to uint8."""
+    if bits <= 8:
+        return ski.util.img_as_ubyte(pixels.astype(np.uint8))
+    scaled = pixels.astype(np.float32) * (255 / (2**bits - 1))
+    return np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
+
+
+def _gray_dicom(pixels: np.ndarray, photometric: str) -> np.ndarray:
+    """Float [0, 1] image from MONOCHROME1/2 pixels: tail compression, crop, CLAHE, crop."""
     img = pixels.astype(np.float32)
     if photometric == "MONOCHROME1":
         img = -img
@@ -233,6 +229,41 @@ def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
     img = _crop(img)
     img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
     return _crop(img)
+
+
+def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> np.ndarray:
+    """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels."""
+    pixels = dcm.pixel_array
+    bits = int(dcm.BitsStored)
+    if photometric == "PALETTE COLOR":
+        pixels = pydicom.pixels.apply_color_lut(pixels, dcm)
+        bits = int(dcm.RedPaletteColorLookupTableDescriptor[2])
+    if pixels.ndim != 3 or pixels.shape[2] != 3:
+        raise Unsupported(f"pixel array with shape {pixels.shape}")
+    return _to_uint8(pixels, bits)
+
+
+def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.ndarray:
+    """Render a single-frame DICOM to (H, W, 3) uint8: grayscale through `colormap`, colour as is."""
+    if not _has_pixel_data(dcm):
+        sop_class = _sop_class(dcm)
+        if sop_class == MediaStorageDirectoryStorage:
+            raise NotAnImage("DICOMDIR index")
+        raise Unsupported(f"no pixel data ({sop_class.name})" if sop_class else "no pixel data")
+    frames = int(dcm.get("NumberOfFrames") or 1)
+    if frames > 1:
+        raise Unsupported(f"multi-frame DICOM ({frames} frames)")
+    photometric = dcm.get("PhotometricInterpretation")
+    match photometric:
+        case "MONOCHROME1" | "MONOCHROME2":
+            pixels = dcm.pixel_array
+            if pixels.ndim != 2:
+                raise Unsupported(f"pixel array with shape {pixels.shape}")
+            return apply_colormap(_gray_dicom(pixels, photometric), colormap)
+        case "RGB" | "PALETTE COLOR" | "YBR_FULL" | "YBR_FULL_422" | "YBR_PARTIAL_420" | "YBR_PARTIAL_422" | "YBR_ICT" | "YBR_RCT":
+            return _crop(_colour_dicom(dcm, photometric))
+        case _:
+            raise Unsupported(f"photometric interpretation {photometric}")
 
 
 def apply_colormap(img: np.ndarray, colormap: str = "inferno") -> np.ndarray:
@@ -364,7 +395,7 @@ def render(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Render
     match kind:
         case "dicom":
             dcm = read_dicom(data)
-            rgb = apply_colormap(preprocess_dicom(dcm), colormap)
+            rgb = preprocess_dicom(dcm, colormap)
         case "raster":
             rgb = preprocess_raster(decode_raster(data))
     return [Rendered(image_id, rgb)]

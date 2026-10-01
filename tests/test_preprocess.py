@@ -125,12 +125,11 @@ class MixedSourceTest(unittest.TestCase):
         self.assertEqual(len(result.skipped), len(skipped))
 
         rendered = {r["image_id"] for r in manifest}
-        expected = {self.paths[k].as_posix() for k in ("good", "zero", "rgba", "la")}
+        expected = {self.paths[k].as_posix() for k in ("good", "zero", "rgb", "rgba", "la")}
         self.assertEqual(rendered, expected)
 
         reasons = {r["image_id"]: r["reason"] for r in skipped}
         self.assertTrue(all(r["kind"] == "failed" for r in skipped))
-        self.assertTrue(reasons[self.paths["rgb"].as_posix()].startswith("unsupported: photometric interpretation RGB"))
         self.assertEqual(reasons[self.paths["multi"].as_posix()], "unsupported: multi-frame DICOM (3 frames)")
         self.assertIn(self.paths["corrupt_jpg"].as_posix(), reasons)
         self.assertTrue(reasons[self.paths["corrupt_zip"].as_posix()].startswith("BadZipFile:"))
@@ -150,7 +149,7 @@ class MixedSourceTest(unittest.TestCase):
         keys = [r["preprocessed_path"] for r in _read_tsv(work / "manifest.tsv")]
         self.assertEqual(
             keys,
-            ["batch_001/img_00001.jpg", "batch_001/img_00002.jpg", "batch_001/img_00003.jpg", "batch_002/img_00001.jpg"],
+            ["batch_001/img_00001.jpg", "batch_001/img_00002.jpg", "batch_001/img_00003.jpg", "batch_002/img_00001.jpg", "batch_002/img_00002.jpg"],
         )
         self.assertEqual(result.batches, 2)
         self.assertEqual(sorted(p.name for p in work.glob("batch_*")), ["batch_001", "batch_002"])
@@ -870,6 +869,54 @@ class RenderTest(unittest.TestCase):
         with self.assertRaisesRegex(Unsupported, r"^unsupported: multi-frame DICOM \(2 frames\)$"):
             render("dicom", "id", self.dicom_bytes(pixels), "inferno")
 
+    def test_multiframe_colour_dicom_reports_multiframe(self):
+        pixels = RNG.integers(0, 255, (3, 16, 16, 3), dtype=np.uint8)
+        with self.assertRaisesRegex(Unsupported, r"^unsupported: multi-frame DICOM \(3 frames\)$"):
+            render("dicom", "id", self.dicom_bytes(pixels, "RGB"), "inferno")
+
+    def test_single_frame_rgb_dicom_is_shown_as_is(self):
+        pixels = RNG.integers(0, 255, (32, 40, 3), dtype=np.uint8)
+        [out] = render("dicom", "id", self.dicom_bytes(pixels, "RGB"), "inferno")
+        self.assertEqual(out.rgb.dtype, np.uint8)
+        np.testing.assert_array_equal(out.rgb, pixels)
+
+    def test_high_bit_rgb_dicom_scales_by_bits_stored(self):
+        pixels = np.full((32, 40, 3), 65535, dtype=np.uint16)
+        pixels[8:24, 10:30, 0] = 0
+        [out] = render("dicom", "id", self.dicom_bytes(pixels, "RGB"), "inferno")
+        self.assertEqual(out.rgb.dtype, np.uint8)
+        self.assertEqual(out.rgb.max(), 255)
+        self.assertEqual(out.rgb.min(), 0)
+
+    def test_bundled_colour_dicoms_render_rgb_uint8(self):
+        for name in ("examples_rgb_color.dcm", "SC_ybr_full_422_uncompressed.dcm", "examples_palette.dcm"):
+            with self.subTest(name=name):
+                path = get_testdata_file(name, download=False)
+                if path is None:
+                    self.skipTest(f"{name} not bundled")
+                [out] = render("dicom", "id", Path(path).read_bytes(), "inferno")
+                self.assertEqual(out.rgb.ndim, 3)
+                self.assertEqual(out.rgb.shape[2], 3)
+                self.assertEqual(out.rgb.dtype, np.uint8)
+                if name == "examples_palette.dcm":
+                    self.assertFalse(np.array_equal(out.rgb[..., 0], out.rgb[..., 1]))
+                    self.assertFalse(np.array_equal(out.rgb[..., 1], out.rgb[..., 2]))
+
+    def test_bundled_multiframe_dicoms_stay_unsupported(self):
+        for name, frames in (("examples_ybr_color.dcm", 30), ("SC_rgb_rle_2frame.dcm", 2), ("rtdose.dcm", 15)):
+            with self.subTest(name=name):
+                path = get_testdata_file(name, download=False)
+                if path is None:
+                    self.skipTest(f"{name} not bundled")
+                with self.assertRaisesRegex(Unsupported, rf"^unsupported: multi-frame DICOM \({frames} frames\)$"):
+                    render("dicom", "id", Path(path).read_bytes(), "inferno")
+
+    def test_other_photometric_interpretation_is_unsupported(self):
+        ds = pydicom.dcmread(io.BytesIO(self.dicom_bytes(_good_pixels())))
+        ds.PhotometricInterpretation = "HSV"
+        with self.assertRaisesRegex(Unsupported, r"^unsupported: photometric interpretation HSV$"):
+            preprocess_module.preprocess_dicom(ds)
+
     def test_failure_reason_has_no_memory_addresses(self):
         skipped = _failed("id", OSError("cannot identify image file <_io.BytesIO object at 0x7f3a2c1b9e40>"))
         self.assertEqual(skipped.reason, "OSError: cannot identify image file <data>")
@@ -933,7 +980,7 @@ class PreprocessCliTest(unittest.TestCase):
     def test_failures_exit_1(self):
         result = self.invoke()
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("Found 7 inputs: wrote 4 images in 1 batches; 3 skipped (3 failed, 0 ignored;", result.output)
+        self.assertIn("Found 7 inputs: wrote 5 images in 1 batches; 2 skipped (2 failed, 0 ignored;", result.output)
         self.assertIn("--allow-skipped", result.output)
         self.assertTrue((self.root / "work" / "manifest.tsv").exists())
         self.assertTrue((self.root / "work" / "skipped.tsv").exists())
@@ -941,7 +988,7 @@ class PreprocessCliTest(unittest.TestCase):
     def test_allow_skipped_exits_0(self):
         result = self.invoke("--allow-skipped")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn(f"3 skipped (3 failed, 0 ignored; see {self.root / 'work' / 'skipped.tsv'})", result.output)
+        self.assertIn(f"2 skipped (2 failed, 0 ignored; see {self.root / 'work' / 'skipped.tsv'})", result.output)
 
     def test_existing_work_dir_exits_1(self):
         self.invoke("--allow-skipped")

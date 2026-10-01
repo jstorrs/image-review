@@ -122,7 +122,9 @@ review_work/
     ...
 ```
 
-The DICOM preprocessing pipeline:
+The DICOM preprocessing pipeline for grayscale (MONOCHROME1/2) images; single-frame
+colour (RGB, YBR) and palette DICOMs are only converted to 8-bit RGB and
+cropped, with no windowing or colormap:
 1. Converts to float32, corrects photometric interpretation
 2. Compresses intensity outliers (beyond the 1st/99th percentile) into the
    ends of the range instead of clipping them, so bright burned-in text
@@ -163,8 +165,8 @@ Every file the run finds is listed in `manifest.tsv` or `skipped.tsv`. The
   affect the exit status, but glance at them in case something you expected
   to review is among them.
 
-Only single-frame grayscale (MONOCHROME1/2) DICOMs are rendered for now.
-Colour and multi-frame DICOMs, DICOM objects without pixel data (structured
+Only single-frame DICOMs (grayscale, colour or palette) are rendered for now.
+Multi-frame DICOMs, DICOM objects without pixel data (structured
 reports, encapsulated PDFs), and any file that cannot be read or decoded do
 not stop the run: each is recorded in `skipped.tsv` as `failed` with a reason
 (for example `unsupported: multi-frame DICOM (3 frames)` or `BadZipFile: File

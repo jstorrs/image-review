@@ -58,7 +58,8 @@ directory or into another SOURCE is ignored, and any other is failed with its
 target, so pass that target as a SOURCE if you want it. The work directory is
 never read as input. DICOM images are
 normalized with adaptive histogram equalization to enhance local contrast
-and a configurable colormap. Non-DICOM images are converted to RGB, with the same
+and a configurable colormap; single-frame colour and palette DICOMs are shown
+as they are. Non-DICOM images are converted to RGB, with the same
 contrast enhancement applied to grayscale. Transparent images are shown as
 the composite over mid-gray beside the raw channels with alpha ignored, and
 MPO JPEGs (HDR gain maps, previews) show all their frames side by side.
@@ -105,7 +106,7 @@ directories.
 Every input ends up in exactly one of `manifest.tsv` (rendered) or
 `skipped.tsv`, with kind `failed` (e.g. a corrupt file, a `.jpg`/`.png`/...
 or `.zip` whose content is not one, a `.tar.gz` or other non-ZIP archive, an
-`unsupported:` multi-frame or colour DICOM, an unreadable subdirectory, a
+`unsupported:` multi-frame DICOM, an unreadable subdirectory, a
 symlinked directory outside the sources, a file named on the command line
 that is not an image) or `ignored` (not an image: unrecognized content, macOS
 AppleDouble files, a DICOMDIR index, an empty ZIP). The run finishes with a summary line (`Found N inputs:

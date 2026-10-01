@@ -177,12 +177,19 @@ the order given, each walked as above).
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
-1. Only single-frame `MONOCHROME1`/`MONOCHROME2` images with pixel data are
-   rendered. No pixel data, any other photometric interpretation, or a pixel
-   array that is not 2-D (multi-frame) raises `Unsupported` (e.g.
+1. Only single-frame images with pixel data are rendered. No pixel data,
+   `NumberOfFrames` above 1 (checked first, whatever the photometric
+   interpretation), or a photometric interpretation other than the ones below
+   raises `Unsupported` (e.g.
    `unsupported: no pixel data (Basic Text SR Storage)` naming the SOP class
    when known, `unsupported: multi-frame DICOM (3 frames)`,
-   `unsupported: photometric interpretation RGB`)
+   `unsupported: photometric interpretation HSV`). Multi-frame DICOMs are not
+   split into per-frame items. `RGB`, `YBR_*` (pydicom's `pixel_array`
+   returns RGB) and `PALETTE COLOR` (expanded with `apply_color_lut`) images
+   skip steps 2-5: samples are scaled to uint8 (by `BitsStored`, or the
+   palette's entry bit depth, when above 8 bits), no windowing or colormap is
+   applied, and only the crop of step 6 follows. Steps 2-5 apply to
+   `MONOCHROME1`/`MONOCHROME2`
 2. Extract pixel array, convert to float32 (values keep their native scale)
 3. Correct photometric interpretation (invert MONOCHROME1 by negation)
 4. Compress the intensity tails: the robust core range (1st-99th percentile
@@ -198,7 +205,7 @@ the order given, each walked as above).
 6. Strip uniform rows/columns (`compress_image` -- removes letterboxing). If
    stripping would leave nothing (e.g. an all-zero image), the uncropped
    image is kept
-7. Apply colormap, save as 8-bit RGB JPG
+7. Apply colormap (grayscale only), save as 8-bit RGB JPG
 
 **Raster preprocessing** (`decode_raster` + `preprocess_raster`, for PNG/JPEG/TIFF/BMP/GIF):
 - Decode with Pillow and branch on the image mode, not the channel count
