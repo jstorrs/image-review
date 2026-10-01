@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import get_args
 
 from .access import policy_of_dir
-from .status import Status, Verdict
+from .status import TODO_STATUSES, Status, Verdict
 
 HEADER = ["image_id", "batch", "status", "pass_number", "timestamp"]
 
@@ -96,21 +96,7 @@ class ReviewDB:
             return row.status
         if row.status == "CLEAN":
             return "CLEAN"
-        # DIRTY from a prior pass → treat as UNREVIEWED
-        return "UNREVIEWED"
-
-    def images_by_status(self, manifest_rows: list[dict], pass_number: int, status_filter: str = "unreviewed", batch: str | None = None) -> list[dict]:
-        """Return manifest rows filtered by status.
-
-        status_filter: "unreviewed", "clean", or "all".
-        """
-        if status_filter not in ("all", "clean", "unreviewed"):
-            raise ValueError(f"Invalid status_filter {status_filter!r}, must be 'unreviewed', 'clean', or 'all'")
-        rows = [r for r in manifest_rows if not batch or r["batch"] == batch]
-        if status_filter == "all":
-            return rows
-        target = "CLEAN" if status_filter == "clean" else "UNREVIEWED"
-        return [r for r in rows if self.get_status(r["image_id"], pass_number) == target]
+        return "FLAGGED"  # DIRTY in another pass; needs re-review in this one
 
     def current_pass(self, image_ids: Iterable[str]) -> int:
         """Auto-detect the current pass number.
@@ -123,24 +109,6 @@ class ReviewDB:
             return 1
         max_pass = max((self._rows[i].pass_number for i in ids), default=0)
         # Stay on max_pass if it still has unfinished work
-        if any(self.get_status(i, max_pass) == "UNREVIEWED" for i in ids):
+        if any(self.get_status(i, max_pass) in TODO_STATUSES for i in ids):
             return max_pass
         return max_pass + 1
-
-    def summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, int]:
-        totals = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
-        for bc in self.batch_summary(manifest_rows, pass_number).values():
-            for k in totals:
-                totals[k] += bc[k]
-        return totals
-
-    def batch_summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, dict[str, int]]:
-        batches: dict[str, dict[str, int]] = {}
-        for row in manifest_rows:
-            batch = row["batch"]
-            if batch not in batches:
-                batches[batch] = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
-            status = self.get_status(row["image_id"], pass_number)
-            batches[batch][status] += 1
-            batches[batch]["total"] += 1
-        return batches

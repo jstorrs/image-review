@@ -241,7 +241,7 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
 @click.option("--mode", type=click.Choice(["single", "grid"]), default="single", show_default=True, help="Review display mode.")
 @click.option("--pass", "pass_number", type=int, default=None, help="Pass number (auto-detected if omitted).")
 @click.option("--batch", type=str, default=None, help="Restrict to a specific batch.")
-@click.option("--filter", "status_filter", type=click.Choice(["unreviewed", "clean", "all"]), default="unreviewed", show_default=True, help="Which images to show.")
+@click.option("--filter", "status_filter", type=click.Choice(["unreviewed", "clean", "all"]), default="unreviewed", show_default=True, help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).")
 @click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
 @work_dir_option
 @remote_option
@@ -283,7 +283,7 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote, vi
 @remote_option
 @via_option
 def status(work_dir, remote, via):
-    """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED counts)."""
+    """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED / FLAGGED counts)."""
     from .store import batch_summary, summary
 
     with open_store(work_dir, remote, via, read_only=True) as store:
@@ -301,15 +301,16 @@ def status(work_dir, remote, via):
     print(f"  CLEAN:      {counts['CLEAN']:>6}")
     print(f"  DIRTY:      {counts['DIRTY']:>6}")
     print(f"  UNREVIEWED: {counts['UNREVIEWED']:>6}")
+    print(f"  FLAGGED:    {counts['FLAGGED']:>6}")
 
     # Per-batch summary
     batch_counts = batch_summary(manifest, statuses)
     if len(batch_counts) > 1:
-        print(f"\n{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6}")
-        print("-" * 45)
+        print(f"\n{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6} {'Flag':>6}")
+        print("-" * 52)
         for batch_id in sorted(batch_counts):
             bc = batch_counts[batch_id]
-            print(f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6}")
+            print(f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6} {bc['FLAGGED']:>6}")
 
     print(f"\nCurrent pass: {current}")
 

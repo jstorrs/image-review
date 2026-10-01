@@ -209,7 +209,7 @@ image-review review [options]
 | `--mode` | `single` | `single` (one image at a time) or `grid` (packed grids) |
 | `--pass` | auto | Pass number (auto-detected if omitted) |
 | `--batch` | all | Restrict review to a specific batch (e.g., `batch_001`) |
-| `--filter` | `unreviewed` | Which images to show: `unreviewed`, `clean`, or `all` |
+| `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
 | `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images for tighter grid packing |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |
 | `--remote` | -- | Review a server started with `image-review serve` instead (also `$IMAGE_REVIEW_REMOTE`); see [Reviewing on an HPC Cluster](#reviewing-on-an-hpc-cluster) |
@@ -259,6 +259,7 @@ The viewer accepts keyboard and gamepad input:
 - **Green** = CLEAN
 - **Red** = DIRTY
 - **Gray** = UNREVIEWED
+- **Orange** = FLAGGED (marked DIRTY in an earlier pass; needs a verdict in this one)
 
 After marking an image, the viewer auto-advances to the next image after a
 short delay (200ms). Images are shuffled at review time to counter attention
@@ -280,15 +281,20 @@ that status. This is the fast pass -- err on the side of marking DIRTY.
 ```bash
 image-review review --mode single --pass 2
 ```
-Only images marked DIRTY in pass 1 are shown. Review each one individually.
-Mark obviously clean ones as CLEAN, leave the rest DIRTY.
+Only images marked DIRTY in pass 1 are shown; in pass 2 they are FLAGGED
+(orange) until you give them a verdict. Review each one individually. Mark
+obviously clean ones as CLEAN, mark the rest DIRTY again.
+
+Grid mode skips FLAGGED images (and any image already marked DIRTY), so a
+single grid keypress can never clear an image that was flagged. Review
+flagged images in single mode.
 
 **Pass 3+** -- Repeat until confident:
 ```bash
 image-review review --mode single
 ```
-Each subsequent pass shows only the remaining DIRTY images. The pool
-shrinks with each pass.
+Each subsequent pass shows only the images still DIRTY from the previous
+pass (FLAGGED in the new pass). The pool shrinks with each pass.
 
 If you omit `--pass`, the tool auto-detects the next pass number.
 
@@ -316,7 +322,8 @@ image-review review --mode single --batch batch_003
 
 ### Filtering by Status
 
-By default, only unreviewed images are shown. Use `--filter` to change this:
+By default, only images still to do are shown (UNREVIEWED, plus FLAGGED in
+pass 2 and later). Use `--filter` to change this:
 
 ```bash
 # Re-examine images previously marked CLEAN (e.g., to re-mark as DIRTY)
@@ -328,7 +335,9 @@ image-review review --filter all
 
 With `--filter clean`, the "todo" counter tracks how many CLEAN images remain
 (haven't been re-marked yet). With `--filter all`, "todo" tracks unreviewed
-images. The `n` key jumps to the next todo item and `u` toggles todo-only
+and flagged images. In grid mode every filter, `all` included, leaves out
+DIRTY and FLAGGED images; if that leaves nothing, it tells you how many
+images need single-mode review. The `n` key jumps to the next todo item and `u` toggles todo-only
 navigation in all filter modes.
 
 ## Step 3: Status
@@ -346,13 +355,14 @@ image-review status --remote 'ir://...' [--via user@login-node]
 Overall: 40320 images (pass 2)
   CLEAN:       38100
   DIRTY:         820
-  UNREVIEWED:   1400
+  UNREVIEWED:      0
+  FLAGGED:      1400
 
-Batch            Total  Clean  Dirty  Unrev
----------------------------------------------
-batch_001          300    290      8      2
-batch_002          300    285     12      3
-batch_003          300    280     15      5
+Batch            Total  Clean  Dirty  Unrev   Flag
+----------------------------------------------------
+batch_001          300    290      8      0      2
+batch_002          300    285     12      0      3
+batch_003          300    280     15      0      5
 ...
 
 Current pass: 2
@@ -552,7 +562,7 @@ image-review review --mode grid --work-dir ./phi_review
 # Check progress
 image-review status --work-dir ./phi_review
 
-# Pass 2: single-image review of remaining DIRTY
+# Pass 2: single-image review of the images flagged DIRTY in pass 1
 image-review review --mode single --work-dir ./phi_review
 
 # Pass 3: final review of stubborn cases
@@ -580,7 +590,8 @@ action, so it is safe to kill the process at any time without data loss.
 
 - **Grid mode first**: Grids are packed at review time to fit your screen,
   so each grid contains as many images as possible. Marking a grid CLEAN
-  clears all of them at once. Reserve single mode for the DIRTY remainder.
+  clears all of them at once. Reserve single mode for the DIRTY remainder
+  (grid mode skips DIRTY and FLAGGED images).
 - **Autoplay**: Press `Space` to start auto-advancing through images at
   500ms intervals. Press any key to stop. Useful for a quick visual scan.
 - **Gamepad**: A game controller makes long review sessions more

@@ -97,7 +97,8 @@ class TestRoundTrips(RemoteTestCase):
         local = self.local_copy()
         self.assertEqual(self.store.statuses(1), local.statuses(1))
         self.assertEqual(local.statuses(1)[KEYS[2]], "DIRTY")
-        self.assertEqual(self.store.statuses(2)[KEYS[2]], "UNREVIEWED")
+        self.assertEqual(self.store.statuses(2)[KEYS[2]], "FLAGGED")
+        self.assertEqual(self.store.statuses(2), local.statuses(2))
 
     def test_bad_mark_is_remote_error(self):
         with self.assertRaises(RemoteError):
@@ -225,6 +226,7 @@ class TestParsing(unittest.TestCase):
     def test_valid(self):
         self.assertEqual(parse_manifest(b'[{"key": "k", "batch": "b"}]'), [ManifestRow("k", "b")])
         self.assertEqual(parse_statuses(b'{"k": "CLEAN"}'), {"k": "CLEAN"})
+        self.assertEqual(parse_statuses(b'{"k": "FLAGGED", "j": "UNREVIEWED"}'), {"k": "FLAGGED", "j": "UNREVIEWED"})
         self.assertEqual(parse_pass(b'{"pass": 3}'), 3)
         self.assertEqual(parse_version(b'{"api": 1, "version": "x"}'), 1)
 
@@ -287,6 +289,17 @@ class TestCli(RemoteTestCase):
         self.assertEqual(local.exit_code, 0, local.output)
         self.assertEqual(remote.stdout, local.stdout)
 
+    def test_status_flagged_identical_to_local(self):
+        self.store.mark([KEYS[0]], "batch_001", "DIRTY", 1)
+        self.store.mark([KEYS[1]], "batch_001", "CLEAN", 1)
+        self.store.mark([KEYS[2], KEYS[3]], "batch_002", "CLEAN", 1)
+        remote = self.invoke("status", "--remote", self.target.to_uri())
+        local = self.invoke("status", "--work-dir", str(self.work_dir))
+        self.assertEqual(remote.exit_code, 0, remote.output)
+        self.assertIn("  FLAGGED:         1\n", remote.stdout)
+        self.assertIn("Current pass: 2\n", remote.stdout)
+        self.assertEqual(remote.stdout, local.stdout)
+
     def test_status_skipped_line_identical_to_local(self):
         (self.work_dir / "skipped.tsv").write_text(SKIPPED_TSV)
         remote = self.invoke("status", "--remote", self.target.to_uri())
@@ -311,10 +324,10 @@ class TestCli(RemoteTestCase):
         self.assertNotIn("Traceback", result.output)
 
     def test_api_mismatch_message(self):
-        with mock.patch("image_review.remote.API_VERSION", 3):
+        with mock.patch("image_review.remote.API_VERSION", 4):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("server speaks API v2, this client v3; install the same image-review version on both machines", result.output)
+        self.assertIn("server speaks API v3, this client v4; install the same image-review version on both machines", result.output)
         self.assertNotIn(self.target.token, result.output)
 
     def test_server_without_version_endpoint(self):
@@ -332,7 +345,7 @@ class TestCli(RemoteTestCase):
 
     def test_check_api(self):
         self.store.check_api()
-        with mock.patch("image_review.remote.API_VERSION", 3), self.assertRaises(ApiMismatch):
+        with mock.patch("image_review.remote.API_VERSION", 4), self.assertRaises(ApiMismatch):
             self.store.check_api()
 
     def test_status_envvar(self):

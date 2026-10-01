@@ -12,13 +12,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, Self
+from typing import Protocol, Self, get_args
 
 from .access import policy_of_dir
 from .review_db import ReviewDB
-from .status import Status, Verdict
+from .status import TODO_STATUSES, Status, Verdict
 
-__all__ = ["Status", "Verdict"]  # re-exported for callers that import them from here
+__all__ = ["TODO_STATUSES", "Status", "Verdict"]  # re-exported for callers that import them from here
 
 
 @dataclass(frozen=True)
@@ -434,27 +434,36 @@ def filter_rows(
     status_filter: str = "unreviewed",
     batch: str | None = None,
 ) -> list[ManifestRow]:
-    """Filter rows by status ("unreviewed", "clean", or "all") and optional batch."""
+    """Filter rows by status and optional batch.
+
+    "unreviewed" selects the todo statuses (UNREVIEWED and FLAGGED), "clean" selects CLEAN, "all" everything.
+    """
     if status_filter not in ("all", "clean", "unreviewed"):
         raise ValueError(f"Invalid status_filter {status_filter!r}, must be 'unreviewed', 'clean', or 'all'")
     selected = [r for r in rows if not batch or r.batch == batch]
     if status_filter == "all":
         return selected
-    target = "CLEAN" if status_filter == "clean" else "UNREVIEWED"
-    return [r for r in selected if statuses[r.key] == target]
+    targets: frozenset[Status] = frozenset({"CLEAN"}) if status_filter == "clean" else TODO_STATUSES
+    return [r for r in selected if statuses[r.key] in targets]
+
+
+def _zero_counts() -> dict[str, int]:
+    return {**dict.fromkeys(get_args(Status), 0), "total": 0}
 
 
 def batch_summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[str, dict[str, int]]:
+    """Per batch: a count for each Status, plus "total"."""
     batches: dict[str, dict[str, int]] = {}
     for row in rows:
-        counts = batches.setdefault(row.batch, {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0})
+        counts = batches.setdefault(row.batch, _zero_counts())
         counts[statuses[row.key]] += 1
         counts["total"] += 1
     return batches
 
 
 def summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[str, int]:
-    totals = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
+    """A count for each Status, plus "total"."""
+    totals = _zero_counts()
     for bc in batch_summary(rows, statuses).values():
         for k in totals:
             totals[k] += bc[k]

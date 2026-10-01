@@ -466,9 +466,9 @@ class TestReads(ServerTestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
 
-    def test_api_version_is_2(self):
-        self.assertEqual(API_VERSION, 2)
-        self.assertEqual(self.get_json("/version")["api"], 2)
+    def test_api_version_is_3(self):
+        self.assertEqual(API_VERSION, 3)
+        self.assertEqual(self.get_json("/version")["api"], 3)
 
     def test_skipped_absent_is_null(self):
         resp, data, _ = self.request("GET", "/skipped")
@@ -511,10 +511,15 @@ class TestMark(ServerTestCase):
             stored = {r["image_id"] for r in csv.DictReader(f, delimiter="\t")}
         self.assertEqual(stored, {"/src/patient_smith/a.dcm", "/src/patient_jones/b.dcm"})
 
+    def test_prior_pass_dirty_is_flagged(self):
+        self.post_mark({"keys": ["batch_001/a.jpg"], "batch": "batch_001", "status": "DIRTY", "pass": 1})
+        self.assertEqual(self.get_json("/statuses?pass=2")["batch_001/a.jpg"], "FLAGGED")
+
     def test_bad_bodies_are_400(self):
         good = {"keys": ["batch_001/a.jpg"], "batch": "batch_001", "status": "DIRTY", "pass": 1}
         bad = {
             "status UNREVIEWED": {**good, "status": "UNREVIEWED"},
+            "status FLAGGED": {**good, "status": "FLAGGED"},
             "keys not a list": {**good, "keys": "batch_001/a.jpg"},
             "empty keys": {**good, "keys": []},
             "non-str key": {**good, "keys": [1]},

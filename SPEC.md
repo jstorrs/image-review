@@ -310,7 +310,7 @@ image-review review [--mode {single,grid}]            [--pass N]
 | `--mode` | `single` | `single` = one image at a time; `grid` = packed grids |
 | `--pass` | auto-detected | Review pass number |
 | `--batch` | all | Restrict to a named batch (e.g. `batch_001`) |
-| `--filter` | `unreviewed` | Which images to show: `unreviewed`, `clean`, or `all` |
+| `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
 | `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images 90° for tighter grid packing |
 | `--work-dir` | `./review_work` | Work directory from preprocessing (local review) |
 | `--remote` | (none) | `ir://` connection string of an `image-review serve` process; also read from `$IMAGE_REVIEW_REMOTE` |
@@ -352,8 +352,12 @@ image-review status [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINAT
 Same store selection as `review`, but a local store is opened read-only (no
 lock), so `status` works while a writer holds the work directory. Fetches the manifest, the current pass and
 that pass's statuses from the store, then prints overall and per-batch counts
-of CLEAN / DIRTY / UNREVIEWED images (pass-aware, computed by the pure
-`store.summary` / `store.batch_summary`), plus the current pass number. Then
+of each `Status` (pass-aware, computed by the pure `store.summary` /
+`store.batch_summary`), plus the current pass number. The overall block has
+one line each for CLEAN, DIRTY, UNREVIEWED and FLAGGED; the per-batch table
+(printed when there is more than one batch) has columns `Batch Total Clean
+Dirty Unrev Flag`. After a completed pass, images marked DIRTY in it show as
+FLAGGED (not DIRTY) because the current pass is then the next one. Then
 it calls `store.skipped()`; if preprocess skipped anything it prints
 `Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`
 so that a fully reviewed manifest is not mistaken for a complete input set.
@@ -459,7 +463,8 @@ tool with `Cannot read work directory: <file>:<line>: <problem>` instead of
 being skipped or rewritten, so a hand edit cannot silently lose decisions.
 
 Only images that have been explicitly marked appear in `review.tsv`. An image
-absent from `review.tsv` is implicitly `UNREVIEWED`.
+absent from `review.tsv` is implicitly `UNREVIEWED`. `FLAGGED` is derived when
+reading (see *Pass Logic*) and is never written.
 
 ### `batch_NNN/img_NNNNN.jpg`
 
@@ -471,8 +476,9 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 
 | Name | Description |
 |------|-------------|
-| `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED"]` |
+| `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
+| `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
 | `ManifestRow` | Frozen dataclass: `key` (the `preprocessed_path`) and `batch` |
 | `StoreUnavailable` | Exception: the store cannot be reached (as opposed to a bad key or image) |
 
@@ -515,13 +521,10 @@ or `ignored`) and returns only the counts.
 
 | Function | Description |
 |----------|-------------|
-| `filter_rows(rows, statuses, status_filter="unreviewed", batch=None)` | Filter rows by `unreviewed`, `clean` or `all` and optional batch; `ValueError` on an invalid filter |
-| `summary(rows, statuses)` | Totals of CLEAN/DIRTY/UNREVIEWED/total |
+| `filter_rows(rows, statuses, status_filter="unreviewed", batch=None)` | Filter rows by status and optional batch: `unreviewed` selects `TODO_STATUSES` (UNREVIEWED and FLAGGED), `clean` selects CLEAN, `all` everything; `ValueError` on an invalid filter |
+| `summary(rows, statuses)` | Count of each `Status` (CLEAN/DIRTY/UNREVIEWED/FLAGGED) plus `total` |
 | `batch_summary(rows, statuses)` | The same per batch |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
-
-`ReviewDB.images_by_status`, `summary` and `batch_summary` are no longer used
-by the application; they remain as oracles for tests of the functions above.
 
 ## Review Session (`controller.py`)
 
@@ -537,7 +540,9 @@ by the application; they remain as oracles for tests of the functions above.
      or advances to max(pass_number) + 1
 3. Fetch the **status snapshot** `store.statuses(pass)` (key -> status)
 4. Auto-select batch if not specified: pick the first batch (sorted
-   alphabetically) that has rows matching the status filter
+   alphabetically) that has rows the mode may show (the status filter's rows;
+   in grid mode, minus DIRTY and FLAGGED, see *Grid Mode*). A batch whose only
+   todo images are FLAGGED is therefore not auto-selected for grid mode
 5. Determine review items based on mode
 
 ### Status Snapshot
@@ -571,7 +576,11 @@ image.
 
 - Display a "Computing grids..." message while packing
 - Read screen dimensions, subtract the 50px status bar height
-- `filter_rows()` for the current pass/batch/filter
+- `filter_rows()` for the current pass/batch/filter, then keep only rows whose
+  status is in `controller.GRID_ELIGIBLE` (UNREVIEWED or CLEAN), in every
+  filter including `all`. A grid mark applies to all its images, so one
+  keypress must never clear an image already judged DIRTY (this pass) or
+  FLAGGED (DIRTY in another pass); those are reviewed in single mode
 - Pass the rows and the store to `pack_into_grids()` with the screen dimensions
 - Convert the returned `GridSpec` list into item dicts with `surface`,
   `keys`, and `batch` keys
@@ -580,12 +589,32 @@ image.
 When a grid is marked CLEAN or DIRTY, `store.mark()` is called with all its
 `keys`, and every key in the result is written into the snapshot.
 
+A grid can still come to hold a DIRTY key mid-session, when a key in it shares
+an `image_id` with an image marked DIRTY elsewhere. CLEAN on a grid holding any
+DIRTY or FLAGGED key is refused (no store call; the status bar shows "grid
+contains an image already marked DIRTY - review it in single mode", also
+printed to stderr), unless every key in the grid is DIRTY, which reverses that
+grid's own verdict.
+
+If grid mode has no items but the status filter selected rows it left out, the
+session says so instead of implying the review is done: `run()` prints, and a
+mode restart shows, "No grid items for pass N; K FLAGGED/DIRTY image(s) need(s)
+single-mode review (--mode single)" (K counted over the selected batch, or all
+batches when none is selected).
+
 ### Grid Status Derivation
 
 A grid's aggregate status is derived from the snapshot statuses of its keys:
-- All CLEAN -> CLEAN
-- Any UNREVIEWED -> UNREVIEWED
-- Otherwise -> DIRTY
+- Any key not in `GRID_ELIGIBLE` (DIRTY or FLAGGED) -> DIRTY, so such a grid
+  is neither shown nor counted as todo
+- Otherwise any UNREVIEWED -> UNREVIEWED
+- Otherwise (all CLEAN) -> CLEAN
+
+### Todo
+
+An item is todo if its status is in `TODO_STATUSES` (UNREVIEWED or FLAGGED),
+or, with `--filter clean`, if it is CLEAN. In single mode a FLAGGED image is
+therefore todo; grids are never built with one.
 
 ### Event Loop
 
@@ -661,7 +690,8 @@ bottom edge.
 vertically within the content area. Uses `pg.transform.smoothscale`.
 
 **Status bar**: A colored rectangle spanning the full width at the bottom.
-Color encodes review status (green=CLEAN, red=DIRTY, gray=UNREVIEWED).
+Color encodes review status (green=CLEAN, red=DIRTY, gray=UNREVIEWED,
+orange=FLAGGED).
 The image name is rendered right-aligned, position info is centered.
 
 **Font**: DejaVu Sans 36pt bold, dark gray (`Color(64,64,64)`). Bundled in
@@ -698,22 +728,29 @@ at any point.
 |--------|-------------|
 | `mark(image_id, batch, status, pass_number)` | Record a single review decision |
 | `mark_many(image_ids, batch, status, pass_number)` | Record decisions for multiple images (same timestamp) |
-| `get_status(image_id, current_pass) -> str` | Returns pass-aware status or `"UNREVIEWED"` if absent |
-| `images_by_status(manifest, pass_number, status_filter?, batch?) -> list[dict]` | Filter manifest dicts by status (test oracle; the application uses `store.filter_rows`) |
-| `current_pass(manifest) -> int` | Auto-detect pass number |
-| `summary(manifest, pass_number) -> dict` | Pass-aware count of CLEAN/DIRTY/UNREVIEWED/total (test oracle; the application uses `store.summary`) |
-| `batch_summary(manifest, pass_number) -> dict` | Pass-aware per-batch status counts (test oracle; the application uses `store.batch_summary`) |
+| `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*) |
+| `current_pass(image_ids) -> int` | Auto-detect pass number |
 
 ### Pass Logic
 
-| Pass | Shows |
+`get_status(image_id, pass)` maps the image's (last) row to a `Status`:
+
+| Row | Status |
+|-----|--------|
+| none | UNREVIEWED |
+| from this pass | its verdict (CLEAN or DIRTY) |
+| from another pass, CLEAN | CLEAN |
+| from another pass, DIRTY | FLAGGED |
+
+| Pass | Shows (default `unreviewed` filter) |
 |------|-------|
 | 1 | All UNREVIEWED images |
-| N > 1 | Images marked DIRTY in a prior pass (treated as UNREVIEWED for the current pass) plus any still-UNREVIEWED images |
+| N > 1 | FLAGGED images (marked DIRTY in another pass) in single mode, plus any still-UNREVIEWED images; grid mode skips FLAGGED images |
 
 `current_pass` returns 1 if any image has never been reviewed. Otherwise it
-returns `max(pass_number)` if that pass still has UNREVIEWED work remaining,
-or `max(pass_number) + 1` if the pass is fully complete.
+returns `max(pass_number)` if that pass still has work in `TODO_STATUSES`
+(UNREVIEWED or FLAGGED), or `max(pass_number) + 1` if the pass is fully
+complete.
 
 ## Connection String (`connection.py`)
 
@@ -765,14 +802,16 @@ the boundary (`parse_pass`, `parse_mark`).
 | `GET /version` | `{"api": N, "version": str}`: the wire API version (`connection.API_VERSION`) and the installed `image-review` package version (`"unknown"` if not installed) |
 | `GET /manifest` | `[{"key": str, "batch": str}, ...]` |
 | `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown or unreadable |
-| `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED", ...}` for every key; `N` integer >= 1 |
+| `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`), or `null` if the work dir has no `skipped.tsv`. Only counts are sent, never `image_id`s or reasons (which contain source paths) |
 | `POST /mark` | Body `{"keys": [str, ...], "batch": str, "status": "CLEAN"\|"DIRTY", "pass": N}`; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
 
 Only keys and skip counts appear on the wire; original `image_id`s never do.
 
-**API version rule.** `connection.API_VERSION` (an integer, currently 2; v2 added `GET /skipped`) is
+**API version rule.** `connection.API_VERSION` (an integer, currently 3; v2 added `GET /skipped`;
+v3 added `FLAGGED` to the `Status` vocabulary, which `/statuses` responses
+may contain; `/mark` responses hold only the verdict just recorded) is
 shared by client and server. Any change to request or response shapes, or to
 the `Status` vocabulary, must bump it. Client and server are installed
 separately, so skew is expected and must fail clearly rather than as a
@@ -957,12 +996,13 @@ also passed after `--`.
 
 1. **Pass 1 (grid triage)**: `--mode grid`. Mark grids CLEAN or DIRTY.
    Each grid mark applies to all constituent images. Err toward DIRTY.
-2. **Pass 2 (single review)**: `--mode single`. Only DIRTY images from
-   pass 1 are shown. Inspect individually.
+2. **Pass 2 (single review)**: `--mode single`. Only images marked DIRTY in
+   pass 1 (now FLAGGED) are shown. Inspect individually. Grid mode skips
+   FLAGGED images, so they cannot be cleared by a grid keypress.
 3. **Pass 3+**: Repeat single-mode review on the shrinking DIRTY pool
    until confident.
 
 Sessions are resumable: quitting mid-session saves all progress (with a
 remote store, progress is saved on the server at every mark). Re-running
-the same command shows only remaining unreviewed (pass 1) or dirty (pass 2+)
+the same command shows only remaining unreviewed (pass 1) or flagged (pass 2+)
 images.

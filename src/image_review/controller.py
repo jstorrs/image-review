@@ -6,6 +6,7 @@ import pygame as pg
 
 from .grid_packer import pack_into_grids
 from .store import (
+    TODO_STATUSES,
     ManifestRow,
     ReviewStore,
     Status,
@@ -20,13 +21,26 @@ AUTOPLAY_EVENT = pg.USEREVENT + 1
 ADVANCE_EVENT = pg.USEREVENT + 2
 
 
+# A grid verdict applies to every image in it, so grids only hold images not yet judged
+# DIRTY (this pass) or FLAGGED (DIRTY in another pass): one keypress must never clear those.
+GRID_ELIGIBLE: frozenset[Status] = frozenset({"UNREVIEWED", "CLEAN"})
+GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in single mode"
+
+
 def _grid_status(snapshot: dict[str, Status], keys: list[str]) -> str:
     statuses = {snapshot[key] for key in keys}
-    if statuses == {"CLEAN"}:
-        return "CLEAN"
-    if "UNREVIEWED" in statuses:
+    if not statuses <= GRID_ELIGIBLE:
+        return "DIRTY"  # e.g. a key sharing an image_id with one marked DIRTY elsewhere this session
+    if statuses & TODO_STATUSES:
         return "UNREVIEWED"
-    return "DIRTY"
+    return "CLEAN"
+
+
+def _grid_clean_refused(snapshot: dict[str, Status], keys: list[str]) -> bool:
+    """CLEAN on a grid holding a DIRTY or FLAGGED image is refused, unless the whole grid is
+    DIRTY (reversing that grid's own verdict)."""
+    statuses = {snapshot[key] for key in keys}
+    return not statuses <= GRID_ELIGIBLE and statuses != {"DIRTY"}
 
 
 class UIState(Enum):
@@ -97,16 +111,34 @@ class ReviewSession:
     def _switch_to_single(self):
         self._restart_in_mode("single")
 
+    def _review_rows(self, batch: str | None) -> list[ManifestRow]:
+        """Rows the current mode may show: the status filter's, limited to GRID_ELIGIBLE in grid mode."""
+        rows = filter_rows(self.manifest, self._statuses, self.status_filter, batch)
+        if self.mode == "grid":
+            rows = [r for r in rows if self._statuses[r.key] in GRID_ELIGIBLE]
+        return rows
+
+    def _held_back_count(self) -> int:
+        """Rows the status filter selects that the current mode leaves out (grid mode: DIRTY and FLAGGED)."""
+        return len(filter_rows(self.manifest, self._statuses, self.status_filter, self.batch)) - len(self._review_rows(self.batch))
+
+    def _held_back_message(self) -> str | None:
+        held = self._held_back_count()
+        if not held:
+            return None
+        images = "image needs" if held == 1 else "images need"
+        return f"No grid items for pass {self.pass_number}; {held} FLAGGED/DIRTY {images} single-mode review (--mode single)"
+
     def _auto_select_batch(self) -> str | None:
-        """Find the first batch that has images matching the status filter."""
+        """Find the first batch that has images the current mode may show."""
         batches = sorted({row.batch for row in self.manifest})
         for batch in batches:
-            if filter_rows(self.manifest, self._statuses, self.status_filter, batch):
+            if self._review_rows(batch):
                 return batch
         return None
 
     def _init_single_mode(self):
-        rows = filter_rows(self.manifest, self._statuses, self.status_filter, self.batch)
+        rows = self._review_rows(self.batch)
         random.shuffle(rows)
         self._items = rows
         self._todo_count = self._count_todo()
@@ -115,7 +147,7 @@ class ReviewSession:
         grid_w, grid_h = self._viewer.screen.get_size()
         grid_h -= self._viewer.border
 
-        review_rows = filter_rows(self.manifest, self._statuses, self.status_filter, self.batch)
+        review_rows = self._review_rows(self.batch)
         grid_specs = pack_into_grids(review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation)
 
         items = [
@@ -173,7 +205,7 @@ class ReviewSession:
             return
 
         if not self._items:
-            self._viewer.show_message(f"No items for {new_mode} mode")
+            self._viewer.show_message(self._held_back_message() or f"No items for {new_mode} mode")
             self._ui_state = UIState.END_MESSAGE
             return
 
@@ -183,7 +215,7 @@ class ReviewSession:
     def _is_todo(self, status: str) -> bool:
         if self.status_filter == "clean":
             return status == "CLEAN"
-        return status == "UNREVIEWED"
+        return status in TODO_STATUSES
 
     def _count_todo(self) -> int:
         return sum(1 for item in self._items if self._is_todo(self._item_status(item)))
@@ -289,6 +321,11 @@ class ReviewSession:
         item = self._items[self._cursor]
         if self.mode == "grid":
             keys, batch = item["keys"], item["batch"]
+            if status == "CLEAN" and _grid_clean_refused(self._statuses, keys):
+                print(f"WARNING: {GRID_HAS_DIRTY}", file=sys.stderr)
+                self._viewer.set_info(GRID_HAS_DIRTY)
+                self._dirty = True
+                return
         else:
             keys, batch = [item.key], item.batch
         try:
@@ -413,7 +450,7 @@ class ReviewSession:
     def run(self):
         if not self._items:
             filter_msg = f" (filter: {self.status_filter})" if self.status_filter != "unreviewed" else ""
-            print(f"No images to review for pass {self.pass_number}{filter_msg}.")
+            print(self._held_back_message() or f"No images to review for pass {self.pass_number}{filter_msg}.")
             return
 
         batch_info = f", batch {self.batch}" if self.batch else ""

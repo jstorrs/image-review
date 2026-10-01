@@ -22,8 +22,7 @@ from fixtures import ROWS, make_work_dir
 
 from image_review import store as store_module
 from image_review.cli import cli
-from image_review.controller import ReviewSession
-from image_review.review_db import ReviewDB
+from image_review.controller import GRID_HAS_DIRTY, ReviewSession
 from image_review.store import (
     LOCK_NAME,
     LocalStore,
@@ -124,7 +123,26 @@ class TestMarkAndStatuses(StoreTestCase):
         self.store.mark(["batch_001/b.jpg"], "batch_001", "DIRTY", 1)
         statuses = self.store.statuses(2)
         self.assertEqual(statuses["batch_001/a.jpg"], "CLEAN")
-        self.assertEqual(statuses["batch_001/b.jpg"], "UNREVIEWED")
+        self.assertEqual(statuses["batch_001/b.jpg"], "FLAGGED")
+
+    def test_pass_one_dirty_is_flagged_in_pass_two(self):
+        self.store.mark(["batch_001/a.jpg"], "batch_001", "DIRTY", 1)
+        self.store.mark(["batch_001/b.jpg"], "batch_001", "CLEAN", 1)
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "batch_002", "CLEAN", 1)
+        self.assertEqual(self.store.current_pass(), 2)
+        self.assertEqual(
+            self.store.statuses(2),
+            {"batch_001/a.jpg": "FLAGGED", "batch_001/b.jpg": "CLEAN", "batch_002/c.jpg": "CLEAN", "batch_002/d.jpg": "CLEAN"},
+        )
+        self.assertEqual(self.store.mark(["batch_001/a.jpg"], "batch_001", "CLEAN", 2), {"batch_001/a.jpg": "CLEAN"})
+        self.assertEqual(self.store.current_pass(), 3)
+
+    def test_flagged_keeps_pass_open(self):
+        self.store.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "batch_001", "DIRTY", 1)
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "batch_002", "CLEAN", 1)
+        self.store.mark(["batch_001/a.jpg"], "batch_001", "CLEAN", 2)
+        self.assertEqual(self.store.statuses(2)["batch_001/b.jpg"], "FLAGGED")
+        self.assertEqual(self.store.current_pass(), 2)
 
 
 class TestSharedImageId(unittest.TestCase):
@@ -248,6 +266,97 @@ class TestSession(StoreTestCase):
         self.assertTrue(keys)
         self.assertEqual({s._statuses[k] for k in keys}, {"DIRTY"})
 
+    def finish_pass_one(self):
+        """Pass 1 ends with a DIRTY and b, c, d CLEAN."""
+        self.store.mark(["batch_001/a.jpg"], "batch_001", "DIRTY", 1)
+        self.store.mark(["batch_001/b.jpg"], "batch_001", "CLEAN", 1)
+        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "batch_002", "CLEAN", 1)
+
+    @staticmethod
+    def grid_keys(s: ReviewSession) -> set[str]:
+        return {k for item in s._items for k in item["keys"]}
+
+    def test_pass_two_grid_excludes_flagged(self):
+        self.finish_pass_one()
+        s = ReviewSession(self.store, mode="grid")
+        self.assertEqual(s.pass_number, 2)
+        self.assertEqual(s._items, [])
+        self.assertIsNone(s.batch)
+
+    def test_pass_two_grid_all_filter_excludes_flagged(self):
+        self.finish_pass_one()
+        for batch in ("batch_001", None):
+            with self.subTest(batch=batch):
+                s = ReviewSession(self.store, mode="grid", status_filter="all", batch=batch)
+                self.assertNotIn("batch_001/a.jpg", self.grid_keys(s))
+                self.assertIn("batch_001/b.jpg", self.grid_keys(s))
+
+    def test_pass_two_single_shows_flagged_as_todo(self):
+        self.finish_pass_one()
+        s = ReviewSession(self.store, mode="single")
+        self.assertEqual(s.pass_number, 2)
+        self.assertEqual(s.batch, "batch_001")
+        self.assertEqual([r.key for r in s._items], ["batch_001/a.jpg"])
+        self.assertEqual(s._todo_count, 1)
+        s._cursor = 0
+        s._mark("CLEAN")
+        self.assertEqual(s._todo_count, 0)
+
+    def test_pass_one_all_filter_grid_excludes_dirty(self):
+        self.store.mark(["batch_001/a.jpg"], "batch_001", "DIRTY", 1)
+        s = ReviewSession(self.store, mode="grid", status_filter="all")
+        self.assertEqual(s.pass_number, 1)
+        self.assertEqual(self.grid_keys(s), {"batch_001/b.jpg"})
+        s = ReviewSession(self.store, mode="grid", status_filter="all", batch="batch_002")
+        self.assertEqual(self.grid_keys(s), {"batch_002/c.jpg", "batch_002/d.jpg"})
+
+    def test_auto_select_batch_uses_grid_eligibility(self):
+        self.store.mark(["batch_001/a.jpg"], "batch_001", "DIRTY", 1)
+        self.store.mark(["batch_001/b.jpg"], "batch_001", "CLEAN", 1)
+        self.store.mark(["batch_002/c.jpg"], "batch_002", "CLEAN", 1)
+        # pass 2: batch_001's only todo image is FLAGGED; batch_002 has d UNREVIEWED
+        self.assertEqual(ReviewSession(self.store, mode="grid", pass_number=2).batch, "batch_002")
+        self.assertEqual(ReviewSession(self.store, mode="single", pass_number=2).batch, "batch_001")
+
+    def test_grid_clean_refused_when_shared_image_id_became_dirty(self):
+        # a and b share an image_id; marking grid [a] DIRTY makes b DIRTY inside grid [b, c]
+        with open(self.work_dir / "manifest.tsv", "w", newline="") as f:
+            writer = csv.writer(f, delimiter="\t")
+            writer.writerow(["batch", "preprocessed_path", "image_id"])
+            writer.writerow(["batch_001", "batch_001/a.jpg", "/src/same.dcm"])
+            writer.writerow(["batch_001", "batch_001/b.jpg", "/src/same.dcm"])
+            writer.writerow(["batch_001", "batch_002/c.jpg", "/src/other.dcm"])
+        self.store.close()
+        self.store = LocalStore(self.work_dir)
+        self.addCleanup(self.store.close)
+        s = ReviewSession(self.store, mode="grid")
+        s._items = [
+            {"surface": None, "keys": ["batch_001/a.jpg"], "batch": "batch_001"},
+            {"surface": None, "keys": ["batch_001/b.jpg", "batch_002/c.jpg"], "batch": "batch_001"},
+        ]
+        s._cursor = 0
+        s._mark("DIRTY")
+        self.assertEqual(s._statuses["batch_001/b.jpg"], "DIRTY")
+        self.assertEqual(s._item_status(s._items[1]), "DIRTY")
+        self.assertEqual(s._count_todo(), 0)
+        s._cursor = 1
+        with mock.patch.object(self.store, "mark", wraps=self.store.mark) as mark, mock.patch("sys.stderr"):
+            s._mark("CLEAN")
+            mark.assert_not_called()
+            self.assertEqual(s._statuses["batch_001/b.jpg"], "DIRTY")
+            self.assertEqual(s._viewer._info, GRID_HAS_DIRTY)
+            # the all-DIRTY grid may reverse its own verdict
+            s._cursor = 0
+            s._mark("CLEAN")
+            mark.assert_called_once()
+        self.assertEqual(self.store.statuses(1)["batch_001/b.jpg"], "CLEAN")
+
+    def test_flagged_is_orange(self):
+        s = ReviewSession(self.store, mode="single")
+        self.assertEqual(s._viewer.STATUS_COLORS["FLAGGED"], pg.Color(255, 176, 64))
+        s._viewer.set_status("FLAGGED")
+        s._viewer.refresh()  # every Status has a colour; a missing one would raise
+
     def test_restart_refetches_statuses(self):
         s = ReviewSession(self.store, mode="single")
         self.store.mark(["batch_001/a.jpg"], "batch_001", "CLEAN", s.pass_number)
@@ -257,30 +366,51 @@ class TestSession(StoreTestCase):
 
 
 class TestPureFunctions(StoreTestCase):
+    """Pass 2 with every status present: a FLAGGED, b CLEAN, c DIRTY, d UNREVIEWED."""
+
     def setUp(self):
         super().setUp()
-        self.store.mark(["batch_001/a.jpg"], "batch_001", "CLEAN", 1)
-        self.store.mark(["batch_002/c.jpg"], "batch_002", "DIRTY", 1)
-        self.db = ReviewDB(self.work_dir)
-        self.raw = [{"batch": b, "preprocessed_path": k, "image_id": i} for b, k, i in ROWS]
+        self.store.mark(["batch_001/a.jpg", "batch_002/c.jpg"], "batch_001", "DIRTY", 1)
+        self.store.mark(["batch_001/b.jpg"], "batch_001", "CLEAN", 1)
+        self.store.mark(["batch_002/c.jpg"], "batch_002", "DIRTY", 2)
         self.rows = self.store.manifest()
-        self.statuses = self.store.statuses(1)
+        self.statuses = self.store.statuses(2)
 
-    def test_filter_matches_review_db(self):
-        for status_filter in ("unreviewed", "clean", "all"):
-            for batch in (None, "batch_001", "batch_002"):
-                with self.subTest(status_filter=status_filter, batch=batch):
-                    expected = [r["preprocessed_path"] for r in self.db.images_by_status(self.raw, 1, status_filter, batch)]
-                    actual = [r.key for r in filter_rows(self.rows, self.statuses, status_filter, batch)]
-                    self.assertEqual(actual, expected)
+    def test_statuses(self):
+        self.assertEqual(
+            self.statuses,
+            {"batch_001/a.jpg": "FLAGGED", "batch_001/b.jpg": "CLEAN", "batch_002/c.jpg": "DIRTY", "batch_002/d.jpg": "UNREVIEWED"},
+        )
+
+    def test_filter(self):
+        expected = {
+            ("unreviewed", None): ["batch_001/a.jpg", "batch_002/d.jpg"],
+            ("unreviewed", "batch_001"): ["batch_001/a.jpg"],
+            ("unreviewed", "batch_002"): ["batch_002/d.jpg"],
+            ("clean", None): ["batch_001/b.jpg"],
+            ("clean", "batch_001"): ["batch_001/b.jpg"],
+            ("clean", "batch_002"): [],
+            ("all", None): ["batch_001/a.jpg", "batch_001/b.jpg", "batch_002/c.jpg", "batch_002/d.jpg"],
+            ("all", "batch_001"): ["batch_001/a.jpg", "batch_001/b.jpg"],
+            ("all", "batch_002"): ["batch_002/c.jpg", "batch_002/d.jpg"],
+        }
+        for (status_filter, batch), keys in expected.items():
+            with self.subTest(status_filter=status_filter, batch=batch):
+                self.assertEqual([r.key for r in filter_rows(self.rows, self.statuses, status_filter, batch)], keys)
 
     def test_filter_rejects_bad_filter(self):
         with self.assertRaises(ValueError):
             filter_rows(self.rows, self.statuses, "bogus")
 
-    def test_summaries_match_review_db(self):
-        self.assertEqual(batch_summary(self.rows, self.statuses), self.db.batch_summary(self.raw, 1))
-        self.assertEqual(summary(self.rows, self.statuses), self.db.summary(self.raw, 1))
+    def test_summaries(self):
+        self.assertEqual(
+            batch_summary(self.rows, self.statuses),
+            {
+                "batch_001": {"CLEAN": 1, "DIRTY": 0, "UNREVIEWED": 0, "FLAGGED": 1, "total": 2},
+                "batch_002": {"CLEAN": 0, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 0, "total": 2},
+            },
+        )
+        self.assertEqual(summary(self.rows, self.statuses), {"CLEAN": 1, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 1, "total": 4})
 
 
 THIS_BOOT = boot_id()
@@ -557,6 +687,29 @@ class TestLockCli(LockTestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("No preprocessed data found", result.output)
         self.assertFalse(self.lock_path.exists())
+
+    def test_status_counts_flagged_after_pass_one(self):
+        with LocalStore(self.work_dir) as store:
+            store.mark(["batch_001/a.jpg"], "batch_001", "DIRTY", 1)
+            store.mark(["batch_001/b.jpg"], "batch_001", "CLEAN", 1)
+            store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "batch_002", "CLEAN", 1)
+        result = self.invoke("status")
+        self.assertEqual(result.exit_code, 0, result.output)
+        for line in ("  CLEAN:           3", "  DIRTY:           0", "  UNREVIEWED:      0", "  FLAGGED:         1", "Current pass: 2"):
+            self.assertIn(line + "\n", result.output)
+        self.assertIn(f"{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6} {'Flag':>6}", result.output)
+        self.assertIn(f"{'batch_001':<15} {2:>6} {1:>6} {0:>6} {0:>6} {1:>6}", result.output)
+
+    def test_grid_review_names_held_back_images(self):
+        with LocalStore(self.work_dir) as store:
+            store.mark(["batch_001/a.jpg"], "batch_001", "DIRTY", 1)
+            store.mark(["batch_001/b.jpg"], "batch_001", "CLEAN", 1)
+            store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "batch_002", "CLEAN", 1)
+        with mock.patch.object(pg.display, "toggle_fullscreen", lambda: None):
+            result = self.invoke("review", "--mode", "grid")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No grid items for pass 2; 1 FLAGGED/DIRTY image needs single-mode review (--mode single)", result.output)
+        self.assertNotIn("No images to review", result.output)
 
     def test_status_works_on_locked_dir(self):
         self.write_lock("node042", 1234)

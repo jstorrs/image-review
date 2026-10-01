@@ -13,6 +13,7 @@ class ImageViewer:
         "CLEAN": pg.Color(128, 255, 128),
         "DIRTY": pg.Color(255, 128, 128),
         "UNREVIEWED": pg.Color(128, 128, 128),
+        "FLAGGED": pg.Color(255, 176, 64),
     }
 
     def __init__(self):
@@ -76,6 +77,10 @@ class ImageViewer:
     def set_status(self, status: str) -> None:
         self._status = status
 
+    def set_info(self, info: str) -> None:
+        """Replace the centered status-bar text (e.g. with a short notice)."""
+        self._info = info
+
     def resize(self) -> None:
         if self._image is None:
             return
@@ -96,7 +101,7 @@ class ImageViewer:
         self.screen = pg.display.get_surface()
         screen_w, screen_h = self.screen.get_size()
         self.screen.fill(pg.Color(64, 64, 64))
-        bar_color = self.STATUS_COLORS.get(self._status, pg.Color(128, 128, 128))
+        bar_color = self.STATUS_COLORS[self._status]
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
         left_text = "(h)elp"
         left_text += " | todo-only" if self._todo_only else " | all"

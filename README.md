@@ -39,7 +39,7 @@ image-review preprocess /path/to/dicoms/ --work-dir ./review_work
 # Pass 1: grid triage — quickly mark entire grids CLEAN or DIRTY
 image-review review --mode grid
 
-# Pass 2: single review — inspect only the DIRTY images individually
+# Pass 2: single review — inspect only the flagged (pass-1 DIRTY) images individually
 image-review review --mode single
 
 # Check progress
@@ -157,6 +157,10 @@ are shown one at a time for detailed inspection.
 | `f` | Toggle fullscreen |
 | `q` / Escape | Quit |
 
+The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
+orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
+verdict). Grids are built without DIRTY or FLAGGED images.
+
 Xbox-style controllers are also supported (see help screen for mappings).
 
 `--remote` (or `$IMAGE_REVIEW_REMOTE`) reviews a server started with
@@ -171,7 +175,18 @@ tunnel via a login node, e.g. `--via user@login.cluster`; it requires
 image-review status [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINATION]]
 ```
 
-Prints overall and per-batch counts of CLEAN / DIRTY / UNREVIEWED images.
+Prints overall and per-batch counts of CLEAN / DIRTY / UNREVIEWED / FLAGGED
+images. FLAGGED means marked DIRTY in an earlier pass and not yet re-reviewed
+in the current one, so after pass 1 completes its DIRTY images show as FLAGGED:
+
+```
+Overall: 6 images (pass 2)
+  CLEAN:           4
+  DIRTY:           0
+  UNREVIEWED:      0
+  FLAGGED:         2
+```
+
 If preprocess skipped any inputs it also prints
 `Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`;
 failed inputs were never shown, so they are not part of the counts above.
@@ -228,7 +243,9 @@ If `--remote` reports "server speaks API vN, this client vM" (or "server is too 
 ## Multi-Pass Workflow
 
 1. **Pass 1** (grid triage): Mark grids CLEAN or DIRTY. Err toward DIRTY.
-2. **Pass 2** (single review): Only DIRTY images are shown. Inspect individually.
+2. **Pass 2** (single review): Only images marked DIRTY in pass 1 are shown,
+   as FLAGGED (orange status bar). Inspect individually. Grid mode skips
+   FLAGGED and DIRTY images, so a grid keypress cannot clear them.
 3. **Pass 3+**: Repeat on the shrinking DIRTY pool until confident.
 
 Sessions are resumable -- quitting saves all progress. The batch and pass
