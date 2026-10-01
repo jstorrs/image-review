@@ -16,6 +16,18 @@ class ManifestRow:
     batch: str
 
 
+@dataclass(frozen=True)
+class SkippedCounts:
+    """Inputs preprocess could not put in the manifest: unrenderable (failed) or not images (ignored)."""
+
+    failed: int
+    ignored: int
+
+    @property
+    def any(self) -> bool:
+        return self.failed > 0 or self.ignored > 0
+
+
 class StoreUnavailable(Exception):
     """The store cannot be reached (as opposed to a key or image being bad)."""
 
@@ -39,6 +51,10 @@ class ReviewStore(Protocol):
 
     def current_pass(self) -> int: ...
 
+    def skipped(self) -> SkippedCounts | None:
+        """Counts from preprocess's skipped.tsv; None if the work dir has none. ValueError if it is malformed."""
+        ...
+
 
 def safe_path(work_dir: Path, relative: str) -> Path:
     """Resolve a relative path within work_dir, rejecting traversal attempts."""
@@ -52,6 +68,23 @@ def load_manifest(work_dir: Path) -> list[dict]:
     manifest_path = work_dir / "manifest.tsv"
     with open(manifest_path, newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
+
+
+def load_skipped_counts(work_dir: Path) -> SkippedCounts | None:
+    path = work_dir / "skipped.tsv"
+    if not path.exists():
+        return None
+    failed = ignored = 0
+    with open(path, newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        if next(reader, None) != ["image_id", "kind", "reason"]:
+            raise ValueError(f"{path}:1: header must be image_id, kind, reason")
+        for row in reader:
+            if len(row) != 3 or row[1] not in ("failed", "ignored"):
+                raise ValueError(f"{path}:{reader.line_num}: expected image_id, kind (failed or ignored), reason")
+            failed += row[1] == "failed"
+            ignored += row[1] == "ignored"
+    return SkippedCounts(failed=failed, ignored=ignored)
 
 
 class LocalStore:
@@ -96,6 +129,9 @@ class LocalStore:
 
     def current_pass(self) -> int:
         return self._db.current_pass(self._raw)
+
+    def skipped(self) -> SkippedCounts | None:
+        return load_skipped_counts(self.work_dir)
 
 
 def filter_rows(

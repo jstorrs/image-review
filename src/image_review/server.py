@@ -230,6 +230,10 @@ class ReviewHandler(BaseHTTPRequestHandler):
             with lock:
                 current = store.current_pass()
             return json_reply({"pass": current})
+        if method == "GET" and url.path == "/skipped":
+            with lock:
+                skipped = store.skipped()
+            return json_reply(None if skipped is None else {"failed": skipped.failed, "ignored": skipped.ignored})
         if is_mark:
             req = self._read_mark()
             with lock:

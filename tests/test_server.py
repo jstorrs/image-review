@@ -343,6 +343,7 @@ class TestAuth(ServerTestCase):
             ("GET", "/image?key=batch_001/a.jpg"),
             ("GET", "/statuses?pass=1"),
             ("GET", "/current_pass"),
+            ("GET", "/skipped"),
             ("GET", "/version"),
             ("POST", "/mark"),
             ("GET", "/nope"),
@@ -394,6 +395,26 @@ class TestReads(ServerTestCase):
         resp, data, _ = self.request("GET", "/version")
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
+
+    def test_api_version_is_2(self):
+        self.assertEqual(API_VERSION, 2)
+        self.assertEqual(self.get_json("/version")["api"], 2)
+
+    def test_skipped_absent_is_null(self):
+        resp, data, _ = self.request("GET", "/skipped")
+        self.assertEqual((resp.status, data), (200, b"null"))
+
+    def test_skipped_counts_only_no_paths(self):
+        rows = [(f"{image_id}", "failed", "cannot read /src/secret/dir") for _, _, image_id in ROWS[:2]]
+        rows.append(("/src/patient_x/notes.txt", "ignored", "not an image"))
+        text = "image_id\tkind\treason\n" + "".join("\t".join(r) + "\n" for r in rows)
+        (self.work_dir / "skipped.tsv").write_text(text)
+        resp, data, _ = self.request("GET", "/skipped")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(data), {"failed": 2, "ignored": 1})
+        self.assertNotIn(b"/", data)
+        for _, _, image_id in ROWS:
+            self.assertNotIn(image_id.encode(), data)
 
     def test_statuses_and_current_pass(self):
         self.assertEqual(self.get_json("/current_pass"), {"pass": 1})

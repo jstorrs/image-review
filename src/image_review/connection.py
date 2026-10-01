@@ -6,7 +6,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 # Wire API version, shared by client and server. Any change to request/response
 # shapes or to the Status vocabulary must bump it.
-API_VERSION = 1
+API_VERSION = 2
 
 _FP_PATTERN = re.compile(r"sha256:([0-9a-f]{64})")
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]+")

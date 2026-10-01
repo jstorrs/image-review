@@ -252,6 +252,10 @@ def status(work_dir, remote, via):
         manifest = store.manifest()
         current = store.current_pass()
         statuses = store.statuses(current)
+        try:
+            skipped = store.skipped()
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
 
     # Overall summary
     counts = summary(manifest, statuses)
@@ -270,6 +274,9 @@ def status(work_dir, remote, via):
             print(f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6}")
 
     print(f"\nCurrent pass: {current}")
+
+    if skipped is not None and skipped.any:
+        print(f"Skipped during preprocess: {skipped.failed} failed, {skipped.ignored} ignored (see skipped.tsv in the work dir)")
 
 
 @cli.command()

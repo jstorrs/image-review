@@ -356,7 +356,14 @@ batch_003          300    280     15      5
 ...
 
 Current pass: 2
+
+Skipped during preprocess: 3 failed, 12 ignored (see skipped.tsv in the work dir)
 ```
+
+The last line appears only when preprocess skipped something. "Failed" inputs
+could not be rendered, so they were never shown for review and are not in the
+counts above; check `skipped.tsv` in the work directory for which ones and
+why. "Ignored" inputs were not images (for example stray text files).
 
 ## Reviewing on an HPC Cluster
 

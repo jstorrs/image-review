@@ -348,8 +348,13 @@ image-review status [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINAT
 Same store selection as `review`. Fetches the manifest, the current pass and
 that pass's statuses from the store, then prints overall and per-batch counts
 of CLEAN / DIRTY / UNREVIEWED images (pass-aware, computed by the pure
-`store.summary` / `store.batch_summary`), plus the current pass number. Does
-not start pygame.
+`store.summary` / `store.batch_summary`), plus the current pass number. Then
+it calls `store.skipped()`; if preprocess skipped anything it prints
+`Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`
+so that a fully reviewed manifest is not mistaken for a complete input set.
+Nothing extra is printed when `skipped.tsv` is absent (work dirs from older
+versions) or has no rows. A malformed `skipped.tsv` (`ValueError`) is a
+`ClickException` (exit 1). Does not start pygame.
 
 ### `image-review serve`
 
@@ -465,6 +470,7 @@ image preprocessed more than once); they share a review status.
 | `statuses(pass_number) -> dict[str, Status]` | Pass-aware status of every manifest key |
 | `mark(keys, batch, status, pass_number) -> dict[str, Status]` | Record a verdict; returns the new status of every key affected, including keys that share an `image_id` with a marked key |
 | `current_pass() -> int` | Auto-detected pass number |
+| `skipped() -> SkippedCounts \| None` | Counts of `failed` and `ignored` rows in preprocess's `skipped.tsv` (frozen `SkippedCounts(failed, ignored)`); `None` if the file is absent; `ValueError` naming `file:line` if it is malformed |
 
 ### `LocalStore(work_dir)`
 
@@ -472,7 +478,9 @@ Loads `manifest.tsv` and a `ReviewDB`. `image_bytes` reads the file via
 `safe_path`; `image_bytes_many` loops over it, catching `KeyError`,
 `ValueError` (path escape) and `OSError`. `mark` translates keys to
 `image_id`s and calls `ReviewDB.mark_many`. `statuses` and `current_pass`
-delegate to `ReviewDB.get_status` / `current_pass`.
+delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
+`skipped.tsv` strictly (header `image_id`, `kind`, `reason`; `kind` is `failed`
+or `ignored`) and returns only the counts.
 
 ### Pure functions
 
@@ -730,11 +738,12 @@ the boundary (`parse_pass`, `parse_mark`).
 | `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown or unreadable |
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
+| `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`), or `null` if the work dir has no `skipped.tsv`. Only counts are sent, never `image_id`s or reasons (which contain source paths) |
 | `POST /mark` | Body `{"keys": [str, ...], "batch": str, "status": "CLEAN"\|"DIRTY", "pass": N}`; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
 
-Only keys appear on the wire; original `image_id`s never do.
+Only keys and skip counts appear on the wire; original `image_id`s never do.
 
-**API version rule.** `connection.API_VERSION` (an integer, currently 1) is
+**API version rule.** `connection.API_VERSION` (an integer, currently 2; v2 added `GET /skipped`) is
 shared by client and server. Any change to request or response shapes, or to
 the `Status` vocabulary, must bump it. Client and server are installed
 separately, so skew is expected and must fail clearly rather than as a
@@ -821,7 +830,7 @@ Any other `OSError` or `HTTPException` raises `RemoteError` immediately.
 status when the server answered, else `None`. A non-200 reply raises
 `RemoteError` with that status, except `image_bytes`, where 404 raises
 `KeyError(key)` (an unloadable image, not an outage). Responses are parsed
-strictly (`parse_manifest`, `parse_statuses`, `parse_pass`); malformed
+strictly (`parse_manifest`, `parse_statuses`, `parse_pass`, `parse_skipped`); malformed
 payloads raise `RemoteError`.
 
 **`image_bytes_many`**: fetches distinct keys concurrently on an 8-worker

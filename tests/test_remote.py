@@ -29,11 +29,12 @@ from image_review.remote import (
     RemoteStore,
     parse_manifest,
     parse_pass,
+    parse_skipped,
     parse_statuses,
     parse_version,
 )
 from image_review.server import Reply, ReviewHandler
-from image_review.store import LocalStore, ManifestRow, StoreUnavailable
+from image_review.store import LocalStore, ManifestRow, SkippedCounts, StoreUnavailable
 
 KEYS = [key for _, key, _ in ROWS]
 
@@ -252,6 +253,26 @@ class TestParsing(unittest.TestCase):
                 parse(bad)
 
 
+SKIPPED_TSV = "image_id\tkind\treason\n/src/p/x.dcm\tfailed\tbad\n/src/p/y.dcm\tfailed\tbad\n/src/p/z.txt\tignored\tnot an image\n"
+
+
+class TestSkipped(RemoteTestCase):
+    def test_absent_is_none(self):
+        self.assertIsNone(self.store.skipped())
+
+    def test_counts_equal_local(self):
+        (self.work_dir / "skipped.tsv").write_text(SKIPPED_TSV)
+        self.assertEqual(self.store.skipped(), SkippedCounts(failed=2, ignored=1))
+        self.assertEqual(self.store.skipped(), self.local_copy().skipped())
+
+    def test_parse_skipped(self):
+        self.assertIsNone(parse_skipped(b"null"))
+        self.assertEqual(parse_skipped(b'{"failed": 0, "ignored": 4}'), SkippedCounts(0, 4))
+        for bad in (b"[]", b"{}", b'{"failed": 1}', b'{"failed": 1, "ignored": 2, "x": 3}', b'{"failed": "1", "ignored": 0}', b'{"failed": true, "ignored": 0}', b'{"failed": -1, "ignored": 0}', b"nope"):
+            with self.subTest(bad=bad), self.assertRaises(RemoteError):
+                parse_skipped(bad)
+
+
 class TestCli(RemoteTestCase):
     def invoke(self, *args, **kwargs):
         kwargs.setdefault("env", {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None})  # ignore the developer's environment
@@ -266,11 +287,34 @@ class TestCli(RemoteTestCase):
         self.assertEqual(local.exit_code, 0, local.output)
         self.assertEqual(remote.stdout, local.stdout)
 
+    def test_status_skipped_line_identical_to_local(self):
+        (self.work_dir / "skipped.tsv").write_text(SKIPPED_TSV)
+        remote = self.invoke("status", "--remote", self.target.to_uri())
+        local = self.invoke("status", "--work-dir", str(self.work_dir))
+        self.assertEqual(remote.exit_code, 0, remote.output)
+        self.assertIn("Skipped during preprocess: 2 failed, 1 ignored (see skipped.tsv in the work dir)", remote.stdout)
+        self.assertEqual(remote.stdout, local.stdout)
+
+    def test_status_silent_without_skips(self):
+        (self.work_dir / "skipped.tsv").write_text("image_id\tkind\treason\n")
+        for args in (("--remote", self.target.to_uri()), ("--work-dir", str(self.work_dir))):
+            with self.subTest(args=args[0]):
+                self.assertNotIn("Skipped", self.invoke("status", *args).stdout)
+        (self.work_dir / "skipped.tsv").unlink()
+        self.assertNotIn("Skipped", self.invoke("status", "--work-dir", str(self.work_dir)).stdout)
+
+    def test_status_malformed_skipped_is_clean_error(self):
+        (self.work_dir / "skipped.tsv").write_text("wrong\n")
+        result = self.invoke("status", "--work-dir", str(self.work_dir))
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("skipped.tsv:1", result.output)
+        self.assertNotIn("Traceback", result.output)
+
     def test_api_mismatch_message(self):
-        with mock.patch("image_review.remote.API_VERSION", 2):
+        with mock.patch("image_review.remote.API_VERSION", 3):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("server speaks API v1, this client v2; install the same image-review version on both machines", result.output)
+        self.assertIn("server speaks API v2, this client v3; install the same image-review version on both machines", result.output)
         self.assertNotIn(self.target.token, result.output)
 
     def test_server_without_version_endpoint(self):
@@ -288,7 +332,7 @@ class TestCli(RemoteTestCase):
 
     def test_check_api(self):
         self.store.check_api()
-        with mock.patch("image_review.remote.API_VERSION", 2), self.assertRaises(ApiMismatch):
+        with mock.patch("image_review.remote.API_VERSION", 3), self.assertRaises(ApiMismatch):
             self.store.check_api()
 
     def test_status_envvar(self):

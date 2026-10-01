@@ -170,6 +170,9 @@ image-review status [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINAT
 ```
 
 Prints overall and per-batch counts of CLEAN / DIRTY / UNREVIEWED images.
+If preprocess skipped any inputs it also prints
+`Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`;
+failed inputs were never shown, so they are not part of the counts above.
 `--remote` and `--via` work as for `review`.
 
 ### `image-review serve`

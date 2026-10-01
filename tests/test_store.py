@@ -15,6 +15,7 @@ from image_review.review_db import ReviewDB
 from image_review.store import (
     LocalStore,
     ManifestRow,
+    SkippedCounts,
     batch_summary,
     filter_rows,
     summary,
@@ -50,6 +51,36 @@ class TestManifestAndBytes(StoreTestCase):
     def test_load_surface_from_bytes(self):
         surface = load_surface(self.store.image_bytes("batch_002/c.jpg"))
         self.assertEqual(surface.get_size(), (20, 12))
+
+
+class TestSkipped(StoreTestCase):
+    def write(self, text: str) -> None:
+        (self.work_dir / "skipped.tsv").write_text(text)
+
+    def test_absent_is_none(self):
+        self.assertIsNone(self.store.skipped())
+
+    def test_header_only_is_zero(self):
+        self.write("image_id\tkind\treason\n")
+        self.assertEqual(self.store.skipped(), SkippedCounts(0, 0))
+        self.assertFalse(self.store.skipped().any)
+
+    def test_counts_kinds(self):
+        self.write("image_id\tkind\treason\na\tfailed\tx\nb\tignored\ty\nc\tfailed\t\"multi\nline\"\n")
+        self.assertEqual(self.store.skipped(), SkippedCounts(failed=2, ignored=1))
+
+    def test_malformed_names_file_and_line(self):
+        cases = {
+            "bad header": ("id\tkind\treason\n", 1),
+            "empty file": ("", 1),
+            "bad kind": ("image_id\tkind\treason\na\tfailed\tx\nb\tbroken\ty\n", 3),
+            "short row": ("image_id\tkind\treason\na\tfailed\n", 2),
+        }
+        for name, (text, line) in cases.items():
+            with self.subTest(name=name):
+                self.write(text)
+                with self.assertRaisesRegex(ValueError, rf"skipped\.tsv:{line}:"):
+                    self.store.skipped()
 
 
 class TestMarkAndStatuses(StoreTestCase):

@@ -15,7 +15,7 @@ from typing import Self, get_args
 from urllib.parse import urlencode
 
 from .connection import API_VERSION, RemoteTarget, cert_fingerprint
-from .store import ManifestRow, Status, StoreUnavailable, Verdict
+from .store import ManifestRow, SkippedCounts, Status, StoreUnavailable, Verdict
 
 TIMEOUT_SECONDS = 30
 MAX_WORKERS = 8
@@ -109,6 +109,21 @@ def parse_version(data: bytes) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise RemoteError("malformed version from server")
     return value
+
+
+def parse_skipped(data: bytes) -> SkippedCounts | None:
+    payload = _load_json(data)
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"failed", "ignored"}:
+        raise RemoteError("malformed skipped counts from server")
+    counts = []
+    for name in ("failed", "ignored"):
+        value = payload[name]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise RemoteError("malformed skipped counts from server")
+        counts.append(value)
+    return SkippedCounts(failed=counts[0], ignored=counts[1])
 
 
 class RemoteStore:
@@ -221,3 +236,6 @@ class RemoteStore:
 
     def current_pass(self) -> int:
         return parse_pass(self._get("/current_pass"))
+
+    def skipped(self) -> SkippedCounts | None:
+        return parse_skipped(self._get("/skipped"))
