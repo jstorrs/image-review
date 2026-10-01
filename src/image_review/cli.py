@@ -237,10 +237,19 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
         )
 
 
+def unknown_batch_message(batch: str, known: set[str]) -> str | None:
+    """Why `batch` cannot be reviewed, or None when it names a batch in the manifest."""
+    if batch in known:
+        return None
+    names = sorted(known)
+    listed = ", ".join(names[:5]) + (", ..." if len(names) > 5 else "")
+    return f"Unknown batch {batch!r}; known batches: {listed or '(none)'}."
+
+
 @cli.command()
 @click.option("--mode", type=click.Choice(["single", "grid"]), default="single", show_default=True, help="Review display mode.")
-@click.option("--pass", "pass_number", type=int, default=None, help="Pass number (auto-detected if omitted).")
-@click.option("--batch", type=str, default=None, help="Restrict to a specific batch.")
+@click.option("--pass", "pass_number", type=click.IntRange(min=1), default=None, help="Pass number, 1 or more (auto-detected if omitted).")
+@click.option("--batch", type=str, default=None, help="Restrict to a specific batch [default: the first batch with images matching the filter].")
 @click.option("--filter", "status_filter", type=click.Choice(["unreviewed", "clean", "all"]), default="unreviewed", show_default=True, help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).")
 @click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
 @work_dir_option
@@ -262,6 +271,8 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote, vi
 
     hangup = (signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ()  # terminal or ssh session dropped
     with interrupt_on(*hangup), open_store(work_dir, remote, via) as store:
+        if batch is not None and (problem := unknown_batch_message(batch, {row.batch for row in store.manifest()})):
+            raise click.BadParameter(problem, param_hint="'--batch'")
         # after the store: SDL must not steal terminal focus during ssh password/MFA prompts
         pg.init()
         try:

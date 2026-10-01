@@ -207,8 +207,8 @@ image-review review [options]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--mode` | `single` | `single` (one image at a time) or `grid` (packed grids) |
-| `--pass` | auto | Pass number (auto-detected if omitted) |
-| `--batch` | all | Restrict review to a specific batch (e.g., `batch_001`) |
+| `--pass` | auto | Pass number, 1 or more (auto-detected if omitted) |
+| `--batch` | first batch with images matching the filter | Restrict review to a specific batch (e.g., `batch_001`); an unknown or empty name is rejected with the list of known batches |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
 | `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images for tighter grid packing |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |

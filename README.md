@@ -166,6 +166,10 @@ The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
 orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
 verdict). Grids are built without DIRTY or FLAGGED images.
 
+`--pass` must be 1 or more. `--batch` defaults to the first batch with images
+matching the filter; an empty or unknown batch name is rejected (exit 2) with a
+list of known batches.
+
 Xbox-style controllers are also supported (see help screen for mappings).
 
 `--remote` (or `$IMAGE_REVIEW_REMOTE`) reviews a server started with

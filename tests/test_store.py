@@ -22,7 +22,7 @@ from fixtures import ROWS, make_work_dir
 
 from image_review import controller as controller_module
 from image_review import store as store_module
-from image_review.cli import cli
+from image_review.cli import cli, unknown_batch_message
 from image_review.controller import (
     ADVANCE_EVENT,
     AUTOPLAY_EVENT,
@@ -951,6 +951,40 @@ class TestLockCli(LockTestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertFalse(self.lock_path.exists())
         self.assertEqual(signal.getsignal(signal.SIGHUP), before)
+
+    def assert_rejected(self, *args):
+        with mock.patch("image_review.controller.ReviewSession") as session, mock.patch("pygame.init") as init:
+            result = self.invoke("review", *args)
+        self.assertEqual(result.exit_code, 2, result.output)
+        session.assert_not_called()
+        init.assert_not_called()
+        self.assertFalse(self.lock_path.exists())
+        return result
+
+    def test_review_rejects_nonpositive_pass(self):
+        for value in ("0", "-1"):
+            self.assert_rejected("--pass", value)
+
+    def test_review_rejects_unknown_batch_listing_known(self):
+        result = self.assert_rejected("--batch", "nope")
+        self.assertIn("batch_001", result.output)
+        self.assertIn("batch_002", result.output)
+
+    def test_review_rejects_empty_batch(self):
+        self.assert_rejected("--batch", "")
+
+    def test_unknown_batch_message_lists_at_most_five(self):
+        known = {f"batch_{i:03d}" for i in range(1, 9)}
+        message = unknown_batch_message("x", known)
+        self.assertIn("batch_005", message)
+        self.assertNotIn("batch_006", message)
+        self.assertIsNone(unknown_batch_message("batch_003", known))
+
+    def test_review_valid_batch_reaches_session(self):
+        with mock.patch("image_review.controller.ReviewSession") as session, mock.patch("pygame.init"), mock.patch("pygame.quit"):
+            result = self.invoke("review", "--batch", "batch_002")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(session.call_args.kwargs["batch"], "batch_002")
 
     def test_unwritable_work_dir_says_write(self):
         with mock.patch("os.open", side_effect=PermissionError(13, "Permission denied", str(self.lock_path) + ".x")):
