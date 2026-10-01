@@ -2,7 +2,7 @@ import io
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import pygame as pg
 from PIL import Image
@@ -10,6 +10,9 @@ from rectpack import newPacker
 
 from .store import ManifestRow, ReviewStore
 from .util import load_surface
+
+# When images may be rotated 90 degrees in a grid: "auto" rotates only if that saves a grid
+Rotation = Literal["auto", "always", "never"]
 
 
 @dataclass
@@ -45,6 +48,19 @@ def _header_size(buf: bytes) -> tuple[int, int]:
         return im.size
 
 
+def _pack(sizes: dict[int, tuple[int, int]], grid_w: int, grid_h: int, rotate: bool) -> dict[int, list[PlacedRect]]:
+    """Bin-pack the images at their fit sizes, by bin index; rectpack rotates a rect only if `rotate`."""
+    packer = newPacker(rotation=rotate)
+    packer.add_bin(grid_w, grid_h, float("inf"))
+    for idx, (w, h) in sizes.items():
+        packer.add_rect(*fit_size(w, h, grid_w, grid_h, rotate), idx)
+    packer.pack()
+    bins: dict[int, list[PlacedRect]] = {}
+    for bin_idx, x, y, w, h, rect_id in packer.rect_list():
+        bins.setdefault(bin_idx, []).append(PlacedRect(rect_id, x, y, w, h))
+    return bins
+
+
 def _composite_bin(
     placed: list[PlacedRect],
     items: list[ManifestRow],
@@ -52,7 +68,7 @@ def _composite_bin(
     sizes: dict[int, tuple[int, int]],
     grid_w: int,
     grid_h: int,
-    allow_rotation: bool,
+    rotated: bool,
     on_done: Callable[[], None],
 ) -> tuple[GridSpec, list[int]]:
     """Decode and blit one bin's images; their surfaces are released when this returns.
@@ -66,7 +82,7 @@ def _composite_bin(
     failed: list[int] = []
     for rect_id, x, y, w, h in placed:
         key = items[rect_id].key
-        target = fit_size(*sizes[rect_id], grid_w, grid_h, allow_rotation)
+        target = fit_size(*sizes[rect_id], grid_w, grid_h, rotated)
         try:
             surface = load_surface(blobs[key])
             if surface.get_size() != sizes[rect_id]:
@@ -94,14 +110,15 @@ def pack_into_grids(
     grid_w: int,
     grid_h: int,
     *,
-    allow_rotation: bool = True,
+    rotation: Rotation = "auto",
     on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[GridSpec], list[str]]:
     """Pack review items into grid canvases sized for the current screen.
 
     Each item is a ManifestRow; image bytes are fetched via the store. Images are
     packed at their fit_size, read from the image header, and decoded one bin at a
-    time while that bin is composited. Returns the GridSpecs, each holding a
+    time while that bin is composited. `rotation` says whether images may be rotated 90 degrees:
+    always, never, or (auto) only if that needs fewer grids. Returns the GridSpecs, each holding a
     composited pygame surface, and the keys left out of every grid (missing,
     unreadable header, failed decode, or left unpacked), in input order. A grid holds only keys
     whose pixels it shows. on_progress(i, n) is called as each of the n images is
@@ -135,21 +152,19 @@ def pack_into_grids(
             continue
         sizes[idx] = (w, h)
 
-    # Bin-pack at the fit sizes
-    packer = newPacker(rotation=allow_rotation)
-    packer.add_bin(grid_w, grid_h, float("inf"))
-    for idx, (w, h) in sizes.items():
-        packer.add_rect(*fit_size(w, h, grid_w, grid_h, allow_rotation), idx)
-    packer.pack()
-
-    bins: dict[int, list[PlacedRect]] = {}
-    for bin_idx, x, y, w, h, rect_id in packer.rect_list():
-        bins.setdefault(bin_idx, []).append(PlacedRect(rect_id, x, y, w, h))
+    # Bin-pack at the fit sizes. Packing reads no pixels, so "auto" packs both ways and keeps the
+    # rotated packing only if it needs strictly fewer grids
+    rotated = rotation == "always"
+    bins = _pack(sizes, grid_w, grid_h, rotated)
+    if rotation == "auto":
+        with_rotation = _pack(sizes, grid_w, grid_h, True)
+        if len(with_rotation) < len(bins):
+            bins, rotated = with_rotation, True
 
     # Composite one bin at a time, so at most one bin's decoded images are alive
     grids = []
     for bin_idx in sorted(bins):
-        grid, failed = _composite_bin(bins[bin_idx], items, blobs, sizes, grid_w, grid_h, allow_rotation, advance)
+        grid, failed = _composite_bin(bins[bin_idx], items, blobs, sizes, grid_w, grid_h, rotated, advance)
         left_out.update(failed)
         if grid.keys:
             grids.append(grid)

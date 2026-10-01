@@ -6,7 +6,7 @@ from enum import Enum, auto
 
 import pygame as pg
 
-from .grid_packer import GridSpec, pack_into_grids
+from .grid_packer import GridSpec, Rotation, pack_into_grids
 from .store import (
     TODO_STATUSES,
     ManifestRow,
@@ -67,8 +67,8 @@ def _grid_clean_refused(snapshot: dict[str, Status], keys: tuple[str, ...]) -> b
     return not statuses <= GRID_ELIGIBLE and statuses != {"DIRTY"}
 
 
-# What a grid build depends on: the review rows' keys in order, the bin size and allow_rotation
-GridCacheKey = tuple[tuple[str, ...], tuple[int, int], bool]
+# What a grid build depends on: the review rows' keys in order, the bin size and rotation policy
+GridCacheKey = tuple[tuple[str, ...], tuple[int, int], Rotation]
 
 
 @dataclass(frozen=True)
@@ -127,7 +127,7 @@ class ReviewSession:
         pass_number: int | None = None,
         batch: str | None = None,
         status_filter: StatusFilter = "unreviewed",
-        allow_rotation: bool = True,
+        rotation: Rotation = "auto",
     ):
         self.store = store
         self.reviewer = reviewer  # checked by the CLI (connection.parse_reviewer); recorded with each verdict
@@ -135,7 +135,8 @@ class ReviewSession:
         self.batch = batch
         self._explicit_batch = batch is not None  # --batch restricts the session: b never leaves it
         self.status_filter = status_filter
-        self.allow_rotation = allow_rotation
+        self._default_rotation = rotation  # what m uses; M uses "never"
+        self.rotation = rotation
         self.manifest = store.manifest()
 
         self._explicit_pass = pass_number is not None  # --pass: b keeps it rather than re-reading the current pass
@@ -195,8 +196,8 @@ class ReviewSession:
         self._cancel_advance()
         self._stop_autoplay()
 
-    def _switch_to_grid(self, allow_rotation: bool):
-        self.allow_rotation = allow_rotation
+    def _switch_to_grid(self, rotation: Rotation):
+        self.rotation = rotation
         self._restart_in_mode("grid")
 
     def _switch_to_single(self):
@@ -261,11 +262,11 @@ class ReviewSession:
         review_rows = self._review_rows(self.batch)
         # A mark that changes which rows are eligible changes the key, so a cached grid never holds
         # a key the current snapshot excludes (e.g. one now DIRTY)
-        cache_key = (tuple(row.key for row in review_rows), (grid_w, grid_h), self.allow_rotation)
+        cache_key = (tuple(row.key for row in review_rows), (grid_w, grid_h), self.rotation)
         if self._grid_cache is None or self._grid_cache[0] != cache_key:
             self._grid_cache = None  # hold at most one result, and none if packing fails
             grid_specs, left_out = pack_into_grids(
-                review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation, on_progress=self._show_grid_progress
+                review_rows, self.store, grid_w, grid_h, rotation=self.rotation, on_progress=self._show_grid_progress
             )
             self._grid_cache = (cache_key, grid_specs, left_out)
         _, grid_specs, left_out = self._grid_cache
@@ -607,9 +608,9 @@ class ReviewSession:
                 self._show_current()
         elif key == pg.K_m:
             if pg.key.get_mods() & pg.KMOD_SHIFT:
-                self._switch_to_grid(False)
+                self._switch_to_grid("never")
             else:
-                self._switch_to_grid(True)
+                self._switch_to_grid(self._default_rotation)
         elif key == pg.K_s:
             self._switch_to_single()
         return False
@@ -636,9 +637,9 @@ class ReviewSession:
                 self._show_current()
         elif key == pg.K_m:
             if pg.key.get_mods() & pg.KMOD_SHIFT:
-                self._switch_to_grid(False)
+                self._switch_to_grid("never")
             else:
-                self._switch_to_grid(True)
+                self._switch_to_grid(self._default_rotation)
         elif key == pg.K_s:
             self._switch_to_single()
         elif key == pg.K_z:
@@ -670,9 +671,9 @@ class ReviewSession:
                     self.next_image(autoplay=True)
             case pg.K_m:
                 if pg.key.get_mods() & pg.KMOD_SHIFT:
-                    self._switch_to_grid(False)
+                    self._switch_to_grid("never")
                 else:
-                    self._switch_to_grid(True)
+                    self._switch_to_grid(self._default_rotation)
             case pg.K_s:
                 self._switch_to_single()
             case pg.K_n:

@@ -268,7 +268,7 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
 @click.option("--pass", "pass_number", type=click.IntRange(min=1), default=None, help="Pass number, 1 or more (auto-detected if omitted).")
 @click.option("--batch", type=str, default=None, help="Restrict to a specific batch; [b] at the end of the list stays in it [default: the first batch with images matching the filter, and [b] moves on to the next].")
 @click.option("--filter", "status_filter", type=click.Choice(get_args(StatusFilter)), default="unreviewed", show_default=True, help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).")
-@click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
+@click.option("--rotate", type=click.Choice(["auto", "always", "never"]), default="auto", show_default=True, help="Rotate images 90 degrees in grids: auto = only when that saves a grid.")
 @click.option(
     "--reviewer",
     envvar="IMAGE_REVIEW_REVIEWER",
@@ -308,7 +308,7 @@ def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, 
                 pass_number=pass_number,
                 batch=batch,
                 status_filter=status_filter,
-                allow_rotation=rotate,
+                rotation=rotate,
             )
             session.run()
         finally:

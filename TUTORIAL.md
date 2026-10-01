@@ -210,7 +210,7 @@ image-review review [options]
 | `--pass` | auto | Pass number, 1 or more (auto-detected if omitted) |
 | `--batch` | first batch with images matching the filter | Restrict review to a specific batch (e.g., `batch_001`), also for `b` at the end of the list; an unknown or empty name is rejected with the list of known batches |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
-| `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images for tighter grid packing |
+| `--rotate` | `auto` | Rotate images 90° in grids: `auto` = only when that needs fewer grids, `always`, or `never` |
 | `--reviewer` | your login name | Name recorded with each verdict in `review.tsv`, 1-64 printable characters, not all spaces (also `$IMAGE_REVIEW_REVIEWER`). An unauthenticated claim: it is recorded as given, not verified |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |
 | `--remote` | -- | Review a server started with `image-review serve` instead (also `$IMAGE_REVIEW_REMOTE`); see [Reviewing on an HPC Cluster](#reviewing-on-an-hpc-cluster) |
@@ -228,8 +228,10 @@ image-review review --mode single
 **Grid mode** packs images into grid canvases at review time, sized to your
 screen resolution. Each grid contains many images. Best for rapid first-pass
 scanning -- you can review hundreds of images per minute. By default, images
-may be rotated 90° for tighter packing; use `--no-rotate` to disable this,
-or press `M` during review to switch to grid mode without rotation.
+may be rotated 90° when that needs fewer grids (`--rotate auto`, the default);
+use `--rotate always` or `--rotate never` to force it either way (this replaces
+the old `--no-rotate`), or press `M` during review to switch to grid mode
+without rotation.
 
 ```bash
 image-review review --mode grid
@@ -251,7 +253,7 @@ The viewer accepts keyboard and gamepad input:
 | Toggle todo-only navigation | `u` | -- |
 | Autoplay (auto-advance) | `Space` | -- |
 | Single mode | `s` | -- |
-| Grid mode (rotation allowed) | `m` | -- |
+| Grid mode (`--rotate` policy) | `m` | -- |
 | Grid mode (no rotation) | `M` | -- |
 | Select display | `w` | -- |
 | Toggle fullscreen | `f` | -- |

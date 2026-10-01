@@ -305,7 +305,7 @@ after writing everything.
 ```
 image-review review [--mode {single,grid}]            [--pass N]
                     [--batch BATCH_ID]                 [--work-dir DIR]
-                    [--filter {unreviewed,clean,all}]  [--rotate/--no-rotate]
+                    [--filter {unreviewed,clean,all}]  [--rotate {auto,always,never}]
                     [--reviewer NAME]
                     [--remote CONNECTION_STRING [--via DESTINATION]]
 ```
@@ -316,7 +316,7 @@ image-review review [--mode {single,grid}]            [--pass N]
 | `--pass` | auto-detected | Review pass number (integer >= 1) |
 | `--batch` | first batch with images matching the filter | Restrict to a named batch (e.g. `batch_001`), also for `b` at the end of the list (see *Next Batch*); an empty or unknown name exits 2 listing up to 5 known batches |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
-| `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images 90° for tighter grid packing |
+| `--rotate` | `auto` | Rotating images 90° in grids: `auto` = only when that needs fewer grids, `always`, or `never` |
 | `--reviewer` | `getpass.getuser()` at run time | Name recorded in the `reviewer` column of every verdict; also read from `$IMAGE_REVIEW_REVIEWER`. Checked by `connection.parse_reviewer` (1-64 characters, all `str.isprintable()`, so no tab, newline or other control character, and not all whitespace); a bad value, or no login name to default to, exits 2. It is the client's unauthenticated claim, recorded as given |
 | `--work-dir` | `./review_work` | Work directory from preprocessing (local review) |
 | `--remote` | (none) | `ir://` connection string of an `image-review serve` process; also read from `$IMAGE_REVIEW_REMOTE` |
@@ -620,7 +620,7 @@ or `ignored`) and returns only the counts.
 
 ### Initialization
 
-`ReviewSession(store, reviewer, mode, pass_number, batch, status_filter, allow_rotation)`:
+`ReviewSession(store, reviewer, mode, pass_number, batch, status_filter, rotation)`:
 `reviewer` comes from `review --reviewer` (already checked) and is passed, with
 the session's current display mode, to every `store.mark()`, and to every `store.undo()`.
 
@@ -692,7 +692,7 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
   FLAGGED (DIRTY in another pass); those are reviewed in single mode
 - Pass the rows and the store to `pack_into_grids()` with the screen dimensions.
   The session caches the last result (only one), keyed by the review rows'
-  keys in order, the grid size and `allow_rotation`; a rebuild with the same
+  keys in order, the grid size and rotation policy; a rebuild with the same
   key (e.g. `s` then `m` with nothing marked) reuses it instead of packing
   again. A mark that changes which rows are eligible (e.g. one now DIRTY)
   changes the key, so a cached grid never holds a key the snapshot excludes.
@@ -808,8 +808,8 @@ The session runs a pygame event loop processing:
 | `n` key | Jump to next todo item |
 | `u` key | Toggle todo-only navigation |
 | `s` key | Switch to single mode |
-| `m` key | Switch to grid mode (rotation allowed) |
-| `M` key (shift+m) | Switch to grid mode (no rotation) |
+| `m` key | Switch to grid mode (the `--rotate` policy, default `auto`) |
+| `M` key (shift+m) | Switch to grid mode (`never` rotate) |
 | `h` key | Show help/splash screen |
 | `q` / Escape / Button 7 | Quit |
 | Window resize | Refit current image; in grid mode also rebuild the grids (see *Resize rebuild*) |
@@ -947,7 +947,7 @@ on the review screen.
 | `keys` | `list[str]` | Keys (preprocessed paths) of the images drawn in this grid |
 | `min_scale` | `float` | Smallest `fit_size` / header-size ratio among the images drawn (1.0 if none was shrunk) |
 
-### `pack_into_grids(items, store, grid_w, grid_h, *, allow_rotation=True, on_progress=None) -> tuple[list[GridSpec], list[str]]`
+### `pack_into_grids(items, store, grid_w, grid_h, *, rotation="auto", on_progress=None) -> tuple[list[GridSpec], list[str]]`
 
 `items` is a list of `ManifestRow`. Returns the grids and the keys left out of
 every grid (missing, unreadable header, failed decode, or left unpacked), in input order. A
@@ -961,12 +961,16 @@ left to the caller. At most one bin's decoded images are alive at a time.
    are missing (the store warns) or whose header cannot be read (warned here)
    are left out of the packing.
 2. **Pack**: Each image is packed at `fit_size(w, h, grid_w, grid_h,
-   allow_rotation)`: its own size if it fits the bin upright (or rotated, when
-   rotation is allowed), otherwise shrunk, keeping its aspect ratio, only as far
+   rotate)`: its own size if it fits the bin upright (or rotated, when
+   `rotate`), otherwise shrunk, keeping its aspect ratio, only as far
    as the better allowed orientation requires, so nothing is larger than the
-   bin. Create a `rectpack` packer with `rotation=allow_rotation` and
+   bin. `rotation` is `"always"` (`rotate` true), `"never"` (false) or `"auto"`.
+   Create a `rectpack` packer with `rotation=rotate` and
    `(grid_w, grid_h)` bins (unlimited bin count), and add each image as a rect
-   of its fit size.
+   of its fit size. Under `"auto"` the headers are packed twice, without and
+   with rotation (each at its own fit sizes; no pixels are decoded), and the
+   rotated packing is kept only if it needs strictly fewer bins. Only the
+   chosen packing is composited.
 3. **Composite**: One bin at a time: create a black `pg.Surface(grid_w,
    grid_h)`, decode each of the bin's images with `util.load_surface(bytes)`,
    `pg.transform.smoothscale` it to its fit size, and blit it at the packed

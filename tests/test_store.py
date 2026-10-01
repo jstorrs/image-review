@@ -49,7 +49,7 @@ from image_review.controller import (
     next_batch,
     next_index,
 )
-from image_review.grid_packer import fit_size, pack_into_grids
+from image_review.grid_packer import PlacedRect, fit_size, pack_into_grids
 from image_review.review_db import HEADER, ReviewDB
 from image_review.store import (
     LOCK_NAME,
@@ -922,12 +922,22 @@ class TestSession(SessionTestCase):
             first = s._items
             for _ in range(2):
                 s._switch_to_single()
-                s._switch_to_grid(True)
+                s._switch_to_grid("auto")
             self.assertEqual(pack.call_count, 1)
             self.assertEqual(sorted(item.keys for item in s._items), sorted(item.keys for item in first))
-            s._switch_to_grid(False)  # another key replaces the only cached result
-            s._switch_to_grid(True)
+            s._switch_to_grid("never")  # another key replaces the only cached result
+            s._switch_to_grid("auto")
             self.assertEqual(pack.call_count, 3)
+
+    def test_grid_cache_key_distinguishes_rotation_policies(self):
+        with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
+            s = ReviewSession(self.store, reviewer="tester", mode="grid")
+            self.assertEqual(s._grid_cache[0][2], "auto")
+            s._switch_to_grid("auto")
+            self.assertEqual(pack.call_count, 1)
+            s._switch_to_grid("never")
+            self.assertEqual(pack.call_count, 2)
+            self.assertEqual(s._grid_cache[0][2], "never")
 
     def test_grid_size_change_packs_again(self):
         with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
@@ -935,7 +945,7 @@ class TestSession(SessionTestCase):
             s._switch_to_single()
             w, h = s._viewer.screen.get_size()
             pg.display.set_mode((w // 2, h // 2))
-            s._switch_to_grid(True)
+            s._switch_to_grid("auto")
             self.assertEqual(pack.call_count, 2)
 
     def test_grid_cache_never_shows_a_key_marked_dirty(self):
@@ -944,13 +954,13 @@ class TestSession(SessionTestCase):
             s._cursor = 0
             s._mark("CLEAN")  # still eligible under all: the rows, so the cache, are unchanged
             s._switch_to_single()
-            s._switch_to_grid(True)
+            s._switch_to_grid("auto")
             self.assertEqual(pack.call_count, 1)
             s._cursor = 0
             dirty = s._items[0].keys
             s._mark("DIRTY")
             s._switch_to_single()
-            s._switch_to_grid(True)
+            s._switch_to_grid("auto")
             self.assertEqual(pack.call_count, 2)
         self.assertFalse(set(dirty) & self.grid_keys(s))
 
@@ -1316,7 +1326,7 @@ class TestEventLoop(EventLoopTestCase):
     def test_mark_records_reviewer_and_current_mode(self):
         s = ReviewSession(self.store, reviewer="rev", mode="single", status_filter="all")
         with mock.patch.object(self.store, "mark", wraps=self.store.mark) as mark:
-            s._switch_to_grid(True)
+            s._switch_to_grid("auto")
             s._mark("CLEAN")
             self.assertEqual(mark.call_args.kwargs, {"reviewer": "rev", "mode": "grid"})
             s._switch_to_single()
@@ -1334,7 +1344,7 @@ class TestEventLoop(EventLoopTestCase):
 
         pg.event.clear()
         with mock.patch.object(controller_module, "pack_into_grids", pack_while_typing):
-            s._switch_to_grid(True)
+            s._switch_to_grid("auto")
         self.assertEqual(pg.event.get((pg.KEYDOWN, pg.JOYBUTTONDOWN)), [])
 
     def test_correction_after_dwell(self):
@@ -2147,7 +2157,7 @@ class TestPackShrinksOversize(unittest.TestCase):
         store = self.make_store({n: size for n, (size, _) in images.items()}, {n: c for n, (_, c) in images.items()})
         for rot in (True, False):
             with self.subTest(allow_rotation=rot):
-                grids, left_out = pack_into_grids(store.manifest(), store, 1920, 1030, allow_rotation=rot)
+                grids, left_out = pack_into_grids(store.manifest(), store, 1920, 1030, rotation="always" if rot else "never")
                 self.assertEqual(left_out, [])
                 self.assertEqual(sorted(k for gs in grids for k in gs.keys), sorted(images))
                 for gs in grids:
@@ -2185,6 +2195,42 @@ class TestPackShrinksOversize(unittest.TestCase):
         self.assertEqual(sorted(k for gs in grids for k in gs.keys), ["big/a.jpg", "big/c.jpg"])
         self.assertIn("big/b.jpg was not packed", stderr.getvalue())
         self.assertEqual(calls[-1], (3, 3))
+
+    def pack_recording(self, store: LocalStore, rotation: str) -> tuple[list[PlacedRect], int]:
+        """The placements `pack_into_grids` composites under `rotation`, and the number of grids."""
+        placed: list[PlacedRect] = []
+        real = grid_packer_module._composite_bin
+
+        def record(rects, *args, **kwargs):
+            placed.extend(rects)
+            return real(rects, *args, **kwargs)
+
+        with mock.patch.object(grid_packer_module, "_composite_bin", record):
+            grids, left_out = pack_into_grids(store.manifest(), store, 1920, 1030, rotation=rotation)
+        self.assertEqual(left_out, [])
+        return placed, len(grids)
+
+    def test_auto_does_not_rotate_when_it_saves_no_grid(self):
+        store = self.make_store({f"u/{i}.jpg": (512, 384) for i in range(12)})  # 6 per grid either way
+        placed, n_grids = self.pack_recording(store, "auto")
+        self.assertEqual(len(placed), 12)
+        self.assertEqual({(r.w, r.h) for r in placed}, {(512, 384)})
+        self.assertEqual(n_grids, self.pack_recording(store, "never")[1])
+
+    def test_auto_keeps_rotation_that_saves_a_grid(self):
+        store = self.make_store({f"t/{i}.jpg": (400, 600) for i in range(5)})
+        never, never_grids = self.pack_recording(store, "never")
+        self.assertEqual((never_grids, {(r.w, r.h) for r in never}), (2, {(400, 600)}))
+        for rotation in ("auto", "always"):
+            with self.subTest(rotation=rotation):
+                placed, n_grids = self.pack_recording(store, rotation)
+                self.assertEqual(n_grids, 1)
+                self.assertIn((600, 400), {(r.w, r.h) for r in placed})
+
+    def test_never_does_not_rotate_where_always_does(self):
+        store = self.make_store({"p/a.jpg": (1000, 1800), "p/b.jpg": (1000, 1800)})
+        self.assertEqual({(r.w, r.h) for r in self.pack_recording(store, "always")[0]}, {(1800, 1000)})
+        self.assertEqual({(r.w, r.h) for r in self.pack_recording(store, "never")[0]}, {(572, 1030)})
 
     def test_fit_size_rotated_orientation_wins(self):
         self.assertEqual(fit_size(1500, 2500, 1920, 1030, True), (1030, 1716))
@@ -2667,6 +2713,17 @@ class TestLockCli(LockTestCase):
             result = self.invoke("review", "--batch", "batch_002")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(session.call_args.kwargs["batch"], "batch_002")
+
+    def test_review_rotate_reaches_session(self):
+        for args, expected in (((), "auto"), (("--rotate", "never"), "never"), (("--rotate", "always"), "always")):
+            with self.subTest(args=args):
+                with mock.patch("image_review.controller.ReviewSession") as session, mock.patch("pygame.init"), mock.patch("pygame.quit"):
+                    result = self.invoke("review", *args)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertEqual(session.call_args.kwargs["rotation"], expected)
+
+    def test_review_rejects_unknown_rotate(self):
+        self.assert_rejected("--rotate", "sideways")
 
     def test_review_rejects_unknown_filter(self):
         self.assert_rejected("--filter", "bogus")

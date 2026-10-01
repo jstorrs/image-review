@@ -135,7 +135,7 @@ shown.
 ```
 image-review review [--mode {single,grid}]            [--pass N]
                     [--batch BATCH_ID]                 [--work-dir DIR]
-                    [--filter {unreviewed,clean,all}]  [--rotate/--no-rotate]
+                    [--filter {unreviewed,clean,all}]  [--rotate {auto,always,never}]
                     [--reviewer NAME]
                     [--remote CONNECTION_STRING [--via DESTINATION]]
 ```
@@ -155,7 +155,7 @@ are shown one at a time for detailed inspection.
 | `u` | Toggle todo-only navigation |
 | Space | Toggle autoplay |
 | `s` | Single mode |
-| `m` | Grid mode (rotation allowed) |
+| `m` | Grid mode (rotation as set by `--rotate`; default: only when it saves a grid) |
 | `M` | Grid mode (no rotation) |
 | `h` | Help screen |
 | `w` | Select display |

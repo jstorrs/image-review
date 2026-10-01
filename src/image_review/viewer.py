@@ -194,7 +194,7 @@ class ImageViewer:
         "  u        Todo only",
         "  Space    Autoplay        Start      Quit",
         "  s        Single mode",
-        "  m        Grid mode (rotation allowed)",
+        "  m        Grid mode (--rotate policy)",
         "  M        Grid mode (no rotation)",
         "  w        Select display",
         "  h        This help",
