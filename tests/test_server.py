@@ -21,7 +21,7 @@ from click.testing import CliRunner
 from fixtures import ROWS, make_work_dir
 
 from image_review.cli import cli
-from image_review.connection import RemoteTarget
+from image_review.connection import API_VERSION, RemoteTarget
 from image_review.server import ReviewServer, make_server
 from image_review.store import LocalStore
 
@@ -343,6 +343,7 @@ class TestAuth(ServerTestCase):
             ("GET", "/image?key=batch_001/a.jpg"),
             ("GET", "/statuses?pass=1"),
             ("GET", "/current_pass"),
+            ("GET", "/version"),
             ("POST", "/mark"),
             ("GET", "/nope"),
             ("DELETE", "/manifest"),
@@ -386,6 +387,13 @@ class TestReads(ServerTestCase):
     def test_image_without_key_is_400(self):
         resp, _, _ = self.request("GET", "/image")
         self.assertEqual(resp.status, 400)
+
+    def test_version(self):
+        from importlib.metadata import version
+
+        resp, data, _ = self.request("GET", "/version")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
 
     def test_statuses_and_current_pass(self):
         self.assertEqual(self.get_json("/current_pass"), {"pass": 1})

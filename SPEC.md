@@ -725,6 +725,7 @@ the boundary (`parse_pass`, `parse_mark`).
 
 | Request | Response |
 |---------|----------|
+| `GET /version` | `{"api": N, "version": str}`: the wire API version (`connection.API_VERSION`) and the installed `image-review` package version (`"unknown"` if not installed) |
 | `GET /manifest` | `[{"key": str, "batch": str}, ...]` |
 | `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown or unreadable |
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED", ...}` for every key; `N` integer >= 1 |
@@ -732,6 +733,12 @@ the boundary (`parse_pass`, `parse_mark`).
 | `POST /mark` | Body `{"keys": [str, ...], "batch": str, "status": "CLEAN"\|"DIRTY", "pass": N}`; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
 
 Only keys appear on the wire; original `image_id`s never do.
+
+**API version rule.** `connection.API_VERSION` (an integer, currently 1) is
+shared by client and server. Any change to request or response shapes, or to
+the `Status` vocabulary, must bump it. Client and server are installed
+separately, so skew is expected and must fail clearly rather than as a
+malformed reply or a 404.
 
 ### Error semantics
 
@@ -787,6 +794,14 @@ and `internal error: <ExceptionClass>` for 500s.
 still come from `target`. It is a context manager; `close()` shuts down the
 pool and closes every connection. Images are returned as bytes and never
 cached on disk.
+
+**Startup check.** `RemoteStore.check_api()` GETs `/version` (parsed by
+`parse_version`; a malformed reply raises `RemoteError`) and raises
+`ApiMismatch` (a `RemoteError`) if the server answers 404 ("server is too old
+to report its API version") or reports a different `api` ("server speaks API
+vS, this client vC"); both messages end "install the same image-review version
+on both machines". `cli.open_store` calls it after entering the store and
+before yielding, and turns `ApiMismatch` into a `ClickException` (exit 1).
 
 **Certificate pinning**: `PinnedHTTPSConnection` disables CA and host name
 verification and instead compares the peer certificate's SHA-256 fingerprint

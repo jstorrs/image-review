@@ -57,7 +57,7 @@ def open_store(work_dir: str | None, remote: str | None, via: str | None = None)
             raise click.UsageError("IMAGE_REVIEW_REMOTE is set; unset it to use --work-dir.")
         raise click.UsageError("--remote and --work-dir are mutually exclusive.")
     from .connection import RemoteTarget
-    from .remote import FingerprintMismatch, RemoteError, RemoteStore
+    from .remote import ApiMismatch, FingerprintMismatch, RemoteError, RemoteStore
     from .tunnel import TunnelError
 
     try:
@@ -82,8 +82,11 @@ def open_store(work_dir: str | None, remote: str | None, via: str | None = None)
                 local_port = stack.enter_context(ssh_tunnel(via, target.host, target.port))
                 store = RemoteStore(target, connect_host="127.0.0.1", connect_port=local_port)
             stack.enter_context(store)  # closed before the tunnel
+            store.check_api()
             yield store
     except TunnelError as e:
+        raise click.ClickException(str(e))
+    except ApiMismatch as e:
         raise click.ClickException(str(e))
     except FingerprintMismatch:
         raise click.ClickException(

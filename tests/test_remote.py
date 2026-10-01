@@ -22,6 +22,7 @@ from image_review.cli import cli
 from image_review.connection import RemoteTarget
 from image_review.controller import ReviewSession, UIState
 from image_review.remote import (
+    ApiMismatch,
     FingerprintMismatch,
     PinnedHTTPSConnection,
     RemoteError,
@@ -29,8 +30,9 @@ from image_review.remote import (
     parse_manifest,
     parse_pass,
     parse_statuses,
+    parse_version,
 )
-from image_review.server import ReviewHandler
+from image_review.server import Reply, ReviewHandler
 from image_review.store import LocalStore, ManifestRow, StoreUnavailable
 
 KEYS = [key for _, key, _ in ROWS]
@@ -223,6 +225,7 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(parse_manifest(b'[{"key": "k", "batch": "b"}]'), [ManifestRow("k", "b")])
         self.assertEqual(parse_statuses(b'{"k": "CLEAN"}'), {"k": "CLEAN"})
         self.assertEqual(parse_pass(b'{"pass": 3}'), 3)
+        self.assertEqual(parse_version(b'{"api": 1, "version": "x"}'), 1)
 
     def test_malformed(self):
         for parse, bad in [
@@ -239,6 +242,11 @@ class TestParsing(unittest.TestCase):
             (parse_pass, b'{"pass": true}'),
             (parse_pass, b'{"pass": 0}'),
             (parse_pass, b"\xff"),
+            (parse_version, b"[]"),
+            (parse_version, b'{"version": "x"}'),
+            (parse_version, b'{"api": "1"}'),
+            (parse_version, b'{"api": true}'),
+            (parse_version, b'{"api": 0}'),
         ]:
             with self.subTest(parse=parse.__name__, bad=bad), self.assertRaises(RemoteError):
                 parse(bad)
@@ -257,6 +265,31 @@ class TestCli(RemoteTestCase):
         self.assertEqual(remote.exit_code, 0, remote.output)
         self.assertEqual(local.exit_code, 0, local.output)
         self.assertEqual(remote.stdout, local.stdout)
+
+    def test_api_mismatch_message(self):
+        with mock.patch("image_review.remote.API_VERSION", 2):
+            result = self.invoke("status", "--remote", self.target.to_uri())
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("server speaks API v1, this client v2; install the same image-review version on both machines", result.output)
+        self.assertNotIn(self.target.token, result.output)
+
+    def test_server_without_version_endpoint(self):
+        original = ReviewHandler._route
+
+        def route(handler, method):
+            if handler.path == "/version":
+                return Reply(404, close=True)
+            return original(handler, method)
+
+        with mock.patch.object(ReviewHandler, "_route", route):
+            result = self.invoke("status", "--remote", self.target.to_uri())
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("server is too old to report its API version; install the same image-review version on both machines", result.output)
+
+    def test_check_api(self):
+        self.store.check_api()
+        with mock.patch("image_review.remote.API_VERSION", 2), self.assertRaises(ApiMismatch):
+            self.store.check_api()
 
     def test_status_envvar(self):
         result = self.invoke("status", env={"IMAGE_REVIEW_REMOTE": self.target.to_uri(), "IMAGE_REVIEW_VIA": None})

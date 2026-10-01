@@ -6,6 +6,7 @@ leave the store; clients only ever see keys (preprocessed paths).
 
 import datetime
 import hmac
+import importlib.metadata
 import json
 import os
 import re
@@ -26,7 +27,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from .connection import RemoteTarget, cert_fingerprint
+from .connection import API_VERSION, RemoteTarget, cert_fingerprint
 from .store import ReviewStore, Verdict
 
 MAX_BODY_BYTES = 1 << 20
@@ -76,6 +77,13 @@ def parse_mark(body: bytes, known_keys: frozenset[str], known_batches: frozenset
     if not isinstance(pass_number, int) or isinstance(pass_number, bool) or pass_number < 1:
         raise BadRequest("pass must be an integer >= 1")
     return MarkRequest(keys=keys, batch=batch, status=status, pass_number=pass_number)
+
+
+def package_version() -> str:
+    try:
+        return importlib.metadata.version("image-review")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def generate_cert(host: str) -> tuple[x509.Certificate, bytes]:
@@ -205,6 +213,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if not is_mark and not all(v.strip() == "0" for v in self.headers.get_all("Content-Length", [])):
             raise BadRequest("unexpected request body")
         store, lock = self.server.store, self.server.store_lock
+        if method == "GET" and url.path == "/version":
+            return json_reply({"api": API_VERSION, "version": package_version()})
         if method == "GET" and url.path == "/manifest":
             with lock:
                 rows = store.manifest()

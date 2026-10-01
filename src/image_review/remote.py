@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Self, get_args
 from urllib.parse import urlencode
 
-from .connection import RemoteTarget, cert_fingerprint
+from .connection import API_VERSION, RemoteTarget, cert_fingerprint
 from .store import ManifestRow, Status, StoreUnavailable, Verdict
 
 TIMEOUT_SECONDS = 30
@@ -37,6 +37,10 @@ class RemoteError(StoreUnavailable):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status  # HTTP status when the server answered, else None
+
+
+class ApiMismatch(RemoteError):
+    """The server speaks a different wire API version than this client."""
 
 
 class FingerprintMismatch(RemoteError):
@@ -99,6 +103,14 @@ def parse_pass(data: bytes) -> int:
     return value
 
 
+def parse_version(data: bytes) -> int:
+    payload = _load_json(data)
+    value = payload.get("api") if isinstance(payload, dict) else None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise RemoteError("malformed version from server")
+    return value
+
+
 class RemoteStore:
     def __init__(self, target: RemoteTarget, connect_host: str | None = None, connect_port: int | None = None):
         self._host = connect_host or target.host
@@ -158,6 +170,18 @@ class RemoteStore:
         if status != 200:
             raise RemoteError(f"server returned HTTP {status}", status)
         return data
+
+    def check_api(self) -> None:
+        """Raise ApiMismatch unless the server speaks this client's wire API version."""
+        advice = "install the same image-review version on both machines"
+        try:
+            server = parse_version(self._get("/version"))
+        except RemoteError as e:
+            if e.status == 404:
+                raise ApiMismatch(f"server is too old to report its API version; {advice}") from e
+            raise
+        if server != API_VERSION:
+            raise ApiMismatch(f"server speaks API v{server}, this client v{API_VERSION}; {advice}")
 
     def manifest(self) -> list[ManifestRow]:
         return parse_manifest(self._get("/manifest"))

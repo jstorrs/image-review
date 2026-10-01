@@ -500,6 +500,11 @@ whole path to the compute node.
   `Host` alias without `LocalForward`.
 - If ssh backgrounds itself (`ForkAfterAuthentication`), remove that option.
 
+**Troubleshooting versions:** "server speaks API vN, this client vM" (or
+"server is too old to report its API version") means the laptop and the
+cluster have different image-review versions; install the same version on
+both machines.
+
 ## Full Workflow Example
 
 ```bash

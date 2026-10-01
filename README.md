@@ -218,6 +218,8 @@ preprocessed JPGs (and their batch/file names and review statuses) travel, over 
 batch jobs, and [security model and
 limitations](TUTORIAL.md#security-model-and-limitations).
 
+If `--remote` reports "server speaks API vN, this client vM" (or "server is too old to report its API version"), install the same image-review version on both machines.
+
 ## Multi-Pass Workflow
 
 1. **Pass 1** (grid triage): Mark grids CLEAN or DIRTY. Err toward DIRTY.
