@@ -46,6 +46,8 @@ image-review review --mode single
 image-review status
 ```
 
+The default work directory is `./review_work`; don't create work directories inside a git checkout (the repo's `.gitignore` excludes them as a safety net).
+
 ## Commands
 
 ### `image-review preprocess`

@@ -1,0 +1,20 @@
+# Work directories contain PHI (images with burned-in patient text, and
+# manifests listing source paths). They must NEVER be committed.
+review_work/
+manifest.tsv
+review.tsv
+skipped.tsv
+review.lock
+review.lock.*
+preprocess.json
+batch_*/
+.*.partial/
+
+# Build and test artifacts
+*.egg-info/
+build/
+dist/
+__pycache__/
+.*_cache/
+.coverage
+.venv/
