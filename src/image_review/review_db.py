@@ -85,18 +85,18 @@ class ReviewDB:
             raise ValueError(f"Invalid status {status!r}, must be one of {get_args(Verdict)}")
         ts = datetime.now(UTC).isoformat()
         for image_id in image_ids:
-            self._rows[image_id] = Decision(image_id, batch, status, pass_number, ts)
+            existing = self._rows.get(image_id)
+            recorded_pass = max(existing.pass_number, pass_number) if existing else pass_number  # never decreases
+            self._rows[image_id] = Decision(image_id, batch, status, recorded_pass, ts)
         self._save()
 
     def get_status(self, image_id: str, current_pass: int) -> Status:
         row = self._rows.get(image_id)
         if not row:
             return "UNREVIEWED"
-        if row.pass_number == current_pass:
-            return row.status
-        if row.status == "CLEAN":
-            return "CLEAN"
-        return "FLAGGED"  # DIRTY in another pass; needs re-review in this one
+        if row.pass_number >= current_pass or row.status == "CLEAN":
+            return row.status  # this pass or a later one, as recorded; CLEAN holds across passes
+        return "FLAGGED"  # DIRTY in an earlier pass; needs re-review in this one
 
     def current_pass(self, image_ids: Iterable[str]) -> int:
         """Auto-detect the current pass number.

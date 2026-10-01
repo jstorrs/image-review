@@ -240,6 +240,67 @@ class TestStrictLoading(unittest.TestCase):
             LocalStore(self.work_dir)
 
 
+class TestPassMonotonic(StoreTestCase):
+    def setUp(self):
+        super().setUp()
+        pg.init()
+        self.addCleanup(pg.quit)
+        patcher = mock.patch.object(pg.display, "toggle_fullscreen", lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def append_manifest_row(self):
+        with open(self.work_dir / "manifest.tsv", "a", newline="") as f:
+            csv.writer(f, delimiter="\t").writerow(["batch_002", "batch_002/e.jpg", "/src/patient_new/e.dcm"])
+        self.store.close()
+        self.store = LocalStore(self.work_dir)
+        self.addCleanup(self.store.close)
+
+    def mark_all(self, status, pass_number, keys):
+        for key in keys:
+            self.store.mark([key], key.split("/")[0], status, pass_number)
+
+    def test_current_pass_transitions(self):
+        keys = [r[1] for r in ROWS]
+        self.mark_all("DIRTY", 1, keys[:1])
+        self.mark_all("CLEAN", 1, keys[1:])
+        self.assertEqual(self.store.current_pass(), 2)
+        self.mark_all("DIRTY", 1, keys[1:2])  # b: another DIRTY, so pass 2 has two FLAGGED
+        self.mark_all("DIRTY", 2, keys[:1])  # a re-reviewed in pass 2; b still FLAGGED
+        self.assertEqual(self.store.current_pass(), 2)
+        self.mark_all("CLEAN", 2, keys[1:2])
+        self.assertEqual(self.store.current_pass(), 3)
+        self.append_manifest_row()
+        self.assertEqual(self.store.current_pass(), 1)
+
+    def test_pass_one_view_after_append_shows_later_verdicts(self):
+        self.mark_all("DIRTY", 3, ["batch_001/a.jpg"])
+        self.mark_all("CLEAN", 3, ["batch_001/b.jpg"])
+        self.append_manifest_row()
+        self.assertEqual(self.store.current_pass(), 1)
+        statuses = self.store.statuses(1)
+        self.assertEqual(statuses["batch_001/a.jpg"], "DIRTY")
+        self.assertEqual(statuses["batch_001/b.jpg"], "CLEAN")
+        self.assertEqual(statuses["batch_002/e.jpg"], "UNREVIEWED")
+
+    def test_lower_pass_mark_keeps_recorded_pass(self):
+        self.store.mark(["batch_001/a.jpg"], "batch_001", "DIRTY", 3)
+        result = self.store.mark(["batch_001/a.jpg"], "batch_001", "CLEAN", 1)
+        self.assertEqual(result, {"batch_001/a.jpg": "CLEAN"})
+        with open(self.work_dir / "review.tsv", newline="") as f:
+            (row,) = csv.DictReader(f, delimiter="\t")
+        self.assertEqual((row["status"], row["pass_number"]), ("CLEAN", "3"))
+
+    def test_pass_one_grid_excludes_later_pass_dirty(self):
+        self.mark_all("DIRTY", 3, ["batch_001/a.jpg"])
+        self.append_manifest_row()
+        s = ReviewSession(self.store, mode="grid", status_filter="all")
+        self.assertEqual(s.pass_number, 1)
+        keys = {k for item in s._items for k in item["keys"]}
+        self.assertNotIn("batch_001/a.jpg", keys)
+        self.assertIn("batch_001/b.jpg", keys)
+
+
 class TestSession(StoreTestCase):
     def setUp(self):
         super().setUp()

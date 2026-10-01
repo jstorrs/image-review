@@ -738,14 +738,22 @@ at any point.
 | Row | Status |
 |-----|--------|
 | none | UNREVIEWED |
-| from this pass | its verdict (CLEAN or DIRTY) |
-| from another pass, CLEAN | CLEAN |
-| from another pass, DIRTY | FLAGGED |
+| from this pass or a later one | its verdict (CLEAN or DIRTY), as recorded |
+| from an earlier pass, CLEAN | CLEAN |
+| from an earlier pass, DIRTY | FLAGGED |
+
+`mark_many` stores `max(existing pass_number, requested pass)` for each image,
+so an image's recorded pass never decreases (its verdict and timestamp still
+update). A lower `--pass`, or a manifest grown by one image (which sends
+`current_pass` back to 1), therefore cannot hide or overwrite later-pass
+decisions: in such a view a later-pass DIRTY image reads DIRTY, not FLAGGED,
+and is not grid-eligible. `ReviewStore.mark` returns statuses as seen at the
+requested pass.
 
 | Pass | Shows (default `unreviewed` filter) |
 |------|-------|
 | 1 | All UNREVIEWED images |
-| N > 1 | FLAGGED images (marked DIRTY in another pass) in single mode, plus any still-UNREVIEWED images; grid mode skips FLAGGED images |
+| N > 1 | FLAGGED images (marked DIRTY in an earlier pass) in single mode, plus any still-UNREVIEWED images; grid mode skips FLAGGED images |
 
 `current_pass` returns 1 if any image has never been reviewed. Otherwise it
 returns `max(pass_number)` if that pass still has work in `TODO_STATUSES`
