@@ -555,6 +555,7 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
+| `StatusFilter` | `Literal["unreviewed", "clean", "all"]`: the `review --filter` vocabulary, parsed by the CLI's choice and taken by `filter_rows` and `ReviewSession` |
 | `ManifestRow` | Frozen dataclass: `key` (the `preprocessed_path`) and `batch` |
 | `StoreUnavailable` | Exception: the store cannot be reached (as opposed to a bad key or image) |
 
@@ -607,7 +608,7 @@ or `ignored`) and returns only the counts.
 
 | Function | Description |
 |----------|-------------|
-| `filter_rows(rows, statuses, status_filter="unreviewed", batch=None)` | Filter rows by status and optional batch: `unreviewed` selects `TODO_STATUSES` (UNREVIEWED and FLAGGED), `clean` selects CLEAN, `all` everything; `ValueError` on an invalid filter |
+| `filter_rows(rows, statuses, status_filter="unreviewed", batch=None)` | Filter rows by status and optional batch: `unreviewed` selects `TODO_STATUSES` (UNREVIEWED and FLAGGED), `clean` selects CLEAN, `all` everything. `status_filter` is a `StatusFilter` (`Literal["unreviewed", "clean", "all"]`), parsed once by the CLI's `--filter` choice |
 | `summary(rows, statuses)` | Count of each `Status` (CLEAN/DIRTY/UNREVIEWED/FLAGGED) plus `total` |
 | `batch_summary(rows, statuses)` | The same per batch |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
@@ -632,6 +633,12 @@ the session's current display mode, to every `store.mark()`, and to every `store
    in grid mode, minus DIRTY and FLAGGED, see *Grid Mode*). A batch whose only
    todo images are FLAGGED is therefore not auto-selected for grid mode
 5. Determine review items based on mode
+
+Every item is a `ReviewItem`, a frozen dataclass: `keys` (a tuple of manifest
+keys), `label` (shown in the status bar: the key, or
+"grid (N images)"), `surface` (a grid's composited surface, or `None` for a
+single image, loaded when displayed) and `grid` (a grid's status and CLEAN
+refusal follow the grid rules below, even for a one-image overflow grid).
 
 ### Status Snapshot
 
@@ -659,7 +666,7 @@ image.
 - `filter_rows()` over the manifest and snapshot for the current
   pass/batch/filter
 - Shuffle the resulting rows
-- Each item is a `ManifestRow`; the image is fetched with
+- Each row becomes a one-key `ReviewItem` with no surface; the image is fetched with
   `store.image_bytes(key)` and decoded with `load_surface(bytes)` on display
 
 ### Grid Mode
@@ -672,8 +679,8 @@ image.
   keypress must never clear an image already judged DIRTY (this pass) or
   FLAGGED (DIRTY in another pass); those are reviewed in single mode
 - Pass the rows and the store to `pack_into_grids()` with the screen dimensions
-- Convert the returned `GridSpec` list into item dicts with `surface`,
-  `keys`, and `batch` keys
+- Convert each returned `GridSpec` into a `ReviewItem` with its `surface`
+  and `keys`
 - Shuffle the grid items, then sort by image count (largest grids first)
 
 When a grid is marked CLEAN or DIRTY, `store.mark()` is called with all its

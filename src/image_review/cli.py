@@ -6,13 +6,13 @@ import socket
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import click
 
 from .access import world_access_warning
 from .connection import parse_reviewer
-from .store import LOCK_NAME, LocalStore, ReviewStore, WorkDirLocked
+from .store import LOCK_NAME, LocalStore, ReviewStore, StatusFilter, WorkDirLocked
 
 if TYPE_CHECKING:
     from .server import ReviewServer
@@ -267,7 +267,7 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
 @click.option("--mode", type=click.Choice(["single", "grid"]), default="single", show_default=True, help="Review display mode.")
 @click.option("--pass", "pass_number", type=click.IntRange(min=1), default=None, help="Pass number, 1 or more (auto-detected if omitted).")
 @click.option("--batch", type=str, default=None, help="Restrict to a specific batch [default: the first batch with images matching the filter].")
-@click.option("--filter", "status_filter", type=click.Choice(["unreviewed", "clean", "all"]), default="unreviewed", show_default=True, help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).")
+@click.option("--filter", "status_filter", type=click.Choice(get_args(StatusFilter)), default="unreviewed", show_default=True, help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).")
 @click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
 @click.option(
     "--reviewer",

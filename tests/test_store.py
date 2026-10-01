@@ -34,9 +34,11 @@ from image_review.controller import (
     GRID_HAS_DIRTY,
     MIN_DWELL_MS,
     NOTHING_TO_UNDO,
+    ReviewItem,
     ReviewSession,
     UIState,
     _dwell_elapsed,
+    next_index,
 )
 from image_review.review_db import HEADER, ReviewDB
 from image_review.store import (
@@ -718,7 +720,7 @@ class TestPassMonotonic(StoreTestCase):
         self.append_manifest_row()
         s = ReviewSession(self.store, reviewer="tester", mode="grid", status_filter="all")
         self.assertEqual(s.pass_number, 1)
-        keys = {k for item in s._items for k in item["keys"]}
+        keys = {k for item in s._items for k in item.keys}
         self.assertNotIn("batch_001/a.jpg", keys)
         self.assertIn("batch_001/b.jpg", keys)
 
@@ -846,7 +848,7 @@ class TestSession(SessionTestCase):
     def test_single_mode_mark_updates_snapshot(self):
         s = ReviewSession(self.store, reviewer="tester", mode="single")
         s._cursor = 0
-        key = s._items[0].key
+        key = s._items[0].keys[0]
         before = s._todo_count
         s._mark("CLEAN")
         self.assertEqual(s._statuses[key], "CLEAN")
@@ -855,7 +857,7 @@ class TestSession(SessionTestCase):
     def test_grid_mode_mark_updates_all_keys(self):
         s = ReviewSession(self.store, reviewer="tester", mode="grid")
         s._cursor = 0
-        keys = s._items[0]["keys"]
+        keys = s._items[0].keys
         s._mark("DIRTY")
         self.assertTrue(keys)
         self.assertEqual({s._statuses[k] for k in keys}, {"DIRTY"})
@@ -868,7 +870,7 @@ class TestSession(SessionTestCase):
 
     @staticmethod
     def grid_keys(s: ReviewSession) -> set[str]:
-        return {k for item in s._items for k in item["keys"]}
+        return {k for item in s._items for k in item.keys}
 
     def test_pass_two_grid_excludes_flagged(self):
         self.finish_pass_one()
@@ -890,7 +892,7 @@ class TestSession(SessionTestCase):
         s = ReviewSession(self.store, reviewer="tester", mode="single")
         self.assertEqual(s.pass_number, 2)
         self.assertEqual(s.batch, "batch_001")
-        self.assertEqual([r.key for r in s._items], ["batch_001/a.jpg"])
+        self.assertEqual([item.keys[0] for item in s._items], ["batch_001/a.jpg"])
         self.assertEqual(s._todo_count, 1)
         s._cursor = 0
         s._mark("CLEAN")
@@ -925,8 +927,8 @@ class TestSession(SessionTestCase):
         self.addCleanup(self.store.close)
         s = ReviewSession(self.store, reviewer="tester", mode="grid")
         s._items = [
-            {"surface": None, "keys": ["batch_001/a.jpg"], "batch": "batch_001"},
-            {"surface": None, "keys": ["batch_001/b.jpg", "batch_002/c.jpg"], "batch": "batch_001"},
+            ReviewItem(keys=("batch_001/a.jpg",), label="grid (1 images)", surface=None, grid=True),
+            ReviewItem(keys=("batch_001/b.jpg", "batch_002/c.jpg"), label="grid (2 images)", surface=None, grid=True),
         ]
         s._cursor = 0
         s._mark("DIRTY")
@@ -944,6 +946,21 @@ class TestSession(SessionTestCase):
             s._mark("CLEAN")
             mark.assert_called_once()
         self.assertEqual(self.store.statuses(1)["batch_001/b.jpg"], "CLEAN")
+
+    def test_one_key_grid_follows_grid_rules(self):
+        # an overflow grid holding one image that became FLAGGED mid-session is not single-mode todo
+        self.finish_pass_one()
+        s = ReviewSession(self.store, reviewer="tester", mode="grid")
+        self.assertEqual(s._statuses["batch_001/a.jpg"], "FLAGGED")
+        s._items = [ReviewItem(keys=("batch_001/a.jpg",), label="grid (1 images)", surface=None, grid=True)]
+        s._cursor = 0
+        self.assertEqual(s._item_status(s._items[0]), "DIRTY")
+        self.assertEqual(s._count_todo(), 0)
+        with mock.patch.object(self.store, "mark") as mark, mock.patch.object(s._viewer, "set_info") as set_info, \
+                mock.patch("sys.stderr"):
+            s._mark("CLEAN")
+        mark.assert_not_called()
+        set_info.assert_called_once_with(GRID_HAS_DIRTY)
 
     def test_flagged_is_orange(self):
         s = ReviewSession(self.store, reviewer="tester", mode="single")
@@ -1043,6 +1060,37 @@ class TestEventLoop(SessionTestCase):
         self.assertEqual(s._cursor, 1)
         self.mark.assert_called_once()
 
+    def test_n_skips_done_items(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])  # item 0 CLEAN
+        s.handle_events([key(pg.K_n)])
+        self.assertEqual((s._cursor, s._ui_state), (1, UIState.REVIEWING))
+        s.handle_events([key(pg.K_n)])  # round past the done item 0, back to 1
+        self.assertEqual((s._cursor, s._ui_state), (1, UIState.REVIEWING))
+
+    def test_n_wraps_from_last_item_to_earlier_todo(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_RIGHT)])
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+        s.handle_events([key(pg.K_c)])  # the last item CLEAN
+        self.assertEqual(s._cursor, len(s._items) - 1)
+        s.handle_events([key(pg.K_n)])
+        self.assertEqual((s._cursor, s._ui_state), (0, UIState.REVIEWING))
+
+    def test_todo_only_right_from_last_todo_ends(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_RIGHT)])
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+        s.handle_events([key(pg.K_c)])  # the last item CLEAN: item 0 is the last todo item
+        s.handle_events([key(pg.K_LEFT), key(pg.K_u)])
+        self.assertEqual(s._cursor, 0)
+        with mock.patch.object(s._viewer, "show_message") as show_message:
+            s.handle_events([key(pg.K_RIGHT)])
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        show_message.assert_called_once_with("No todo images remaining")
+
     def assert_message_stays(self, s: ReviewSession, state: UIState = UIState.END_MESSAGE) -> None:
         """With no items, the message survives the loop's refresh and the navigation keys."""
         self.assertEqual(s._ui_state, state)
@@ -1135,7 +1183,7 @@ class TestEventLoop(SessionTestCase):
 
     def test_correction_after_dwell(self):
         s = self.reviewing()
-        item_key = s._items[s._cursor].key
+        item_key = s._items[s._cursor].keys[0]
         s.handle_events([key(pg.K_c)])
         self.paint(s)
         self.now += 50
@@ -1168,7 +1216,7 @@ class TestEventLoop(SessionTestCase):
 
     def test_undo_restores_status_cursor_and_dwell(self):
         s = self.reviewing()
-        item_key = s._items[0].key
+        item_key = s._items[0].keys[0]
         todo = s._todo_count
         s.handle_events([key(pg.K_c)])
         s.handle_events([pg.event.Event(ADVANCE_EVENT)])
@@ -1190,11 +1238,11 @@ class TestEventLoop(SessionTestCase):
         s.handle_events([key(pg.K_c)])
         s.handle_events([key(pg.K_z), pg.event.Event(ADVANCE_EVENT)])
         self.assertEqual(s._cursor, 0)
-        self.assertEqual(s._statuses[s._items[0].key], "UNREVIEWED")
+        self.assertEqual(s._statuses[s._items[0].keys[0]], "UNREVIEWED")
 
     def test_undo_of_grid_restores_every_key(self):
         s = self.reviewing("grid")
-        keys = s._items[0]["keys"]
+        keys = s._items[0].keys
         s.handle_events([key(pg.K_d)])
         self.assertEqual({s._statuses[k] for k in keys}, {"DIRTY"})
         s.handle_events([key(pg.K_z)])
@@ -1211,7 +1259,7 @@ class TestEventLoop(SessionTestCase):
                 self.paint(s)
             self.now += MIN_DWELL_MS
         self.assertEqual(s._ui_state, UIState.END_MESSAGE)
-        last_key = s._items[-1].key
+        last_key = s._items[-1].keys[0]
         s.handle_events([key(pg.K_z)])
         self.assertEqual(s._ui_state, UIState.REVIEWING)
         self.assertEqual((s._cursor, s._statuses[last_key]), (len(s._items) - 1, "UNREVIEWED"))
@@ -1243,7 +1291,7 @@ class TestEventLoop(SessionTestCase):
 
     def test_undo_never_reaches_a_mark_from_before_a_mode_switch(self):
         s = self.reviewing()
-        item_key = s._items[s._cursor].key
+        item_key = s._items[s._cursor].keys[0]
         s.handle_events([key(pg.K_d)])
         s.handle_events([key(pg.K_m)])  # grid mode: the DIRTY image is in no grid
         self.assertEqual(s._ui_state, UIState.REVIEWING)
@@ -1273,6 +1321,49 @@ class TestDwell(unittest.TestCase):
         self.assertFalse(_dwell_elapsed(None, 10_000))
         self.assertFalse(_dwell_elapsed(1_000, 1_000 + MIN_DWELL_MS - 1))
         self.assertTrue(_dwell_elapsed(1_000, 1_000 + MIN_DWELL_MS))
+
+
+class TestNextIndex(unittest.TestCase):
+    def test_steps_forward_and_back(self):
+        self.assertEqual(next_index(4, 1, 1, is_todo=None, wrap=False), 2)
+        self.assertEqual(next_index(4, 1, -1, is_todo=None, wrap=False), 0)
+
+    def test_stops_at_either_end_without_wrap(self):
+        self.assertIsNone(next_index(4, 3, 1, is_todo=None, wrap=False))
+        self.assertIsNone(next_index(4, 0, -1, is_todo=None, wrap=False))
+        self.assertIsNone(next_index(1, 0, 1, is_todo=None, wrap=False))
+
+    def test_wraps_at_either_end(self):
+        self.assertEqual(next_index(4, 3, 1, is_todo=None, wrap=True), 0)
+        self.assertEqual(next_index(4, 0, -1, is_todo=None, wrap=True), 3)
+
+    def test_todo_only_without_wrap(self):
+        todo = {0, 2}.__contains__
+        self.assertEqual(next_index(4, 0, 1, is_todo=todo, wrap=False), 2)
+        self.assertIsNone(next_index(4, 2, 1, is_todo=todo, wrap=False))  # 3 is not todo, then the end
+        self.assertEqual(next_index(4, 2, -1, is_todo=todo, wrap=False), 0)
+        self.assertIsNone(next_index(4, 0, -1, is_todo=todo, wrap=False))
+
+    def test_todo_only_with_wrap(self):
+        todo = {0, 2}.__contains__
+        self.assertEqual(next_index(4, 2, 1, is_todo=todo, wrap=True), 0)
+        self.assertEqual(next_index(4, 0, -1, is_todo=todo, wrap=True), 2)
+        self.assertEqual(next_index(4, 1, 1, is_todo={1}.__contains__, wrap=True), 1)  # round to the cursor itself
+        self.assertIsNone(next_index(4, 1, 1, is_todo=lambda i: False, wrap=True))
+
+    def test_empty_list(self):
+        for direction in (1, -1):
+            for wrap in (False, True):
+                with self.subTest(direction=direction, wrap=wrap):
+                    self.assertIsNone(next_index(0, -1, direction, is_todo=None, wrap=wrap))
+                    self.assertIsNone(next_index(0, -1, direction, is_todo=lambda i: True, wrap=wrap))
+
+    def test_cursor_before_first_item(self):
+        self.assertEqual(next_index(4, -1, 1, is_todo=None, wrap=False), 0)
+        self.assertEqual(next_index(4, -1, 1, is_todo={2}.__contains__, wrap=False), 2)
+        self.assertEqual(next_index(4, -1, 1, is_todo={3}.__contains__, wrap=False), 3)
+        self.assertEqual(next_index(4, -1, -1, is_todo=None, wrap=False), 2)  # the inherited formula's result; unreachable in production
+        self.assertEqual(next_index(1, -1, -1, is_todo=None, wrap=False), 0)
 
 
 class TestPureFunctions(StoreTestCase):
@@ -1307,10 +1398,6 @@ class TestPureFunctions(StoreTestCase):
         for (status_filter, batch), keys in expected.items():
             with self.subTest(status_filter=status_filter, batch=batch):
                 self.assertEqual([r.key for r in filter_rows(self.rows, self.statuses, status_filter, batch)], keys)
-
-    def test_filter_rejects_bad_filter(self):
-        with self.assertRaises(ValueError):
-            filter_rows(self.rows, self.statuses, "bogus")
 
     def test_summaries(self):
         self.assertEqual(
@@ -1661,6 +1748,13 @@ class TestLockCli(LockTestCase):
             result = self.invoke("review", "--batch", "batch_002")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(session.call_args.kwargs["batch"], "batch_002")
+
+    def test_review_rejects_unknown_filter(self):
+        self.assert_rejected("--filter", "bogus")
+        with mock.patch("image_review.controller.ReviewSession") as session, mock.patch("pygame.init"), mock.patch("pygame.quit"):
+            result = self.invoke("review", "--filter", "clean")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(session.call_args.kwargs["status_filter"], "clean")
 
     def test_unwritable_work_dir_says_write(self):
         with mock.patch("os.open", side_effect=PermissionError(13, "Permission denied", str(self.lock_path) + ".x")):

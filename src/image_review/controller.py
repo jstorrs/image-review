@@ -1,5 +1,7 @@
 import random
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum, auto
 
 import pygame as pg
@@ -11,6 +13,7 @@ from .store import (
     MarkMode,
     ReviewStore,
     Status,
+    StatusFilter,
     StoreUnavailable,
     Verdict,
     filter_rows,
@@ -40,7 +43,7 @@ GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in sin
 NOTHING_TO_UNDO = "Nothing to undo"
 
 
-def _grid_status(snapshot: dict[str, Status], keys: list[str]) -> str:
+def _grid_status(snapshot: dict[str, Status], keys: tuple[str, ...]) -> str:
     statuses = {snapshot[key] for key in keys}
     if not statuses <= GRID_ELIGIBLE:
         return "DIRTY"  # e.g. a key sharing an image_id with one marked DIRTY elsewhere this session
@@ -49,11 +52,39 @@ def _grid_status(snapshot: dict[str, Status], keys: list[str]) -> str:
     return "CLEAN"
 
 
-def _grid_clean_refused(snapshot: dict[str, Status], keys: list[str]) -> bool:
+def _grid_clean_refused(snapshot: dict[str, Status], keys: tuple[str, ...]) -> bool:
     """CLEAN on a grid holding a DIRTY or FLAGGED image is refused, unless the whole grid is
     DIRTY (reversing that grid's own verdict)."""
     statuses = {snapshot[key] for key in keys}
     return not statuses <= GRID_ELIGIBLE and statuses != {"DIRTY"}
+
+
+@dataclass(frozen=True)
+class ReviewItem:
+    """One reviewable item: a single image (surface None, loaded when displayed) or a grid
+    (composited when built). A grid's status and CLEAN refusal follow the grid rules even
+    when it holds one key (an overflow image), so `grid` is kept rather than read off len(keys)."""
+
+    keys: tuple[str, ...]
+    label: str
+    surface: pg.Surface | None
+    grid: bool
+
+
+def next_index(n: int, cursor: int, direction: int, *, is_todo: Callable[[int], bool] | None, wrap: bool) -> int | None:
+    """Index of the next item from `cursor` (-1: none shown yet) in `direction` (+1 or -1) that
+    `is_todo` accepts (None: any item), or None when there is none.
+
+    Without `wrap` the search stops at the end of the list (index 0 going forward, n - 1 going
+    back), except from cursor -1. With `wrap` it goes round once, back to the cursor itself."""
+    boundary = 0 if direction == 1 else n - 1
+    for offset in range(1, n + 1):
+        idx = (cursor + direction * offset) % n
+        if not wrap and idx == boundary and cursor != -1:
+            return None
+        if is_todo is None or is_todo(idx):
+            return idx
+    return None
 
 
 class UIState(Enum):
@@ -71,7 +102,7 @@ class ReviewSession:
         mode: MarkMode = "single",
         pass_number: int | None = None,
         batch: str | None = None,
-        status_filter: str = "unreviewed",
+        status_filter: StatusFilter = "unreviewed",
         allow_rotation: bool = True,
     ):
         self.store = store
@@ -168,7 +199,7 @@ class ReviewSession:
     def _init_single_mode(self):
         rows = self._review_rows(self.batch)
         random.shuffle(rows)
-        self._items = rows
+        self._items = [ReviewItem(keys=(row.key,), label=row.key, surface=None, grid=False) for row in rows]
         self._todo_count = self._count_todo()
 
     def _init_grid_mode(self):
@@ -179,11 +210,11 @@ class ReviewSession:
         grid_specs = pack_into_grids(review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation)
 
         items = [
-            {"surface": gs.surface, "keys": gs.keys, "batch": gs.batch}
+            ReviewItem(keys=tuple(gs.keys), label=f"grid ({len(gs.keys)} images)", surface=gs.surface, grid=True)
             for gs in grid_specs
         ]
         random.shuffle(items)
-        items.sort(key=lambda item: len(item["keys"]), reverse=True)
+        items.sort(key=lambda item: len(item.keys), reverse=True)
         self._items = items
         self._todo_count = self._count_todo()
 
@@ -257,19 +288,15 @@ class ReviewSession:
 
     def next_todo(self, direction: int = 1, *, wrap: bool = True) -> bool:
         """Navigate to next todo item. Returns True if found."""
-        if not self._items:
+        idx = next_index(
+            len(self._items), self._cursor, direction,
+            is_todo=lambda i: self._is_todo(self._item_status(self._items[i])), wrap=wrap,
+        )
+        if idx is None:
             return False
-        n = len(self._items)
-        boundary = 0 if direction == 1 else n - 1
-        for offset in range(1, n + 1):
-            idx = (self._cursor + direction * offset) % n
-            if not wrap and idx == boundary and self._cursor != -1:
-                return False
-            if self._is_todo(self._item_status(self._items[idx])):
-                self._cursor = idx
-                self._show_current()
-                return True
-        return False
+        self._cursor = idx
+        self._show_current()
+        return True
 
     def _show_current(self):
         self._shown_at = None
@@ -278,18 +305,19 @@ class ReviewSession:
             return
         item = self._items[self._cursor]
 
-        if self.mode != "grid":
+        surface = item.surface
+        if surface is None:
             # Iteratively skip unloadable images to avoid recursion
             start = self._cursor
             while True:
                 try:
-                    surface = load_surface(self.store.image_bytes(item.key))
+                    surface = load_surface(self.store.image_bytes(item.keys[0]))
                     break
                 except StoreUnavailable as exc:
                     self._store_lost(exc)
                     return
                 except Exception as exc:
-                    print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
+                    print(f"WARNING: cannot load {item.keys[0]}: {exc}", file=sys.stderr)
                     self._cursor += 1
                     if self._cursor >= len(self._items) or self._cursor == start:
                         self._viewer.show_message("No loadable images")
@@ -299,18 +327,13 @@ class ReviewSession:
 
         status = self._item_status(item)
         info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
-
-        if self.mode == "grid":
-            surface = item["surface"]
-            self._viewer.set_image(surface, f"grid ({len(item['keys'])} images)", status, info)
-        else:
-            self._viewer.set_image(surface, item.key, status, info)
+        self._viewer.set_image(surface, item.label, status, info)
         self._dirty = True
 
-    def _item_status(self, item: ManifestRow | dict) -> str:
-        if self.mode == "grid":
-            return _grid_status(self._statuses, item["keys"])
-        return self._statuses[item.key]
+    def _item_status(self, item: ReviewItem) -> str:
+        if item.grid:
+            return _grid_status(self._statuses, item.keys)
+        return self._statuses[item.keys[0]]
 
     def _continue_autoplay(self, direction: int, autoplay: bool = False):
         if direction == 1 and (autoplay or self.autoplay):
@@ -322,7 +345,6 @@ class ReviewSession:
     def _navigate(self, direction: int, *, autoplay: bool = False):
         if not self._items:
             return
-        n = len(self._items)
 
         if self._todo_only:
             if self.next_todo(direction, wrap=False):
@@ -334,14 +356,14 @@ class ReviewSession:
                 self._viewer.show_message("No todo images remaining")
             return
 
-        at_boundary = (self._cursor == n - 1) if direction == 1 else (self._cursor == 0)
-        if at_boundary:
+        idx = next_index(len(self._items), self._cursor, direction, is_todo=None, wrap=False)
+        if idx is None:
             self._stop_autoplay()
             self._ui_state = UIState.END_MESSAGE
             self._viewer.show_message("End of list")
             return
 
-        self._cursor = (self._cursor + direction) % n
+        self._cursor = idx
         self._show_current()
         if self._ui_state == UIState.REVIEWING:
             self._continue_autoplay(direction, autoplay)
@@ -356,17 +378,13 @@ class ReviewSession:
         if not self._items or self._cursor < 0:
             return
         item = self._items[self._cursor]
-        if self.mode == "grid":
-            keys = item["keys"]
-            if status == "CLEAN" and _grid_clean_refused(self._statuses, keys):
-                print(f"WARNING: {GRID_HAS_DIRTY}", file=sys.stderr)
-                self._viewer.set_info(GRID_HAS_DIRTY)
-                self._dirty = True
-                return
-        else:
-            keys = [item.key]
+        if item.grid and status == "CLEAN" and _grid_clean_refused(self._statuses, item.keys):
+            print(f"WARNING: {GRID_HAS_DIRTY}", file=sys.stderr)
+            self._viewer.set_info(GRID_HAS_DIRTY)
+            self._dirty = True
+            return
         try:
-            changed = self.store.mark(keys, status, self.pass_number, reviewer=self.reviewer, mode=self.mode)
+            changed = self.store.mark(list(item.keys), status, self.pass_number, reviewer=self.reviewer, mode=self.mode)
         except StoreUnavailable as exc:
             self._store_lost(exc)
             return
@@ -377,9 +395,6 @@ class ReviewSession:
         self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
         self._advance_pending = True
-
-    def _item_keys(self, item: ManifestRow | dict) -> list[str]:
-        return item["keys"] if self.mode == "grid" else [item.key]
 
     def _notify(self, text: str):
         """Show text in the info bar while reviewing, else as the screen's message."""
@@ -407,7 +422,7 @@ class ReviewSession:
         self._undoable -= 1
         self._statuses.update(changed)
         self._todo_count = self._count_todo()
-        index = next((i for i, item in enumerate(self._items) if any(k in changed for k in self._item_keys(item))), None)
+        index = next((i for i, item in enumerate(self._items) if any(k in changed for k in item.keys)), None)
         if index is None:  # another client's mark on a shared server
             shown = ", ".join(f"{k} {v}" for k, v in list(changed.items())[:3])
             more = f" and {len(changed) - 3} more" if len(changed) > 3 else ""

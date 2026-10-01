@@ -475,7 +475,7 @@ class TestSession(RemoteTestCase):
     def test_grid_mode_marks_on_server(self):
         s = ReviewSession(self.store, reviewer="tester", mode="grid")
         s._cursor = 0
-        keys = s._items[0]["keys"]
+        keys = s._items[0].keys
         self.assertTrue(keys)
         s._mark("CLEAN")
         self.assertEqual({s._statuses[k] for k in keys}, {"CLEAN"})
@@ -487,7 +487,7 @@ class TestSession(RemoteTestCase):
         s = ReviewSession(self.store, reviewer="tester", mode="single")
         s._cursor = 0
         s._show_current()
-        key = s._items[0].key
+        key = s._items[0].keys[0]
         s._mark("DIRTY")
         self.assertEqual(s._statuses[key], "DIRTY")
         self.assertEqual(self.local_copy().statuses(1)[key], "DIRTY")

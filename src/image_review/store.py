@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, Self, get_args
+from typing import Literal, Protocol, Self, get_args
 
 from .access import policy_of_dir
 from .review_db import Change, MarkMode, ReviewDB
@@ -463,18 +463,20 @@ class LocalStore:
         return load_skipped_counts(self.work_dir)
 
 
+# The review --filter vocabulary, parsed by the CLI's click.Choice.
+StatusFilter = Literal["unreviewed", "clean", "all"]
+
+
 def filter_rows(
     rows: list[ManifestRow],
     statuses: dict[str, Status],
-    status_filter: str = "unreviewed",
+    status_filter: StatusFilter = "unreviewed",
     batch: str | None = None,
 ) -> list[ManifestRow]:
     """Filter rows by status and optional batch.
 
     "unreviewed" selects the todo statuses (UNREVIEWED and FLAGGED), "clean" selects CLEAN, "all" everything.
     """
-    if status_filter not in ("all", "clean", "unreviewed"):
-        raise ValueError(f"Invalid status_filter {status_filter!r}, must be 'unreviewed', 'clean', or 'all'")
     selected = [r for r in rows if not batch or r.batch == batch]
     if status_filter == "all":
         return selected
