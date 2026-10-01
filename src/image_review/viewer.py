@@ -135,6 +135,7 @@ class ImageViewer:
         "Keyboard                 Controller",
         "  c        Mark CLEAN      B / East   Mark CLEAN",
         "  d        Mark DIRTY      Y / North  Mark DIRTY",
+        "  z        Undo last mark",
         "  Left/Right  Navigate     D-pad      Navigate",
         "  n        Next todo",
         "  u        Todo only",

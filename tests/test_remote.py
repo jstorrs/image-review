@@ -109,6 +109,46 @@ class TestRoundTrips(RemoteTestCase):
             [(ROWS[i][2], ROWS[i][0], "Dr. Lee", "grid", "2", package_version()) for i in (1, 2)],
         )
 
+    def test_undo_equals_local(self):
+        self.store.mark([KEYS[0]], "DIRTY", 1, reviewer="tester", mode="single")
+        self.store.mark([KEYS[0], KEYS[1]], "CLEAN", 1, reviewer="tester", mode="grid")
+        self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "DIRTY", KEYS[1]: "UNREVIEWED"})
+        self.assertEqual(self.store.statuses(1), self.local_copy().statuses(1))
+        self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "UNREVIEWED"})
+        self.assertEqual(self.store.undo(1, reviewer="tester"), {})
+        self.assertEqual(set(self.local_copy().statuses(1).values()), {"UNREVIEWED"})
+
+    def test_undo_whose_reply_is_lost_is_not_resent(self):
+        self.store.mark([KEYS[0]], "DIRTY", 1, reviewer="tester", mode="single")
+        self.store.mark([KEYS[1]], "CLEAN", 1, reviewer="tester", mode="single")
+        real_send = ReviewHandler._send
+        dropped = []
+
+        def lossy_send(handler, reply):
+            if handler.path == "/undo" and not dropped:
+                dropped.append(reply)
+                handler.close_connection = True
+                handler.request.shutdown(socket.SHUT_RDWR)  # applied, but the reply never arrives
+                return
+            real_send(handler, reply)
+
+        with mock.patch.object(ReviewHandler, "_send", lossy_send), redirect_stderr(io.StringIO()), self.assertRaises(RemoteError):
+            self.store.undo(1, reviewer="tester")
+        self.assertEqual(len(dropped), 1)
+        statuses = self.local_copy().statuses(1)
+        self.assertEqual((statuses[KEYS[0]], statuses[KEYS[1]]), ("DIRTY", "UNREVIEWED"))  # exactly one mark undone
+
+    def test_undo_after_idle_close_succeeds(self):
+        with mock.patch.object(ReviewHandler, "timeout", 0.3), redirect_stderr(io.StringIO()):
+            self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")  # on a connection the server closes when idle
+            time.sleep(0.8)
+            self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "UNREVIEWED"})
+
+    def test_bad_undo_is_remote_error(self):
+        with self.assertRaises(RemoteError) as ctx:
+            self.store.undo(1, reviewer="a\tb")
+        self.assertEqual(ctx.exception.status, 400)
+
     def test_bad_mark_is_remote_error(self):
         with self.assertRaises(RemoteError):
             self.store.mark(["nope"], "CLEAN", 1, reviewer="tester", mode="single")
@@ -333,10 +373,10 @@ class TestCli(RemoteTestCase):
         self.assertNotIn("Traceback", result.output)
 
     def test_api_mismatch_message(self):
-        with mock.patch("image_review.remote.API_VERSION", 5):
+        with mock.patch("image_review.remote.API_VERSION", 6):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("server speaks API v4, this client v5; install the same image-review version on both machines", result.output)
+        self.assertIn("server speaks API v5, this client v6; install the same image-review version on both machines", result.output)
         self.assertNotIn(self.target.token, result.output)
 
     def test_server_without_version_endpoint(self):
@@ -354,7 +394,7 @@ class TestCli(RemoteTestCase):
 
     def test_check_api(self):
         self.store.check_api()
-        with mock.patch("image_review.remote.API_VERSION", 5), self.assertRaises(ApiMismatch):
+        with mock.patch("image_review.remote.API_VERSION", 6), self.assertRaises(ApiMismatch):
             self.store.check_api()
 
     def test_status_envvar(self):
@@ -470,7 +510,7 @@ class TestSession(RemoteTestCase):
         todo = s._todo_count
         self.lose_server()
         s._mark("CLEAN")
-        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
         self.assertEqual(s._statuses, before)
         self.assertEqual(s._todo_count, todo)
         self.assertFalse((self.work_dir / "review.tsv").exists() and self.reviewed_ids())
@@ -480,7 +520,7 @@ class TestSession(RemoteTestCase):
         self.lose_server()
         with redirect_stderr(io.StringIO()) as err:
             s.next_image()
-        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
         self.assert_no_repaint(s)
         self.assertFalse(s.autoplay)
         self.assertIn("Lost connection to server", err.getvalue())
@@ -491,7 +531,7 @@ class TestSession(RemoteTestCase):
         self.lose_server()
         with redirect_stderr(io.StringIO()):
             s._handle_splash_key(pg.K_SPACE)
-        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
         self.assert_no_repaint(s)
 
     def test_no_refresh_after_outage_when_statuses_fail_on_mode_switch(self):
@@ -499,7 +539,7 @@ class TestSession(RemoteTestCase):
         self.lose_server()
         with redirect_stderr(io.StringIO()):
             s._switch_to_grid(True)
-        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
         self.assert_no_repaint(s)
 
     def test_no_refresh_after_outage_when_grid_fetch_fails_on_mode_switch(self):
@@ -509,7 +549,7 @@ class TestSession(RemoteTestCase):
             redirect_stderr(io.StringIO()),
         ):
             s._switch_to_grid(True)
-        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
         self.assert_no_repaint(s)
 
 

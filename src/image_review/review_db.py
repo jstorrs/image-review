@@ -22,19 +22,25 @@ LEGACY_HEADER = HEADER[:5]  # before the audit columns; migrate() rewrites such 
 # fsync errors that only mean a directory cannot be synced on this filesystem
 DIR_FSYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF})
 
-# How a verdict was given: on one image, or on every image of a grid at once.
+# How a verdict was given: on one image, or on every image of a grid at once. A client may only give these.
 MarkMode = Literal["single", "grid"]
+# A row's mode in review.tsv: a MarkMode, or "undo" for a row written by undo_many (a restore or a tombstone).
+RowMode = MarkMode | Literal["undo"]
+# A row's status in review.tsv: a Verdict, or UNREVIEWED in a tombstone (mode "undo"), which erases the image's
+# earlier rows from the fold. FLAGGED is derived and never stored.
+RowStatus = Verdict | Literal["UNREVIEWED"]
+TOMBSTONE: RowStatus = "UNREVIEWED"
 
 
 @dataclass(frozen=True)
 class Decision:
     image_id: str
     batch: str
-    status: Verdict
+    status: RowStatus  # TOMBSTONE only in an undo row; latest() drops such an image_id
     pass_number: int
     timestamp: str
     reviewer: str  # the client's unauthenticated claim; "" in rows from before it was recorded
-    mode: MarkMode | Literal[""]  # "" in rows from before it was recorded
+    mode: RowMode | Literal[""]  # "" in rows from before it was recorded
     grid_size: int | None  # how many keys the verdict covered; None in rows from before it was recorded
     tool_version: str  # image-review version that wrote the row; "" in rows from before it was recorded
 
@@ -47,16 +53,16 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str] =
     image_id, batch, status, pass_text, timestamp, reviewer, mode, size_text, tool_version = fields + [""] * (len(HEADER) - len(header))
     if not image_id:
         raise ValueError(f"{where}: image_id is empty")
-    if status not in get_args(Verdict):
-        raise ValueError(f"{where}: status must be one of {', '.join(get_args(Verdict))}, got {status!r}")
+    if status not in get_args(Verdict) and not (status == TOMBSTONE and mode == "undo"):
+        raise ValueError(f"{where}: status must be one of {', '.join(get_args(Verdict))} ({TOMBSTONE} only in an undo row), got {status!r}")
     try:
         pass_number = int(pass_text)
     except ValueError:
         raise ValueError(f"{where}: pass_number must be an integer, got {pass_text!r}") from None
     if pass_number < 1:
         raise ValueError(f"{where}: pass_number must be at least 1, got {pass_number}")
-    if mode not in ("", *get_args(MarkMode)):
-        raise ValueError(f"{where}: mode must be one of {', '.join(get_args(MarkMode))} or empty, got {mode!r}")
+    if mode not in ("", *get_args(MarkMode), "undo"):
+        raise ValueError(f"{where}: mode must be one of {', '.join(get_args(MarkMode))}, undo or empty, got {mode!r}")
     grid_size = None
     if size_text:
         try:
@@ -121,9 +127,28 @@ def parse_log(path: Path, data: bytes) -> tuple[list[Decision], bool]:
     return decisions, header == LEGACY_HEADER
 
 
+def fold(rows: dict[str, Decision], decisions: Iterable[Decision]) -> None:
+    """Apply decisions, in order, to rows (the last decision per image_id): a tombstone removes its image_id."""
+    for d in decisions:
+        if d.status == TOMBSTONE:
+            rows.pop(d.image_id, None)
+        else:
+            rows[d.image_id] = d
+
+
 def latest(decisions: Iterable[Decision]) -> dict[str, Decision]:
-    """The last decision per image_id."""
-    return {d.image_id: d for d in decisions}
+    """The last decision per image_id; an image_id whose last row is a tombstone has none."""
+    rows: dict[str, Decision] = {}
+    fold(rows, decisions)
+    return rows
+
+
+@dataclass(frozen=True)
+class Change:
+    """One row mark_many wrote, and the image's decision just before it (None: it had none)."""
+
+    written: Decision
+    previous: Decision | None
 
 
 class ReviewDB:
@@ -132,7 +157,7 @@ class ReviewDB:
     def __init__(self, work_dir: Path):
         self.work_dir = work_dir
         self.review_path = work_dir / "review.tsv"
-        self._rows: dict[str, Decision] = {}  # keyed by image_id; last row wins
+        self._rows: dict[str, Decision] = {}  # keyed by image_id; last row wins (see latest(): never a tombstone)
         self._truncate: PendingTruncate | None = None  # a torn tail to drop before the next append
         self._legacy: LegacyLog | None = None  # an old-header file; appends refuse until migrate()
         if self.review_path.exists():
@@ -237,8 +262,11 @@ class ReviewDB:
     def mark(self, image_id: str, batch: str, status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> None:
         self.mark_many([(image_id, batch)], status, pass_number, reviewer=reviewer, mode=mode)
 
-    def mark_many(self, targets: list[tuple[str, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> None:
-        """Record one verdict on every (image_id, batch) in targets; grid_size is len(targets)."""
+    def mark_many(self, targets: list[tuple[str, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> list[Change]:
+        """Record one verdict on every (image_id, batch) in targets; grid_size is len(targets).
+
+        Returns each row written with the decision it replaced, for undo_many.
+        """
         if status not in get_args(Verdict):
             raise ValueError(f"Invalid status {status!r}, must be one of {get_args(Verdict)}")
         if mode not in get_args(MarkMode):
@@ -246,13 +274,35 @@ class ReviewDB:
         reviewer = parse_reviewer(reviewer)  # a tab or newline would corrupt the log
         ts = datetime.now(UTC).isoformat()
         tool_version = package_version()
-        decisions = []
+        changes = []
         for image_id, batch in targets:
             existing = self._rows.get(image_id)
             recorded_pass = max(existing.pass_number, pass_number) if existing else pass_number  # never decreases
-            decisions.append(Decision(image_id, batch, status, recorded_pass, ts, reviewer, mode, len(targets), tool_version))
+            changes.append(Change(Decision(image_id, batch, status, recorded_pass, ts, reviewer, mode, len(targets), tool_version), existing))
+        decisions = [c.written for c in changes]
         self._append(decisions)  # on disk first; a failed append changes neither memory nor, once its tail is cut, the file
         self._rows.update((d.image_id, d) for d in decisions)
+        return changes
+
+    def undo_many(self, changes: list[Change], *, reviewer: str) -> None:
+        """Undo changes (one mark_many's result) in one append: each image's previous decision is written again
+        exactly (batch, status, pass_number; the pass may go down: it is a restore), or a tombstone in the undone
+        row's batch and pass where there was none. Rows get mode "undo", `reviewer` and grid_size = images undone.
+        """
+        reviewer = parse_reviewer(reviewer)  # a tab or newline would corrupt the log
+        ts = datetime.now(UTC).isoformat()
+        tool_version = package_version()
+        by_image = {c.written.image_id: c for c in changes}  # an image_id given twice (keys sharing it) is undone once
+        decisions = [
+            Decision(image_id, c.previous.batch, c.previous.status, c.previous.pass_number, ts, reviewer, "undo", len(by_image), tool_version)
+            if c.previous is not None
+            else Decision(image_id, c.written.batch, TOMBSTONE, c.written.pass_number, ts, reviewer, "undo", len(by_image), tool_version)
+            for image_id, c in by_image.items()
+        ]
+        if not decisions:
+            return
+        self._append(decisions)  # on disk first, as in mark_many
+        fold(self._rows, decisions)
 
     def get_status(self, image_id: str, current_pass: int) -> Status:
         row = self._rows.get(image_id)

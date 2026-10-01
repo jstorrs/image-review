@@ -166,7 +166,8 @@ class RemoteStore:
                 self._connections.append(conn)
         return conn
 
-    def _request(self, method: str, path: str, body: bytes | None = None) -> tuple[int, bytes]:
+    def _request(self, method: str, path: str, body: bytes | None = None, *, retry: bool = True) -> tuple[int, bytes]:
+        """One request on this thread's connection; with `retry`, resent once on a fresh connection after a stale one."""
         headers = dict(self._auth)
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -180,7 +181,7 @@ class RemoteStore:
                 raise
             except _STALE_CONNECTION as e:
                 conn.close()
-                if attempt == 2:
+                if attempt == 2 or not retry:
                     raise RemoteError(f"connection lost: {type(e).__name__}") from e
             except (OSError, http.client.HTTPException) as e:
                 conn.close()
@@ -237,6 +238,18 @@ class RemoteStore:
     def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
         body = json.dumps({"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}).encode()
         code, data = self._request("POST", "/mark", body)
+        if code != 200:
+            raise RemoteError(f"server returned HTTP {code}", code)
+        return parse_statuses(data)
+
+    def undo(self, pass_number: int, *, reviewer: str) -> dict[str, Status]:
+        # Not idempotent: a resend after a lost reply would undo a second mark. So it is sent once, on a
+        # fresh connection (an idle one may have been closed by the server), and any failure is an outage.
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()  # the next request reconnects, and the pin is checked again
+        body = json.dumps({"pass": pass_number, "reviewer": reviewer}).encode()
+        code, data = self._request("POST", "/undo", body, retry=False)
         if code != 200:
             raise RemoteError(f"server returned HTTP {code}", code)
         return parse_statuses(data)

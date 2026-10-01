@@ -33,6 +33,7 @@ from image_review.controller import (
     AUTOPLAY_EVENT,
     GRID_HAS_DIRTY,
     MIN_DWELL_MS,
+    NOTHING_TO_UNDO,
     ReviewSession,
     UIState,
     _dwell_elapsed,
@@ -178,6 +179,13 @@ class TestSharedImageId(unittest.TestCase):
             statuses = store.statuses(1)
             self.assertEqual({k: statuses[k] for k in changed}, changed)
             self.assertEqual(statuses["batch_002/c.jpg"], "UNREVIEWED")
+            self.assertEqual(store.undo(1, reviewer="tester"), {"batch_001/a.jpg": "UNREVIEWED", "batch_001/b.jpg": "UNREVIEWED"})
+            store.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY", 1, reviewer="tester", mode="grid")
+            size = (root / "review.tsv").stat().st_size
+            store.undo(1, reviewer="tester")
+            with open(root / "review.tsv", "rb") as f:
+                f.seek(size)
+                self.assertEqual(f.read().count(b"\n"), 1)  # one undo row for the shared image_id
 
 
 class TestMissingManifest(unittest.TestCase):
@@ -234,7 +242,11 @@ class TestStrictLoading(unittest.TestCase):
         good = f"/src/a.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.2.0"
         cases = {
             "old-width row under new header": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}"),
-            "bad mode": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tundo\t1\t0.2.0"),
+            "bad mode": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tbogus\t1\t0.2.0"),
+            "FLAGGED status": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tsingle\t1\t0.2.0"),
+            "FLAGGED in an undo row": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tundo\t1\t0.2.0"),
+            "UNREVIEWED outside an undo row": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\talice\tsingle\t1\t0.2.0"),
+            "UNREVIEWED in a migrated row": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\t\t\t\t"),
             "bad grid_size": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\tfour\t0.2.0"),
             "zero grid_size": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\t0\t0.2.0"),
             "new-width row under old header": (self.REVIEW_HEADER, f"/src/a.dcm\tbatch_001\tCLEAN\t1\t{ts}", good),
@@ -244,6 +256,19 @@ class TestStrictLoading(unittest.TestCase):
                 self.write_review(*lines)
                 with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
                     LocalStore(self.work_dir, read_only=True)
+
+    def test_undo_rows_load_and_tombstone_folds(self):
+        ts = self.GOOD_TS
+        self.write_review(
+            self.NEW_HEADER,
+            f"/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.2.0",
+            f"/src/patient_jones/b.dcm\tbatch_001\tDIRTY\t2\t{ts}\talice\tsingle\t1\t0.2.0",
+            f"/src/patient_jones/b.dcm\tbatch_001\tCLEAN\t3\t{ts}\talice\tsingle\t1\t0.2.0",
+            f"/src/patient_smith/a.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\talice\tundo\t2\t0.2.0",
+            f"/src/patient_jones/b.dcm\tbatch_001\tDIRTY\t2\t{ts}\talice\tundo\t2\t0.2.0",
+        )
+        statuses = LocalStore(self.work_dir, read_only=True).statuses(2)
+        self.assertEqual((statuses["batch_001/a.jpg"], statuses["batch_001/b.jpg"]), ("UNREVIEWED", "DIRTY"))
 
     def test_migrated_rows_with_empty_audit_columns_load(self):
         self.write_review(self.NEW_HEADER, f"/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t1\t{self.GOOD_TS}\t\t\t\t")
@@ -698,6 +723,115 @@ class TestPassMonotonic(StoreTestCase):
         self.assertIn("batch_001/b.jpg", keys)
 
 
+class TestUndo(StoreTestCase):
+    A, B, C = ROWS[0][1], ROWS[1][1], ROWS[2][1]
+
+    def last_row(self) -> dict[str, str]:
+        return review_rows(self.work_dir / "review.tsv")[-1]
+
+    def test_undo_of_first_mark_is_a_tombstone(self):
+        self.store.mark([self.A], "CLEAN", 1, reviewer="alice", mode="single")
+        self.assertEqual(self.store.undo(1, reviewer="bob"), {self.A: "UNREVIEWED"})
+        self.assertEqual(self.store.statuses(1)[self.A], "UNREVIEWED")
+        row = self.last_row()
+        self.assertEqual(
+            {k: row[k] for k in ("image_id", "batch", "status", "pass_number", "reviewer", "mode", "grid_size", "tool_version")},
+            {
+                "image_id": ROWS[0][2], "batch": "batch_001", "status": "UNREVIEWED", "pass_number": "1",
+                "reviewer": "bob", "mode": "undo", "grid_size": "1", "tool_version": package_version(),
+            },
+        )
+        reloaded = LocalStore(self.work_dir, read_only=True)
+        self.assertEqual(reloaded.statuses(1), self.store.statuses(1))
+        self.assertEqual(reloaded.current_pass(), 1)
+
+    def test_tombstone_makes_image_unseen_for_current_pass(self):
+        self.store.mark([self.A, self.B, self.C], "CLEAN", 1, reviewer="alice", mode="grid")
+        self.store.mark([ROWS[3][1]], "CLEAN", 1, reviewer="alice", mode="single")
+        self.assertEqual(self.store.current_pass(), 2)
+        self.store.undo(2, reviewer="alice")
+        self.assertEqual(self.store.current_pass(), 1)
+        self.assertEqual(LocalStore(self.work_dir, read_only=True).current_pass(), 1)
+
+    def test_undo_restores_previous_verdict_and_exact_pass(self):
+        self.store.mark([self.A], "CLEAN", 2, reviewer="alice", mode="single")
+        self.store.mark([self.A], "DIRTY", 3, reviewer="alice", mode="single")
+        self.assertEqual(self.store.undo(3, reviewer="alice"), {self.A: "CLEAN"})
+        row = self.last_row()
+        self.assertEqual((row["status"], row["pass_number"], row["mode"]), ("CLEAN", "2", "undo"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            db = ReviewDB(self.work_dir)
+        self.assertEqual((db._rows[ROWS[0][2]].status, db._rows[ROWS[0][2]].pass_number), ("CLEAN", 2))
+
+    def test_lower_pass_restore_keeps_original_pass(self):
+        self.store.mark([self.A], "DIRTY", 1, reviewer="alice", mode="single")
+        self.store.mark([self.A], "CLEAN", 3, reviewer="alice", mode="single")
+        self.assertEqual(self.store.undo(3, reviewer="alice"), {self.A: "FLAGGED"})  # DIRTY in pass 1, seen from pass 3
+        self.assertEqual(self.last_row()["pass_number"], "1")  # a restore may lower the recorded pass
+        self.assertEqual(self.store.statuses(1)[self.A], "DIRTY")
+
+    def test_undo_restores_the_never_decreased_pass(self):
+        self.store.mark([self.A], "DIRTY", 3, reviewer="alice", mode="single")
+        self.store.mark([self.A], "CLEAN", 1, reviewer="alice", mode="single")  # recorded as pass 3
+        self.store.undo(1, reviewer="alice")
+        row = self.last_row()
+        self.assertEqual((row["status"], row["pass_number"]), ("DIRTY", "3"))
+
+    def test_five_key_grid_is_undone_at_once(self):
+        with open(self.work_dir / "manifest.tsv", "a", newline="") as f:
+            csv.writer(f, delimiter="\t").writerow(["batch_002", "batch_002/e.jpg", "/src/patient_new/e.dcm"])
+        self.store.close()
+        self.store = LocalStore(self.work_dir)
+        self.addCleanup(self.store.close)
+        keys = [r.key for r in self.store.manifest()]
+        self.assertEqual(len(keys), 5)
+        self.store.mark(keys[:1], "DIRTY", 1, reviewer="alice", mode="single")
+        self.store.mark(keys, "CLEAN", 1, reviewer="alice", mode="grid")
+        changed = self.store.undo(1, reviewer="alice")
+        self.assertEqual(changed, {keys[0]: "DIRTY", **dict.fromkeys(keys[1:], "UNREVIEWED")})
+        undo_rows = review_rows(self.work_dir / "review.tsv")[-5:]
+        self.assertEqual({(r["mode"], r["grid_size"]) for r in undo_rows}, {("undo", "5")})
+        self.assertEqual(self.store.undo(1, reviewer="alice"), {keys[0]: "UNREVIEWED"})
+        self.assertEqual(set(self.store.statuses(1).values()), {"UNREVIEWED"})
+
+    def test_empty_stack_is_empty_dict_and_writes_nothing(self):
+        self.assertEqual(self.store.undo(1, reviewer="alice"), {})
+        self.store.mark([self.A], "CLEAN", 1, reviewer="alice", mode="single")
+        self.store.undo(1, reviewer="alice")
+        size = (self.work_dir / "review.tsv").stat().st_size
+        self.assertEqual(self.store.undo(1, reviewer="alice"), {})
+        self.assertEqual((self.work_dir / "review.tsv").stat().st_size, size)
+
+    def test_stack_is_lost_when_the_store_is_reopened(self):
+        self.store.mark([self.A], "CLEAN", 1, reviewer="alice", mode="single")
+        self.store.close()
+        self.store = LocalStore(self.work_dir)
+        self.addCleanup(self.store.close)
+        self.assertEqual(self.store.undo(1, reviewer="alice"), {})
+        self.assertEqual(self.store.statuses(1)[self.A], "CLEAN")
+
+    def test_failed_undo_keeps_the_entry(self):
+        self.store.mark([self.A], "CLEAN", 1, reviewer="alice", mode="single")
+        with mock.patch.object(ReviewDB, "_append", side_effect=OSError(errno.ENOSPC, "full")), self.assertRaises(OSError):
+            self.store.undo(1, reviewer="alice")
+        with self.assertRaises(ValueError):
+            self.store.undo(1, reviewer="a\tb")
+        self.assertEqual(self.store.statuses(1)[self.A], "CLEAN")
+        self.assertEqual(self.store.undo(1, reviewer="alice"), {self.A: "UNREVIEWED"})
+
+    def test_failed_mark_is_not_pushed(self):
+        self.store.mark([self.A], "CLEAN", 1, reviewer="alice", mode="single")
+        with mock.patch.object(ReviewDB, "_append", side_effect=OSError(errno.ENOSPC, "full")), self.assertRaises(OSError):
+            self.store.mark([self.B], "DIRTY", 1, reviewer="alice", mode="single")
+        self.assertEqual(self.store.undo(1, reviewer="alice"), {self.A: "UNREVIEWED"})
+        self.assertEqual(self.store.undo(1, reviewer="alice"), {})
+
+    def test_mark_many_still_refuses_unreviewed(self):
+        with self.assertRaises(ValueError):
+            self.store.mark([self.A], "UNREVIEWED", 1, reviewer="alice", mode="single")  # type: ignore[arg-type]
+        self.assertFalse((self.work_dir / "review.tsv").exists())
+
+
 class SessionTestCase(StoreTestCase):
     def setUp(self):
         super().setUp()
@@ -909,14 +1043,14 @@ class TestEventLoop(SessionTestCase):
         self.assertEqual(s._cursor, 1)
         self.mark.assert_called_once()
 
-    def assert_message_stays(self, s: ReviewSession) -> None:
+    def assert_message_stays(self, s: ReviewSession, state: UIState = UIState.END_MESSAGE) -> None:
         """With no items, the message survives the loop's refresh and the navigation keys."""
-        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertEqual(s._ui_state, state)
         with mock.patch.object(s._viewer, "refresh") as refresh:
             s.refresh_if_needed()
             for k in (pg.K_SPACE, pg.K_RIGHT, pg.K_LEFT):
                 self.assertTrue(s.handle_events([key(k)]))
-                self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+                self.assertEqual(s._ui_state, state)
                 s.refresh_if_needed()
         refresh.assert_not_called()
 
@@ -935,7 +1069,7 @@ class TestEventLoop(SessionTestCase):
         ):
             s.handle_events([key(pg.K_m)])
         self.assertEqual(s._items, [])
-        self.assert_message_stays(s)
+        self.assert_message_stays(s, UIState.DISCONNECTED)
 
     def test_stale_advance_after_mode_switch_is_ignored(self):
         s = self.reviewing()
@@ -1031,6 +1165,107 @@ class TestEventLoop(SessionTestCase):
         s = self.reviewing()
         self.assertFalse(s.handle_events([key(pg.K_q), key(pg.K_c)]))
         self.mark.assert_not_called()
+
+    def test_undo_restores_status_cursor_and_dwell(self):
+        s = self.reviewing()
+        item_key = s._items[0].key
+        todo = s._todo_count
+        s.handle_events([key(pg.K_c)])
+        s.handle_events([pg.event.Event(ADVANCE_EVENT)])
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+        self.assertEqual((s._cursor, s._todo_count), (1, todo - 1))
+        s.handle_events([key(pg.K_z), key(pg.K_d)])  # a verdict right after the undo is not counted
+        self.assertEqual((s._cursor, s._statuses[item_key], s._todo_count), (0, "UNREVIEWED", todo))
+        self.assertEqual(self.store.statuses(s.pass_number)[item_key], "UNREVIEWED")
+        self.assertIsNone(s._shown_at)
+        self.mark.assert_called_once()
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+        s.handle_events([key(pg.K_d)])
+        self.assertEqual(s._statuses[item_key], "DIRTY")
+
+    def test_undo_cancels_post_mark_advance(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        s.handle_events([key(pg.K_z), pg.event.Event(ADVANCE_EVENT)])
+        self.assertEqual(s._cursor, 0)
+        self.assertEqual(s._statuses[s._items[0].key], "UNREVIEWED")
+
+    def test_undo_of_grid_restores_every_key(self):
+        s = self.reviewing("grid")
+        keys = s._items[0]["keys"]
+        s.handle_events([key(pg.K_d)])
+        self.assertEqual({s._statuses[k] for k in keys}, {"DIRTY"})
+        s.handle_events([key(pg.K_z)])
+        self.assertEqual({s._statuses[k] for k in keys}, {"UNREVIEWED"})
+        self.assertEqual((s._cursor, s._item_status(s._items[0])), (0, "UNREVIEWED"))
+        self.assertIsNone(s._shown_at)
+
+    def test_undo_on_end_of_list_returns_to_the_item(self):
+        s = self.reviewing()
+        for _ in s._items:
+            s.handle_events([key(pg.K_c)])
+            s.handle_events([pg.event.Event(ADVANCE_EVENT)])
+            if s._ui_state == UIState.REVIEWING:
+                self.paint(s)
+            self.now += MIN_DWELL_MS
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        last_key = s._items[-1].key
+        s.handle_events([key(pg.K_z)])
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertEqual((s._cursor, s._statuses[last_key]), (len(s._items) - 1, "UNREVIEWED"))
+        self.paint(s)
+
+    def test_nothing_to_undo(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_z)])
+        self.assertEqual(s._viewer._info, NOTHING_TO_UNDO)
+        self.assertEqual(s._cursor, 0)
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+
+    def test_undo_outage_is_a_lost_connection_that_only_quits(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        cursor = s._cursor
+        with (
+            mock.patch.object(self.store, "undo", side_effect=store_module.StoreUnavailable("down")) as undo,
+            mock.patch("sys.stderr"),
+        ):
+            s.handle_events([key(pg.K_z)])
+            self.assertEqual(s._ui_state, UIState.DISCONNECTED)
+            for k in (pg.K_z, pg.K_RIGHT, pg.K_SPACE, pg.K_LEFT, pg.K_n, pg.K_m, pg.K_s, pg.K_c):
+                self.assertTrue(s.handle_events([key(k)]))
+            undo.assert_called_once()
+        self.mark.assert_called_once()
+        self.assertEqual((s._ui_state, s._cursor), (UIState.DISCONNECTED, cursor))
+        self.assertFalse(s.handle_events([key(pg.K_q)]))
+
+    def test_undo_never_reaches_a_mark_from_before_a_mode_switch(self):
+        s = self.reviewing()
+        item_key = s._items[s._cursor].key
+        s.handle_events([key(pg.K_d)])
+        s.handle_events([key(pg.K_m)])  # grid mode: the DIRTY image is in no grid
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        with mock.patch.object(self.store, "undo", wraps=self.store.undo) as undo:
+            s.handle_events([key(pg.K_z)])
+            undo.assert_not_called()
+        self.assertEqual(s._viewer._info, NOTHING_TO_UNDO)
+        self.assertEqual(self.store.statuses(s.pass_number)[item_key], "DIRTY")
+
+    def test_undo_count_follows_marks_and_undos(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        s.handle_events([key(pg.K_z)])
+        self.assertEqual(s._undoable, 0)
+        with mock.patch.object(self.store, "undo", wraps=self.store.undo) as undo:
+            s.handle_events([key(pg.K_z)])
+            undo.assert_not_called()
+        self.assertEqual(s._viewer._info, NOTHING_TO_UNDO)
+
+    def test_key_repeat_is_off(self):
+        ReviewSession(self.store, reviewer="tester", mode="single")
+        self.assertEqual(pg.key.get_repeat(), (0, 0))  # a held z undoes one mark, not many
 
 
 class TestDwell(unittest.TestCase):
@@ -1288,6 +1523,18 @@ class TestWorkDirLock(LockTestCase):
         store.close()
         with self.assertRaises(PermissionError):
             store.mark([ROWS[0][1]], "CLEAN", 1, reviewer="tester", mode="single")
+
+    def test_read_only_and_closed_stores_refuse_undo(self):
+        writer = self.open()
+        writer.mark([ROWS[0][1]], "CLEAN", 1, reviewer="tester", mode="single")
+        reader = self.open(read_only=True)
+        with self.assertRaises(PermissionError):
+            reader.undo(1, reviewer="tester")
+        reader.close()
+        writer.close()
+        with self.assertRaises(PermissionError):
+            writer.undo(1, reviewer="tester")
+        self.assertEqual(self.open(read_only=True).statuses(1)[ROWS[0][1]], "CLEAN")
 
     def test_close_is_idempotent_and_keeps_another_process_lock(self):
         store = self.open()

@@ -83,6 +83,10 @@ class ServerTestCase(unittest.TestCase):
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         return self.request("POST", "/mark", body=body)[:2]
 
+    def post_undo(self, payload):
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        return self.request("POST", "/undo", body=body)[:2]
+
 
 class TestTransport(ServerTestCase):
     def test_peer_cert_matches_fingerprint(self):
@@ -416,6 +420,7 @@ class TestAuth(ServerTestCase):
             ("GET", "/skipped"),
             ("GET", "/version"),
             ("POST", "/mark"),
+            ("POST", "/undo"),
             ("GET", "/nope"),
             ("DELETE", "/manifest"),
         ]
@@ -466,9 +471,9 @@ class TestReads(ServerTestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
 
-    def test_api_version_is_4(self):
-        self.assertEqual(API_VERSION, 4)
-        self.assertEqual(self.get_json("/version")["api"], 4)
+    def test_api_version_is_5(self):
+        self.assertEqual(API_VERSION, 5)
+        self.assertEqual(self.get_json("/version")["api"], 5)
 
     def test_skipped_absent_is_null(self):
         resp, data, _ = self.request("GET", "/skipped")
@@ -559,6 +564,52 @@ class TestMark(ServerTestCase):
         # Declared length only: the server must reject before reading the body.
         resp, _, _ = self.request("POST", "/mark", headers={"Content-Length": str((1 << 20) + 1)})
         self.assertEqual(resp.status, 400)
+
+
+class TestUndo(ServerTestCase):
+    def test_undo_round_trip(self):
+        self.post_mark({"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"})
+        self.post_mark({"keys": ["batch_001/a.jpg", "batch_002/c.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "grid"})
+        resp, data = self.post_undo({"pass": 1, "reviewer": "tester"})
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(data), {"batch_001/a.jpg": "DIRTY", "batch_002/c.jpg": "UNREVIEWED"})
+        for _, _, image_id in ROWS:
+            self.assertNotIn(image_id.encode(), data)
+        statuses = self.get_json("/statuses?pass=1")
+        self.assertEqual((statuses["batch_001/a.jpg"], statuses["batch_002/c.jpg"]), ("DIRTY", "UNREVIEWED"))
+        self.assertEqual(json.loads(self.post_undo({"pass": 2, "reviewer": "tester"})[1]), {"batch_001/a.jpg": "UNREVIEWED"})
+        resp, data = self.post_undo({"pass": 1, "reviewer": "tester"})
+        self.assertEqual((resp.status, json.loads(data)), (200, {}))
+
+    def test_bad_bodies_are_400(self):
+        self.post_mark({"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"})
+        good = {"pass": 1, "reviewer": "tester"}
+        bad = {
+            "missing pass": {"reviewer": "tester"},
+            "pass zero": {**good, "pass": 0},
+            "pass not int": {**good, "pass": "1"},
+            "pass bool": {**good, "pass": True},
+            "missing reviewer": {"pass": 1},
+            "reviewer with tab": {**good, "reviewer": "a\tb"},
+            "reviewer empty": {**good, "reviewer": ""},
+            "reviewer too long": {**good, "reviewer": "r" * 65},
+            "reviewer not a string": {**good, "reviewer": 7},
+            "not an object": [good],
+            "invalid json": b"{not json",
+        }
+        for name, payload in bad.items():
+            with self.subTest(name):
+                resp, _ = self.post_undo(payload)
+                self.assertEqual(resp.status, 400)
+        self.assertEqual(self.get_json("/statuses?pass=1")["batch_001/a.jpg"], "DIRTY")
+
+    def test_undo_without_body_is_400(self):
+        resp, _, _ = self.request("POST", "/undo")
+        self.assertEqual(resp.status, 400)
+
+    def test_get_undo_is_404(self):
+        resp, _, _ = self.request("GET", "/undo")
+        self.assertEqual(resp.status, 404)
 
 
 class TestRemoteTarget(unittest.TestCase):

@@ -54,6 +54,15 @@ class MarkRequest:
     mode: MarkMode
 
 
+@dataclass(frozen=True)
+class UndoRequest:
+    pass_number: int
+    reviewer: str
+
+
+BODY_ROUTES = frozenset({"/mark", "/undo"})  # the POST routes, the only ones that take a body
+
+
 def parse_pass(raw: str | None) -> int:
     try:
         value = int(raw) if raw is not None else 0
@@ -64,13 +73,31 @@ def parse_pass(raw: str | None) -> int:
     return value
 
 
-def parse_mark(body: bytes, known_keys: frozenset[str]) -> MarkRequest:
+def _json_object(body: bytes) -> dict:
     try:
         data = json.loads(body)
     except (ValueError, RecursionError) as e:
         raise BadRequest("invalid JSON") from e
     if not isinstance(data, dict):
         raise BadRequest("body must be an object")
+    return data
+
+
+def _pass_field(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise BadRequest("pass must be an integer >= 1")
+    return value
+
+
+def _reviewer_field(value: object) -> str:
+    try:
+        return parse_reviewer(value)
+    except ValueError as e:
+        raise BadRequest(str(e)) from e
+
+
+def parse_mark(body: bytes, known_keys: frozenset[str]) -> MarkRequest:
+    data = _json_object(body)
     keys, status, pass_number, reviewer, mode = (data.get(k) for k in ("keys", "status", "pass", "reviewer", "mode"))
     if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
         raise BadRequest("keys must be a non-empty list of strings")
@@ -78,15 +105,16 @@ def parse_mark(body: bytes, known_keys: frozenset[str]) -> MarkRequest:
         raise BadRequest("unknown key")
     if status not in get_args(Verdict):
         raise BadRequest("status must be CLEAN or DIRTY")
-    if not isinstance(pass_number, int) or isinstance(pass_number, bool) or pass_number < 1:
-        raise BadRequest("pass must be an integer >= 1")
-    try:
-        reviewer = parse_reviewer(reviewer)
-    except ValueError as e:
-        raise BadRequest(str(e)) from e
+    pass_number = _pass_field(pass_number)
+    reviewer = _reviewer_field(reviewer)
     if mode not in get_args(MarkMode):
         raise BadRequest("mode must be single or grid")
     return MarkRequest(keys=keys, status=status, pass_number=pass_number, reviewer=reviewer, mode=mode)
+
+
+def parse_undo(body: bytes) -> UndoRequest:
+    data = _json_object(body)
+    return UndoRequest(pass_number=_pass_field(data.get("pass")), reviewer=_reviewer_field(data.get("reviewer")))
 
 
 def generate_cert(host: str) -> tuple[x509.Certificate, bytes]:
@@ -211,8 +239,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
             raise BadRequest("Transfer-Encoding not supported")
         url = urlsplit(self.path)
         query = parse_qs(url.query)
-        is_mark = method == "POST" and url.path == "/mark"
-        if not is_mark and not all(v.strip() == "0" for v in self.headers.get_all("Content-Length", [])):
+        has_body = method == "POST" and url.path in BODY_ROUTES
+        if not has_body and not all(v.strip() == "0" for v in self.headers.get_all("Content-Length", [])):
             raise BadRequest("unexpected request body")
         store, lock = self.server.store, self.server.store_lock
         if method == "GET" and url.path == "/version":
@@ -236,11 +264,16 @@ class ReviewHandler(BaseHTTPRequestHandler):
             with lock:
                 skipped = store.skipped()
             return json_reply(None if skipped is None else {"failed": skipped.failed, "ignored": skipped.ignored})
-        if is_mark:
-            req = self._read_mark()
+        if has_body and url.path == "/mark":
+            req = parse_mark(self._read_body(), self.server.known_keys)
             with lock:
                 changed = store.mark(req.keys, req.status, req.pass_number, reviewer=req.reviewer, mode=req.mode)
             return json_reply(changed)
+        if has_body and url.path == "/undo":
+            undo = parse_undo(self._read_body())
+            with lock:
+                changed = store.undo(undo.pass_number, reviewer=undo.reviewer)
+            return json_reply(changed)  # keys only, like /mark
         return Reply(404, close=True)
 
     def _image(self, query: dict[str, list[str]]) -> Reply:
@@ -253,7 +286,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             return Reply(404)
         return Reply(200, data, "image/jpeg")
 
-    def _read_mark(self) -> MarkRequest:
+    def _read_body(self) -> bytes:
         lengths = self.headers.get_all("Content-Length", [])
         try:
             length = int(lengths[0]) if len(lengths) == 1 else -1
@@ -261,7 +294,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             length = -1
         if not 0 <= length <= MAX_BODY_BYTES:
             raise BadRequest("missing, repeated or oversized Content-Length")
-        return parse_mark(self.rfile.read(length), self.server.known_keys)
+        return self.rfile.read(length)
 
     def do_GET(self) -> None:
         self._handle("GET")

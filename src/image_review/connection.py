@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 # Wire API version, shared by client and server. Any change to request/response
 # shapes or to the Status vocabulary must bump it.
-API_VERSION = 4
+API_VERSION = 5
 
 MAX_REVIEWER_LENGTH = 64
 

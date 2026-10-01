@@ -148,6 +148,7 @@ are shown one at a time for detailed inspection.
 |-----|--------|
 | `c` | Mark CLEAN |
 | `d` | Mark DIRTY |
+| `z` | Undo your last mark in this mode (also on the end-of-list screen) |
 | Left / Right | Navigate |
 | `n` | Jump to next todo item |
 | `u` | Toggle todo-only navigation |
@@ -163,6 +164,15 @@ are shown one at a time for detailed inspection.
 `c` and `d` are ignored for 200 ms after an image or grid appears, so a verdict
 only applies to an item you have seen.
 
+`z` undoes your most recent mark, a single image or a whole grid, and returns
+to that item so you can mark it again (after the same 200 ms). Pressing it again
+undoes the mark before that, and so on. Only marks you made in this session
+since the last mode switch (`s`, `m`, `M`) can be undone; beyond them `z` says
+"Nothing to undo". The history lives in memory only and is gone when you quit.
+After a lost connection `z` does nothing; only `q` works. An undo appends rows to `review.tsv`
+(`mode` `undo`) that restore each image's previous verdict and pass, or, for an
+image that had none, mark it `UNREVIEWED` again (a tombstone).
+
 The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
 orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
 verdict). Grids are built without DIRTY or FLAGGED images.
@@ -173,8 +183,10 @@ list of known batches.
 
 Every verdict is saved to `review.tsv` in the work directory with who gave it
 and how: the columns are `image_id`, `batch`, `status`, `pass_number`,
-`timestamp`, `reviewer`, `mode` (`single` or `grid`), `grid_size` (how many
-images the one keypress covered) and `tool_version`. `--reviewer NAME` (or
+`timestamp`, `reviewer`, `mode` (`single`, `grid`, or `undo` for a row written
+by `z`), `grid_size` (how many images the one keypress covered) and
+`tool_version`. `status` is `CLEAN` or `DIRTY`, or `UNREVIEWED` in an undo row
+that returns an image to never-reviewed. `--reviewer NAME` (or
 `$IMAGE_REVIEW_REVIEWER`) sets the reviewer name, by default your login name;
 it must be 1-64 printable characters, not all spaces (no tabs or newlines),
 else the command exits 2. The name is an unauthenticated claim made by the client, recorded as
@@ -182,7 +194,9 @@ given; nothing verifies it, also with `--remote`. A `review.tsv` from an older
 version (five columns) is upgraded in place the first time `review` or `serve`
 opens it, with the new columns left empty for its existing rows. Older
 image-review versions cannot read the upgraded file, so everyone sharing a
-work directory should upgrade together.
+work directory should upgrade together. Likewise, versions before wire API v5
+(before undo) reject a `review.tsv` that holds undo rows, so upgrade everyone
+sharing a work directory before anyone presses `z`.
 
 Xbox-style controllers are also supported (see help screen for mappings).
 

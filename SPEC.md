@@ -466,20 +466,20 @@ always used); the reader accepts `\n` too.
 |--------|-------------|
 | `image_id` | Matches `manifest.tsv` |
 | `batch` | Batch the image belongs to |
-| `status` | `CLEAN` or `DIRTY` |
-| `pass_number` | Integer pass (at least 1) in which this decision was made |
+| `status` | `CLEAN` or `DIRTY`; or `UNREVIEWED` in a tombstone (only with `mode` `undo`; see *Undo rows*) |
+| `pass_number` | Integer pass (at least 1) in which this decision was made (an undo row: the restored decision's pass) |
 | `timestamp` | ISO 8601 UTC timestamp |
 | `reviewer` | Who gave the verdict, as the client claims it (`review --reviewer`, default the login name); unauthenticated, recorded as given. Empty in migrated rows (and, in an old five-column file, absent) |
-| `mode` | `single` or `grid` (`review_db.MarkMode`): the display mode the verdict was given in. Empty in migrated rows |
-| `grid_size` | Integer >= 1: how many keys the one verdict covered (1 in single mode). Empty in migrated rows |
+| `mode` | `single` or `grid` (`review_db.MarkMode`): the display mode the verdict was given in; `undo` for a row written by an undo (`review_db.RowMode`). Empty in migrated rows |
+| `grid_size` | Integer >= 1: how many keys the one verdict covered (1 in single mode); in an undo row, how many `image_id`s the undo covered. Empty in migrated rows |
 | `tool_version` | `image-review` package version of the writing process (`connection.package_version()`, resolved once per process; `unknown` if not installed). Empty in migrated rows, and possibly cut short or empty in a kept torn last row (see below) |
 
 An `image_id` may repeat; its last row wins. Files written before the log format
 (one row per `image_id`) are already valid logs. The file is parsed strictly:
 it must be UTF-8, the header must be exactly these nine columns or the old first
 five, every row must have as many fields as the header, a `status` of `CLEAN` or
-`DIRTY`, an integer `pass_number` of at least 1, a non-empty `image_id`, a
-`mode` of `single`, `grid` or empty, and a `grid_size` that is empty or an
+`DIRTY` (or `UNREVIEWED` with `mode` `undo`; `FLAGGED` never), an integer `pass_number` of at least 1, a non-empty `image_id`, a
+`mode` of `single`, `grid`, `undo` or empty, and a `grid_size` that is empty or an
 integer of at least 1 (`reviewer` and `tool_version` are free text, possibly
 empty). A bad file stops the
 tool with `Cannot read work directory: <file>:<line>: <problem>` instead of
@@ -521,12 +521,25 @@ if the file's inode or size changed since the load. `ReviewDB` refuses to
 append to an old-header file that was not migrated, so the file never mixes
 five- and nine-field rows.
 
+**Undo rows.** An undo (`ReviewDB.undo_many`, see *`ReviewStore` Protocol*)
+appends, in one append, one row per `image_id` of the mark it undoes, each with
+`mode` `undo`, a new `timestamp`, the undoing `reviewer`, `grid_size` = the
+number of `image_id`s undone, and the current `tool_version`. Where the image
+had a decision before that mark, the row restores that decision's `batch`,
+`status` and `pass_number` exactly (the pass may be lower than the undone
+row's: a restore is exempt from the never-decreasing pass rule). Where it had
+none, the row is a **tombstone**: `status` `UNREVIEWED`, with the undone row's
+`batch` and `pass_number`. Folding the log drops an `image_id` whose last row
+is a tombstone, so it reads as never reviewed (`UNREVIEWED`, and unseen by
+`current_pass`) until it is marked again. image-review versions before undo
+(wire API v5) reject a file holding undo rows as malformed.
+
 Compatibility: image-review versions before this format cannot read a migrated
 (nine-column) `review.tsv`; teammates sharing a group work directory must all
 upgrade before any of them opens it with `review` or `serve`.
 
 Only images that have been explicitly marked appear in `review.tsv`. An image
-absent from `review.tsv` is implicitly `UNREVIEWED`. `FLAGGED` is derived when
+absent from `review.tsv`, or whose last row is a tombstone, is implicitly `UNREVIEWED`. `FLAGGED` is derived when
 reading (see *Pass Logic*) and is never written.
 
 ### `batch_NNN/img_NNNNN.jpg`
@@ -563,6 +576,7 @@ image preprocessed more than once); they share a review status.
 | `image_bytes_many(keys) -> dict[str, bytes]` | Bytes for the keys that loaded; missing or unloadable keys are omitted with a stderr warning |
 | `statuses(pass_number) -> dict[str, Status]` | Pass-aware status of every manifest key |
 | `mark(keys, status, pass_number, *, reviewer, mode) -> dict[str, Status]` | Record a verdict given by `reviewer` (an unauthenticated claim) in `mode` (`single` or `grid`); returns the new status of every key affected, including keys that share an `image_id` with a marked key |
+| `undo(pass_number, *, reviewer) -> dict[str, Status]` | Undo the latest mark not yet undone (one `mark` call: one image or a whole grid), restoring each of its images' decision from before it (see *Undo rows*); `reviewer` is checked and recorded like `mark`'s. Returns the new status, at `pass_number`, of every key affected, as `mark` does; `{}` when there is nothing to undo |
 | `current_pass() -> int` | Auto-detected pass number |
 | `close()`, `__enter__`, `__exit__` | Release what the store holds (`RemoteStore`: pool and connections; `LocalStore`: the work dir lock); idempotent. Stores are context managers that close on exit |
 | `skipped() -> SkippedCounts \| None` | Counts of `failed` and `ignored` rows in preprocess's `skipped.tsv` (frozen `SkippedCounts(failed, ignored)`); `None` if the file is absent; `ValueError` naming `file:line` if it is malformed |
@@ -572,11 +586,19 @@ image preprocessed more than once); they share a review status.
 Loads `manifest.tsv` (written once by `preprocess`, so before locking); a
 writable store then takes the work dir lock (see *Concurrency limits*) and
 loads a `ReviewDB` and calls its `migrate()` (see *`review.tsv`*), releasing the lock if either fails. `close()` releases it. A `read_only` store takes no lock and its
-`mark` raises `PermissionError` (as does `mark` after `close()`). `image_bytes` reads the file via
+`mark` and `undo` raise `PermissionError` (as they do after `close()`). `image_bytes` reads the file via
 `safe_path`; `image_bytes_many` loops over it, catching `KeyError`,
 `ValueError` (path escape) and `OSError`. `mark` translates each key to its
 `image_id` and its own manifest batch (a grid's keys need not share one) and
-calls `ReviewDB.mark_many`, so `grid_size` is the number of keys. `statuses` and `current_pass`
+calls `ReviewDB.mark_many`, so `grid_size` is the number of keys. After a
+successful `mark_many`, the rows it wrote and each image's decision from just
+before them (`review_db.Change(written, previous)`, `previous` `None` for an
+image with none) are pushed as one entry on the store's **undo stack**; `undo`
+writes the top entry's restore rows with `ReviewDB.undo_many` and pops it only
+once they are written (a failed undo can be retried). The stack is unbounded
+(one small entry per mark of the session). It is in memory
+only: it starts empty and is lost when the store is closed or the process ends,
+so only marks made since the store was opened can be undone. `statuses` and `current_pass`
 delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
 `skipped.tsv` strictly (header `image_id`, `kind`, `reason`; `kind` is `failed`
 or `ignored`) and returns only the counts.
@@ -596,7 +618,7 @@ or `ignored`) and returns only the counts.
 
 `ReviewSession(store, reviewer, mode, pass_number, batch, status_filter, allow_rotation)`:
 `reviewer` comes from `review --reviewer` (already checked) and is passed, with
-the session's current display mode, to every `store.mark()`.
+the session's current display mode, to every `store.mark()`, and to every `store.undo()`.
 
 1. Fetch `store.manifest()` (a list of `ManifestRow`)
 2. Determine the pass: `store.current_pass()` if not specified. The store's
@@ -626,7 +648,9 @@ image, marking, or restarting a mode is treated as a lost connection, not an
 unloadable image: autoplay and the pending auto-advance are cancelled, the
 status snapshot is left unchanged (a failed mark is not applied), the viewer
 shows "Lost connection to server - progress saved. Press q to quit." and the
-reason is printed to stderr. A failed mode restart clears the item list. Any
+reason is printed to stderr. The session is then `DISCONNECTED`: only `q`/Esc
+and closing the window do anything (no navigation, mode switch or `z` reaches
+the store again). A failed mode restart clears the item list. Any
 other exception while loading a single-mode image logs a warning and skips the
 image.
 
@@ -690,6 +714,7 @@ The session runs a pygame event loop processing:
 |-------|--------|
 | `c` key / Button 1 | Mark current item CLEAN |
 | `d` key / Button 3 | Mark current item DIRTY |
+| `z` key | Undo this session's latest mark since the mode started (see *Undo*); also on the end-of-list screen |
 | Right arrow / Hat right | Next item |
 | Left arrow / Hat left | Previous item |
 | Space | Toggle autoplay (500ms auto-advance) |
@@ -723,9 +748,9 @@ the help, display-select or message screens.
 set, to minimize CPU usage, and only while reviewing: the splash, help,
 display-select and message screens ("End of list", "No items for grid mode",
 "Lost connection to server ...") are painted once by the viewer and stay until
-the state changes. When there are no items (an empty mode, or a lost connection
-during a mode restart), the navigation keys leave the message up; only `q`/Esc,
-`s`, `m` and `M` act.
+the state changes. When there are no items (an empty mode), the navigation keys
+leave the message up; only `q`/Esc, `s`, `m`, `M` and `z` act. On the lost
+connection screen only `q`/Esc act (see *Store Failures*).
 
 **Verdicts need a seen item.** A verdict (`c`/`d`, Button 1/3) applies only to
 an item that has been painted and on screen for `MIN_DWELL_MS` (200 ms);
@@ -741,6 +766,29 @@ appearing, never judges an item the reviewer has not seen. All keyboard and
 gamepad button events queued during a blocking step (a grid build or mode
 restart) are also discarded with `pg.event.clear`, including `q`/Esc and the
 arrows. `_mark` itself is not gated.
+
+### Undo
+
+`z` (on the review screen, in single and grid mode, and on the "End of list"
+and other message screens, but not the lost connection screen) first cancels
+autoplay and a pending post-mark advance. The session counts its own
+successful marks since the current mode started (`_undoable`: reset by every
+mode restart, +1 per successful mark, -1 per successful undo). At 0, `z` says
+"Nothing to undo" without calling the store, so it only ever undoes a mark made
+on one of this mode's items. Otherwise it calls `store.undo(pass,
+reviewer=...)`; a `StoreUnavailable` is a lost connection, as for a mark, and a
+`{}` result (the store's history is gone) resets the count and says "Nothing to
+undo". The returned statuses update the snapshot and the todo count. The cursor
+moves to the first item, in this mode's item order, holding any returned key,
+the review screen is shown for it, and its dwell starts again, so `c`/`d` count
+only once the restored item has been on screen for `MIN_DWELL_MS`. Items are
+not rebuilt: grid membership is fixed when the mode starts, and an undone
+grid's keys are still in it. Only another client's mark on a shared server (out
+of scope, see *Concurrency limits*) can leave no item holding a returned key;
+the status bar then names up to three of its keys with their new status. `z`
+is not dwell-gated: it only undoes a mark on an item this mode showed, and
+shows that item again before any verdict counts. Key repeat stays off
+(pygame's default), so a held `z` undoes one mark.
 
 ## Grid Packer (`grid_packer.py`)
 
@@ -815,10 +863,10 @@ In-memory dict keyed by `image_id`, backed by `review.tsv` on disk.
 Used only through `LocalStore`, which is the one place that maps keys to
 `image_id`s.
 
-**Persistence**: Every mutation (`mark`, `mark_many`) appends its rows to
+**Persistence**: Every mutation (`mark`, `mark_many`, `undo_many`) appends its rows to
 `review.tsv` as one buffer (written in a loop that handles short writes),
 `fsync`s, and only then updates the in-memory dict; a failed append leaves the
-dict unchanged and its partial bytes are cut off. Loading folds the log (last row per `image_id` wins). Safe to kill the
+dict unchanged and its partial bytes are cut off. Loading folds the log (last row per `image_id` wins; a tombstone removes the `image_id`). Safe to kill the
 process at any point: a torn append is ignored on load and dropped by the next mark (see
 *`review.tsv`*). A kill during migration leaves `review.tsv` either old or
 migrated, but may leave a `.review.tsv.*.tmp` behind; it is ignored by the
@@ -830,7 +878,8 @@ by hand.
 | Method | Description |
 |--------|-------------|
 | `mark(image_id, batch, status, pass_number, *, reviewer, mode)` | Record a single review decision |
-| `mark_many(targets, status, pass_number, *, reviewer, mode)` | Record one verdict on every `(image_id, batch)` in `targets` (same timestamp; `grid_size` = `len(targets)`; `tool_version` = `package_version()`) |
+| `mark_many(targets, status, pass_number, *, reviewer, mode) -> list[Change]` | Record one verdict on every `(image_id, batch)` in `targets` (same timestamp; `grid_size` = `len(targets)`; `tool_version` = `package_version()`); returns each row written with the decision it replaced |
+| `undo_many(changes, *, reviewer)` | Append the undo rows for one `mark_many` result in one append (see *Undo rows*); an `image_id` listed twice (keys sharing it) gets one row |
 | `migrate()` | Rewrite an old five-column file with the current header, once (see *`review.tsv`*); no-op otherwise |
 | `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*) |
 | `current_pass(image_ids) -> int` | Auto-detect pass number |
@@ -907,7 +956,7 @@ closed (any request body is left unread).
 ### Endpoints
 
 All responses are JSON unless noted. Requests are parsed into typed values at
-the boundary (`parse_pass`, `parse_mark`).
+the boundary (`parse_pass`, `parse_mark`, `parse_undo`).
 
 | Request | Response |
 |---------|----------|
@@ -918,14 +967,15 @@ the boundary (`parse_pass`, `parse_mark`).
 | `GET /current_pass` | `{"pass": N}` |
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`), or `null` if the work dir has no `skipped.tsv`. Only counts are sent, never `image_id`s or reasons (which contain source paths) |
 | `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
+| `POST /undo` | Body `{"pass": N, "reviewer": str}`, checked as for `/mark`; other fields are ignored. Undoes the server store's latest mark (`ReviewStore.undo`); responds `{key: status, ...}` for every key affected, or `{}` when there is nothing to undo |
 
 Only keys and skip counts appear on the wire; original `image_id`s never do.
 
-**API version rule.** `connection.API_VERSION` (an integer, currently 4; v2 added `GET /skipped`;
+**API version rule.** `connection.API_VERSION` (an integer, currently 5; v2 added `GET /skipped`;
 v3 added `FLAGGED` to the `Status` vocabulary, which `/statuses` responses
 may contain; `/mark` responses hold only the verdict just recorded; v4 dropped
 `batch` from the `/mark` body, the server taking each key's batch from the
-manifest, and added `reviewer` and `mode`) is
+manifest, and added `reviewer` and `mode`; v5 added `POST /undo`) is
 shared by client and server. Any change to request or response shapes, or to
 the `Status` vocabulary, must bump it. Client and server are installed
 separately, so skew is expected and must fail clearly rather than as a
@@ -935,7 +985,7 @@ malformed reply or a 404.
 
 | Status | Cause |
 |--------|-------|
-| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark`; `/image` without exactly one `key`; invalid `pass`; `/mark` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a missing or invalid `reviewer`, a `mode` other than single/grid |
+| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo`; `/image` without exactly one `key`; invalid `pass`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid |
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 500 | Any unexpected store failure; only the exception class name is logged |
@@ -1011,11 +1061,14 @@ therefore holds `work_dir/review.lock`:
   SIGHUP (lost terminal or ssh session) into `KeyboardInterrupt` while the store
   is open.
 
-The server additionally assumes one reviewer per server.
+The server additionally assumes one reviewer per server. Its undo stack is
+one, in the server's store, shared by every client: if several clients use one
+server, `z` in one undoes the latest mark from any of them. Serving several
+clients at once is out of scope.
 
 ### Locking
 
-Manifest, statuses, current-pass and mark calls run under a single store lock
+Manifest, statuses, current-pass, mark and undo calls run under a single store lock
 (`ReviewDB` is not thread-safe). `/image` does not take it (read-only file
 access), and the lock is never held while writing to the network.
 
@@ -1057,6 +1110,12 @@ fails with a stale-connection error (connection reset/remote disconnect,
 broken pipe, SSL EOF/zero return, `CannotSendRequest`, `ResponseNotReady`),
 the connection is closed and the request retried once on a fresh one; a
 second failure raises `RemoteError("connection lost: ...")`. Timeout is 30 s.
+A retried `/mark` whose first attempt was applied (its reply lost) is applied
+twice; the store's undo stack then holds two entries for it, so the first `z`
+restores the identical verdict and nothing visibly changes. `POST /undo` is not
+idempotent, so it is never retried: it is sent once on a fresh connection (the
+thread's connection is closed first, so the request reconnects and re-checks
+the pin), and any transport error raises `RemoteError`.
 Any other `OSError` or `HTTPException` raises `RemoteError` immediately.
 
 **Error mapping**: `RemoteError(StoreUnavailable)` carries `status`, the HTTP

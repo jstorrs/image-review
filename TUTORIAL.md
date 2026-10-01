@@ -243,6 +243,7 @@ The viewer accepts keyboard and gamepad input:
 |--------|-----|---------|
 | Mark CLEAN | `c` | Button 1 |
 | Mark DIRTY | `d` | Button 3 |
+| Undo your last mark in this mode | `z` | -- |
 | Next image | `Right` | Hat right |
 | Previous image | `Left` | Hat left |
 | Next todo item | `n` | -- |
@@ -268,6 +269,15 @@ fatigue. A verdict (`c`/`d` or gamepad Button 1/3) only counts once the image
 or grid has been on screen for 200ms: one pressed sooner is ignored, so press
 it again once you have looked. Every key and button pressed while grids are
 being computed is dropped, including `q`/`Esc` and the arrows.
+
+Pressed the wrong key? `z` undoes your most recent mark, whether it was one
+image or a whole grid, and takes you back to that item to mark it again (the
+200ms wait applies again). Press `z` repeatedly to step further back. It also
+works on the "End of list" screen, so you can undo the last mark of a batch.
+`z` only undoes marks you made in this session since the last mode switch
+(`s`, `m` or `M`); past those it says "Nothing to undo". The history is kept in
+memory and is gone once the program exits. After "Lost connection to server",
+`z` and the other keys do nothing; press `q`.
 
 ### Multi-Pass Workflow
 
@@ -482,7 +492,8 @@ This assumes your home directory is shared between the login and compute nodes.
 
 Stop the server with Ctrl-C, `scancel`, or by letting the allocation end.
 Progress is saved on the server at every mark. If the connection drops, the
-viewer shows "Lost connection to server - progress saved"; press `q`, then
+viewer shows "Lost connection to server - progress saved" and ignores every
+key but `q`/`Esc`; press `q`, then
 reconnect with the same string while the server is still running.
 
 ### Security Model and Limitations
@@ -598,11 +609,16 @@ or empty.
 Each line also records who rated and how: `reviewer` (the `--reviewer` name,
 the client's own unverified claim), `mode` (`single` or `grid`), `grid_size`
 (how many images one keypress rated; 1 in single mode) and `tool_version` (the
-image-review version that wrote it). A `review.tsv` written by an older
+image-review version that wrote it). An undo (`z`) appends lines with `mode`
+`undo`: each restores an image's previous status and pass number exactly, or,
+for an image that had no earlier rating, has status `UNREVIEWED`, which makes
+the image count as never reviewed again. A `review.tsv` written by an older
 version has only the first five columns; `review` or `serve` upgrades it once,
 leaving the new columns empty for the old lines, while `status` reads it as is.
 Older image-review versions cannot read the upgraded file, so upgrade everyone
-sharing a work directory together. If the upgrade is interrupted, a
+sharing a work directory together. Versions before wire API v5 (before undo)
+also reject a `review.tsv` holding undo lines, so upgrade everyone before
+anyone uses `z`. If the upgrade is interrupted, a
 `.review.tsv.*.tmp` file may be left in the work directory: the tool ignores
 it, but it contains source paths, so delete it.
 

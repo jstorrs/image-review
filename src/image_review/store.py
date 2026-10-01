@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Protocol, Self, get_args
 
 from .access import policy_of_dir
-from .review_db import MarkMode, ReviewDB
+from .review_db import Change, MarkMode, ReviewDB
 from .status import TODO_STATUSES, Status, Verdict
 
 __all__ = ["TODO_STATUSES", "MarkMode", "Status", "Verdict"]  # re-exported for callers that import them from here
@@ -75,6 +75,14 @@ class ReviewStore(Protocol):
         """Record a verdict on keys, given by `reviewer` (an unauthenticated claim) in `mode`.
 
         Returns the new status of every key affected (incl. keys sharing an image_id).
+        """
+        ...
+
+    def undo(self, pass_number: int, *, reviewer: str) -> dict[str, Status]:
+        """Undo the latest mark not yet undone, restoring each image's decision from before it; `reviewer` is recorded.
+
+        Returns the new status of every key affected, as mark does; {} when there is nothing to undo. The marks
+        that can be undone are the store's (the server's, for a remote store), held in memory since it was opened.
         """
         ...
 
@@ -362,7 +370,10 @@ def load_skipped_counts(work_dir: Path) -> SkippedCounts | None:
 
 class LocalStore:
     """The work directory itself. Writable (the default) holds work_dir/review.lock until close();
-    read_only takes no lock and refuses mark."""
+    read_only takes no lock and refuses mark and undo.
+
+    The undo stack holds this process's marks in memory only: it is lost when the store is closed or the process
+    ends, and a server's stack is shared by every client it serves."""
 
     def __init__(self, work_dir: Path, read_only: bool = False):
         self.work_dir = work_dir
@@ -376,6 +387,7 @@ class LocalStore:
             self._keys_by_image_id.setdefault(iid, []).append(key)
         # Lock before loading review.tsv, so the state loaded is not one another writer is about to overwrite.
         self._lock: LockHolder | None = None if read_only else acquire_lock(work_dir)
+        self._undo: list[list[Change]] = []  # one entry per mark, latest last
         try:
             self._db = ReviewDB(work_dir)
             if not read_only:
@@ -415,17 +427,34 @@ class LocalStore:
     def statuses(self, pass_number: int) -> dict[str, Status]:
         return {key: self._db.get_status(iid, pass_number) for key, iid in self._image_ids.items()}
 
-    def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
+    def _require_writable(self) -> None:
         if self._lock is None:
             state = "opened read-only" if self.read_only else "closed"
             raise PermissionError(f"store for {self.work_dir} was {state}; cannot record verdicts")
-        image_ids = [self._image_ids[key] for key in keys]
-        self._db.mark_many([(self._image_ids[k], self._batches[k]) for k in keys], status, pass_number, reviewer=reviewer, mode=mode)
+
+    def _affected(self, image_ids: list[str], pass_number: int) -> dict[str, Status]:
+        """The status of every key of these image_ids, in their order."""
         return {
             k: self._db.get_status(iid, pass_number)
             for iid in dict.fromkeys(image_ids)
             for k in self._keys_by_image_id[iid]
         }
+
+    def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
+        self._require_writable()
+        image_ids = [self._image_ids[key] for key in keys]
+        changes = self._db.mark_many([(self._image_ids[k], self._batches[k]) for k in keys], status, pass_number, reviewer=reviewer, mode=mode)
+        self._undo.append(changes)  # only once written
+        return self._affected(image_ids, pass_number)
+
+    def undo(self, pass_number: int, *, reviewer: str) -> dict[str, Status]:
+        self._require_writable()
+        if not self._undo:
+            return {}
+        changes = self._undo[-1]
+        self._db.undo_many(changes, reviewer=reviewer)
+        self._undo.pop()  # only once written: a failed undo can be retried
+        return self._affected([c.written.image_id for c in changes], pass_number)
 
     def current_pass(self) -> int:
         return self._db.current_pass(self._image_ids.values())

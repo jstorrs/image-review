@@ -37,6 +37,7 @@ def _dwell_elapsed(shown_at: int | None, now: int) -> bool:
 # DIRTY (this pass) or FLAGGED (DIRTY in another pass): one keypress must never clear those.
 GRID_ELIGIBLE: frozenset[Status] = frozenset({"UNREVIEWED", "CLEAN"})
 GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in single mode"
+NOTHING_TO_UNDO = "Nothing to undo"
 
 
 def _grid_status(snapshot: dict[str, Status], keys: list[str]) -> str:
@@ -59,6 +60,7 @@ class UIState(Enum):
     SPLASH = auto()
     REVIEWING = auto()
     END_MESSAGE = auto()
+    DISCONNECTED = auto()  # the store was lost: only quitting is possible
 
 
 class ReviewSession:
@@ -93,6 +95,7 @@ class ReviewSession:
         self._shown_at: int | None = None  # ticks when the current item was first painted
         self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
         self._todo_only = False
+        self._undoable = 0  # this session's marks since the current mode started, less those undone
 
         self._viewer = ImageViewer()
         self._joysticks = {}
@@ -113,7 +116,7 @@ class ReviewSession:
         self._stop_timers()
         print(f"Lost connection to server: {exc}. Progress up to the last mark is saved on the server.", file=sys.stderr)
         self._viewer.show_message("Lost connection to server - progress saved. Press q to quit.")
-        self._ui_state = UIState.END_MESSAGE
+        self._ui_state = UIState.DISCONNECTED
 
     def _stop_autoplay(self):
         self.autoplay = False
@@ -219,6 +222,7 @@ class ReviewSession:
         self._stop_timers()
         self.mode = new_mode
         self._cursor = -1
+        self._undoable = 0  # z only undoes marks it can show; the old mode's items are gone
         self._shown_at = None
         self._dirty = True
         try:
@@ -366,12 +370,52 @@ class ReviewSession:
         except StoreUnavailable as exc:
             self._store_lost(exc)
             return
+        self._undoable += 1
         self._statuses.update(changed)
         self._todo_count = self._count_todo()
         self._viewer.set_status(status)
         self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
         self._advance_pending = True
+
+    def _item_keys(self, item: ManifestRow | dict) -> list[str]:
+        return item["keys"] if self.mode == "grid" else [item.key]
+
+    def _notify(self, text: str):
+        """Show text in the info bar while reviewing, else as the screen's message."""
+        if self._ui_state == UIState.REVIEWING:
+            self._viewer.set_info(text)
+            self._dirty = True
+        else:
+            self._viewer.show_message(text)
+
+    def _undo(self):
+        """Undo this mode's latest mark and show the item holding its keys, for a fresh dwell."""
+        self._stop_timers()
+        if not self._undoable:  # never undo a mark this mode did not make (and so may not be able to show)
+            self._notify(NOTHING_TO_UNDO)
+            return
+        try:
+            changed = self.store.undo(self.pass_number, reviewer=self.reviewer)
+        except StoreUnavailable as exc:
+            self._store_lost(exc)
+            return
+        if not changed:  # the store's history is gone (e.g. a restarted server)
+            self._undoable = 0
+            self._notify(NOTHING_TO_UNDO)
+            return
+        self._undoable -= 1
+        self._statuses.update(changed)
+        self._todo_count = self._count_todo()
+        index = next((i for i, item in enumerate(self._items) if any(k in changed for k in self._item_keys(item))), None)
+        if index is None:  # another client's mark on a shared server
+            shown = ", ".join(f"{k} {v}" for k, v in list(changed.items())[:3])
+            more = f" and {len(changed) - 3} more" if len(changed) > 3 else ""
+            self._notify(f"Undid a mark not in this view: {shown}{more}")
+            return
+        self._cursor = index
+        self._ui_state = UIState.REVIEWING  # also from the end-of-list screen, to undo the batch's last mark
+        self._show_current()  # resets the dwell: c/d count only once the restored item has been seen
 
     def _verdict_input(self, status: Verdict, now: int):
         """A verdict key or button at tick `now`: stops autoplay, and marks only an item on screen
@@ -437,6 +481,8 @@ class ReviewSession:
                 self._switch_to_grid(True)
         elif key == pg.K_s:
             self._switch_to_single()
+        elif key == pg.K_z:
+            self._undo()
         return False
 
     def _handle_review_key(self, key, now: int) -> bool:
@@ -448,6 +494,8 @@ class ReviewSession:
                 self._verdict_input("CLEAN", now)
             case pg.K_d:
                 self._verdict_input("DIRTY", now)
+            case pg.K_z:
+                self._undo()
             case pg.K_w:
                 self._display_select = True
                 self._pre_display_index = self._viewer._display_index
@@ -533,6 +581,8 @@ class ReviewSession:
                         self.next_image()
             case pg.KEYDOWN:
                 match self._ui_state:
+                    case UIState.DISCONNECTED:
+                        return event.key in (pg.K_ESCAPE, pg.K_q)
                     case UIState.END_MESSAGE:
                         return self._handle_end_key(event.key)
                     case UIState.SPLASH:
