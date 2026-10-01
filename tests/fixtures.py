@@ -51,6 +51,19 @@ def write_dicom(path: Path, pixels: np.ndarray, photometric: str = "MONOCHROME2"
         ds.save_as(path, implicit_vr=True, little_endian=True)
 
 
+def add_overlay(ds: pydicom.Dataset, mask: np.ndarray, origin: tuple[int, int] = (1, 1), group: int = 0x6000) -> None:
+    """Add a bitmap overlay plane for the boolean `mask` at OverlayOrigin `origin` (1-based row, column)."""
+    rows, cols = mask.shape
+    packed = np.packbits(mask.ravel().astype(np.uint8), bitorder="little").tobytes()
+    ds.add_new((group, 0x0010), "US", rows)
+    ds.add_new((group, 0x0011), "US", cols)
+    ds.add_new((group, 0x0040), "CS", "G")
+    ds.add_new((group, 0x0050), "SS", list(origin))
+    ds.add_new((group, 0x0100), "US", 1)
+    ds.add_new((group, 0x0102), "US", 0)
+    ds.add_new((group, 0x3000), "OW", packed + b"\x00" * (len(packed) % 2))
+
+
 def start_server(work_dir: Path, port: int = 0):
     """Serve work_dir on 127.0.0.1 in a thread; returns (server, target, stop)."""
     import threading

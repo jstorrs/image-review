@@ -59,7 +59,9 @@ target, so pass that target as a SOURCE if you want it. The work directory is
 never read as input. DICOM images are
 normalized with adaptive histogram equalization to enhance local contrast
 and a configurable colormap; single-frame colour and palette DICOMs are shown
-as they are. Non-DICOM images are converted to RGB, with the same
+as they are. DICOM overlay planes are drawn at maximum brightness, and an
+embedded icon image becomes an extra manifest row whose image id ends in
+`#icon`. Non-DICOM images are converted to RGB, with the same
 contrast enhancement applied to grayscale. Transparent images are shown as
 the composite over mid-gray beside the raw channels with alpha ignored, and
 MPO JPEGs (HDR gain maps, previews) show all their frames side by side.

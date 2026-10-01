@@ -19,6 +19,7 @@ import numpy as np
 import pydicom
 import skimage as ski
 from PIL import Image
+from pydicom.dataset import FileMetaDataset
 from pydicom.errors import InvalidDicomError
 from pydicom.uid import (
     UID,
@@ -58,6 +59,11 @@ _RASTER_MAGIC = (
 )
 _BMP_DIB_HEADER_SIZES = {12, 40, 52, 56, 64, 108, 124}
 _PNM_TYPES = {b"P1", b"P2", b"P3", b"P4", b"P5", b"P6"}
+_OVERLAY_FIRST_GROUP = 0x6000
+_OVERLAY_LAST_GROUP = 0x601E
+_OVERLAY_DATA_ELEMENT = 0x3000
+_OVERLAY_ORIGIN_ELEMENT = 0x0050
+ICON_SUFFIX = "#icon"
 _DICOM_SUFFIXES = {".dcm", ".dicom", ".ima"}
 _RASTER_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".webp",
@@ -218,14 +224,47 @@ def _to_uint8(pixels: np.ndarray, bits: int) -> np.ndarray:
     return np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
 
 
-def _gray_dicom(pixels: np.ndarray, photometric: str) -> np.ndarray:
-    """Float [0, 1] image from MONOCHROME1/2 pixels: tail compression, crop, CLAHE, crop."""
+def _overlay_mask(dcm: pydicom.FileDataset, shape: tuple[int, int]) -> np.ndarray | None:
+    """Union of the overlay planes (groups 0x6000-0x601E with OverlayData) as a bool mask of `shape`.
+
+    Each plane is placed at its OverlayOrigin (1-based row, column; default 1, 1)
+    and clipped to the image. None when there are no overlays. A plane that
+    cannot be decoded raises ValueError naming its group.
+    """
+    mask = np.zeros(shape, dtype=bool)
+    found = False
+    for group in range(_OVERLAY_FIRST_GROUP, _OVERLAY_LAST_GROUP + 1, 2):
+        if (group, _OVERLAY_DATA_ELEMENT) not in dcm:
+            continue
+        found = True
+        try:
+            plane = dcm.overlay_array(group)
+            if plane.ndim != 2:
+                raise ValueError(f"overlay array with shape {plane.shape}")
+            row0, col0 = (int(v) - 1 for v in dcm.get((group, _OVERLAY_ORIGIN_ELEMENT), [1, 1]))
+        except Exception as exc:
+            raise ValueError(f"overlay 0x{group:04X} cannot be decoded: {exc}") from exc
+        top, left = max(row0, 0), max(col0, 0)
+        bottom, right = min(row0 + plane.shape[0], shape[0]), min(col0 + plane.shape[1], shape[1])
+        if top < bottom and left < right:
+            mask[top:bottom, left:right] |= plane[top - row0 : bottom - row0, left - col0 : right - col0].astype(bool)
+    return mask if found else None
+
+
+def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray | None = None) -> np.ndarray:
+    """Float [0, 1] image from MONOCHROME1/2 pixels: tail compression, overlay, crop, CLAHE, crop.
+
+    Overlay pixels are set to 1.0 after intensity mapping, so they come out at the top of the range.
+    """
     img = pixels.astype(np.float32)
     if photometric == "MONOCHROME1":
         img = -img
-    if img.min() >= img.max():
-        return _crop(np.zeros_like(img))
-    img = _compress_tails(img)
+    constant = img.min() >= img.max()
+    img = np.zeros_like(img) if constant else _compress_tails(img)
+    if overlay is not None:
+        img[overlay] = 1.0
+    if constant:
+        return _crop(img)
     img = _crop(img)
     img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
     return _crop(img)
@@ -244,7 +283,10 @@ def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> np.ndarray:
 
 
 def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.ndarray:
-    """Render a single-frame DICOM to (H, W, 3) uint8: grayscale through `colormap`, colour as is."""
+    """Render a single-frame DICOM to (H, W, 3) uint8: grayscale through `colormap`, colour as is.
+
+    Overlay planes are drawn at maximum brightness.
+    """
     if not _has_pixel_data(dcm):
         sop_class = _sop_class(dcm)
         if sop_class == MediaStorageDirectoryStorage:
@@ -259,9 +301,13 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
             pixels = dcm.pixel_array
             if pixels.ndim != 2:
                 raise Unsupported(f"pixel array with shape {pixels.shape}")
-            return apply_colormap(_gray_dicom(pixels, photometric), colormap)
+            return apply_colormap(_gray_dicom(pixels, photometric, _overlay_mask(dcm, pixels.shape)), colormap)
         case "RGB" | "PALETTE COLOR" | "YBR_FULL" | "YBR_FULL_422" | "YBR_PARTIAL_420" | "YBR_PARTIAL_422" | "YBR_ICT" | "YBR_RCT":
-            return _crop(_colour_dicom(dcm, photometric))
+            rgb = _colour_dicom(dcm, photometric)
+            overlay = _overlay_mask(dcm, rgb.shape[:2])
+            if overlay is not None:
+                rgb[overlay] = 255
+            return _crop(rgb)
         case _:
             raise Unsupported(f"photometric interpretation {photometric}")
 
@@ -391,14 +437,36 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
     return dcm
 
 
-def render(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Rendered]:
+def _render_icon(dcm: pydicom.FileDataset, image_id: str, colormap: str) -> Rendered | Skipped | None:
+    """The embedded IconImageSequence thumbnail (item 0) as its own row, or None when there is none."""
+    icons = dcm.get("IconImageSequence")
+    if not icons:
+        return None
+    icon_id = f"{image_id}{ICON_SUFFIX}"
+    try:
+        icon = icons[0]
+        # icon pixels are always uncompressed, in the byte order of the enclosing dataset
+        big_endian = dcm.file_meta.get("TransferSyntaxUID") == ExplicitVRBigEndian
+        icon.file_meta = FileMetaDataset()
+        icon.file_meta.TransferSyntaxUID = ExplicitVRBigEndian if big_endian else ExplicitVRLittleEndian
+        return Rendered(icon_id, preprocess_dicom(icon, colormap))
+    except Exception as exc:  # noqa: BLE001 - a bad icon must not lose the main image; it is recorded as its own failed row
+        return _failed(icon_id, exc)
+
+
+def render(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Rendered | Skipped]:
+    """Render one input: its image, plus (DICOM) an `{image_id}#icon` row for an embedded icon image.
+
+    A failure of the main image raises; a failure of the icon is returned as a `Skipped` row.
+    """
     match kind:
         case "dicom":
             dcm = read_dicom(data)
-            rgb = preprocess_dicom(dcm, colormap)
+            rendered: list[Rendered | Skipped] = [Rendered(image_id, preprocess_dicom(dcm, colormap))]
+            icon = _render_icon(dcm, image_id, colormap)
+            return rendered if icon is None else [*rendered, icon]
         case "raster":
-            rgb = preprocess_raster(decode_raster(data))
-    return [Rendered(image_id, rgb)]
+            return [Rendered(image_id, preprocess_raster(decode_raster(data)))]
 
 
 # ---------------------------------------------------------------- discovery (IO)
@@ -593,17 +661,21 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
     return iio.imwrite("<bytes>", rgb, extension=".jpg")
 
 
-def _process(candidate: Candidate, colormap: str) -> list[tuple[str, bytes]] | Skipped:
-    """Read, render and JPEG-encode one input; any failure here is that input's failure."""
+def _process(candidate: Candidate, colormap: str) -> list[tuple[str, bytes] | Skipped]:
+    """Read, render and JPEG-encode one input into its output rows: encoded images and skipped parts.
+
+    A failure of the input itself is a single `Skipped`; an embedded icon that fails is a `Skipped`
+    beside the main image.
+    """
     try:
         rendered = render(candidate.kind, candidate.image_id, candidate.read(), colormap)
-        encoded = [(r.image_id, encode_jpeg(r.rgb)) for r in rendered]
+        encoded = [r if isinstance(r, Skipped) else (r.image_id, encode_jpeg(r.rgb)) for r in rendered]
     except NotAnImage as exc:
-        return Skipped(candidate.image_id, "ignored", _clean_reason(str(exc)))
+        return [Skipped(candidate.image_id, "ignored", _clean_reason(str(exc)))]
     except Exception as exc:  # noqa: BLE001 - one bad input must not abort the run; it is recorded in skipped.tsv
-        return _failed(candidate.image_id, exc)
+        return [_failed(candidate.image_id, exc)]
     if not encoded:
-        return Skipped(candidate.image_id, "failed", "rendered no images")
+        return [Skipped(candidate.image_id, "failed", "rendered no images")]
     return encoded
 
 
@@ -697,13 +769,14 @@ def _render_into(
 
     for item in discover(sources, exclude):
         found += 1
-        outcome = _process(item, colormap) if isinstance(item, Candidate) else item
-        if isinstance(outcome, Skipped):
-            if outcome.kind == "failed":
-                tqdm.write(f"WARNING: skipping {outcome.image_id}: {outcome.reason}", file=sys.stderr)
-            skipped.append(outcome)
-            continue
-        for image_id, jpeg in outcome:
+        outcome = _process(item, colormap) if isinstance(item, Candidate) else [item]
+        for part in outcome:
+            if isinstance(part, Skipped):
+                if part.kind == "failed":
+                    tqdm.write(f"WARNING: skipping {part.image_id}: {part.reason}", file=sys.stderr)
+                skipped.append(part)
+                continue
+            image_id, jpeg = part
             n = len(manifest_rows)
             batch_id = f"batch_{n // batch_size + 1:03d}"
             batch_dir = output_dir / batch_id

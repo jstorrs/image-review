@@ -16,7 +16,7 @@ import numpy as np
 import pydicom
 import skimage as ski
 from click.testing import CliRunner
-from fixtures import write_dicom
+from fixtures import add_overlay, write_dicom
 from PIL import Image
 from pydicom.data import get_testdata_file
 from pydicom.dataset import FileMetaDataset
@@ -806,6 +806,106 @@ class RenderTest(unittest.TestCase):
             path = Path(tmp) / "x.dcm"
             write_dicom(path, pixels, photometric)
             return path.read_bytes()
+
+    def with_elements(self, pixels: np.ndarray, photometric: str = "MONOCHROME2", edit=lambda ds: None) -> bytes:
+        ds = pydicom.dcmread(io.BytesIO(self.dicom_bytes(pixels, photometric)))
+        edit(ds)
+        buf = io.BytesIO()
+        ds.save_as(buf, enforce_file_format=True)
+        return buf.getvalue()
+
+    def test_overlay_is_drawn_at_its_origin(self):
+        pixels = RNG.integers(0, 1001, (200, 200)).astype(np.uint16)  # noise: nothing is cropped
+        block = np.ones((5, 8), dtype=bool)
+        data = self.with_elements(pixels, edit=lambda ds: add_overlay(ds, block, origin=(10, 20)))
+        [out, *rest] = render("dicom", "id", data, "gray")
+        self.assertEqual(rest, [])
+        self.assertEqual(out.rgb.shape, (200, 200, 3))
+        self.assertGreaterEqual(out.rgb[9:14, 19:27].min(), 250)  # 1-based (10, 20) is zero-based (9, 19)
+        self.assertLess(out.rgb[8, 19:27].mean(), 250)
+        self.assertLess(out.rgb[9:14, 18].mean(), 250)
+
+    def test_overlay_is_clipped_to_the_image(self):
+        pixels = RNG.integers(0, 1001, (50, 60)).astype(np.uint16)
+        block = np.ones((20, 20), dtype=bool)
+        data = self.with_elements(pixels, edit=lambda ds: add_overlay(ds, block, origin=(40, 50)))
+        [out] = render("dicom", "id", data, "gray")
+        self.assertEqual(out.rgb.shape, (50, 60, 3))
+        self.assertGreaterEqual(out.rgb[39:, 49:].min(), 250)
+
+    def test_overlay_is_drawn_on_colour_images(self):
+        pixels = RNG.integers(0, 200, (60, 80, 3)).astype(np.uint8)
+        block = np.ones((4, 4), dtype=bool)
+        data = self.with_elements(pixels, "RGB", lambda ds: add_overlay(ds, block, origin=(5, 6)))
+        [out] = render("dicom", "id", data, "inferno")
+        self.assertTrue((out.rgb[4:8, 5:9] == 255).all())
+
+    def test_undecodable_overlay_fails_the_file_naming_the_group(self):
+        def edit(ds):
+            add_overlay(ds, np.ones((8, 8), dtype=bool), group=0x6002)
+            ds[0x6002, 0x3000].value = b"\x00\x00"  # far too short for 8x8 bits
+        data = self.with_elements(_good_pixels(), edit=edit)
+        with self.assertRaisesRegex(ValueError, r"overlay 0x6002 cannot be decoded"):
+            render("dicom", "id", data, "gray")
+
+    def test_bundled_overlay_and_icon_are_rendered(self):
+        path = get_testdata_file("examples_overlay.dcm", download=False)
+        if path is None:
+            self.skipTest("examples_overlay.dcm not bundled")
+        data = Path(path).read_bytes()
+
+        def strip(ds):
+            for tag in [e.tag for e in ds if 0x6000 <= e.tag.group <= 0x601E]:
+                del ds[tag]
+
+        bare = self.with_elements_from(data, strip)
+        [main, icon] = render("dicom", "/x/a.dcm", data, "gray")
+        [plain, plain_icon] = render("dicom", "/x/a.dcm", bare, "gray")
+        self.assertEqual((main.image_id, icon.image_id), ("/x/a.dcm", "/x/a.dcm#icon"))
+        self.assertEqual(plain_icon.image_id, "/x/a.dcm#icon")
+        self.assertFalse(np.array_equal(main.rgb, plain.rgb))
+        mask = pydicom.dcmread(path).overlay_array(0x6000).astype(bool)
+        self.assertGreaterEqual(np.percentile(main.rgb[..., 0][mask], 5), 250)
+        self.assertEqual(icon.rgb.ndim, 3)
+
+    def with_elements_from(self, data: bytes, edit) -> bytes:
+        ds = pydicom.dcmread(io.BytesIO(data))
+        edit(ds)
+        buf = io.BytesIO()
+        ds.save_as(buf, enforce_file_format=True)
+        return buf.getvalue()
+
+    def test_failed_icon_is_a_skipped_row_beside_the_main_image(self):
+        def edit(ds):
+            item = pydicom.Dataset()
+            item.Rows = 4  # no pixel data
+            ds.IconImageSequence = [item]
+        data = self.with_elements(_good_pixels(), edit=edit)
+        [main, icon] = render("dicom", "/x/a.dcm", data, "gray")
+        self.assertIsInstance(main, preprocess_module.Rendered)
+        self.assertEqual(icon, Skipped("/x/a.dcm#icon", "failed", "unsupported: no pixel data"))
+
+    def test_icon_row_lands_in_manifest_and_failed_icon_in_skipped_tsv(self):
+        path = get_testdata_file("examples_overlay.dcm", download=False)
+        if path is None:
+            self.skipTest("examples_overlay.dcm not bundled")
+        def edit(ds):
+            item = pydicom.Dataset()
+            item.Rows = 4
+            ds.IconImageSequence = [item]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "ok.dcm").write_bytes(Path(path).read_bytes())
+            (root / "src" / "bad.dcm").write_bytes(self.with_elements(_good_pixels(), edit=edit))
+            with quiet():
+                result = run_preprocess([root / "src"], root / "work")
+            with open(root / "work" / "manifest.tsv", newline="") as f:
+                ids = [row["image_id"] for row in csv.DictReader(f, delimiter="\t")]
+        ok, bad = str(root / "src" / "ok.dcm"), str(root / "src" / "bad.dcm")
+        self.assertEqual(sorted(ids), sorted([ok, f"{ok}#icon", bad]))
+        self.assertEqual([(s.image_id, s.kind) for s in result.skipped], [(f"{bad}#icon", "failed")])
+        self.assertEqual(result.found, 2)
 
     def test_all_zero_dicom_keeps_uncropped_image(self):
         with quiet():

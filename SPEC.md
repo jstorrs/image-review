@@ -175,6 +175,14 @@ the order given, each walked as above).
 - Directory: absolute path to each file (a symlinked file keeps its link path)
 - Single file: fully-resolved absolute path
 
+A DICOM whose `IconImageSequence` (0088,0200) has an item also yields a second
+output row, `{image_id}#icon`, for the embedded thumbnail (item 0, rendered
+like a single-frame DICOM image of its own: grayscale through the colormap,
+colour as is). The main image keeps its `image_id`. If the icon cannot be
+rendered the main image is still written and `{image_id}#icon` is a `failed`
+row in `skipped.tsv`. If the main image fails the file is `failed` and has no
+icon row.
+
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
 1. Only single-frame images with pixel data are rendered. No pixel data,
@@ -200,12 +208,25 @@ the order given, each walked as above).
    extremes such as burned-in text at the maximum stay distinguishable from
    a bright core. An image with a single value maps to all zeros; when no
    robust core exists (no inner values, or the core is empty or touches
-   the min or max) a plain min-max rescale is used
+   the min or max) a plain min-max rescale is used. Then overlay planes
+   (see below) are drawn at 1.0
 5. Apply CLAHE (adaptive histogram equalization, 96-tile grid)
+   (overlay pixels stay at or near the top of the range)
 6. Strip uniform rows/columns (`compress_image` -- removes letterboxing). If
    stripping would leave nothing (e.g. an all-zero image), the uncropped
    image is kept
 7. Apply colormap (grayscale only), save as 8-bit RGB JPG
+
+**Overlays**: each overlay plane (even group 0x6000-0x601E with OverlayData
+`(g,3000)`) is decoded with `overlay_array`, placed at its OverlayOrigin
+(1-based row, column; default 1, 1) and clipped to the image. For grayscale
+images the overlay pixels are set to 1.0 after intensity compression (step 4)
+and before the first crop, so they come out near 255 (CLAHE keeps them at the
+top of the range); for colour and palette images they are set to white (255)
+before the crop. A plane that cannot be decoded fails the whole file
+(fail-closed, so a reviewer never sees an image with undrawn annotations):
+`ValueError: overlay 0x6002 cannot be decoded: ...`. Overlays embedded in the
+unused bits of PixelData are not drawn.
 
 **Raster preprocessing** (`decode_raster` + `preprocess_raster`, for PNG/JPEG/TIFF/BMP/GIF):
 - Decode with Pillow and branch on the image mode, not the channel count
@@ -366,7 +387,7 @@ Written by `preprocess`. Tab-separated, one row per image.
 |--------|-------------|
 | `batch` | Batch subdirectory name (e.g. `batch_001`) |
 | `preprocessed_path` | Relative path to the JPG within the work directory |
-| `image_id` | Unique string identifier (fully-resolved absolute path) |
+| `image_id` | Unique string identifier (fully-resolved absolute path; `{path}#icon` for a DICOM's embedded icon image) |
 
 `image_id` (source paths, which may carry patient identifiers) is used only
 inside `LocalStore`/`ReviewDB`. Everything else identifies an image by its
@@ -379,7 +400,7 @@ Tab-separated, one row per input that produced no image.
 
 | Column | Description |
 |--------|-------------|
-| `image_id` | Source identifier, in the same form as `manifest.tsv` (or the source path, if a whole source could not be opened) |
+| `image_id` | Source identifier, in the same form as `manifest.tsv` (`{path}#icon` for an icon image that failed to render; or the source path, if a whole source could not be opened) |
 | `kind` | `failed` (an input that was not rendered; makes the CLI exit 1 unless `--allow-skipped`) or `ignored` (not an input: unrecognized content, AppleDouble, DICOMDIR, a ZIP without files, a symlink to an enclosing directory or to a directory inside a SOURCE, a non-regular file inside a directory) |
 | `reason` | `<ExceptionClass>: <message>`, `unsupported: ...` for inputs this tool does not render, or the `ignored` reason |
 

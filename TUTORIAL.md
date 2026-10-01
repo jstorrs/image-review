@@ -124,14 +124,22 @@ review_work/
 
 The DICOM preprocessing pipeline for grayscale (MONOCHROME1/2) images; single-frame
 colour (RGB, YBR) and palette DICOMs are only converted to 8-bit RGB and
-cropped, with no windowing or colormap:
+cropped, with no windowing or colormap (overlay planes are drawn in white):
 1. Converts to float32, corrects photometric interpretation
 2. Compresses intensity outliers (beyond the 1st/99th percentile) into the
    ends of the range instead of clipping them, so bright burned-in text
-   stays visible
+   stays visible. DICOM overlay planes (annotations stored outside the pixel
+   data) are then drawn at maximum brightness
 3. Applies adaptive histogram equalization (96 tiles)
 4. Strips uniform rows/columns (letterboxing removal)
 5. Applies colormap and saves as JPG
+
+A DICOM with an embedded icon image (a thumbnail stored in the file) gets a
+second row in `manifest.tsv` with the image id ending in `#icon`, so any
+text burned into the thumbnail is reviewed too. If the icon cannot be
+rendered, the main image is still written and `<path>#icon` is listed as
+`failed` in `skipped.tsv`. A DICOM whose overlay cannot be decoded is
+`failed` as a whole.
 
 Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
 converted to RGB; 16-bit grayscale keeps its full range), get adaptive
