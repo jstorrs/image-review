@@ -1144,6 +1144,10 @@ def key(k: int) -> pg.event.Event:
     return pg.event.Event(pg.KEYDOWN, key=k, mod=0)
 
 
+def button(b: int) -> pg.event.Event:
+    return pg.event.Event(pg.CONTROLLERBUTTONDOWN, button=b, instance_id=0)
+
+
 class EventLoopTestCase(SessionTestCase):
     """Drive the run loop's two halves, handle_events and refresh_if_needed, with synthetic events."""
 
@@ -1219,7 +1223,7 @@ class TestEventLoop(EventLoopTestCase):
 
     def test_gamepad_verdict_queued_behind_mode_switch_is_ignored(self):
         s = self.reviewing("grid")
-        s.handle_events([key(pg.K_s), pg.event.Event(pg.JOYBUTTONDOWN, button=1)])
+        s.handle_events([key(pg.K_s), button(pg.CONTROLLER_BUTTON_B)])
         self.mark.assert_not_called()
 
     def test_verdict_in_batch_with_autoplay_advance_is_ignored(self):
@@ -1339,13 +1343,13 @@ class TestEventLoop(EventLoopTestCase):
 
         def pack_while_typing(*args, **kwargs):
             pg.event.post(key(pg.K_c))
-            pg.event.post(pg.event.Event(pg.JOYBUTTONDOWN, button=1))
+            pg.event.post(button(pg.CONTROLLER_BUTTON_B))
             return real_pack(*args, **kwargs)
 
         pg.event.clear()
         with mock.patch.object(controller_module, "pack_into_grids", pack_while_typing):
             s._switch_to_grid("auto")
-        self.assertEqual(pg.event.get((pg.KEYDOWN, pg.JOYBUTTONDOWN)), [])
+        self.assertEqual(pg.event.get((pg.KEYDOWN, pg.CONTROLLERBUTTONDOWN)), [])
 
     def test_correction_after_dwell(self):
         s = self.reviewing()
@@ -1519,6 +1523,116 @@ class TestEventLoop(EventLoopTestCase):
     def test_key_repeat_is_off(self):
         ReviewSession(self.store, reviewer="tester", mode="single")
         self.assertEqual(pg.key.get_repeat(), (0, 0))  # a held z undoes one mark, not many
+
+
+class TestGamepad(EventLoopTestCase):
+    def test_b_marks_clean_after_dwell(self):
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
+        s._show_splash()
+        s.handle_events([key(pg.K_SPACE)])
+        self.paint(s)
+        self.now += MIN_DWELL_MS - 1
+        s.handle_events([button(pg.CONTROLLER_BUTTON_B)])
+        self.mark.assert_not_called()
+        self.now += 1
+        s.handle_events([button(pg.CONTROLLER_BUTTON_B)])
+        self.mark.assert_called_once()
+        self.assertEqual(self.mark.call_args.args[1], "CLEAN")
+
+    def test_y_marks_dirty(self):
+        s = self.reviewing()
+        s.handle_events([button(pg.CONTROLLER_BUTTON_Y)])
+        self.mark.assert_called_once()
+        self.assertEqual(self.mark.call_args.args[1], "DIRTY")
+
+    def test_dpad_navigates_and_cancels_advance(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        self.assertTrue(s._advance_pending)
+        s.handle_events([button(pg.CONTROLLER_BUTTON_DPAD_RIGHT)])
+        self.assertEqual(s._cursor, 1)
+        self.assertFalse(s._advance_pending)
+        s.handle_events([button(pg.CONTROLLER_BUTTON_DPAD_LEFT)])
+        self.assertEqual(s._cursor, 0)
+
+    def test_every_button_stops_autoplay(self):
+        for b in (pg.CONTROLLER_BUTTON_DPAD_RIGHT, pg.CONTROLLER_BUTTON_A, pg.CONTROLLER_BUTTON_X):
+            with self.subTest(button=b):
+                s = self.reviewing()
+                s.autoplay = True
+                s.handle_events([button(b)])
+                self.assertFalse(s.autoplay)
+                self.assertEqual(s._cursor, 1 if b == pg.CONTROLLER_BUTTON_DPAD_RIGHT else 0)
+
+    def test_review_buttons_do_nothing_on_splash(self):
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
+        s._show_splash()
+        for b in (pg.CONTROLLER_BUTTON_B, pg.CONTROLLER_BUTTON_Y, pg.CONTROLLER_BUTTON_DPAD_RIGHT):
+            self.assertTrue(s.handle_events([button(b)]))
+        self.assertEqual((s._ui_state, s._cursor), (UIState.SPLASH, -1))
+        self.mark.assert_not_called()
+
+    def test_a_continues_from_splash(self):
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
+        s._show_splash()
+        self.assertTrue(s.handle_events([button(pg.CONTROLLER_BUTTON_A)]))
+        self.assertEqual((s._ui_state, s._cursor), (UIState.REVIEWING, 0))
+
+    def test_a_continues_from_end_screen(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_RIGHT), key(pg.K_RIGHT)])
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertTrue(s.handle_events([button(pg.CONTROLLER_BUTTON_A)]))
+        self.assertEqual((s._ui_state, s._cursor), (UIState.REVIEWING, 0))
+
+    def test_start_quits_in_every_state(self):
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
+        s._show_splash()
+        self.assertFalse(s.handle_events([button(pg.CONTROLLER_BUTTON_START)]))
+        s = self.reviewing()
+        self.assertFalse(s.handle_events([button(pg.CONTROLLER_BUTTON_START)]))
+        s.handle_events([key(pg.K_RIGHT), key(pg.K_RIGHT)])
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        self.assertFalse(s.handle_events([button(pg.CONTROLLER_BUTTON_START)]))
+
+    def test_start_quits_when_disconnected(self):
+        s = self.reviewing()
+        with (
+            mock.patch.object(self.store, "statuses", side_effect=store_module.StoreUnavailable("down")),
+            mock.patch("sys.stderr"),
+        ):
+            s.handle_events([key(pg.K_m)])
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
+        self.assertTrue(s.handle_events([button(pg.CONTROLLER_BUTTON_A)]))
+        self.assertFalse(s.handle_events([button(pg.CONTROLLER_BUTTON_START)]))
+
+    def test_raw_joystick_buttons_are_ignored(self):
+        s = self.reviewing()
+        for b in (1, 3, 7):
+            self.assertTrue(s.handle_events([pg.event.Event(pg.JOYBUTTONDOWN, button=b, instance_id=0)]))
+        self.assertTrue(s.handle_events([pg.event.Event(pg.JOYHATMOTION, hat=0, value=(1, 0), instance_id=0)]))
+        self.assertEqual((s._ui_state, s._cursor), (UIState.REVIEWING, 0))
+        self.mark.assert_not_called()
+
+    def test_device_add_and_remove_update_the_count(self):
+        s = self.reviewing()
+        pads = {0: mock.Mock(), 1: mock.Mock()}
+        for instance_id, pad in pads.items():
+            pad.as_joystick.return_value.get_instance_id.return_value = instance_id + 10
+        with (
+            mock.patch.object(controller_module.sdl_controller, "Controller", side_effect=lambda i: pads[i]) as opened,
+            mock.patch.object(s._viewer, "set_joystick_count") as set_count,
+        ):
+            s.handle_events([pg.event.Event(pg.CONTROLLERDEVICEADDED, device_index=0)])
+            s.handle_events([pg.event.Event(pg.CONTROLLERDEVICEADDED, device_index=1)])
+            s.handle_events([pg.event.Event(pg.CONTROLLERDEVICEADDED, device_index=1)])  # the same pad again
+            self.assertEqual([c.args for c in set_count.call_args_list], [(1,), (2,), (2,)])
+            s.handle_events([pg.event.Event(pg.CONTROLLERDEVICEREMOVED, instance_id=10)])
+            s.handle_events([pg.event.Event(pg.JOYDEVICEADDED, device_index=0)])  # SDL sends it too: not counted
+            set_count.assert_called_with(1)
+            self.assertEqual(set_count.call_count, 4)
+        self.assertEqual(s._gamepads, {11: pads[1]})
+        self.assertEqual([c.args for c in opened.call_args_list], [(0,), (1,), (1,)])
 
 
 class TestScaleAndResize(EventLoopTestCase):

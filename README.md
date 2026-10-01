@@ -162,7 +162,23 @@ are shown one at a time for detailed inspection.
 | `f` | Toggle fullscreen |
 | `q` / Escape | Quit |
 
-`c` and `d` are ignored for 200 ms after an image or grid appears, so a verdict
+A gamepad works too, through SDL's game controller mappings, which give every
+supported pad the same Xbox-style layout whatever its labels say:
+
+| Button | Action |
+|--------|--------|
+| B (right face button) | Mark CLEAN |
+| Y (top face button) | Mark DIRTY |
+| D-pad left / right | Navigate |
+| A (bottom face button) | Continue from the help or end-of-list screen, like Space |
+| Start | Quit (on any screen) |
+
+B, Y and the D-pad act only on the review screen, and every button stops
+autoplay. A pad SDL has no mapping for is not supported; you can supply one
+in SDL's mapping format through the `SDL_GAMECONTROLLERCONFIG` environment
+variable (one mapping per line).
+
+`c` and `d` (and B and Y) are ignored for 200 ms after an image or grid appears, so a verdict
 only applies to an item you have seen.
 
 `z` undoes your most recent mark, a single image or a whole grid, and returns
@@ -170,7 +186,7 @@ to that item so you can mark it again (after the same 200 ms). Pressing it again
 undoes the mark before that, and so on. Only marks you made in this session
 since the last mode switch (`s`, `m`, `M`) can be undone; beyond them `z` says
 "Nothing to undo". The history lives in memory only and is gone when you quit.
-After a lost connection `z` does nothing; only `q` works. An undo appends rows to `review.tsv`
+After a lost connection `z` does nothing; only `q` (or Start) works. An undo appends rows to `review.tsv`
 (`mode` `undo`) that restore each image's previous verdict and pass, or, for an
 image that had none, mark it `UNREVIEWED` again (a tombstone).
 

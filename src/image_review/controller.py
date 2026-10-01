@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 import pygame as pg
+from pygame._sdl2 import controller as sdl_controller
 
 from .grid_packer import GridSpec, Rotation, pack_into_grids
 from .store import (
@@ -28,7 +29,7 @@ ADVANCE_EVENT = pg.USEREVENT + 2
 # input queued while the UI was blocked, or typed as the screen changed, never judges an unseen item.
 MIN_DWELL_MS = 200
 # Input events dropped after a blocking step (grid build, mode restart).
-VERDICT_INPUT_EVENTS = (pg.KEYDOWN, pg.JOYBUTTONDOWN)
+VERDICT_INPUT_EVENTS = (pg.KEYDOWN, pg.CONTROLLERBUTTONDOWN)
 
 
 def _dwell_elapsed(shown_at: int | None, now: int) -> bool:
@@ -162,7 +163,10 @@ class ReviewSession:
         self._grid_cache: tuple[GridCacheKey, list[GridSpec], list[str]] | None = None
 
         self._viewer = ImageViewer()
-        self._joysticks = {}
+        # Gamepads with an SDL game controller mapping, by instance id. SDL also sends JOYDEVICEADDED
+        # for each of them; only the CONTROLLER* events are handled, so a pad is counted once.
+        sdl_controller.init()
+        self._gamepads: dict[int, sdl_controller.Controller] = {}
         self._display_select = False
         self._pre_display_index = 0
 
@@ -704,6 +708,30 @@ class ReviewSession:
                 self.next_image()
         return False
 
+    def _handle_button(self, button: int, now: int) -> bool:
+        """Handle a gamepad button, numbered by SDL's standard layout. Returns True to quit."""
+        if button == pg.CONTROLLER_BUTTON_START:
+            return True
+        match self._ui_state:
+            case UIState.SPLASH if button == pg.CONTROLLER_BUTTON_A:
+                return self._handle_splash_key(pg.K_SPACE)
+            case UIState.END_MESSAGE if button == pg.CONTROLLER_BUTTON_A:
+                return self._handle_end_key(pg.K_SPACE)
+            case UIState.REVIEWING:
+                self._stop_autoplay()  # no button toggles autoplay, so every button stops it
+                match button:
+                    case pg.CONTROLLER_BUTTON_B:
+                        self._verdict_input("CLEAN", now)
+                    case pg.CONTROLLER_BUTTON_Y:
+                        self._verdict_input("DIRTY", now)
+                    case pg.CONTROLLER_BUTTON_DPAD_LEFT:
+                        self._cancel_advance()
+                        self.prev_image()
+                    case pg.CONTROLLER_BUTTON_DPAD_RIGHT:
+                        self._cancel_advance()
+                        self.next_image()
+        return False
+
     def run(self):
         if not self._items:
             filter_msg = f" (filter: {self.status_filter})" if self.status_filter != "unreviewed" else ""
@@ -733,23 +761,8 @@ class ReviewSession:
     def _handle_event(self, event: pg.event.Event, now: int) -> bool:
         """Apply one event of a batch read at tick `now`. Returns True to quit."""
         match event.type:
-            case pg.JOYBUTTONDOWN:
-                if self._ui_state != UIState.REVIEWING:
-                    return False
-                match event.button:
-                    case 1:
-                        self._verdict_input("CLEAN", now)
-                    case 3:
-                        self._verdict_input("DIRTY", now)
-                    case 7:
-                        return True
-            case pg.JOYHATMOTION:
-                if self._ui_state == UIState.REVIEWING and event.hat == 0:
-                    self._cancel_advance()
-                    if event.value[0] < 0:
-                        self.prev_image()
-                    elif event.value[0] > 0:
-                        self.next_image()
+            case pg.CONTROLLERBUTTONDOWN:
+                return self._handle_button(event.button, now)
             case pg.KEYDOWN:
                 match self._ui_state:
                     case UIState.DISCONNECTED:
@@ -771,14 +784,14 @@ class ReviewSession:
                 if self._advance_pending and self._ui_state == UIState.REVIEWING:
                     self._advance_pending = False
                     self.next_image()
-            case pg.JOYDEVICEADDED:
-                joy = pg.joystick.Joystick(event.device_index)
-                self._joysticks[joy.get_instance_id()] = joy
-                self._viewer.set_joystick_count(len(self._joysticks))
+            case pg.CONTROLLERDEVICEADDED:
+                pad = sdl_controller.Controller(event.device_index)
+                self._gamepads[pad.as_joystick().get_instance_id()] = pad
+                self._viewer.set_joystick_count(len(self._gamepads))
                 self._dirty = True
-            case pg.JOYDEVICEREMOVED:
-                self._joysticks.pop(event.instance_id, None)
-                self._viewer.set_joystick_count(len(self._joysticks))
+            case pg.CONTROLLERDEVICEREMOVED:
+                self._gamepads.pop(event.instance_id, None)
+                self._viewer.set_joystick_count(len(self._gamepads))
                 self._dirty = True
             case pg.QUIT:
                 return True

@@ -239,16 +239,18 @@ image-review review --mode grid
 
 ### Controls
 
-The viewer accepts keyboard and gamepad input:
+The viewer accepts keyboard and gamepad input. Gamepad buttons are named by
+SDL's standard (Xbox-style) layout: A is the bottom face button, B the right,
+Y the top, whatever the pad itself prints on them:
 
 | Action | Key | Gamepad |
 |--------|-----|---------|
-| Mark CLEAN | `c` | Button 1 |
-| Mark DIRTY | `d` | Button 3 |
+| Mark CLEAN | `c` | B |
+| Mark DIRTY | `d` | Y |
 | Undo your last mark in this mode | `z` | -- |
 | Next batch (end-of-list screen) | `b` | -- |
-| Next image | `Right` | Hat right |
-| Previous image | `Left` | Hat left |
+| Next image | `Right` | D-pad right |
+| Previous image | `Left` | D-pad left |
 | Next todo item | `n` | -- |
 | Toggle todo-only navigation | `u` | -- |
 | Autoplay (auto-advance) | `Space` | -- |
@@ -258,7 +260,14 @@ The viewer accepts keyboard and gamepad input:
 | Select display | `w` | -- |
 | Toggle fullscreen | `f` | -- |
 | Help screen | `h` | -- |
-| Quit (saves automatically) | `q` or `Esc` | Button 7 |
+| Continue (help or end-of-list screen) | `Space` | A |
+| Quit (saves automatically) | `q` or `Esc` | Start |
+
+B, Y and the D-pad act only while reviewing; Start quits from any screen.
+Every gamepad button stops autoplay. Only pads SDL has a game controller
+mapping for are supported (most common pads are). For another pad, set
+`SDL_GAMECONTROLLERCONFIG` to a mapping line in SDL's format (tools such as
+SDL's `controllermap` produce one) before starting `image-review`.
 
 **Status bar** at the bottom of the screen:
 - **Green** = CLEAN
@@ -276,7 +285,7 @@ size.
 
 After marking an image, the viewer auto-advances to the next image after a
 short delay (200ms). Images are shuffled at review time to counter attention
-fatigue. A verdict (`c`/`d` or gamepad Button 1/3) only counts once the image
+fatigue. A verdict (`c`/`d` or gamepad B/Y) only counts once the image
 or grid has been on screen for 200ms: one pressed sooner is ignored, so press
 it again once you have looked. Every key and button pressed while grids are
 being computed is dropped, including `q`/`Esc` and the arrows.
@@ -668,7 +677,7 @@ it, but it contains source paths, so delete it.
 - **Autoplay**: Press `Space` to start auto-advancing through images at
   500ms intervals. Press any key to stop (the key still does its usual job). Useful for a quick visual scan.
 - **Gamepad**: A game controller makes long review sessions more
-  comfortable. Map CLEAN/DIRTY to face buttons and navigate with the d-pad.
+  comfortable: B marks CLEAN, Y marks DIRTY and the D-pad navigates.
 - **Batch size**: Larger batches mean fewer but denser grids. The default
   (300) works well for typical DICOM series. Reduce for very large images.
 - **Colormap**: `inferno` (default) provides good contrast for medical

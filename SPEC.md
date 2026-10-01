@@ -663,8 +663,8 @@ image, marking, restarting a mode, or moving to the next batch is treated as a l
 unloadable image: autoplay and the pending auto-advance are cancelled, the
 status snapshot is left unchanged (a failed mark is not applied), the viewer
 shows "Lost connection to server - progress saved. Press q to quit." and the
-reason is printed to stderr. The session is then `DISCONNECTED`: only `q`/Esc
-and closing the window do anything (no navigation, mode switch or `z` reaches
+reason is printed to stderr. The session is then `DISCONNECTED`: only `q`/Esc, the
+gamepad's Start and closing the window do anything (no navigation, mode switch or `z` reaches
 the store again). A failed mode restart or next-batch move clears the item list. Any
 other failure to load an image is an unloadable image (see *Unloadable Images*).
 
@@ -734,8 +734,7 @@ repacks for the new size, unless the size is the one the grids were last packed
 for (a resize back to it before the tick costs nothing): it stops autoplay and
 a pending advance, shows "Computing grids...", and rebuilds the items (the
 cache key includes the size, so a changed size misses the cache). Queued
-`KEYDOWN` and `JOYBUTTONDOWN` events are discarded, as on a mode restart;
-`JOYHATMOTION` is not. The repack uses the current statuses, so under the
+`KEYDOWN` and `CONTROLLERBUTTONDOWN` events are discarded, as on a mode restart. The repack uses the current statuses, so under the
 default filter it drops grids already marked CLEAN as well as DIRTY or FLAGGED
 ones. The cursor goes to the grid that holds the first key of the item that was
 current, or to the first item if none does (that grid was marked, or the new
@@ -796,12 +795,12 @@ The session runs a pygame event loop processing:
 
 | Event | Action |
 |-------|--------|
-| `c` key / Button 1 | Mark current item CLEAN |
-| `d` key / Button 3 | Mark current item DIRTY |
+| `c` key / B button | Mark current item CLEAN |
+| `d` key / Y button | Mark current item DIRTY |
 | `z` key | Undo this session's latest mark since the mode started (see *Undo*); also on the end-of-list screen |
 | `b` key | On the end-of-list screen only: move on to the next batch (see *Next Batch*) |
-| Right arrow / Hat right | Next item |
-| Left arrow / Hat left | Previous item |
+| Right arrow / D-pad right | Next item |
+| Left arrow / D-pad left | Previous item |
 | Space | Toggle autoplay (500ms auto-advance) |
 | `w` key | Select display |
 | `f` key | Toggle fullscreen |
@@ -811,9 +810,23 @@ The session runs a pygame event loop processing:
 | `m` key | Switch to grid mode (the `--rotate` policy, default `auto`) |
 | `M` key (shift+m) | Switch to grid mode (`never` rotate) |
 | `h` key | Show help/splash screen |
-| `q` / Escape / Button 7 | Quit |
+| A button | On the splash/help and end-of-list screens: continue, as Space |
+| `q` / Escape / Start button | Quit (Start in every state, including `DISCONNECTED`) |
 | Window resize | Refit current image; in grid mode also rebuild the grids (see *Resize rebuild*) |
-| Joystick added/removed | Hot-plug handling |
+| Controller added/removed | Hot-plug handling: open or drop the `Controller`; the status bar shows the count |
+
+Gamepads go through SDL's GameController API (`pygame._sdl2.controller`,
+initialised when the session starts), so buttons are numbered by SDL's
+standard layout, with Xbox-style positions: A bottom, B right, Y top. On
+`CONTROLLERDEVICEADDED` the session opens a `Controller(event.device_index)`
+and keeps it in a dict keyed by its joystick instance id; on
+`CONTROLLERDEVICEREMOVED` it drops the one with `event.instance_id`. SDL also
+sends the raw `JOY*` events for these pads, but none are handled, so each pad
+is counted once and a pad's raw button indices never act. A pad with no SDL
+mapping is not supported: it gets no `CONTROLLER*` events and is not counted. A
+mapping can be added through the `SDL_GAMECONTROLLERCONFIG` environment
+variable. B, Y and the D-pad act only while reviewing; A acts only on the
+splash/help and end-of-list screens; Start quits in every state.
 
 After marking, the viewer auto-advances to the next item after 200ms.
 Navigation stops at list boundaries with an "End of list - K todo left - [b]
@@ -833,8 +846,9 @@ On that screen Right/Space and Left wrap round to the first or last item, `s`,
 `q`/Esc quits.
 
 On the review screen every key except Space cancels autoplay (and still does
-its normal action, so Right steps once and stops); Space toggles it. On a
-gamepad, marking and hat left cancel it and hat right keeps it running. Left/Right, the hat, `n`, mode switches, `h` and `w` cancel a
+its normal action, so Right steps once and stops); Space toggles it. Every
+gamepad button cancels it (there is no gamepad autoplay toggle), and still does
+its normal action. Left/Right, the D-pad, `n`, mode switches, `h` and `w` cancel a
 pending post-mark advance, and so does any change of the current item: the
 advance belongs to the item that was marked, so an `ADVANCE_EVENT` already
 queued when it was cancelled is ignored (`_advance_pending`). The autoplay and
@@ -850,9 +864,9 @@ display-select and message screens ("End of list", "No items for grid mode",
 by the viewer and stay until the state changes. When there are no items (an
 empty mode, or no batch left), the navigation keys leave the message up; only
 `q`/Esc, `s`, `m`, `M`, `z` and `b` act. On the lost
-connection screen only `q`/Esc act (see *Store Failures*).
+connection screen only `q`/Esc and Start act (see *Store Failures*).
 
-**Verdicts need a seen item.** A verdict (`c`/`d`, Button 1/3) applies only to
+**Verdicts need a seen item.** A verdict (`c`/`d`, B/Y) applies only to
 an item that has been painted and on screen for `MIN_DWELL_MS` (200 ms);
 otherwise it is ignored (it still stops autoplay). The session records the tick
 of the first paint of the current item in `refresh_if_needed`, compares it
@@ -940,8 +954,8 @@ The last three get " (current pass is M)" appended when an explicit `--pass`
 differs from `current_pass()`. `q`/Esc quit. A `StoreUnavailable` from any of
 these calls is a lost connection (see *Store Failures*). The
 splash/help info line shows the batch's position, "batch k/B", among all the
-manifest's batches. There is no gamepad binding: the gamepad buttons act only
-on the review screen.
+manifest's batches. There is no gamepad binding for `b`: on the end-of-list screen the gamepad
+only continues (A, as Space) or quits (Start).
 
 ## Grid Packer (`grid_packer.py`)
 
