@@ -11,7 +11,11 @@ interactively in a fullscreen viewer, and report **status** on review progress.
 
 - Python >= 3.12
 - Dependencies: click, matplotlib, numpy, pydicom, Pillow, scikit-image,
-  rectpack, tqdm, pygame-ce, cryptography
+  rectpack, tqdm, pygame-ce, cryptography, and the DICOM codecs python-gdcm
+  (JPEG baseline/extended/lossless, JPEG-LS, JPEG 2000, RLE) and pylibjpeg +
+  pylibjpeg-openjpeg (JPEG 2000, HTJ2K). `pylibjpeg-libjpeg` is deliberately
+  not used (GPL-3), so 12-bit JPEG Extended (Process 4) and JPEG-LS with 6- or
+  7-bit samples cannot be decoded
 - `review --via` / `status --via` additionally need an OpenSSH client (`ssh`)
   on the client machine
 
@@ -185,6 +189,12 @@ icon row.
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
+0. Compressed pixel data is decoded by pydicom with the codecs above. A file
+   whose decode fails is `failed` with reason
+   `cannot decode <transfer syntax name>: <ExceptionClass>: <first line of the message>`
+   (e.g. `cannot decode JPEG Extended (Process 2 and 4): RuntimeError: Unable to
+   decode as exceptions were raised by all available plugins:`); uncompressed
+   files keep the plain `<ExceptionClass>: <message>` reason.
 1. Only single-frame images with pixel data are rendered. No pixel data,
    `NumberOfFrames` above 1 (checked first, whatever the photometric
    interpretation), or a photometric interpretation other than the ones below

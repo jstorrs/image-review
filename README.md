@@ -17,6 +17,15 @@ Requires Python >= 3.12.
 pip install .
 ```
 
+Compressed DICOMs (JPEG, JPEG Lossless, JPEG-LS, JPEG 2000, HTJ2K, RLE) are
+decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`, installed
+with the package. Wheels exist for CPython 3.12 and 3.13 on Linux (x86_64 and
+aarch64), macOS (Intel and Apple silicon) and Windows (x86_64); on other
+platforms `python-gdcm` has no wheel and installation may fail.
+12-bit JPEG Extended files cannot be decoded (the only decoder is
+GPL-licensed and is not used) and are listed in `skipped.tsv` as
+`cannot decode JPEG Extended (Process 2 and 4): ...`.
+
 `cryptography` is a dependency (used by `serve` for its TLS certificate).
 `review --via` and `status --via` need an OpenSSH client on the machine you
 run them on (built into macOS, Linux and Windows 10+).

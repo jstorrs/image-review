@@ -17,6 +17,9 @@ dependencies = [
     "tqdm",
     "pygame-ce",
     "cryptography",
+    "python-gdcm",
+    "pylibjpeg",
+    "pylibjpeg-openjpeg",
 ]
 
 [tool.setuptools.package-data]

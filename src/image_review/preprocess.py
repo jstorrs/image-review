@@ -160,6 +160,10 @@ class Unsupported(Exception):
         super().__init__(f"unsupported: {what}")
 
 
+class DecodeError(Exception):
+    """Compressed pixel data that no installed codec could decode; the message starts with `cannot decode`."""
+
+
 # ---------------------------------------------------------------- rendering (pure)
 
 
@@ -271,9 +275,21 @@ def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray | None
     return _crop(img)
 
 
+def _decode_pixels(dcm: pydicom.FileDataset) -> np.ndarray:
+    """`dcm.pixel_array`; a compressed file that cannot be decoded is a `DecodeError` naming its transfer syntax."""
+    try:
+        return dcm.pixel_array
+    except Exception as exc:
+        syntax = dcm.file_meta.get("TransferSyntaxUID")
+        if syntax is None or not syntax.is_compressed:
+            raise
+        cause = (str(exc).strip().splitlines() or [""])[0]
+        raise DecodeError(f"cannot decode {syntax.name}: {type(exc).__name__}: {cause}") from exc
+
+
 def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> np.ndarray:
     """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels."""
-    pixels = dcm.pixel_array
+    pixels = _decode_pixels(dcm)
     bits = int(dcm.BitsStored)
     if photometric == "PALETTE COLOR":
         pixels = pydicom.pixels.apply_color_lut(pixels, dcm)
@@ -299,7 +315,7 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
     photometric = dcm.get("PhotometricInterpretation")
     match photometric:
         case "MONOCHROME1" | "MONOCHROME2":
-            pixels = dcm.pixel_array
+            pixels = _decode_pixels(dcm)
             if pixels.ndim != 2:
                 raise Unsupported(f"pixel array with shape {pixels.shape}")
             return apply_colormap(_gray_dicom(pixels, photometric, _overlay_mask(dcm, pixels.shape)), colormap)
@@ -537,7 +553,7 @@ def _clean_reason(reason: str) -> str:
 
 
 def _failed(image_id: str, exc: Exception) -> Skipped:
-    reason = str(exc) if isinstance(exc, Unsupported) else f"{type(exc).__name__}: {exc}"
+    reason = str(exc) if isinstance(exc, Unsupported | DecodeError) else f"{type(exc).__name__}: {exc}"
     return Skipped(image_id, "failed", _clean_reason(reason))
 
 

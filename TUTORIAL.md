@@ -9,7 +9,11 @@ The workflow has three phases: **preprocess**, **review**, and **status**.
 pip install -e .
 ```
 
-This installs the `image-review` command. `--via` (HPC tunnelling, below)
+This installs the `image-review` command and the codecs that decode compressed
+DICOMs (`python-gdcm`, `pylibjpeg`, `pylibjpeg-openjpeg`; wheels for CPython
+3.12/3.13 on Linux x86_64/aarch64, macOS and Windows). A DICOM that still
+cannot be decoded (e.g. 12-bit JPEG Extended) is listed in `skipped.tsv` as
+`cannot decode <transfer syntax>: ...`. `--via` (HPC tunnelling, below)
 also needs an OpenSSH client on the machine you run it on (built into macOS,
 Linux and Windows 10+).
 

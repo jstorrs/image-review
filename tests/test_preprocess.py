@@ -18,7 +18,7 @@ import skimage as ski
 from click.testing import CliRunner
 from fixtures import add_overlay, write_dicom
 from PIL import Image, JpegImagePlugin
-from pydicom.data import get_testdata_file
+from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import MediaStorageDirectoryStorage, generate_uid
 
@@ -27,6 +27,7 @@ from image_review.cli import cli
 from image_review.preprocess import (
     SIDE_BY_SIDE_GAP,
     Candidate,
+    DecodeError,
     Rejected,
     Skipped,
     Unsupported,
@@ -1009,6 +1010,82 @@ class RenderTest(unittest.TestCase):
                 if name == "examples_palette.dcm":
                     self.assertFalse(np.array_equal(out.rgb[..., 0], out.rgb[..., 1]))
                     self.assertFalse(np.array_equal(out.rgb[..., 1], out.rgb[..., 2]))
+
+    def test_bundled_compressed_dicoms_render(self):
+        for name in (
+            "MR_small_jpeg_ls_lossless.dcm",  # JPEG-LS
+            "SC_rgb_jpeg_gdcm.dcm",  # JPEG Lossless (Process 14)
+            "JPEG2000.dcm",
+            "HTJ2KLossless_08_RGB.dcm",
+            "rtdose_rle_1frame.dcm",  # RLE
+        ):
+            with self.subTest(name=name):
+                # an already-downloaded external file (e.g. the HTJ2K ones) is found by get_testdata_files only
+                path = get_testdata_file(name, download=False) or next(iter(get_testdata_files(name)), None)
+                if path is None:
+                    self.skipTest(f"{name} not available")
+                [out] = render("dicom", "id", Path(path).read_bytes(), "inferno")
+                self.assertEqual(out.rgb.shape[2], 3)
+                self.assertEqual(out.rgb.dtype, np.uint8)
+
+    def test_every_bundled_compressed_dicom_decodes(self):
+        # Not decodable with permissively licensed codecs (pylibjpeg-libjpeg is GPL-3), or corrupt on purpose.
+        undecodable = {
+            "JPEG-lossy.dcm": "12-bit JPEG Extended",
+            "JPGExtended.dcm": "12-bit JPEG Extended",
+            "JLSL_08_07_0_1F.dcm": "JPEG-LS with 7-bit samples",
+            "JPEG2000-embedded-sequence-delimiter.dcm": "corrupt J2K codestream",
+        }
+        paths = get_testdata_files("*.dcm")
+        if not paths:
+            self.skipTest("no bundled test data")
+        checked = 0
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for path in sorted(paths):
+                name = Path(path).name
+                dcm = None
+                with contextlib.suppress(Exception):  # deliberately broken files in pydicom's test set
+                    dcm = pydicom.dcmread(path)
+                if dcm is None:
+                    continue
+                syntax = dcm.file_meta.get("TransferSyntaxUID")
+                if syntax is None or not syntax.is_compressed or "PixelData" not in dcm:
+                    continue
+                if name in undecodable:
+                    with self.assertRaises(RuntimeError, msg=name):
+                        dcm.pixel_array  # noqa: B018
+                    continue
+                with self.subTest(name=name, syntax=syntax.name):
+                    self.assertGreater(dcm.pixel_array.size, 0)
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_undecodable_compressed_dicom_names_its_transfer_syntax(self):
+        path = get_testdata_file("JPEG2000-embedded-sequence-delimiter.dcm", download=False)
+        if path is None:
+            self.skipTest("file not bundled")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with self.assertRaises(DecodeError) as ctx:
+                render("dicom", "id", Path(path).read_bytes(), "inferno")
+        reason = _failed("id", ctx.exception).reason
+        self.assertTrue(reason.startswith("cannot decode JPEG 2000 Image Compression: "), reason)
+        self.assertNotIn("0x", reason)
+        self.assertNotIn("\n", reason)
+
+    def test_decoder_failure_in_colour_dicom_names_its_transfer_syntax(self):
+        path = get_testdata_file("SC_rgb_jpeg_gdcm.dcm", download=False)
+        if path is None:
+            self.skipTest("file not bundled")
+        boom = mock.PropertyMock(side_effect=RuntimeError("codec <Foo object at 0x7f3a2c1b9e40> broke\nline two"))
+        with mock.patch.object(pydicom.FileDataset, "pixel_array", boom), self.assertRaises(DecodeError) as ctx:
+            render("dicom", "id", Path(path).read_bytes(), "inferno")
+        self.assertEqual(
+            _failed("id", ctx.exception).reason,
+            "cannot decode JPEG Lossless, Non-Hierarchical, First-Order Prediction (Process 14 [Selection Value 1]): "
+            "RuntimeError: codec <data> broke",
+        )
 
     def test_bundled_multiframe_dicoms_stay_unsupported(self):
         for name, frames in (("examples_ybr_color.dcm", 30), ("SC_rgb_rle_2frame.dcm", 2), ("rtdose.dcm", 15)):
