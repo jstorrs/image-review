@@ -47,6 +47,7 @@ image-review preprocess SOURCE [SOURCE ...] [options]
 | `--batch-size` | 300 | Number of images per batch |
 | `--work-dir` | `./review_work` | Where to write preprocessed output |
 | `--colormap` | `inferno` | Matplotlib colormap for DICOM rendering |
+| `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
 
 **Examples:**
 
@@ -69,6 +70,7 @@ image-review preprocess scans.zip --work-dir /data/review_session_1
 ```
 review_work/
   manifest.tsv        # Master list: batch, preprocessed_path, image_id
+  skipped.tsv         # Inputs that produced no image: image_id, kind, reason
   review.tsv          # (created later during review)
   batch_001/
     img_00001.jpg      # Individual preprocessed images
@@ -85,7 +87,37 @@ The DICOM preprocessing pipeline:
 4. Strips uniform rows/columns (letterboxing removal)
 5. Applies colormap and saves as JPG
 
-Non-DICOM images (JPG/PNG) get adaptive histogram equalization if grayscale, then are saved directly.
+Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
+converted to RGB; 16-bit grayscale keeps its full range), get adaptive
+histogram equalization if grayscale, and are saved as RGB JPGs. Some inputs
+are shown as several views side by side in one image (still one item to
+review):
+
+- **Transparent images**: left is the image composited over mid-gray (so
+  anything drawn only in the alpha channel is visible), right is the raw
+  image with transparency ignored (so anything hidden under transparent
+  pixels is visible). Check both halves.
+- **MPO JPEGs** (HDR gain maps, camera previews embedded in a JPEG): every
+  embedded image, left to right.
+
+Animated PNGs and other multi-frame rasters are listed in `skipped.tsv` as
+unsupported.
+
+Only single-frame grayscale (MONOCHROME1/2) DICOMs are rendered for now.
+Colour and multi-frame DICOMs, and any file that cannot be read or decoded,
+do not stop the run: each is recorded in `skipped.tsv` with a reason (for
+example `unsupported: multi-frame DICOM (3 frames)` or `BadZipFile: File is
+not a zip file`). The run ends with a summary such as:
+
+```
+Found 1200 inputs: wrote 1195 images in 4 batches; 5 skipped (see review_work/skipped.tsv)
+```
+
+If anything failed, `preprocess` exits with status 1 so scripts notice.
+Inspect `skipped.tsv` -- those inputs will **not** be reviewed -- and either
+fix them or re-run with `--allow-skipped` to accept the result.
+`skipped.tsv` contains source paths, so treat it as carefully as
+`manifest.tsv`.
 
 ## Step 2: Review
 
@@ -430,6 +462,7 @@ All state lives in the work directory (default `./review_work`):
 | File | Format | Description |
 |------|--------|-------------|
 | `manifest.tsv` | TSV | Master image list (batch, preprocessed_path, image_id) |
+| `skipped.tsv` | TSV | Inputs that produced no image (image_id, kind, reason) |
 | `review.tsv` | TSV | Review decisions (image_id, batch, status, pass, timestamp) |
 | `batch_NNN/img_NNNNN.jpg` | JPG | Preprocessed individual images |
 

@@ -45,13 +45,24 @@ image-review status
 image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--work-dir DIR]
                                             [--colormap NAME]
+                                            [--allow-skipped]
 ```
 
 Accepts ZIP files, directories, or individual image files. DICOM images are
 normalized with adaptive histogram equalization to enhance local contrast
-and a configurable colormap. Non-DICOM images are passed through (with
-the same contrast enhancement applied to grayscale). Output is organized into
-batch subdirectories with a `manifest.tsv` index.
+and a configurable colormap. Non-DICOM images are converted to RGB, with the same
+contrast enhancement applied to grayscale. Transparent images are shown as
+the composite over mid-gray beside the raw channels with alpha ignored, and
+MPO JPEGs (HDR gain maps, previews) show all their frames side by side.
+Output is organized into batch subdirectories with a `manifest.tsv` index.
+
+Every input ends up in exactly one of `manifest.tsv` (rendered) or
+`skipped.tsv` (with the reason it failed, e.g. a corrupt file or an
+`unsupported:` multi-frame or colour DICOM). The run finishes with a summary
+line (`Found N inputs: wrote K images in B batches; S skipped (see
+.../skipped.tsv)`) and exits 1 if any input failed, unless `--allow-skipped`
+is given. Check `skipped.tsv` before reviewing: those images will not be
+shown.
 
 ### `image-review review`
 

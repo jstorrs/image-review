@@ -2,7 +2,10 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import pydicom
 import skimage as ski
+from pydicom.dataset import FileMetaDataset
+from pydicom.uid import SecondaryCaptureImageStorage, generate_uid
 
 # (batch, preprocessed_path, image_id); image_ids deliberately differ from keys
 ROWS = [
@@ -22,6 +25,24 @@ def make_work_dir(root: Path) -> None:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(["batch", "preprocessed_path", "image_id"])
         writer.writerows(ROWS)
+
+
+def write_dicom(path: Path, pixels: np.ndarray, photometric: str = "MONOCHROME2", **attrs) -> None:
+    """Write a synthetic DICOM file (with preamble and file meta) holding `pixels`.
+
+    `pixels` is (rows, cols) or (rows, cols, 3) for one frame, or (frames, rows, cols[, 3]).
+    Extra keyword arguments are set as DICOM attributes.
+    """
+    ds = pydicom.Dataset()
+    ds.file_meta = FileMetaDataset()
+    ds.SOPClassUID = SecondaryCaptureImageStorage
+    ds.SOPInstanceUID = generate_uid()
+    ds.file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
+    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.set_pixel_data(pixels, photometric, pixels.dtype.itemsize * 8)
+    for name, value in attrs.items():
+        setattr(ds, name, value)
+    ds.save_as(path, enforce_file_format=True)
 
 
 def start_server(work_dir: Path, port: int = 0):

@@ -132,15 +132,28 @@ def cli():
 @click.option("--batch-size", type=int, default=300, show_default=True, help="Images per batch.")
 @click.option("--work-dir", "--output-dir", type=click.Path(), default="./review_work", show_default=True, help="Work directory for output.")
 @click.option("--colormap", type=str, default="inferno", show_default=True, help="Matplotlib colormap for rendering.")
-def preprocess(sources, batch_size, work_dir, colormap):
+@click.option("--allow-skipped", is_flag=True, default=False, help="Exit 0 even if some inputs failed to preprocess (they are listed in skipped.tsv).")
+def preprocess(sources, batch_size, work_dir, colormap, allow_skipped):
     """Normalize DICOM and image files to JPGs and organize them into batches.
 
     SOURCES are one or more ZIP files, directories, or image files to process.
+    Every input is listed in either manifest.tsv or skipped.tsv. Exits 1 if any
+    input failed, unless --allow-skipped is given.
     """
     from .preprocess import run_preprocess
 
     source_paths = [Path(s).resolve() for s in sources]
-    run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap)
+    result = run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap)
+    click.echo(
+        f"Found {result.found} inputs: wrote {result.written} images in {result.batches} batches; "
+        f"{len(result.skipped)} skipped (see {result.skipped_path})"
+    )
+    failed = sum(1 for s in result.skipped if s.kind == "failed")
+    if failed and not allow_skipped:
+        raise click.ClickException(
+            f"{failed} input(s) failed to preprocess and will not be reviewed; see {result.skipped_path}. "
+            "Re-run with --allow-skipped to accept this."
+        )
 
 
 @cli.command()

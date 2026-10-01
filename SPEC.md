@@ -57,6 +57,7 @@ Entry point: `image-review` (mapped to `image_review.cli:main`).
 image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--work-dir DIR]
                                             [--colormap NAME]
+                                            [--allow-skipped]
 ```
 
 | Argument | Default | Description |
@@ -65,14 +66,30 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 | `--batch-size` | 300 | Maximum images per batch subdirectory |
 | `--work-dir` | `./review_work` | Work directory for all output (alias: `--output-dir`) |
 | `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale |
+| `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
+
+The pipeline has three parts: **discovery** (IO) yields one `Candidate`
+(`image_id`, `kind` = `dicom` or `raster`, and a `read()` returning the raw
+bytes) per input without decoding anything; a pure **`render(kind, image_id,
+data, colormap) -> list[Rendered]`** turns the bytes into `(H, W, 3)` uint8
+RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
+the encoded bytes the moment they are produced and records them in the
+manifest. For ZIP entries `read()` reads from the open archive, so it is only
+valid until discovery moves on to the next item.
 
 **Source loading** dispatches by type:
 
 | Source type | Behavior |
 |-------------|----------|
-| `.zip` | Scans for `*.dcm`, `*.jpg`, `*.jpeg`, `*.png` entries |
+| `.zip` | Scans for `*.dcm`, `*.jpg`, `*.jpeg`, `*.png` entries (extension matched case-insensitively) |
 | Directory | Globs `**/*.dcm`, then `**/*.jpg`, `**/*.jpeg`, `**/*.png` |
-| Single file | Reads as DICOM (`.dcm`) or passes through (other extensions) |
+| Single file | Treated as DICOM (`.dcm`) or as a raster image (other extensions) |
+
+The kind (`dicom` or `raster`) is chosen by extension (case-insensitively).
+ZIP entries are read by their `ZipInfo`, so entries that share a name are
+distinct inputs: the first keeps `{zip}::{name}`, later ones get
+`{zip}::{name}#2`, `#3`, ... (no image name ends in `#N`, so these cannot
+clash with a real entry).
 
 **Image IDs** are fully-resolved absolute paths derived from the source:
 - ZIP: `{absolute_zip_path}::{filename}`
@@ -81,28 +98,74 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
-1. Extract pixel array, convert to float32
-2. Correct photometric interpretation (invert MONOCHROME1)
-3. Clip to robust intensity range (1st-99th percentile with 2% margin)
-4. Apply CLAHE (adaptive histogram equalization, 96-tile grid)
-5. Strip uniform rows/columns (`compress_image` -- removes letterboxing)
-6. Apply colormap, save as 8-bit RGB JPG
+1. Only single-frame `MONOCHROME1`/`MONOCHROME2` images with pixel data are
+   rendered. No pixel data, any other photometric interpretation, or a pixel
+   array that is not 2-D (multi-frame) raises `Unsupported` (e.g.
+   `unsupported: no pixel data`, `unsupported: multi-frame DICOM (3 frames)`,
+   `unsupported: photometric interpretation RGB`)
+2. Extract pixel array, convert to float32
+3. Correct photometric interpretation (invert MONOCHROME1)
+4. Clip to robust intensity range (1st-99th percentile with 2% margin)
+5. Apply CLAHE (adaptive histogram equalization, 96-tile grid)
+6. Strip uniform rows/columns (`compress_image` -- removes letterboxing). If
+   stripping would leave nothing (e.g. an all-zero image), the uncropped
+   image is kept
+7. Apply colormap, save as 8-bit RGB JPG
 
-**Non-DICOM preprocessing** (`preprocess_non_dicom` / `preprocess_non_dicom_bytes`):
-- Read image from path or in-memory bytes (the bytes variant is used for
-  non-DICOM files inside ZIP archives); if grayscale, apply CLAHE and
-  convert to 8-bit
-- Color images are saved as-is
+**Raster preprocessing** (`decode_raster` + `preprocess_raster`, for JPG/PNG):
+- Decode with Pillow and branch on the image mode, not the channel count
+- Each frame is decoded to float [0, 1]. Several views of one input are
+  placed side by side in a single rendered image (one manifest row, one
+  `image_id`), top-aligned, separated by a 4-pixel gap
+- MPO files (JPEGs carrying extra MPF images: HDR gain maps, camera
+  previews) render every frame side by side at native resolution, padded and
+  separated with black. Any other multi-frame image (animated PNG/GIF,
+  multi-page TIFF) raises `unsupported: multi-frame image (N frames)`
+- Modes with real alpha (`RGBA`, `LA`, `PA`, premultiplied variants, or any
+  mode with a `transparency` entry such as a palette with a transparent
+  index or a grayscale/RGB colour key): if alpha is fully opaque it is
+  dropped. Otherwise the rendered image shows, side by side with a mid-gray
+  gap, the composite over mid-gray (left; content carried only by alpha stays
+  visible) and the raw colour/gray channels with alpha ignored (right;
+  content hidden under transparent pixels stays visible). Grayscale+alpha
+  stays grayscale
+- High-bit-depth grayscale (`I;16*` scaled by 65535, `I`/`F` min-max scaled)
+  keeps its full range; a `tRNS` colour key is matched against the native
+  values to build the alpha mask
+- Grayscale modes (`1`, `L`, `I;16*`, `I`, `F`) stay grayscale; every other
+  mode (`RGB`, `CMYK`, `YCbCr`, `P`, ...) is converted to RGB by Pillow (so
+  CMYK black text stays black)
+- Grayscale: apply CLAHE, convert to 8-bit, and stack to 3 channels
+- Colour: convert to 8-bit RGB
 
-**Error handling**: If a single file fails to load or preprocess (corrupt
-DICOM, unreadable image, etc.), a warning is logged to stderr and the file
-is skipped. This prevents one bad file from aborting the entire batch.
+**Error handling**: Every input is accounted for exactly once, in either
+`manifest.tsv` or `skipped.tsv`. Any exception while reading, decoding,
+rendering or JPEG-encoding one input (e.g. an image wider than libjpeg's
+65500-pixel limit) becomes a `failed` row in `skipped.tsv` with reason
+`<ExceptionClass>: <message>` (or the `unsupported: ...` message), with tabs
+and newlines replaced by spaces; a warning is also printed to stderr. A render that
+yields no image becomes a `failed` row with reason `rendered no images`. A
+source that cannot be opened at all (corrupt ZIP, unreadable top-level source
+directory) becomes one `failed` row for the source path. Only the top-level
+directory is checked: unreadable subdirectories are currently skipped silently
+by the directory glob (handled in a later change). Errors writing to the work
+directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`) still
+abort the run; since images are encoded in memory first, an input's content
+cannot cause one.
 
-**Batching**: Sources are streamed through a generator. Each batch of up to
-`batch_size` images is written to a `batch_NNN/` subdirectory. This bounds
-peak memory usage regardless of dataset size.
+**Batching**: Each input is rendered, encoded and written as soon as discovery yields
+it, so memory does not grow with batch size. The n-th written image
+(0-based) goes to `batch_{n // batch_size + 1:03d}/img_{n % batch_size + 1:05d}.jpg`.
 
-**Output**: A single `manifest.tsv` file.
+**Output**: `manifest.tsv` and `skipped.tsv` (always written, even when
+empty), plus the summary line
+
+```
+Found N inputs: wrote K images in B batches; S skipped (see WORK_DIR/skipped.tsv)
+```
+
+If any input failed and `--allow-skipped` was not given, the command exits 1
+after writing everything.
 
 ### `image-review review`
 
@@ -209,6 +272,19 @@ Written by `preprocess`. Tab-separated, one row per image.
 `image_id` (source paths, which may carry patient identifiers) is used only
 inside `LocalStore`/`ReviewDB`. Everything else identifies an image by its
 `preprocessed_path`.
+
+### `skipped.tsv`
+
+Written by `preprocess`, always (header only when nothing was skipped).
+Tab-separated, one row per input that produced no image.
+
+| Column | Description |
+|--------|-------------|
+| `image_id` | Source identifier, in the same form as `manifest.tsv` (or the source path, if a whole source could not be opened) |
+| `kind` | `failed` |
+| `reason` | `<ExceptionClass>: <message>`, or `unsupported: ...` for inputs this tool does not render |
+
+It contains source paths, so it is as sensitive as `manifest.tsv`.
 
 ### `review.tsv`
 
