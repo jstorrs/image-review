@@ -29,6 +29,7 @@ server.py           HTTPS + bearer-token server exposing a ReviewStore
 connection.py       RemoteTarget: the ir:// connection string; API_VERSION, package_version, parse_reviewer
 remote.py           RemoteStore: ReviewStore client with certificate pinning
 tunnel.py           SSH local port-forward for --via
+signals.py          interrupt_on: SIGTERM/SIGHUP to KeyboardInterrupt, shared by serve, review and the tunnel
 controller.py       Review session orchestration and event loop
 viewer.py           Fullscreen pygame display
 grid_packer.py      Review-time bin-packing of images into grids
@@ -39,8 +40,8 @@ util.py             Shared utilities (surface loading)
 All review-time data access goes through a `ReviewStore`. The controller and
 grid packer never touch the work directory; `LocalStore` serves it directly,
 and `RemoteStore` talks to an `image-review serve` process that wraps a
-`LocalStore`. `store.py`, `server.py`, `connection.py`, `remote.py` and
-`tunnel.py` import without pygame, numpy or skimage.
+`LocalStore`. `store.py`, `server.py`, `connection.py`, `remote.py`,
+`tunnel.py` and `signals.py` import without pygame, numpy or skimage.
 
 ```
 review (pygame)             serve (compute node)

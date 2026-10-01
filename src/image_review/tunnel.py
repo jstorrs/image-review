@@ -5,13 +5,13 @@ already-pinned TLS connection end to end; it adds no trust of its own.
 """
 
 import re
-import signal
 import socket
 import subprocess
-import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+
+from .signals import TERMINATION_SIGNALS, interrupt_on
 
 POLL_SECONDS = 0.1
 TERMINATE_WAIT_SECONDS = 5
@@ -49,28 +49,6 @@ def _accepts_connections(port: int) -> bool:
         return False
 
 
-def _raise_interrupt(signum, frame):
-    raise KeyboardInterrupt
-
-
-@contextmanager
-def _signals_raise_interrupt() -> Iterator[None]:
-    """Turn SIGTERM/SIGHUP into KeyboardInterrupt so ssh is torn down (main thread only)."""
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-    sigs = [signal.SIGTERM] + ([signal.SIGHUP] if hasattr(signal, "SIGHUP") else [])
-    # leave ignored signals alone so `nohup` keeps working
-    previous = {
-        sig: signal.signal(sig, _raise_interrupt) for sig in sigs if signal.getsignal(sig) is not signal.SIG_IGN
-    }
-    try:
-        yield
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
-
-
 def _stop(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         proc.terminate()
@@ -96,7 +74,7 @@ def ssh_tunnel(via: str, host: str, port: int, *, ready_timeout: float = 120) ->
         "--",
         via,
     ]  # fmt: skip
-    with _signals_raise_interrupt():
+    with interrupt_on(*TERMINATION_SIGNALS):  # so ssh is torn down
         try:
             proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL)  # stdin/stderr inherited for prompts and errors
         except FileNotFoundError:

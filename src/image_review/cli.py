@@ -11,6 +11,7 @@ import click
 
 from .access import world_access_warning
 from .connection import parse_reviewer
+from .signals import TERMINATION_SIGNALS, interrupt_on
 from .store import LOCK_NAME, LocalStore, ReviewStore, StatusFilter, WorkDirLocked
 
 if TYPE_CHECKING:
@@ -70,24 +71,6 @@ def open_local_store(path: Path, read_only: bool = False) -> LocalStore:
         raise click.ClickException(f"Cannot update work directory: {e}") from e
     warn_if_world_accessible(path)
     return store
-
-
-@contextlib.contextmanager
-def interrupt_on(*signals: signal.Signals) -> Iterator[None]:
-    """Turn these signals into KeyboardInterrupt so cleanup (e.g. releasing the work dir lock) runs.
-
-    A signal already ignored (e.g. under nohup) stays ignored. Previous handlers are restored on exit.
-    """
-    previous = {}
-    try:
-        for sig in signals:
-            if signal.getsignal(sig) is signal.SIG_IGN:
-                continue
-            previous[sig] = signal.signal(sig, _raise_interrupt)
-        yield
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
 
 
 @contextlib.contextmanager
@@ -461,7 +444,7 @@ def serve(work_dir, bind, port):
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
         # Installed before the lock is taken, so every exit path releases it.
-        with interrupt_on(signal.SIGTERM, signal.SIGHUP), contextlib.ExitStack() as stack:
+        with interrupt_on(*TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
             store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
             host = socket.getfqdn() if bind is None else bind
             try:
@@ -501,10 +484,6 @@ def serve(work_dir, bind, port):
 def _close_store_after_marks(server: "ReviewServer", store: LocalStore) -> None:
     with server.store_lock:  # a mark in flight finishes first; later ones get PermissionError (a 500)
         store.close()
-
-
-def _raise_interrupt(signum, frame):
-    raise KeyboardInterrupt
 
 
 def main():
