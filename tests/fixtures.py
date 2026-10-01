@@ -27,10 +27,12 @@ def make_work_dir(root: Path) -> None:
         writer.writerows(ROWS)
 
 
-def write_dicom(path: Path, pixels: np.ndarray, photometric: str = "MONOCHROME2", **attrs) -> None:
+def write_dicom(path: Path, pixels: np.ndarray, photometric: str = "MONOCHROME2", preamble: bool = True, **attrs) -> None:
     """Write a synthetic DICOM file (with preamble and file meta) holding `pixels`.
 
     `pixels` is (rows, cols) or (rows, cols, 3) for one frame, or (frames, rows, cols[, 3]).
+    With `preamble=False` only the dataset is written (implicit VR little endian,
+    no preamble, `DICM` or file meta), as some older systems do.
     Extra keyword arguments are set as DICOM attributes.
     """
     ds = pydicom.Dataset()
@@ -42,7 +44,11 @@ def write_dicom(path: Path, pixels: np.ndarray, photometric: str = "MONOCHROME2"
     ds.set_pixel_data(pixels, photometric, pixels.dtype.itemsize * 8)
     for name, value in attrs.items():
         setattr(ds, name, value)
-    ds.save_as(path, enforce_file_format=True)
+    if preamble:
+        ds.save_as(path, enforce_file_format=True)
+    else:
+        del ds.file_meta
+        ds.save_as(path, implicit_vr=True, little_endian=True)
 
 
 def start_server(work_dir: Path, port: int = 0):

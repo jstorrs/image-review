@@ -49,7 +49,14 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--allow-skipped]
 ```
 
-Accepts ZIP files, directories, or individual image files. DICOM images are
+Accepts ZIP files, directories (searched recursively, including ZIP files
+inside them), or individual files. Inputs are recognized by content, not by
+extension: DICOM (including extensionless files like `IM0001` and DICOM
+without the 128-byte preamble), PNG, JPEG, TIFF, BMP, GIF, WebP, JPEG 2000 and
+PNM. Symlinked directories are never entered: a link to an enclosing
+directory or into another SOURCE is ignored, and any other is failed with its
+target, so pass that target as a SOURCE if you want it. The work directory is
+never read as input. DICOM images are
 normalized with adaptive histogram equalization to enhance local contrast
 and a configurable colormap. Non-DICOM images are converted to RGB, with the same
 contrast enhancement applied to grayscale. Transparent images are shown as
@@ -96,9 +103,13 @@ time, so a team shares one sequentially or splits a study into several work
 directories.
 
 Every input ends up in exactly one of `manifest.tsv` (rendered) or
-`skipped.tsv` (with the reason it failed, e.g. a corrupt file or an
-`unsupported:` multi-frame or colour DICOM). The run finishes with a summary
-line (`Found N inputs: wrote K images in B batches; S skipped (see
+`skipped.tsv`, with kind `failed` (e.g. a corrupt file, a `.jpg`/`.png`/...
+or `.zip` whose content is not one, a `.tar.gz` or other non-ZIP archive, an
+`unsupported:` multi-frame or colour DICOM, an unreadable subdirectory, a
+symlinked directory outside the sources, a file named on the command line
+that is not an image) or `ignored` (not an image: unrecognized content, macOS
+AppleDouble files, a DICOMDIR index, an empty ZIP). The run finishes with a summary line (`Found N inputs:
+wrote K images in B batches; S skipped (F failed, I ignored; see
 .../skipped.tsv)`) and exits 1 if any input failed, unless `--allow-skipped`
 is given. Check `skipped.tsv` before reviewing: those images will not be
 shown.

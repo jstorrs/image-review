@@ -36,9 +36,26 @@ image-review preprocess SOURCE [SOURCE ...] [options]
 ```
 
 **Sources** can be:
-- ZIP files containing `.dcm`, `.jpg`, `.jpeg`, or `.png` files
-- Directories containing `.dcm`, `.jpg`, or `.png` files
-- Individual image files
+- Directories, searched recursively (including ZIP files inside them)
+- ZIP files
+- Individual DICOM, image or ZIP files
+
+Inputs are recognized by their content, not their file name, so upper-case
+extensions (`B.DCM`, `e.JPG`), `.jpeg`, `.dicom` and `.ima` files, and
+extensionless DICOM files such as `IM0001` (common in DICOM exports) are all
+picked up. DICOM (with or without the standard 128-byte preamble), PNG,
+JPEG, TIFF, BMP, GIF, WebP, JPEG 2000 and PNM are recognized. Word, Excel,
+PowerPoint and EPUB files are ZIPs, so images embedded in them are reviewed
+too. A ZIP inside a ZIP is not opened, and other archives (`.tar.gz`, `.7z`,
+`.rar`, ...) are not supported: extract them first (both are recorded as
+failed). Symlinked files are read, but symlinked directories are never
+entered, so a link such as `up -> ..` cannot pull in other patients' studies:
+a link to an enclosing directory, or into a directory you passed as a SOURCE,
+is ignored; any other is recorded as failed with its target, so pass that
+target as another SOURCE if you want it reviewed.
+The work directory and its `.NAME.partial` staging directory are never read
+as input, so `image-review preprocess .` with the default `./review_work` is
+safe.
 
 **Options:**
 
@@ -128,14 +145,31 @@ review):
 Animated PNGs and other multi-frame rasters are listed in `skipped.tsv` as
 unsupported.
 
+Every file the run finds is listed in `manifest.tsv` or `skipped.tsv`. The
+`kind` column of `skipped.tsv` is either:
+
+- `failed`: an input that should have been rendered but was not (a corrupt
+  file, a file named like an image or a ZIP such as `.jpg` or `.zip` whose
+  content is not one, an unsupported DICOM, an unreadable subdirectory, a ZIP
+  inside a ZIP, a `.tar.gz` or other non-ZIP archive, a symlinked directory
+  outside your sources, or any file you named on the command line that is
+  not an image, such as `notes.txt`). These make `preprocess` exit 1.
+- `ignored`: a file that is not an image (`not an image (unrecognized
+  content)`, e.g. a text file; macOS `._name` AppleDouble files and
+  `__MACOSX/` entries; a DICOMDIR index; a ZIP with no files), or a symlink
+  to a directory that is already being read. These do not
+  affect the exit status, but glance at them in case something you expected
+  to review is among them.
+
 Only single-frame grayscale (MONOCHROME1/2) DICOMs are rendered for now.
-Colour and multi-frame DICOMs, and any file that cannot be read or decoded,
-do not stop the run: each is recorded in `skipped.tsv` with a reason (for
-example `unsupported: multi-frame DICOM (3 frames)` or `BadZipFile: File is
-not a zip file`). The run ends with a summary such as:
+Colour and multi-frame DICOMs, DICOM objects without pixel data (structured
+reports, encapsulated PDFs), and any file that cannot be read or decoded do
+not stop the run: each is recorded in `skipped.tsv` as `failed` with a reason
+(for example `unsupported: multi-frame DICOM (3 frames)` or `BadZipFile: File
+is not a zip file`). The run ends with a summary such as:
 
 ```
-Found 1200 inputs: wrote 1195 images in 4 batches; 5 skipped (see review_work/skipped.tsv)
+Found 1200 inputs: wrote 1195 images in 4 batches; 5 skipped (3 failed, 2 ignored; see review_work/skipped.tsv)
 ```
 
 If anything failed, `preprocess` exits with status 1 so scripts notice.

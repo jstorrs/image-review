@@ -164,8 +164,9 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
     """Normalize DICOM and image files to JPGs and organize them into batches.
 
     SOURCES are one or more ZIP files, directories, or image files to process.
-    Every input is listed in either manifest.tsv or skipped.tsv. Exits 1 if any
-    input failed, unless --allow-skipped is given.
+    Inputs are recognized by content, not extension. Every input is listed in
+    either manifest.tsv or skipped.tsv (as failed, or ignored when it is not an
+    image). Exits 1 if any input failed, unless --allow-skipped is given.
     """
     from .preprocess import WorkDirExists, run_preprocess
 
@@ -174,13 +175,13 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
         result = run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap, access=access)
     except WorkDirExists as exc:
         raise click.ClickException(str(exc)) from exc
+    failed = sum(1 for s in result.skipped if s.kind == "failed")
     click.echo(
         f"Found {result.found} inputs: wrote {result.written} images in {result.batches} batches; "
-        f"{len(result.skipped)} skipped (see {result.skipped_path})"
+        f"{len(result.skipped)} skipped ({failed} failed, {len(result.skipped) - failed} ignored; see {result.skipped_path})"
     )
     if access == "group":
         click.echo(_shared_with(Path(work_dir)))
-    failed = sum(1 for s in result.skipped if s.kind == "failed")
     if failed and not allow_skipped:
         raise click.ClickException(
             f"{failed} input(s) failed to preprocess and will not be reviewed; see {result.skipped_path}. "

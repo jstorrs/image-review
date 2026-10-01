@@ -63,7 +63,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `SOURCE` | (required) | One or more ZIP files, directories, or image files |
+| `SOURCE` | (required) | One or more ZIP files, directories, or individual files |
 | `--batch-size` | 300 | Maximum images per batch subdirectory |
 | `--work-dir` | `./review_work` | Work directory for all output (alias: `--output-dir`); must not exist or be empty |
 | `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale |
@@ -72,7 +72,8 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 
 The pipeline has three parts: **discovery** (IO) yields one `Candidate`
 (`image_id`, `kind` = `dicom` or `raster`, and a `read()` returning the raw
-bytes) per input without decoding anything; a pure **`render(kind, image_id,
+bytes) per input without decoding anything (or a `Skipped` row for content
+that is not an input or cannot be read); a pure **`render(kind, image_id,
 data, colormap) -> list[Rendered]`** turns the bytes into `(H, W, 3)` uint8
 RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and records them in the
@@ -123,23 +124,55 @@ directory or `manifest.tsv` has any other bit, they print
 never chmod'ed automatically. A team shares a work directory sequentially
 (one writer at a time) or splits a study into several work directories.
 
-**Source loading** dispatches by type:
+**Source loading.** `discover(sources, exclude)` yields every input,
+classified by content. `run_preprocess` passes the resolved work directory and
+staging directory as `exclude`; nothing under them is ingested (resolved
+paths compared), so a work dir inside a source (e.g. `preprocess .` with the
+default `./review_work`) never re-ingests its own output.
 
 | Source type | Behavior |
 |-------------|----------|
-| `.zip` | Scans for `*.dcm`, `*.jpg`, `*.jpeg`, `*.png` entries (extension matched case-insensitively) |
-| Directory | Globs `**/*.dcm`, then `**/*.jpg`, `**/*.jpeg`, `**/*.png` |
-| Single file | Treated as DICOM (`.dcm`) or as a raster image (other extensions) |
+| Directory | One `os.walk(followlinks=False)`, directory and file names sorted at each level, top-down (a directory's files before its subdirectories). Every file is classified; a ZIP file yields its entries. Symlinked files are read; a dangling symlink is `failed`. A symlinked directory is never entered (it could lead out of the source, e.g. `up -> ..` or a link to `/`); by its resolved target it is: inside `exclude` → skipped silently; the link's own directory or an ancestor of it (so the source root and its ancestors) → `ignored`, `symlink to an enclosing directory`; inside or equal to a directory given as a SOURCE in this run (including the one being walked) → `ignored`, `symlinked directory already included via SOURCE <path>`; anything else → `failed`, `symlinked directory not followed; pass its target <resolved path> as a SOURCE`. A non-regular file (FIFO, socket, device) is `ignored` (`not a regular file`). An unreadable directory (including the source itself) is one `failed` row for that directory's path |
+| ZIP (by content, wherever found) | Every non-directory entry from `infolist()`, classified by its first bytes. A ZIP entry → `failed`, `unsupported: nested zip`. An entry that cannot be read (encrypted, unknown compression) → `failed`. An archive that cannot be opened → one `failed` row for the archive path. An archive with no file entries (empty, or directories only) → one `ignored` row for the archive path, `zip contains no files`. Office Open XML, ODF and EPUB files are ZIPs: their embedded images are reviewed, their XML parts are `ignored`, and embedded workbooks or packages are nested ZIPs (`failed`) |
+| Single file | Classified like a file in a directory, except that a file that would be `ignored` is `failed` with the same reason (it was named explicitly, e.g. `notes.txt`, a FIFO); AppleDouble stays `ignored`. Rows from inside a named ZIP are unchanged |
 
-The kind (`dicom` or `raster`) is chosen by extension (case-insensitively).
+`classify(name, head)` is pure over the name and the first 132 bytes (the
+whole file is read only when the input is rendered):
+
+| Content | Result |
+|---------|--------|
+| `DICM` at offset 128 | `dicom` |
+| `PK\x03\x04` or `PK\x05\x06` (empty archive) | ZIP (its entries) |
+| gzip (`\x1f\x8b`), bzip2 (`BZh` + digit), xz, zstd, 7z or rar signature | `failed`: `unsupported: <format> archive` |
+| PNG, JPEG, TIFF, BigTIFF, GIF, WebP (`RIFF` + `WEBP` at 8), JPEG 2000 (JP2 box or J2K codestream), PNM (`P1`-`P6` + whitespace), BMP (`BM` + a DIB header size of 12, 40, 52, 56, 64, 108 or 124 at offset 14), or HEIF/AVIF (`ftyp` at 4 with brand `heic`, `heix`, `hevc`, `hevx`, `heim`, `heis`, `mif1`, `msf1`, `avif` or `avis`) signature | `raster` (Pillow decides) |
+| AppleDouble signature (`\x00\x05\x16\x07`), or none of the above and the name starts with `._` or has a `__MACOSX` component | `ignored`: `AppleDouble metadata (macOS resource fork)` |
+| A bare DICOM dataset: little-endian group `0002` or `0008` at bytes 0-1, then an explicit VR at bytes 4-5 or an even implicit length of at most 256 at bytes 4-7 (names such as `IM0003`, `I.001`, UID-named files) | `dicom` |
+| None of the above, name ends in `.dcm`, `.dicom` or `.ima` (case-insensitive) | `dicom` (the reader decides) |
+| None of the above, name ends in an image suffix (`.jpg .jpeg .png .tif .tiff .bmp .gif .webp .jp2 .j2k .jpx .pbm .pgm .ppm .pnm .heic .heif .avif`, case-insensitive) | `raster`: Pillow decides, so a damaged image is `failed` with Pillow's error, never dropped |
+| None of the above, name ends in `.gz .tgz .tar .7z .rar .bz2 .xz .zst` (tar's `ustar` is at offset 257, beyond the sniffed bytes) | `failed`: `unsupported: <format> archive` |
+| None of the above, name ends in `.zip` | `failed`: `unrecognized content for a .zip file` (a login page or truncated download) |
+| Anything else | `ignored`: `not an image (unrecognized content)` |
+
+DICOM is read with `dcmread(force=True)`. Without `DICM` at offset 128 the
+parsed dataset must have a SOP Class UID or pixel data (an ACR-NEMA image may
+have only pixel data), else it is `InvalidDicomError: not DICOM (no preamble,
+no SOP Class UID and no pixel data)` when its first element is in group
+`0002`/`0008`, or `not DICOM (no preamble and no recognizable DICOM
+elements)` otherwise; so a mislabelled `.dcm` never fails as `unsupported: no
+pixel data`. The SOP class name in `unsupported: no pixel data (<name>)` is
+given only for a single UID value. For a bare dataset the transfer
+syntax is set from the encoding pydicom detected (uncompressed by definition).
+A DICOM without pixel data whose SOP class is DICOMDIR
+(`1.2.840.10008.1.3.10`) is `ignored`: `DICOMDIR index`.
 ZIP entries are read by their `ZipInfo`, so entries that share a name are
 distinct inputs: the first keeps `{zip}::{name}`, later ones get
-`{zip}::{name}#2`, `#3`, ... (no image name ends in `#N`, so these cannot
-clash with a real entry).
+`{zip}::{name}#2`, `#3`, ... (no entry name ends in `#N`, so these cannot
+clash with a real entry). Manifest rows follow discovery order (sources in
+the order given, each walked as above).
 
 **Image IDs** are fully-resolved absolute paths derived from the source:
-- ZIP: `{absolute_zip_path}::{filename}`
-- Directory: fully-resolved absolute path to each file
+- ZIP entry: `{absolute_zip_path}::{filename}` (also for a ZIP inside a directory)
+- Directory: absolute path to each file (a symlinked file keeps its link path)
 - Single file: fully-resolved absolute path
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
@@ -147,7 +180,8 @@ clash with a real entry).
 1. Only single-frame `MONOCHROME1`/`MONOCHROME2` images with pixel data are
    rendered. No pixel data, any other photometric interpretation, or a pixel
    array that is not 2-D (multi-frame) raises `Unsupported` (e.g.
-   `unsupported: no pixel data`, `unsupported: multi-frame DICOM (3 frames)`,
+   `unsupported: no pixel data (Basic Text SR Storage)` naming the SOP class
+   when known, `unsupported: multi-frame DICOM (3 frames)`,
    `unsupported: photometric interpretation RGB`)
 2. Extract pixel array, convert to float32
 3. Correct photometric interpretation (invert MONOCHROME1)
@@ -158,7 +192,7 @@ clash with a real entry).
    image is kept
 7. Apply colormap, save as 8-bit RGB JPG
 
-**Raster preprocessing** (`decode_raster` + `preprocess_raster`, for JPG/PNG):
+**Raster preprocessing** (`decode_raster` + `preprocess_raster`, for PNG/JPEG/TIFF/BMP/GIF):
 - Decode with Pillow and branch on the image mode, not the channel count
 - Each frame is decoded to float [0, 1]. Several views of one input are
   placed side by side in a single rendered image (one manifest row, one
@@ -189,12 +223,12 @@ clash with a real entry).
 rendering or JPEG-encoding one input (e.g. an image wider than libjpeg's
 65500-pixel limit) becomes a `failed` row in `skipped.tsv` with reason
 `<ExceptionClass>: <message>` (or the `unsupported: ...` message), with tabs
-and newlines replaced by spaces; a warning is also printed to stderr. A render that
+and other control characters replaced by spaces and object reprs such as `<_io.BytesIO object at 0x...>` replaced by `<data>` (so `skipped.tsv` is reproducible); a warning is also printed to stderr. A render that
 yields no image becomes a `failed` row with reason `rendered no images`. A
-source that cannot be opened at all (corrupt ZIP, unreadable top-level source
-directory) becomes one `failed` row for the source path. Only the top-level
-directory is checked: unreadable subdirectories are currently skipped silently
-by the directory glob (handled in a later change). Errors writing to the work
+source that cannot be opened at all (corrupt ZIP, unreadable directory at any
+depth) becomes one `failed` row for its path. Content that is not an input
+(see *Source loading*) becomes an `ignored` row, without a stderr warning.
+Only `failed` rows affect the exit status. Errors writing to the work
 directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`) still
 abort the run; since images are encoded in memory first, an input's content
 cannot cause one.
@@ -207,8 +241,10 @@ it, so memory does not grow with batch size. The n-th written image
 empty), plus the summary line
 
 ```
-Found N inputs: wrote K images in B batches; S skipped (see WORK_DIR/skipped.tsv)
+Found N inputs: wrote K images in B batches; S skipped (F failed, I ignored; see WORK_DIR/skipped.tsv)
 ```
+
+N counts every discovered item (rendered, failed and ignored).
 
 If any input failed and `--allow-skipped` was not given, the command exits 1
 after writing everything.
@@ -329,8 +365,8 @@ Tab-separated, one row per input that produced no image.
 | Column | Description |
 |--------|-------------|
 | `image_id` | Source identifier, in the same form as `manifest.tsv` (or the source path, if a whole source could not be opened) |
-| `kind` | `failed` |
-| `reason` | `<ExceptionClass>: <message>`, or `unsupported: ...` for inputs this tool does not render |
+| `kind` | `failed` (an input that was not rendered; makes the CLI exit 1 unless `--allow-skipped`) or `ignored` (not an input: unrecognized content, AppleDouble, DICOMDIR, a ZIP without files, a symlink to an enclosing directory or to a directory inside a SOURCE, a non-regular file inside a directory) |
+| `reason` | `<ExceptionClass>: <message>`, `unsupported: ...` for inputs this tool does not render, or the `ignored` reason |
 
 It contains source paths, so it is as sensitive as `manifest.tsv`.
 
