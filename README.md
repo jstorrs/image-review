@@ -110,9 +110,11 @@ does not manage ACLs), but files never get "other" bits.
 `review`, `serve` and `status` print a warning if the work directory or its
 `manifest.tsv` is accessible to other users (e.g. one made by an older
 version); they never change an existing directory's mode: run
-`chmod -R o-rwx <work dir>`. Only one writer should use a work directory at a
-time, so a team shares one sequentially or splits a study into several work
-directories.
+`chmod -R o-rwx <work dir>`. Only one writer (`review` or `serve`) can use a
+work directory at a time: it holds `review.lock` there, and a second writer
+exits with an error naming who holds it (`status` is read-only and always
+works). A team shares a work directory sequentially or splits a study into
+several work directories.
 
 Every input ends up in exactly one of `manifest.tsv` (rendered) or
 `skipped.tsv`, with kind `failed` (e.g. a corrupt file, a `.jpg`/`.png`/...

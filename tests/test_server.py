@@ -34,7 +34,9 @@ class ServerTestCase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.work_dir = Path(tmp.name)
         make_work_dir(self.work_dir)
-        self.server, self.target = make_server(LocalStore(self.work_dir), "127.0.0.1", 0)
+        store = LocalStore(self.work_dir)
+        self.addCleanup(store.close)
+        self.server, self.target = make_server(store, "127.0.0.1", 0)
         thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
         self.addCleanup(thread.join)
@@ -221,8 +223,8 @@ class TestNoKeyFilesLeft(unittest.TestCase):
     def test_make_server_leaves_temp_dir_empty(self):
         with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as scratch:
             make_work_dir(Path(work))
-            with mock.patch.object(tempfile, "tempdir", scratch):
-                server, _ = make_server(LocalStore(Path(work)), "127.0.0.1", 0)
+            with mock.patch.object(tempfile, "tempdir", scratch), LocalStore(Path(work)) as store:
+                server, _ = make_server(store, "127.0.0.1", 0)
             server.server_close()
             self.assertEqual(os.listdir(scratch), [])
 
@@ -274,6 +276,31 @@ class TestServeCommand(unittest.TestCase):
         self.assertEqual(seen["dir_mode"], 0o700)
         self.assertEqual(list((self.home / ".image-review").iterdir()), [])
         self.assertEqual(closed, [True])
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_locked_work_dir_exits_1(self):
+        lock = self.work / "review.lock"
+        lock.write_text(json.dumps({"host": "node042", "user": "alice", "pid": 1234, "started": "2026-09-30T12:00:00Z"}))
+        with mock.patch.object(ReviewServer, "serve_forever") as serve_forever:
+            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        serve_forever.assert_not_called()
+        for part in ("alice", "node042", "pid 1234", str(lock)):
+            self.assertIn(part, result.output)
+        self.assertTrue(lock.exists())
+
+    def test_serve_holds_lock_while_serving(self):
+        seen = []
+
+        def fake_serve(server, *a, **k):
+            seen.append(json.loads((self.work / "review.lock").read_text())["pid"])
+            raise KeyboardInterrupt
+
+        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(seen, [os.getpid()])
+        self.assertFalse((self.work / "review.lock").exists())
 
     def test_loose_existing_dir_is_tightened(self):
         d = self.home / ".image-review"
@@ -319,6 +346,7 @@ class TestServeCommand(unittest.TestCase):
         _, err = proc.communicate(timeout=20)
         self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(list(directory.iterdir()), [])
+        self.assertFalse((self.work / "review.lock").exists())
 
     def test_missing_manifest(self):
         empty = self.home / "empty"
@@ -328,12 +356,54 @@ class TestServeCommand(unittest.TestCase):
         self.assertIn("No preprocessed data found", result.output)
 
     def test_bad_bind_and_port(self):
-        for args in (["--bind", "0.0.0.0"], ["--bind", "::"], ["--bind", ""], ["--bind", "::1"], ["--bind", "0"], ["--bind", "127.1"], ["--port", "70000"], ["--port", "-1"]):
+        cases = [
+            (["--bind", "0.0.0.0"], "Refusing to bind a wildcard"),
+            (["--bind", "::"], "Refusing to bind a wildcard"),
+            (["--bind", ""], "Refusing to bind a wildcard"),
+            (["--bind", "::1"], "Cannot listen on ::1"),
+            (["--bind", "0"], "Refusing to bind a wildcard"),
+            (["--bind", "127.1"], "cannot be advertised"),
+            (["--port", "70000"], "Invalid value for '--port'"),
+            (["--port", "-1"], "Invalid value for '--port'"),
+        ]
+        for args, message in cases:
             with self.subTest(args=args):
                 result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), *args])
                 self.assertEqual(result.exit_code, 2 if "--port" in args else 1, result.output)
                 self.assertNotIsInstance(result.exception, OSError)
                 self.assertNotIn("Traceback", result.output)
+                self.assertIn(message, result.output)
+                self.assertFalse((self.work / "review.lock").exists())
+
+    def test_connection_file_failure_releases_lock(self):
+        with (
+            mock.patch("image_review.server.write_connection_file", side_effect=OSError("disk full")),
+            mock.patch.object(ReviewServer, "serve_forever") as serve_forever,
+        ):
+            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Cannot write connection file: disk full", result.output)
+        serve_forever.assert_not_called()
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_store_closed_under_store_lock(self):
+        servers = []
+        lock_held_at_close = []
+        real_close = LocalStore.close
+
+        def fake_serve(server, *a, **k):
+            servers.append(server)
+            raise KeyboardInterrupt
+
+        def close(store):
+            lock_held_at_close.append(servers[0].store_lock.locked())
+            real_close(store)
+
+        with mock.patch.object(ReviewServer, "serve_forever", fake_serve), mock.patch.object(LocalStore, "close", close):
+            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(lock_held_at_close[0])  # a handler thread's mark cannot interleave with the release
+        self.assertFalse((self.work / "review.lock").exists())
 
 
 class TestAuth(ServerTestCase):

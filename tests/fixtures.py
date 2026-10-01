@@ -65,13 +65,14 @@ def add_overlay(ds: pydicom.Dataset, mask: np.ndarray, origin: tuple[int, int] =
 
 
 def start_server(work_dir: Path, port: int = 0):
-    """Serve work_dir on 127.0.0.1 in a thread; returns (server, target, stop)."""
+    """Serve work_dir on 127.0.0.1 in a thread; returns (server, target, stop). The store holds the work dir lock until stop()."""
     import threading
 
     from image_review.server import make_server
     from image_review.store import LocalStore
 
-    server, target = make_server(LocalStore(work_dir), "127.0.0.1", port)
+    store = LocalStore(work_dir)
+    server, target = make_server(store, "127.0.0.1", port)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
 
@@ -79,5 +80,6 @@ def start_server(work_dir: Path, port: int = 0):
         server.shutdown()
         thread.join()
         server.server_close()
+        store.close()
 
     return server, target, stop

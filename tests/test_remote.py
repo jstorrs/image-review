@@ -64,7 +64,7 @@ class RemoteTestCase(unittest.TestCase):
             self._stop()
 
     def local_copy(self) -> LocalStore:
-        return LocalStore(self.work_dir)
+        return LocalStore(self.work_dir, read_only=True)  # the server holds the lock
 
 
 class TestRoundTrips(RemoteTestCase):

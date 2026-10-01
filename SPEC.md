@@ -126,7 +126,8 @@ directory or `manifest.tsv` has any other bit, they print
 `warning: <path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
 <work dir>`` to stderr (group bits alone are silent). Existing directories are
 never chmod'ed automatically. A team shares a work directory sequentially
-(one writer at a time) or splits a study into several work directories.
+(one writer at a time, enforced by `review.lock`; see *Concurrency limits*) or
+splits a study into several work directories.
 
 **Source loading.** `discover(sources, exclude)` yields every input,
 classified by content. `run_preprocess` passes the resolved work directory and
@@ -321,7 +322,10 @@ store (and tunnel) is up, so ssh password/MFA prompts keep terminal focus.
 
 **Store selection** (`cli.open_store`, shared by `review` and `status`):
 
-- Without `--remote`: `LocalStore(work_dir)`. `--via` without `--remote` is a
+- Without `--remote`: `LocalStore(work_dir)` (writable for `review`, holding
+  the work dir lock until the command exits; `read_only=True` for `status`),
+  entered as a context manager like `RemoteStore`. `WorkDirLocked` is a
+  `ClickException` (exit 1) with its message. `--via` without `--remote` is a
   usage error unless it came only from `$IMAGE_REVIEW_VIA`.
 - With `--remote`: `--work-dir` is a usage error (mutually exclusive; if
   `--remote` came from the environment the message says to unset
@@ -345,7 +349,8 @@ store (and tunnel) is up, so ssh password/MFA prompts keep terminal focus.
 image-review status [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINATION]]
 ```
 
-Same store selection as `review`. Fetches the manifest, the current pass and
+Same store selection as `review`, but a local store is opened read-only (no
+lock), so `status` works while a writer holds the work directory. Fetches the manifest, the current pass and
 that pass's statuses from the store, then prints overall and per-batch counts
 of CLEAN / DIRTY / UNREVIEWED images (pass-aware, computed by the pure
 `store.summary` / `store.batch_summary`), plus the current pass number. Then
@@ -368,7 +373,9 @@ image-review serve [--work-dir DIR] [--bind HOST] [--port N]
 | `--bind` | `socket.getfqdn()` | Hostname or IPv4 address to bind and advertise |
 | `--port` | 0 | Port to listen on; 0 picks a free port |
 
-Opens a `LocalStore`, calls `server.make_server`, and serves until interrupted.
+Opens a writable `LocalStore` (holding the work dir lock for the server's
+lifetime; `WorkDirLocked` is a `ClickException`, exit 1), calls
+`server.make_server`, and serves until interrupted.
 Wildcard binds (`0.0.0.0`, `::`, empty) are refused, as is any address the
 server ends up bound to that is unspecified, or whose connection string would
 not parse (`RemoteTarget.parse` round trip). Only IPv4 hostnames/addresses are
@@ -385,8 +392,8 @@ user, tightened to 0700 if looser; file created `O_EXCL|O_NOFOLLOW` with mode
 
 **Shutdown**: SIGINT, SIGTERM and SIGHUP all stop the server (SIGTERM is what
 Slurm sends on `scancel` and at the time limit); a signal that was already
-ignored (e.g. under `nohup`) is left ignored. On exit the socket is closed and
-the connection file removed.
+ignored (e.g. under `nohup`) is left ignored. On exit the socket is closed,
+the store closed (releasing the work dir lock) and the connection file removed.
 
 ## Data Files
 
@@ -426,6 +433,11 @@ Tab-separated, one row per input that produced no image.
 | `reason` | `<ExceptionClass>: <message>`, `unsupported: ...` for inputs this tool does not render, or the `ignored` reason |
 
 It contains source paths, so it is as sensitive as `manifest.tsv`.
+
+### `review.lock`
+
+Present while a writer (`review` or `serve`) has the work directory open. JSON
+naming the holder; see *Concurrency limits*.
 
 ### `review.tsv`
 
@@ -483,11 +495,15 @@ image preprocessed more than once); they share a review status.
 | `statuses(pass_number) -> dict[str, Status]` | Pass-aware status of every manifest key |
 | `mark(keys, batch, status, pass_number) -> dict[str, Status]` | Record a verdict; returns the new status of every key affected, including keys that share an `image_id` with a marked key |
 | `current_pass() -> int` | Auto-detected pass number |
+| `close()`, `__enter__`, `__exit__` | Release what the store holds (`RemoteStore`: pool and connections; `LocalStore`: the work dir lock); idempotent. Stores are context managers that close on exit |
 | `skipped() -> SkippedCounts \| None` | Counts of `failed` and `ignored` rows in preprocess's `skipped.tsv` (frozen `SkippedCounts(failed, ignored)`); `None` if the file is absent; `ValueError` naming `file:line` if it is malformed |
 
-### `LocalStore(work_dir)`
+### `LocalStore(work_dir, read_only=False)`
 
-Loads `manifest.tsv` and a `ReviewDB`. `image_bytes` reads the file via
+Loads `manifest.tsv` (written once by `preprocess`, so before locking); a
+writable store then takes the work dir lock (see *Concurrency limits*) and
+loads a `ReviewDB`, releasing the lock if that fails. `close()` releases it. A `read_only` store takes no lock and its
+`mark` raises `PermissionError` (as does `mark` after `close()`). `image_bytes` reads the file via
 `safe_path`; `image_bytes_many` loops over it, catching `KeyError`,
 `ValueError` (path escape) and `OSError`. `mark` translates keys to
 `image_id`s and calls `ReviewDB.mark_many`. `statuses` and `current_pass`
@@ -788,10 +804,58 @@ readiness probe through `--via` (a TCP connect and close) produces one such
 
 ### Concurrency limits
 
-The server assumes one reviewer and is the only writer of `review.tsv`:
-running `serve` and a local `review` (or two servers) on the same work
-directory can lose marks, since each process holds its own in-memory copy of
-the review state.
+Each writer holds its own in-memory copy of the review state and rewrites
+`review.tsv` from it, so two writers on one work directory would lose each
+other's marks. A writable `LocalStore` (used by `review` and `serve`)
+therefore holds `work_dir/review.lock`:
+
+- Contents are JSON `{"host", "boot_id", "user", "pid", "started"}`: hostname,
+  `/proc/sys/kernel/random/boot_id` (`""` where unavailable), login name (the
+  uid if there is none), pid, and UTC ISO start time. The full record is written
+  to a unique sibling `review.lock.<host>.<boot_id or ->.<pid>.<random>`
+  (created `O_EXCL`, `fchmod`ed to the work dir policy's file mode: 0600
+  private, 0660 group, so teammates can read who holds it; then `fsync`ed),
+  which is hard-linked to `review.lock` and then removed. A lock is therefore
+  never seen empty or half-written. If `link` reports an error but the
+  sibling's link count is 2 (a lost NFS reply), the lock was acquired. Where
+  hard links are unsupported (`link` fails with `EPERM`, `ENOTSUP`/`EOPNOTSUPP`
+  or `ENOSYS`: vfat/exFAT, SMB, many FUSE mounts), `review.lock` is created
+  directly with `O_CREAT | O_EXCL` and the record written and `fsync`ed; a
+  reader that finds the lock empty re-reads it for up to 1 s before treating it
+  as corrupt. A process killed mid-acquire can leave a sibling behind; each
+  acquire removes, best effort, siblings named with this host and `boot_id`
+  whose pid no longer exists. Others are harmless and can be deleted by hand.
+  `flock` is not used: it is unreliable on Lustre/GPFS/NFS.
+- A lock is reclaimed automatically only when its process is verifiably gone
+  on this machine: same hostname and same non-empty `boot_id` (so neither a
+  different machine with the same hostname nor a lock from before a reboot or
+  from an older version qualifies), and `os.kill(pid, 0)` raises
+  `ProcessLookupError` (`PermissionError` means another user's process
+  exists; `os.kill` is only called on POSIX, as signal 0 is `CTRL_C_EVENT` on
+  Windows). Containers share the host's `boot_id`, so one that also shares the
+  hostname but has its own pid namespace is not told apart. The lock is then
+  removed only if `review.lock` is still the same file (`(st_dev, st_ino)` from
+  the `fstat` of the descriptor it was read from). That check relies on the
+  descriptor staying open from the read through the staleness check, the
+  `stat` and the `unlink`: an open inode cannot be freed, so its number cannot
+  be reused by a lock another reclaimer has just re-created (NFS
+  silly-renames an open file instead). Only the gap between that `stat` and
+  the `unlink` remains. Creation is retried once.
+- Otherwise `WorkDirLocked` is raised: `work directory is in use by USER on
+  HOST (pid PID) since STARTED; lock file PATH. If that process is gone, delete
+  PATH by hand` (the start time helps judge, e.g. after a pid was reused). An
+  unreadable or malformed lock file counts as held; the message names it and
+  gives the same advice.
+- `close()` removes the file only if it still names this process (host,
+  `boot_id` and pid) and is still the file it read (held open the same way);
+  it is idempotent.
+- `serve` turns SIGTERM and SIGHUP into `KeyboardInterrupt` before taking the
+  lock, and closes the store last, while holding the server's store lock, so a
+  mark in progress finishes first and later ones fail (500). `review` turns
+  SIGHUP (lost terminal or ssh session) into `KeyboardInterrupt` while the store
+  is open.
+
+The server additionally assumes one reviewer per server.
 
 ### Locking
 

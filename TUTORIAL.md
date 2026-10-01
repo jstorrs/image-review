@@ -491,9 +491,9 @@ whole path to the compute node.
 **Limitations:**
 - Anyone holding the connection string can view the images and record review
   marks while the server runs. Do not paste it into chat or tickets.
-- One review process per work directory. Do not run `serve` and a local
-  `review` on the same work directory at the same time (marks can be lost),
-  and use one reviewer per server.
+- One writer per work directory: `serve` or a local `review` holds
+  `review.lock` in the work directory while it runs, and a second one exits
+  with an error (see below). `status` still works. Use one reviewer per server.
 
 **Troubleshooting `--via`:**
 - The server logs one `connection error: SSLEOFError` line per client start.
@@ -506,6 +506,20 @@ whole path to the compute node.
   Jupyter), `--via` can fail with "Address already in use". Use a separate
   `Host` alias without `LocalForward`.
 - If ssh backgrounds itself (`ForkAfterAuthentication`), remove that option.
+
+**Troubleshooting "work directory is in use":** the message names who holds
+the work directory (user, node, pid, start time) and the lock file
+(`review.lock` in the work directory). Finish or stop that session first. A
+lock is cleared automatically only when the tool can verify that its process is
+gone on the same machine since its last boot. A lock left on another node (for
+example a `serve` job that was killed), or one whose process id has since been
+reused, is not. If you are sure that process is gone (check `squeue`, or
+`ps -p PID` on that node, and compare the start time), delete the lock file by
+hand and run again:
+
+```bash
+rm /scratch/me/review_work/review.lock
+```
 
 **Troubleshooting "Cannot read work directory":** `review.tsv` or
 `manifest.tsv` is malformed (for example a hand edit left a short row, a

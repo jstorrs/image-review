@@ -5,11 +5,15 @@ import socket
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from .access import world_access_warning
-from .store import ReviewStore
+from .store import LOCK_NAME, LocalStore, ReviewStore, WorkDirLocked
+
+if TYPE_CHECKING:
+    from .server import ReviewServer
 
 DEFAULT_WORK_DIR = "./review_work"
 
@@ -32,9 +36,48 @@ def warn_if_world_accessible(work_dir: Path) -> None:
         click.echo(warning, err=True)
 
 
+def open_local_store(path: Path, read_only: bool = False) -> LocalStore:
+    """Open a LocalStore (writable ones take the work dir lock), translating failures into ClickExceptions."""
+    try:
+        store = LocalStore(path, read_only=read_only)
+    except WorkDirLocked as e:
+        raise click.ClickException(str(e)) from e
+    except FileNotFoundError:
+        raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
+    except OSError as e:
+        if e.filename is not None and Path(e.filename).name.startswith(LOCK_NAME):
+            raise click.ClickException(f"Cannot write to work directory {path}: {e}") from e
+        raise click.ClickException(f"Cannot read work directory: {e}") from e
+    except ValueError as e:
+        raise click.ClickException(f"Cannot read work directory: {e}") from e
+    warn_if_world_accessible(path)
+    return store
+
+
 @contextlib.contextmanager
-def open_store(work_dir: str | None, remote: str | None, via: str | None = None) -> Iterator[ReviewStore]:
-    """Open the local or remote store, translating startup failures into ClickExceptions."""
+def interrupt_on(*signals: signal.Signals) -> Iterator[None]:
+    """Turn these signals into KeyboardInterrupt so cleanup (e.g. releasing the work dir lock) runs.
+
+    A signal already ignored (e.g. under nohup) stays ignored. Previous handlers are restored on exit.
+    """
+    previous = {}
+    try:
+        for sig in signals:
+            if signal.getsignal(sig) is signal.SIG_IGN:
+                continue
+            previous[sig] = signal.signal(sig, _raise_interrupt)
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+@contextlib.contextmanager
+def open_store(work_dir: str | None, remote: str | None, via: str | None = None, read_only: bool = False) -> Iterator[ReviewStore]:
+    """Open the local or remote store, translating startup failures into ClickExceptions.
+
+    `read_only` applies to a local store: it takes no lock and refuses marks.
+    """
     if remote is None:
         if via is not None and click.get_current_context().get_parameter_source("via") is not click.core.ParameterSource.ENVIRONMENT:
             raise click.UsageError("--via requires --remote.")
@@ -42,16 +85,8 @@ def open_store(work_dir: str | None, remote: str | None, via: str | None = None)
         path = Path(raw)
         if not path.exists():
             raise click.BadParameter(f"Path '{raw}' does not exist.", param_hint="'--work-dir'")
-        from .store import LocalStore
-
-        try:
-            store = LocalStore(path)
-        except FileNotFoundError:
-            raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
-        except ValueError as e:
-            raise click.ClickException(f"Cannot read work directory: {e}") from e
-        warn_if_world_accessible(path)
-        yield store
+        with open_local_store(path, read_only=read_only) as local:
+            yield local
         return
 
     if work_dir is not None:
@@ -225,7 +260,8 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote, vi
 
     from .controller import ReviewSession
 
-    with open_store(work_dir, remote, via) as store:
+    hangup = (signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ()  # terminal or ssh session dropped
+    with interrupt_on(*hangup), open_store(work_dir, remote, via) as store:
         # after the store: SDL must not steal terminal focus during ssh password/MFA prompts
         pg.init()
         try:
@@ -250,7 +286,7 @@ def status(work_dir, remote, via):
     """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED counts)."""
     from .store import batch_summary, summary
 
-    with open_store(work_dir, remote, via) as store:
+    with open_store(work_dir, remote, via, read_only=True) as store:
         manifest = store.manifest()
         current = store.current_pass()
         statuses = store.statuses(current)
@@ -295,66 +331,56 @@ def serve(work_dir, bind, port):
     """
     from .connection import RemoteTarget
     from .server import make_server, write_connection_file
-    from .store import LocalStore
 
     if bind is not None and bind.strip() in ("", "0.0.0.0", "::"):
         raise click.ClickException("Refusing to bind a wildcard address; pass this node's hostname with --bind.")
     try:
-        store = LocalStore(Path(work_dir))
-    except FileNotFoundError:
-        raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
-    except ValueError as e:
-        raise click.ClickException(f"Cannot read work directory: {e}") from e
-    warn_if_world_accessible(Path(work_dir))
-
-    host = bind or socket.getfqdn()
-    try:
-        server, target = make_server(store, host, port)
-    except OSError as e:
-        raise click.ClickException(f"Cannot listen on {host}:{port} (IPv4 hostnames/addresses only): {e}")
-
-    connection_file = None
-    previous_handlers = {}
-    try:
-        if ipaddress.ip_address(server.server_address[0]).is_unspecified:
-            raise click.ClickException("Refusing to bind a wildcard address; pass this node's hostname with --bind.")
-        uri = target.to_uri()
-        try:
-            RemoteTarget.parse(uri)
-        except ValueError as e:
-            raise click.ClickException(f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address.")
-        # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs
-        for sig in (signal.SIGTERM, signal.SIGHUP):
-            if signal.getsignal(sig) is signal.SIG_IGN:  # e.g. nohup
-                continue
-            previous_handlers[sig] = signal.signal(sig, _raise_interrupt)
-        if sys.stdout.isatty():
-            print("Serving review data. The connection string grants access; treat it like a password.\n")
-            print(uri)
-            remote_arg = f"'{uri}'"
-        else:
+        # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
+        # Installed before the lock is taken, so every exit path releases it.
+        with interrupt_on(signal.SIGTERM, signal.SIGHUP), contextlib.ExitStack() as stack:
+            store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
+            host = bind or socket.getfqdn()
             try:
-                connection_file = write_connection_file(target)
+                server, target = make_server(store, host, port)
             except OSError as e:
-                raise click.ClickException(f"Cannot write connection file: {e}")
-            print("Serving review data. Stdout is not a terminal, so the connection string (an access token;")
-            print(f"treat it like a password) was written to {connection_file} (mode 0600) on this node.")
-            print("Home directories are usually shared with the login node, so on your laptop use:")
-            remote_arg = f'"$(ssh <user>@<login-node> cat {connection_file})"'
-        print("\nOn your laptop, directly:")
-        print(f"  image-review review --remote {remote_arg}")
-        print("or through an SSH tunnel via the login node:")
-        print(f"  image-review review --remote {remote_arg} --via <user>@<login-node>")
-        print("\nPress Ctrl-C to stop.", flush=True)
-        server.serve_forever()
+                raise click.ClickException(f"Cannot listen on {host}:{port} (IPv4 hostnames/addresses only): {e}")
+            # Exit order (LIFO): connection file, socket, then the store; a handler thread may still be marking.
+            stack.callback(_close_store_after_marks, server, store)
+            stack.callback(server.server_close)
+            if ipaddress.ip_address(server.server_address[0]).is_unspecified:
+                raise click.ClickException("Refusing to bind a wildcard address; pass this node's hostname with --bind.")
+            uri = target.to_uri()
+            try:
+                RemoteTarget.parse(uri)
+            except ValueError as e:
+                raise click.ClickException(f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address.")
+            if sys.stdout.isatty():
+                print("Serving review data. The connection string grants access; treat it like a password.\n")
+                print(uri)
+                remote_arg = f"'{uri}'"
+            else:
+                try:
+                    connection_file = write_connection_file(target)
+                except OSError as e:
+                    raise click.ClickException(f"Cannot write connection file: {e}")
+                stack.callback(connection_file.unlink, missing_ok=True)
+                print("Serving review data. Stdout is not a terminal, so the connection string (an access token;")
+                print(f"treat it like a password) was written to {connection_file} (mode 0600) on this node.")
+                print("Home directories are usually shared with the login node, so on your laptop use:")
+                remote_arg = f'"$(ssh <user>@<login-node> cat {connection_file})"'
+            print("\nOn your laptop, directly:")
+            print(f"  image-review review --remote {remote_arg}")
+            print("or through an SSH tunnel via the login node:")
+            print(f"  image-review review --remote {remote_arg} --via <user>@<login-node>")
+            print("\nPress Ctrl-C to stop.", flush=True)
+            server.serve_forever()
     except KeyboardInterrupt:
         pass
-    finally:
-        for sig, handler in previous_handlers.items():
-            signal.signal(sig, handler)
-        server.server_close()
-        if connection_file is not None:
-            connection_file.unlink(missing_ok=True)
+
+
+def _close_store_after_marks(server: "ReviewServer", store: LocalStore) -> None:
+    with server.store_lock:  # a mark in flight finishes first; later ones get PermissionError (a 500)
+        store.close()
 
 
 def _raise_interrupt(signum, frame):
