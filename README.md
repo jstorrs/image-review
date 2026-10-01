@@ -45,6 +45,7 @@ image-review status
 image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--work-dir DIR]
                                             [--colormap NAME]
+                                            [--access {private,group}]
                                             [--allow-skipped]
 ```
 
@@ -59,10 +60,40 @@ Output is organized into batch subdirectories with a `manifest.tsv` index.
 The work directory must not already exist (an empty directory is fine);
 `preprocess` refuses to write into one that has content, so verdicts can never
 be attached to a replaced image. Choose a new `--work-dir` or remove the old
-one. Output is built in a private staging directory next to it
-(`.NAME.partial`, mode 0700) and renamed into place only on success, so an
+one. Output is built in a staging directory next to it
+(`.NAME.partial`, with the access policy's directory mode) and renamed into place only on success, so an
 interrupted run leaves no work directory behind. If a crash leaves
 `.NAME.partial` behind, the next run says so; remove it and re-run.
+
+**Access control.** A work directory holds PHI (images with burned-in text,
+source paths, verdicts), so it is never world-readable. `--access` (or
+`$IMAGE_REVIEW_ACCESS`) picks who else may use it:
+
+| `--access` | Directories | Files | Who |
+|------------|-------------|-------|-----|
+| `private` (default) | 0700 | 0600 | the owner only |
+| `group` | 2770 (setgid) | 0660 | the work directory's Unix group |
+
+Every directory and file `preprocess` creates follows the policy, and so does
+`review.tsv` when verdicts are saved (it recovers the policy from the work
+directory's own mode, so there is nothing to repeat). The tool only sets mode
+bits; it never runs `chgrp`. The work directory's group is whatever the
+filesystem assigns: the parent directory's group if the parent is setgid,
+otherwise your current primary group; a pre-created empty work directory's
+own group and mode are not kept (it is replaced by the staging directory).
+On clusters where everyone's primary group is site-wide (e.g. `users`), create
+the work directory under the study's group-owned setgid project directory, or
+run `sg <group> -c 'image-review preprocess ... --access group'` (or
+`newgrp <group>` first). With `--access group`, `preprocess` prints which Unix
+group got access (`Shared with Unix group 'study' (gid N)`). POSIX default ACLs
+on the parent can add named user/group entries (check with `getfacl`; the tool
+does not manage ACLs), but files never get "other" bits.
+`review`, `serve` and `status` print a warning if the work directory or its
+`manifest.tsv` is accessible to other users (e.g. one made by an older
+version); they never change an existing directory's mode: run
+`chmod -R o-rwx <work dir>`. Only one writer should use a work directory at a
+time, so a team shares one sequentially or splits a study into several work
+directories.
 
 Every input ends up in exactly one of `manifest.tsv` (rendered) or
 `skipped.tsv` (with the reason it failed, e.g. a corrupt file or an

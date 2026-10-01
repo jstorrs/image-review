@@ -57,6 +57,7 @@ Entry point: `image-review` (mapped to `image_review.cli:main`).
 image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--work-dir DIR]
                                             [--colormap NAME]
+                                            [--access {private,group}]
                                             [--allow-skipped]
 ```
 
@@ -66,6 +67,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 | `--batch-size` | 300 | Maximum images per batch subdirectory |
 | `--work-dir` | `./review_work` | Work directory for all output (alias: `--output-dir`); must not exist or be empty |
 | `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale |
+| `--access` | `private` | `private` (dirs 0700, files 0600) or `group` (dirs 2770, files 0660); env `IMAGE_REVIEW_ACCESS` |
 | `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
 
 The pipeline has three parts: **discovery** (IO) yields one `Candidate`
@@ -78,10 +80,10 @@ manifest. For ZIP entries `read()` reads from the open archive, so it is only
 valid until discovery moves on to the next item.
 
 **Work directory lifecycle.** The run builds everything (batch directories,
-JPGs, `manifest.tsv`, `skipped.tsv`) in a private staging directory
-`<parent>/.<name>.partial`, created with mode 0700 (not `exist_ok`), and
-renames it to the work directory only on success; the final directory keeps
-mode 0700. If the work directory already exists and is not an empty directory
+JPGs, `manifest.tsv`, `skipped.tsv`) in a staging directory
+`<parent>/.<name>.partial`, created with the access policy's directory mode
+(not `exist_ok`), and renames it to the work directory only on success; the
+final directory keeps that mode. If the work directory already exists and is not an empty directory
 (or is a file) the run is refused with `WorkDirExists` (a `ValueError`; the CLI
 exits 1 asking for a new `--work-dir` or removal of the old one); an existing
 empty directory is replaced by the rename. If the staging directory already
@@ -90,6 +92,36 @@ refused naming it; remove it and re-run. On any error or interrupt
 (including `KeyboardInterrupt`) the staging directory is removed and the work
 directory is never created. There is no `--force`. Existing work directories
 are never modified, so a running `serve` is not affected.
+
+**Access policy** (`access.py`, stdlib only). `run_preprocess(..., access)`
+takes `Access = Literal["private", "group"]` (CLI `--access`, env
+`IMAGE_REVIEW_ACCESS`, default `private`). `modes(access)` returns frozen
+`Modes(dir_mode, file_mode, umask)`: private is (0700, 0600, 0077); group is
+(2770, 0660, 007), setgid so new entries inherit the directory's group.
+Nothing is ever created with an "other" bit. The run holds `os.umask(umask)` for
+its whole duration (restored in `finally`, including on error), creates the
+staging dir and every batch dir and then `chmod`s them to `dir_mode`
+explicitly (mkdir's mode is masked by the umask and does not set setgid), and
+creates every file with `os.open(O_CREAT|O_EXCL, file_mode)` (a POSIX default
+ACL on the parent makes Linux ignore the umask, so the mode is passed
+explicitly; the umask stays as a second guard). Missing parents of the work dir
+are created before the umask is set. If the staging chmod fails the staging dir
+is removed. The policy is only mode bits: no chgrp, no ACL handling (default
+ACLs on the parent can add named user/group entries; check `getfacl`; files
+never get "other" bits). With `--access group` the CLI prints
+`Shared with Unix group '<name>' (gid N)` from the work dir's gid. A
+pre-created empty work dir's group and mode are not kept (it is replaced by the
+staging dir). It is not stored: `access_of(st_mode)` recovers it from an existing
+work directory (`group` if the group bits are rwx, else
+`private`), and later writers follow it. `ReviewDB._save` `fchmod`s its temp
+file (mkstemp creates 0600) to that policy's `file_mode` before `os.replace`,
+so `review.tsv` is 0600 in a private and 0660 in a group work directory.
+`review`, `serve` and local `status` call `world_access_warning`: if the work
+directory or `manifest.tsv` has any other bit, they print
+`warning: <path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
+<work dir>`` to stderr (group bits alone are silent). Existing directories are
+never chmod'ed automatically. A team shares a work directory sequentially
+(one writer at a time) or splits a study into several work directories.
 
 **Source loading** dispatches by type:
 
@@ -304,7 +336,7 @@ It contains source paths, so it is as sensitive as `manifest.tsv`.
 
 ### `review.tsv`
 
-Written atomically by `ReviewDB` after every mark action (temp file + `os.replace`).
+Written atomically by `ReviewDB` after every mark action (temp file + `os.replace`), with the file mode of the work directory's access policy (0600 private, 0660 group).
 
 | Column | Description |
 |--------|-------------|

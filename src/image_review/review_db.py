@@ -5,6 +5,8 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .access import policy_of_dir
+
 VALID_STATUSES = {"CLEAN", "DIRTY"}
 
 
@@ -29,9 +31,11 @@ class ReviewDB:
                     print(f"WARNING: skipping malformed row in {self.review_path}: {exc}", file=sys.stderr)
 
     def _save(self) -> None:
+        file_mode = policy_of_dir(self.work_dir).file_mode
         fd, tmp = tempfile.mkstemp(dir=self.work_dir, suffix=".tsv")
         try:
             with os.fdopen(fd, "w", newline="") as f:
+                os.fchmod(f.fileno(), file_mode)  # mkstemp is always 0600; follow the work dir's policy
                 writer = csv.DictWriter(f, fieldnames=self.HEADER, delimiter="\t")
                 writer.writeheader()
                 for row in self._rows.values():

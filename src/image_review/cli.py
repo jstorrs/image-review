@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from .access import world_access_warning
 from .store import ReviewStore
 
 DEFAULT_WORK_DIR = "./review_work"
@@ -23,6 +24,12 @@ def remote_option(f):
 
 def via_option(f):
     return click.option("--via", envvar="IMAGE_REVIEW_VIA", default=None, help="With --remote: reach the server through an SSH tunnel via this login node, e.g. user@login.cluster (also read from $IMAGE_REVIEW_VIA).")(f)
+
+
+def warn_if_world_accessible(work_dir: Path) -> None:
+    warning = world_access_warning(work_dir)
+    if warning is not None:
+        click.echo(warning, err=True)
 
 
 @contextlib.contextmanager
@@ -41,6 +48,7 @@ def open_store(work_dir: str | None, remote: str | None, via: str | None = None)
             store = LocalStore(path)
         except FileNotFoundError:
             raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
+        warn_if_world_accessible(path)
         yield store
         return
 
@@ -127,13 +135,32 @@ def cli():
     """
 
 
+def _shared_with(work_dir: Path) -> str:
+    import grp
+
+    gid = work_dir.stat().st_gid
+    try:
+        name = grp.getgrgid(gid).gr_name
+    except KeyError:
+        return f"Shared with Unix group {gid}"
+    return f"Shared with Unix group '{name}' (gid {gid})"
+
+
 @cli.command()
 @click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True))
 @click.option("--batch-size", type=int, default=300, show_default=True, help="Images per batch.")
 @click.option("--work-dir", "--output-dir", type=click.Path(), default="./review_work", show_default=True, help="Work directory for output.")
 @click.option("--colormap", type=str, default="inferno", show_default=True, help="Matplotlib colormap for rendering.")
+@click.option(
+    "--access",
+    type=click.Choice(["private", "group"]),
+    envvar="IMAGE_REVIEW_ACCESS",
+    default="private",
+    show_default=True,
+    help="Who can use the work directory: private = owner only (dirs 0700, files 0600); group = readable/writable by the work dir's Unix group (dirs 2770, files 0660). Never world-readable. Also read from $IMAGE_REVIEW_ACCESS.",
+)
 @click.option("--allow-skipped", is_flag=True, default=False, help="Exit 0 even if some inputs failed to preprocess (they are listed in skipped.tsv).")
-def preprocess(sources, batch_size, work_dir, colormap, allow_skipped):
+def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
     """Normalize DICOM and image files to JPGs and organize them into batches.
 
     SOURCES are one or more ZIP files, directories, or image files to process.
@@ -144,13 +171,15 @@ def preprocess(sources, batch_size, work_dir, colormap, allow_skipped):
 
     source_paths = [Path(s).resolve() for s in sources]
     try:
-        result = run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap)
+        result = run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap, access=access)
     except WorkDirExists as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"Found {result.found} inputs: wrote {result.written} images in {result.batches} batches; "
         f"{len(result.skipped)} skipped (see {result.skipped_path})"
     )
+    if access == "group":
+        click.echo(_shared_with(Path(work_dir)))
     failed = sum(1 for s in result.skipped if s.kind == "failed")
     if failed and not allow_skipped:
         raise click.ClickException(
@@ -253,6 +282,7 @@ def serve(work_dir, bind, port):
         store = LocalStore(Path(work_dir))
     except FileNotFoundError:
         raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
+    warn_if_world_accessible(Path(work_dir))
 
     host = bind or socket.getfqdn()
     try:

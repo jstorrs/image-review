@@ -47,6 +47,7 @@ image-review preprocess SOURCE [SOURCE ...] [options]
 | `--batch-size` | 300 | Number of images per batch |
 | `--work-dir` | `./review_work` | Where to write preprocessed output; must not exist or be empty |
 | `--colormap` | `inferno` | Matplotlib colormap for DICOM rendering |
+| `--access` | `private` | `private`: owner only (dirs 0700, files 0600); `group`: the work dir's Unix group too (dirs 2770, files 0660). Never world-readable. Env: `IMAGE_REVIEW_ACCESS` |
 | `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
 
 **Examples:**
@@ -64,6 +65,22 @@ image-review preprocess scans.zip --batch-size 100 --colormap viridis
 # Custom output directory
 image-review preprocess scans.zip --work-dir /data/review_session_1
 ```
+
+**Sharing with a team:** the work directory holds PHI, so by default only you
+can read it. If several accounts share a study Unix group, use
+`--access group`: directories become 2770 (setgid) and files 0660, and new
+files inherit the directory's group. The tool never changes groups itself, so
+create the work directory under the study's group-owned setgid project
+directory, or run `sg <group> -c 'image-review preprocess ... --access group'`.
+The work directory's group comes from the parent if it is setgid, else your
+current primary group (on clusters where that is site-wide, e.g. `users`, use
+one of the two ways above); a pre-created empty work directory's group and mode
+are not kept. After the run, `preprocess` prints `Shared with Unix group
+'study' (gid N)`. A parent directory's POSIX default ACL can add named
+user/group entries (check `getfacl`), but files never get "other" bits. `review`, `serve` and `status` warn if a work directory is
+accessible to all users and never change it; fix it with
+`chmod -R o-rwx <work dir>`. Only one person should review a work directory at
+a time; take turns, or split the study into several work directories.
 
 **Re-running:** `preprocess` never writes into a work directory that already
 has content: choose a new `--work-dir` or remove the old one. (Reusing one

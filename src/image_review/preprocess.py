@@ -20,6 +20,8 @@ import skimage as ski
 from PIL import Image
 from tqdm import tqdm
 
+from .access import Access, Modes, modes
+
 EROSION_KERNEL_SIZE = 5
 OUTLIER_PERCENTILE = 0.01
 INTENSITY_MARGIN = 0.02
@@ -335,34 +337,48 @@ def _process(candidate: Candidate, colormap: str) -> list[tuple[str, bytes]] | S
     return encoded
 
 
-def _write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]]) -> None:
-    with open(path, "w", newline="") as f:
+def _open_new(path: Path, perm: int, **kwargs):
+    """Create `path` exclusively with `perm` as its creation mode.
+
+    A POSIX default ACL on the parent makes Linux ignore the umask, so the mode
+    is given explicitly (an ACL's other entry can only narrow it).
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, perm)
+    return os.fdopen(fd, **kwargs)
+
+
+def _write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]], perm: int) -> None:
+    with _open_new(path, perm, mode="w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(header)
         writer.writerows(rows)
-
-
-STAGING_MODE = 0o700  # the work dir keeps the staging dir's mode through the final rename
 
 
 def staging_path(output_dir: Path) -> Path:
     return output_dir.parent / f".{output_dir.name}.partial"
 
 
-def _claim_staging(output_dir: Path) -> Path:
-    """Refuse an in-use work dir, then create the private staging dir next to it."""
+def _claim_staging(output_dir: Path, dir_mode: int) -> Path:
+    """Refuse an in-use work dir, then create the staging dir next to it with the policy's mode.
+
+    The work dir keeps the staging dir's mode through the final rename.
+    """
     if output_dir.is_symlink() or (output_dir.exists() and not (output_dir.is_dir() and not any(output_dir.iterdir()))):
         raise WorkDirExists(
             f"work directory {output_dir} already exists; choose a new --work-dir or remove the old one"
         )
     staging = staging_path(output_dir)
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
     try:
-        staging.mkdir(mode=STAGING_MODE)
+        staging.mkdir(mode=dir_mode)
     except FileExistsError:
         raise WorkDirExists(
             f"a previous preprocess into {output_dir} did not finish; remove {staging}"
         ) from None
+    try:
+        os.chmod(staging, dir_mode)  # mkdir's mode is masked by the umask and drops setgid
+    except BaseException:
+        staging.rmdir()  # a leftover would make every later run refuse
+        raise
     return staging
 
 
@@ -371,27 +387,37 @@ def run_preprocess(
     output_dir: Path,
     batch_size: int = 300,
     colormap: str = "inferno",
+    access: Access = "private",
 ) -> PreprocessResult:
-    """Render every discovered input into a private staging dir, then rename it to `output_dir`.
+    """Render every discovered input into a staging dir, then rename it to `output_dir`.
+
+    Every directory and file follows the `access` policy (see `access.modes`),
+    enforced by a umask held for the whole run and restored afterwards.
 
     Every input ends up in exactly one of manifest.tsv or skipped.tsv. Write
     errors (OSError on the work directory) propagate and abort the run. The
     work dir appears only on success; an existing non-empty one is refused
     (`WorkDirExists`), so verdicts can never attach to a replaced image.
     """
-    staging = _claim_staging(output_dir)
+    policy = modes(access)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)  # before the umask: parents get normal permissions
+    previous_umask = os.umask(policy.umask)
     try:
-        result = _render_into(sources, staging, batch_size, colormap)
-        if output_dir.exists():
-            output_dir.rmdir()  # an empty directory the user made
-        os.rename(staging, output_dir)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+        staging = _claim_staging(output_dir, policy.dir_mode)
+        try:
+            result = _render_into(sources, staging, batch_size, colormap, policy)
+            if output_dir.exists():
+                output_dir.rmdir()  # an empty directory the user made
+            os.rename(staging, output_dir)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    finally:
+        os.umask(previous_umask)
     return replace(result, skipped_path=output_dir / result.skipped_path.name)
 
 
-def _render_into(sources: list[Path], output_dir: Path, batch_size: int, colormap: str) -> PreprocessResult:
+def _render_into(sources: list[Path], output_dir: Path, batch_size: int, colormap: str, policy: Modes) -> PreprocessResult:
     manifest_rows: list[tuple[str, str, str]] = []
     skipped: list[Skipped] = []
     found = 0
@@ -409,13 +435,15 @@ def _render_into(sources: list[Path], output_dir: Path, batch_size: int, colorma
             batch_dir = output_dir / batch_id
             if n % batch_size == 0:
                 batch_dir.mkdir(parents=True, exist_ok=True)
+                os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
             img_path = batch_dir / f"img_{n % batch_size + 1:05d}.jpg"
-            img_path.write_bytes(jpeg)
+            with _open_new(img_path, policy.file_mode, mode="wb") as f:
+                f.write(jpeg)
             manifest_rows.append((batch_id, img_path.relative_to(output_dir).as_posix(), image_id))
 
-    _write_tsv(output_dir / "manifest.tsv", ["batch", "preprocessed_path", "image_id"], manifest_rows)
+    _write_tsv(output_dir / "manifest.tsv", ["batch", "preprocessed_path", "image_id"], manifest_rows, policy.file_mode)
     skipped_path = output_dir / "skipped.tsv"
-    _write_tsv(skipped_path, ["image_id", "kind", "reason"], [(s.image_id, s.kind, s.reason) for s in skipped])
+    _write_tsv(skipped_path, ["image_id", "kind", "reason"], [(s.image_id, s.kind, s.reason) for s in skipped], policy.file_mode)
 
     written = len(manifest_rows)
     batches = -(-written // batch_size)
