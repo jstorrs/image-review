@@ -266,6 +266,8 @@ The viewer accepts keyboard and gamepad input:
 - **Gray** = UNREVIEWED
 - **Orange** = FLAGGED (marked DIRTY in an earlier pass; needs a verdict in this one)
 
+The status word (CLEAN, DIRTY, ...) is also written at the left end of the bar.
+
 The right end of the bar shows the scale the image is displayed at, e.g. `27%`.
 It is red below 100%: text in the image is smaller than in the original, so
 look closely. In grid mode it is the smallest image's effective scale, counting
@@ -290,8 +292,8 @@ memory and is gone once the program exits. After "Lost connection to server",
 
 Finished a batch? On the "End of list" screen (in todo-only navigation, "No
 todo images remaining", or "No more todo images this way" when todo images are
-left in the other direction), which also shows how many todo images the batch
-has left, if any, press `b` to move on to the next batch without restarting
+left in the other direction; Left/Right wrap round to the others), which also
+shows how many todo images the batch has left, if any, press `b` to move on to the next batch without restarting
 the program. The viewer re-reads the current pass (keeping it if you gave
 `--pass`) and the statuses, then opens the next batch, in sorted order, that
 still has todo images in the current mode, starting at its first item. The
@@ -664,7 +666,7 @@ it, but it contains source paths, so delete it.
   clears all of them at once. Reserve single mode for the DIRTY remainder
   (grid mode skips DIRTY and FLAGGED images).
 - **Autoplay**: Press `Space` to start auto-advancing through images at
-  500ms intervals. Press any key to stop. Useful for a quick visual scan.
+  500ms intervals. Press any key to stop (the key still does its usual job). Useful for a quick visual scan.
 - **Gamepad**: A game controller makes long review sessions more
   comfortable. Map CLEAN/DIRTY to face buttons and navigate with the d-pad.
 - **Batch size**: Larger batches mean fewer but denser grids. The default

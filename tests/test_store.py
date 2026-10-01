@@ -1266,7 +1266,7 @@ class TestEventLoop(EventLoopTestCase):
         with mock.patch.object(s._viewer, "show_message") as show_message:
             s.handle_events([key(pg.K_RIGHT)])
         self.assertEqual(s._ui_state, UIState.END_MESSAGE)
-        show_message.assert_called_once_with("No more todo images this way - 1 todo left - [b] next batch")
+        show_message.assert_called_once_with("No more todo images this way - 1 todo left - [Left/Right] wrap - [b] next batch")
 
     def test_empty_mode_message_is_not_painted_over(self):
         s = self.reviewing()
@@ -1355,6 +1355,45 @@ class TestEventLoop(EventLoopTestCase):
         self.now += 50
         s.handle_events([key(pg.K_d)])
         self.assertEqual(s._statuses[item_key], "DIRTY")
+
+    def test_right_stops_autoplay_and_space_toggles_it(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_SPACE)])
+        self.assertTrue(s.autoplay)
+        s.handle_events([key(pg.K_SPACE)])
+        self.assertFalse(s.autoplay)
+        s.handle_events([key(pg.K_LEFT)])
+        s.autoplay = True
+        with mock.patch.object(s, "next_image", wraps=s.next_image) as next_image:
+            s.handle_events([key(pg.K_RIGHT)])
+        self.assertFalse(s.autoplay)
+        next_image.assert_called_once_with()  # Right kept its action
+
+    def test_splash_f_toggles_fullscreen(self):
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
+        s._show_splash()
+        with mock.patch.object(pg.display, "toggle_fullscreen") as toggle:
+            s.handle_events([key(pg.K_f)])
+        toggle.assert_called_once_with()
+        self.assertEqual(s._ui_state, UIState.SPLASH)
+
+    def test_n_with_no_todo_shows_the_message_and_stays(self):
+        s = self.reviewing()
+        for k in s._statuses:
+            s._statuses[k] = "CLEAN"
+        cursor = s._cursor
+        with mock.patch.object(s._viewer, "set_info") as set_info:
+            s.handle_events([key(pg.K_n)])
+        set_info.assert_called_once_with(NO_TODO_MESSAGE)
+        self.assertEqual((s._cursor, s._ui_state), (cursor, UIState.REVIEWING))
+
+    def test_status_bar_renders_the_status_word(self):
+        s = self.reviewing()
+        font = s._viewer.font
+        with mock.patch.object(s._viewer, "font", wraps=font) as spy:
+            s._viewer.set_status("FLAGGED")
+            s._viewer.refresh()
+        self.assertIn("FLAGGED", [call.args[2] for call in spy.render_to.call_args_list])
 
     def test_help_stops_autoplay(self):
         s = self.reviewing()

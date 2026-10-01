@@ -405,12 +405,15 @@ class ReviewSession:
 
     def _no_todo_message(self) -> str:
         """The end message of todo-only navigation: none left at all, or none in that direction."""
-        return self._end_message(NO_TODO_THIS_WAY_MESSAGE if self._todo_count else NO_TODO_MESSAGE)
+        if self._todo_count:
+            return self._end_message(NO_TODO_THIS_WAY_MESSAGE, hint="[Left/Right] wrap")
+        return self._end_message(NO_TODO_MESSAGE)
 
-    def _end_message(self, text: str) -> str:
-        """An end-of-list message with the batch's todo count and the b hint."""
+    def _end_message(self, text: str, hint: str = "") -> str:
+        """An end-of-list message with the batch's todo count, an optional hint and the b hint."""
         todo = f" - {self._todo_count} todo left" if self._todo_count else ""
-        return f"{text}{todo} - [b] next batch"
+        hint = f" - {hint}" if hint else ""
+        return f"{text}{todo}{hint} - [b] next batch"
 
     def _is_todo(self, item: ReviewItem) -> bool:
         """Under clean/all every item is a re-check, so it is todo until marked in this session, and
@@ -613,6 +616,8 @@ class ReviewSession:
                 self._switch_to_grid(self._default_rotation)
         elif key == pg.K_s:
             self._switch_to_single()
+        elif key == pg.K_f:
+            pg.display.toggle_fullscreen()
         return False
 
     def _handle_end_key(self, key) -> bool:
@@ -650,6 +655,8 @@ class ReviewSession:
 
     def _handle_review_key(self, key, now: int) -> bool:
         """Handle key press during review. Returns True to quit."""
+        if key != pg.K_SPACE:  # Space toggles autoplay below; any other key stops it
+            self._stop_autoplay()
         match key:
             case pg.K_ESCAPE | pg.K_q:
                 return True
@@ -679,7 +686,8 @@ class ReviewSession:
             case pg.K_n:
                 self._stop_autoplay()
                 self._cancel_advance()
-                self.next_todo()
+                if not self.next_todo():  # stay on this item: the reviewer is mid-review
+                    self._notify(NO_TODO_MESSAGE)
             case pg.K_u:
                 self._todo_only = not self._todo_only
                 self._viewer.set_todo_only(self._todo_only)

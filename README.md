@@ -151,9 +151,9 @@ are shown one at a time for detailed inspection.
 | `z` | Undo your last mark in this mode (also on the end-of-list screen) |
 | `b` | Next batch (on the end-of-list screen) |
 | Left / Right | Navigate |
-| `n` | Jump to next todo item |
+| `n` | Jump to next todo item ("No todo images remaining" in the info bar if none) |
 | `u` | Toggle todo-only navigation |
-| Space | Toggle autoplay |
+| Space | Toggle autoplay (any other key stops it) |
 | `s` | Single mode |
 | `m` | Grid mode (rotation as set by `--rotate`; default: only when it saves a grid) |
 | `M` | Grid mode (no rotation) |
@@ -177,7 +177,8 @@ image that had none, mark it `UNREVIEWED` again (a tombstone).
 At the end of a batch, `b` moves on to the next batch without restarting. The
 end screen says "End of list", or in todo-only navigation "No todo images
 remaining" (or "No more todo images this way" when todo images are left in
-the other direction), with the batch's todo count when it is not 0. `b`
+the other direction; Left/Right wrap round to the others), with the batch's
+todo count when it is not 0. `b`
 re-reads the current pass (keeping `--pass` if given) and the statuses, then
 opens the next batch, in sorted order, that still has todo images in the
 current mode, at its first item. The search goes round once, so batches you
@@ -197,7 +198,7 @@ not carry over to the new batch.
 
 The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
 orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
-verdict). Grids are built without DIRTY or FLAGGED images.
+verdict). The status word is also written at the left end of the bar. Grids are built without DIRTY or FLAGGED images.
 
 `--pass` must be 1 or more. `--batch` defaults to the first batch with images
 matching the filter; an empty or unknown batch name is rejected (exit 2) with a

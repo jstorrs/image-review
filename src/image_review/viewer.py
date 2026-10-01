@@ -146,6 +146,9 @@ class ImageViewer:
         self.screen.fill(pg.Color(64, 64, 64))
         bar_color = self.STATUS_COLORS[self._status]
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
+        # The word, not only the bar colour, says the status (colour alone fails colour-blind reviewers)
+        self._bar_text(self._status, "left")
+        status_inset = self.font.get_rect(self._status).width + self.font.get_rect(self._status).height
         left_text = "(h)elp"
         left_text += " | todo-only" if self._todo_only else " | all"
         if self._joystick_count == 0:
@@ -154,7 +157,7 @@ class ImageViewer:
             left_text += " | gamepad connected"
         else:
             left_text += f" | {self._joystick_count} gamepads"
-        self._bar_text(left_text, "left")
+        self._bar_text(left_text, "left", inset=status_inset)
         name_inset = 0
         if self._content is not None:
             # Red below 100%: small text may be lost
@@ -170,13 +173,13 @@ class ImageViewer:
         pg.display.flip()
 
     def _bar_text(self, text: str, align: str, *, color: pg.Color | None = None, inset: int = 0) -> None:
-        """Draw `text` in the status bar; `inset` moves right-aligned text left; `color` None is the font's."""
+        """Draw `text` in the status bar; `inset` moves aligned text away from its edge (left text right, right text left); `color` None is the font's."""
         bbox = self.font.get_rect(text)
         screen_w, screen_h = self.screen.get_size()
         y = int(screen_h - (self.border + bbox.height) / 2)
         margin = int(bbox.height / 2)
         if align == "left":
-            x = margin
+            x = margin + inset
         elif align == "right":
             x = screen_w - margin - bbox.width - inset
         else:

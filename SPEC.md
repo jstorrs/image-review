@@ -820,15 +820,21 @@ Navigation stops at list boundaries with an "End of list - K todo left - [b]
 next batch" message, where K is the batch's todo count; the "K todo left" part
 is left out when K is 0. In todo-only navigation the message is "No todo
 images remaining - [b] next batch" when K is 0, and "No more todo images this
-way - K todo left - [b] next batch" when todo items remain in the other
-direction.
+way - K todo left - [Left/Right] wrap - [b] next batch" when todo items remain
+in the other direction (Left/Right on that screen wrap round; `n` does not act
+there). Pressing `n` on the review screen with no todo items left shows "No todo
+images remaining" in the info bar and stays on the current item.
+
+The status bar shows the item's status as a word (CLEAN, DIRTY, UNREVIEWED or
+FLAGGED) at its left edge as well as in the bar colour. The splash and help
+screen also handle `f` (toggle fullscreen).
 On that screen Right/Space and Left wrap round to the first or last item, `s`,
 `m` and `M` switch mode, `z` undoes, `b` moves on to the next batch and
 `q`/Esc quits.
 
-Marking, Left / hat left, `n`, `Space` (while playing), mode switches, the help
-screen (`h`) and display select (`w`) cancel autoplay; Right / hat right keeps
-it running. Left/Right, the hat, `n`, mode switches, `h` and `w` cancel a
+On the review screen every key except Space cancels autoplay (and still does
+its normal action, so Right steps once and stops); Space toggles it. On a
+gamepad, marking and hat left cancel it and hat right keeps it running. Left/Right, the hat, `n`, mode switches, `h` and `w` cancel a
 pending post-mark advance, and so does any change of the current item: the
 advance belongs to the item that was marked, so an `ADVANCE_EVENT` already
 queued when it was cancelled is ignored (`_advance_pending`). The autoplay and
