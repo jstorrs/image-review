@@ -118,9 +118,11 @@ never get "other" bits). With `--access group` the CLI prints
 pre-created empty work dir's group and mode are not kept (it is replaced by the
 staging dir). It is not stored: `access_of(st_mode)` recovers it from an existing
 work directory (`group` if the group bits are rwx, else
-`private`), and later writers follow it. `ReviewDB._save` `fchmod`s its temp
-file (mkstemp creates 0600) to that policy's `file_mode` before `os.replace`,
-so `review.tsv` is 0600 in a private and 0660 in a group work directory.
+`private`), and later writers follow it. `ReviewDB` opens `review.tsv` with
+`os.open(O_APPEND | O_CREAT, file_mode)` and, when the file is new or empty and
+its mode differs from that policy's `file_mode` (the umask may have narrowed
+it), `fchmod`s it, so a new `review.tsv` is 0600 in a private and 0660 in a
+group work directory. An existing, non-empty file keeps whatever mode it has.
 `review`, `serve` and local `status` call `world_access_warning`: if the work
 directory or `manifest.tsv` has any other bit, they print
 `warning: <path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
@@ -445,7 +447,15 @@ naming the holder; see *Concurrency limits*.
 
 ### `review.tsv`
 
-Written atomically by `ReviewDB` after every mark action (temp file + `os.replace`), with the file mode of the work directory's access policy (0600 private, 0660 group).
+An append-only log written by `ReviewDB`. Each mark action encodes its rows
+into one buffer and writes it to a file opened `O_APPEND`, looping until a short
+`write` has written it all, then `fsync`s. The file's inode never changes, and
+neither do earlier bytes, with one exception: a torn tail (see below) is cut off
+before the next append. A crash mid-write can therefore record only some rows
+of a multi-image mark. A new or empty file gets the header first and is
+`fchmod`ed (if needed) to the file mode of the work directory's access policy
+(0600 private, 0660 group). Lines end in `\r\n` (Python `csv`'s default, as the file has
+always used); the reader accepts `\n` too.
 
 | Column | Description |
 |--------|-------------|
@@ -455,12 +465,29 @@ Written atomically by `ReviewDB` after every mark action (temp file + `os.replac
 | `pass_number` | Integer pass (at least 1) in which this decision was made |
 | `timestamp` | ISO 8601 UTC timestamp |
 
-One row per `image_id`; if an `image_id` repeats, the last row wins. The file is
-parsed strictly: the header must be exactly these five columns, and every row
+An `image_id` may repeat; its last row wins. Files written before the log format
+(one row per `image_id`) are already valid logs. The file is parsed strictly:
+it must be UTF-8, the header must be exactly these five columns, and every row
 must have five fields, a `status` of `CLEAN` or `DIRTY`, an integer
 `pass_number` of at least 1, and a non-empty `image_id`. A bad file stops the
 tool with `Cannot read work directory: <file>:<line>: <problem>` instead of
 being skipped or rewritten, so a hand edit cannot silently lose decisions.
+
+Two crash leftovers are tolerated. An empty file (created, but the first append
+never landed) holds no decisions. An unparseable last line with no line ending
+(`\r` or `\n`; a torn append) is ignored with a `WARNING:` on stderr, and the
+next mark truncates the file back to the end of the last complete line before
+appending, so the file stays strictly parseable. The truncate happens only if
+the file still has the inode and size seen when it was loaded; otherwise the
+mark fails with `<file> changed since it was loaded`. A failed append (short
+write then an error, or a failed `fsync`) is cut off the same way, at once if
+possible, else by the next mark. A read-only store warns but never writes.
+
+A last line with no line ending that does parse is kept; the next mark first
+writes its missing line ending (`\n` after a bare `\r`, else `\r\n`). Such a
+row's `timestamp` may be cut short (it is not validated), but its `status` and
+`pass_number` are complete. A bad line anywhere else, or a bad last line that
+is terminated, is still an error.
 
 Only images that have been explicitly marked appear in `review.tsv`. An image
 absent from `review.tsv` is implicitly `UNREVIEWED`. `FLAGGED` is derived when
@@ -749,9 +776,12 @@ In-memory dict keyed by `image_id`, backed by `review.tsv` on disk.
 Used only through `LocalStore`, which is the one place that maps keys to
 `image_id`s.
 
-**Persistence**: Every mutation (`mark`, `mark_many`) writes the full state
-atomically via `tempfile.mkstemp` + `os.replace`. Safe to kill the process
-at any point.
+**Persistence**: Every mutation (`mark`, `mark_many`) appends its rows to
+`review.tsv` as one buffer (written in a loop that handles short writes),
+`fsync`s, and only then updates the in-memory dict; a failed append leaves the
+dict unchanged and its partial bytes are cut off. Loading folds the log (last row per `image_id` wins). Safe to kill the
+process at any point: a torn append is ignored on load and dropped by the next mark (see
+*`review.tsv`*).
 
 ### Key Methods
 
@@ -882,9 +912,12 @@ readiness probe through `--via` (a TCP connect and close) produces one such
 
 ### Concurrency limits
 
-Each writer holds its own in-memory copy of the review state and rewrites
-`review.tsv` from it, so two writers on one work directory would lose each
-other's marks. A writable `LocalStore` (used by `review` and `serve`)
+Each writer holds its own in-memory copy of the review state and appends to
+`review.tsv` from it, so two writers on one work directory would each work from
+a stale view of the other's marks. Worse, a writer that loaded a torn tail
+truncates the file back to that offset before its next append, which would cut
+away every row the other writer appended since; the inode-and-size check before
+truncating (see *`review.tsv`*) makes that mark fail instead. A writable `LocalStore` (used by `review` and `serve`)
 therefore holds `work_dir/review.lock`:
 
 - Contents are JSON `{"host", "boot_id", "user", "pid", "started"}`: hostname,

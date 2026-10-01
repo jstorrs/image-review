@@ -586,8 +586,10 @@ All state lives in the work directory (default `./review_work`):
 | `review.tsv` | TSV | Review decisions (image_id, batch, status, pass, timestamp) |
 | `batch_NNN/img_NNNNN.jpg` | JPG | Preprocessed individual images |
 
-`review.tsv` is written atomically (temp file + rename) after every rating
-action, so it is safe to kill the process at any time without data loss.
+`review.tsv` is an append-only log: every rating action appends a line per
+image and syncs it to disk, and when an image appears more than once its last
+line wins. It is safe to kill the process at any time; a line cut short by a
+crash is skipped with a warning and dropped on the next rating.
 
 ## Tips
 

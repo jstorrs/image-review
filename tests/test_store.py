@@ -1,5 +1,7 @@
+import contextlib
 import csv
 import errno
+import io
 import json
 import os
 import shutil
@@ -21,6 +23,7 @@ from click.testing import CliRunner
 from fixtures import ROWS, make_work_dir
 
 from image_review import controller as controller_module
+from image_review import review_db as review_db_module
 from image_review import store as store_module
 from image_review.cli import cli, unknown_batch_message
 from image_review.controller import (
@@ -32,6 +35,7 @@ from image_review.controller import (
     UIState,
     _dwell_elapsed,
 )
+from image_review.review_db import ReviewDB
 from image_review.store import (
     LOCK_NAME,
     LocalStore,
@@ -249,6 +253,227 @@ class TestStrictLoading(unittest.TestCase):
             LocalStore(self.work_dir)
 
 
+class TestReviewLog(unittest.TestCase):
+    """review.tsv is an append-only log: one header, then one line per decision, last line per image_id wins."""
+
+    HEADER_LINE = b"image_id\tbatch\tstatus\tpass_number\ttimestamp\r\n"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.work_dir = Path(self._tmp.name)
+        os.chmod(self.work_dir, 0o700)
+        self.path = self.work_dir / "review.tsv"
+
+    def reload(self) -> ReviewDB:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            db = ReviewDB(self.work_dir)
+        self.assertEqual(stderr.getvalue(), "")
+        return db
+
+    def test_marks_append_lines_and_reload(self):
+        db = ReviewDB(self.work_dir)
+        db.mark("x", "batch_001", "CLEAN", 1)
+        db.mark_many(["y", "z"], "batch_002", "DIRTY", 2)
+        lines = self.path.read_bytes().splitlines(keepends=True)
+        self.assertEqual(lines[0], self.HEADER_LINE)
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(self.reload()._rows, db._rows)
+
+    def test_same_image_twice_last_wins(self):
+        db = ReviewDB(self.work_dir)
+        db.mark("x", "batch_001", "DIRTY", 1)
+        db.mark("x", "batch_001", "CLEAN", 2)
+        self.assertEqual(len(self.path.read_bytes().splitlines()), 3)
+        reloaded = self.reload()
+        self.assertEqual((reloaded._rows["x"].status, reloaded._rows["x"].pass_number), ("CLEAN", 2))
+        self.assertEqual(reloaded._rows, db._rows)
+
+    def test_mark_is_a_pure_append(self):
+        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1)
+        before = self.path.read_bytes()
+        inode = self.path.stat().st_ino
+        ReviewDB(self.work_dir).mark("y", "batch_001", "DIRTY", 1)
+        after = self.path.read_bytes()
+        self.assertEqual(self.path.stat().st_ino, inode)
+        self.assertTrue(after.startswith(before))
+        self.assertGreater(len(after), len(before))
+
+    def test_torn_last_line_is_dropped_and_next_mark_starts_clean(self):
+        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1)
+        intact = self.path.read_bytes()
+        with open(self.path, "ab") as f:
+            f.write(b"y\tbatch_0")  # a crash mid-append
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            db = ReviewDB(self.work_dir)
+        self.assertIn("WARNING: ignoring the unfinished last line", stderr.getvalue())
+        self.assertIn("review.tsv:3:", stderr.getvalue())
+        self.assertEqual(set(db._rows), {"x"})
+        db.mark("z", "batch_001", "DIRTY", 1)
+        after = self.path.read_bytes()
+        self.assertTrue(after.startswith(intact))
+        self.assertTrue(after[len(intact):].startswith(b"z\tbatch_001\tDIRTY\t1\t"))
+        self.assertEqual(len(after.splitlines()), 3)  # header, x, z: the fragment is gone
+        self.assertEqual(set(self.reload()._rows), {"x", "z"})
+
+    def test_torn_last_line_that_parses_is_kept(self):
+        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1)
+        with open(self.path, "ab") as f:
+            f.write(b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00")  # every field written, line ending not
+        db = self.reload()
+        self.assertEqual(set(db._rows), {"x", "y"})
+        db.mark("z", "batch_001", "CLEAN", 1)
+        self.assertIn(b"T00:00:00\r\nz\t", self.path.read_bytes())  # its missing line ending, in the file's style
+        self.assertEqual(set(self.reload()._rows), {"x", "y", "z"})
+
+    def test_torn_between_cr_and_lf_is_kept(self):
+        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1)
+        with open(self.path, "ab") as f:
+            f.write(b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\r")
+        db = self.reload()
+        self.assertEqual(set(db._rows), {"x", "y"})
+        db.mark("z", "batch_001", "CLEAN", 1)
+        data = self.path.read_bytes()
+        self.assertIn(b"+00:00\r\nz\t", data)
+        self.assertNotIn(b"\r\r", data)
+        self.assertNotIn(b"\n\r\n", data)  # no blank line
+        self.assertEqual(data.count(b"\r"), data.count(b"\r\n"))
+        self.assertEqual(set(self.reload()._rows), {"x", "y", "z"})
+
+    def test_torn_multibyte_character_is_dropped(self):
+        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1)
+        with open(self.path, "ab") as f:
+            f.write("é\tb".encode()[:2])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            db = ReviewDB(self.work_dir)
+        self.assertIn("WARNING: ignoring the unfinished last line", stderr.getvalue())
+        db.mark("z", "batch_001", "DIRTY", 1)
+        self.assertEqual(set(self.reload()._rows), {"x", "z"})
+
+    def test_failed_append_is_rolled_back(self):
+        db = ReviewDB(self.work_dir)
+        db.mark("x", "batch_001", "CLEAN", 1)
+        real_write = os.write
+        calls = []
+
+        def short_then_full(fd, data):
+            calls.append(len(data))
+            if len(calls) == 1:
+                return real_write(fd, data[:10])  # a short write...
+            raise OSError(errno.ENOSPC, "No space left on device")  # ...then the disk fills
+
+        with mock.patch.object(review_db_module.os, "write", short_then_full), self.assertRaises(OSError):
+            db.mark_many(["y", "z"], "batch_001", "DIRTY", 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(set(db._rows), {"x"})
+        db.mark("w", "batch_001", "CLEAN", 1)
+        self.assertEqual(self.reload()._rows, db._rows)
+
+    def test_failed_append_left_on_disk_is_cut_by_the_next(self):
+        db = ReviewDB(self.work_dir)
+        db.mark("x", "batch_001", "CLEAN", 1)
+        real_write = os.write
+
+        def short_then_full(fd, data):
+            if short_then_full.done:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            short_then_full.done = True
+            return real_write(fd, data[:10])
+
+        short_then_full.done = False
+        with mock.patch.object(review_db_module.os, "write", short_then_full), \
+                mock.patch.object(review_db_module.os, "ftruncate", side_effect=OSError(errno.EIO, "I/O error")), \
+                self.assertRaises(OSError):
+            db.mark_many(["y", "z"], "batch_001", "DIRTY", 1)  # the rollback fails too: the fragment stays
+        db.mark("w", "batch_001", "CLEAN", 1)
+        self.assertEqual(self.reload()._rows, db._rows)
+
+    def test_stale_truncate_refuses(self):
+        ReviewDB(self.work_dir).mark_many(["x", "y"], "batch_001", "CLEAN", 1)
+        with open(self.path, "ab") as f:
+            f.write(b"z\tbatch_0")
+        with contextlib.redirect_stderr(io.StringIO()):
+            db = ReviewDB(self.work_dir)
+        with open(self.path, "ab") as f:
+            f.write(b"01\tCLEAN\t1\tt\r\n")  # someone else finished the line since the load
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "changed since it was loaded"):
+            db.mark("w", "batch_001", "DIRTY", 1)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_bare_cr_file_with_bad_middle_line_raises(self):
+        ts = "2026-01-01T00:00:00+00:00"
+        lines = ["image_id\tbatch\tstatus\tpass_number\ttimestamp", f"a\tb\tCLEAN\t1\t{ts}", f"bad\tb\tdirty\t1\t{ts}", f"c\tb\tDIRTY\t2\t{ts}"]
+        for name, data in [("terminated", "\r".join(lines) + "\r"), ("unterminated", "\r".join(lines))]:
+            with self.subTest(name):
+                self.path.write_bytes(data.encode())
+                with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
+                    ReviewDB(self.work_dir)
+                self.assertEqual(self.path.read_bytes(), data.encode())
+
+    def test_torn_header_is_dropped(self):
+        self.path.write_bytes(b"image_id\tba")
+        with contextlib.redirect_stderr(io.StringIO()):
+            db = ReviewDB(self.work_dir)
+        db.mark("x", "batch_001", "CLEAN", 1)
+        self.assertTrue(self.path.read_bytes().startswith(self.HEADER_LINE))
+        self.assertEqual(set(self.reload()._rows), {"x"})
+
+    def test_empty_file_loads_and_gets_a_header(self):
+        self.path.touch()
+        db = self.reload()
+        db.mark("x", "batch_001", "CLEAN", 1)
+        self.assertTrue(self.path.read_bytes().startswith(self.HEADER_LINE))
+
+    def test_unparseable_line_before_the_last_still_raises(self):
+        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1)
+        with open(self.path, "ab") as f:
+            f.write(b"garbage\r\ny\tbatch_0")
+        with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
+            ReviewDB(self.work_dir)
+
+    def test_unparseable_terminated_last_line_still_raises(self):
+        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1)
+        with open(self.path, "ab") as f:
+            f.write(b"y\tbatch_0\r\n")
+        with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
+            ReviewDB(self.work_dir)
+
+    def test_file_mode_follows_policy(self):
+        for dir_mode, file_mode in [(0o700, 0o600), (0o2770, 0o660)]:
+            with self.subTest(dir_mode=oct(dir_mode)):
+                self.path.unlink(missing_ok=True)
+                os.chmod(self.work_dir, dir_mode)
+                old_umask = os.umask(0o077)  # O_CREAT's mode alone would lose the group bits
+                try:
+                    ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1)
+                finally:
+                    os.umask(old_umask)
+                self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), file_mode)
+
+
+class TestReadOnlyTornLog(StoreTestCase):
+    def test_read_only_store_never_writes(self):
+        self.store.mark(["batch_001/a.jpg"], "batch_001", "CLEAN", 1)
+        self.store.close()
+        path = self.work_dir / "review.tsv"
+        with open(path, "ab") as f:
+            f.write(b"/src/patient_jones/b.dcm\tbatch_0")
+        before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            ro = LocalStore(self.work_dir, read_only=True)
+        self.assertIn("WARNING: ignoring the unfinished last line", stderr.getvalue())
+        self.assertEqual(ro.statuses(1)["batch_001/a.jpg"], "CLEAN")
+        with self.assertRaises(PermissionError):
+            ro.mark(["batch_001/b.jpg"], "batch_001", "DIRTY", 1)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(path.stat().st_mtime_ns, mtime)
+
+
 class TestPassMonotonic(StoreTestCase):
     def setUp(self):
         super().setUp()
@@ -297,7 +522,7 @@ class TestPassMonotonic(StoreTestCase):
         result = self.store.mark(["batch_001/a.jpg"], "batch_001", "CLEAN", 1)
         self.assertEqual(result, {"batch_001/a.jpg": "CLEAN"})
         with open(self.work_dir / "review.tsv", newline="") as f:
-            (row,) = csv.DictReader(f, delimiter="\t")
+            *_, row = csv.DictReader(f, delimiter="\t")  # the log's last row for the image wins
         self.assertEqual((row["status"], row["pass_number"]), ("CLEAN", "3"))
 
     def test_pass_one_grid_excludes_later_pass_dirty(self):
