@@ -28,6 +28,32 @@ from tests.fixtures import ROWS, make_work_dir
 FP = "a" * 64
 
 
+class MakeServerChecksTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        make_work_dir(Path(tmp.name))
+        self.store = LocalStore(Path(tmp.name))
+        self.addCleanup(self.store.close)
+
+    def assert_refused(self, host: str, message: str, *, binds: bool):
+        close = mock.patch.object(ReviewServer, "server_close", autospec=True, side_effect=ReviewServer.server_close)
+        with close as closed, self.assertRaisesRegex(ValueError, message):
+            make_server(self.store, host, 0)
+        self.assertEqual(closed.call_count, 1 if binds else 0)
+
+    def test_wildcard_hosts_refused_before_binding(self):
+        for host in ["0.0.0.0", "::", "", "  ", "0:0:0:0:0:0:0:0"]:
+            with self.subTest(host=host):
+                self.assert_refused(host, "Refusing to bind a wildcard", binds=False)
+
+    def test_unspecified_bound_address_closes_socket(self):
+        self.assert_refused("0", "Refusing to bind a wildcard", binds=True)
+
+    def test_unadvertisable_host_closes_socket(self):
+        self.assert_refused("127.1", "cannot be advertised", binds=True)
+
+
 class ServerTestCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

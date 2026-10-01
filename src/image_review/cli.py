@@ -1,6 +1,5 @@
 import contextlib
 import getpass
-import ipaddress
 import signal
 import socket
 import sys
@@ -457,35 +456,24 @@ def serve(work_dir, bind, port):
     When stdout is not a terminal (e.g. sbatch), it is written to a private
     file under ~/.image-review/ instead of being printed.
     """
-    from .connection import RemoteTarget
     from .server import make_server, write_connection_file
 
-    if bind is not None and bind.strip() in ("", "0.0.0.0", "::"):
-        raise click.ClickException("Refusing to bind a wildcard address; pass this node's hostname with --bind.")
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
         # Installed before the lock is taken, so every exit path releases it.
         with interrupt_on(signal.SIGTERM, signal.SIGHUP), contextlib.ExitStack() as stack:
             store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
-            host = bind or socket.getfqdn()
+            host = socket.getfqdn() if bind is None else bind
             try:
                 server, target = make_server(store, host, port)
+            except ValueError as e:  # wildcard bind or unadvertisable host; make_server closed its socket
+                raise click.ClickException(str(e))
             except OSError as e:
                 raise click.ClickException(f"Cannot listen on {host}:{port} (IPv4 hostnames/addresses only): {e}")
             # Exit order (LIFO): connection file, socket, then the store; a handler thread may still be marking.
             stack.callback(_close_store_after_marks, server, store)
             stack.callback(server.server_close)
-            if ipaddress.ip_address(server.server_address[0]).is_unspecified:
-                raise click.ClickException(
-                    "Refusing to bind a wildcard address; pass this node's hostname with --bind."
-                )
             uri = target.to_uri()
-            try:
-                RemoteTarget.parse(uri)
-            except ValueError as e:
-                raise click.ClickException(
-                    f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address."
-                )
             if sys.stdout.isatty():
                 print("Serving review data. The connection string grants access; treat it like a password.\n")
                 print(uri)

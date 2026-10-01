@@ -6,6 +6,7 @@ leave the store; clients only ever see keys (preprocessed paths).
 
 import datetime
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -325,15 +326,43 @@ def _escape(text: str) -> str:
     return text.encode("unicode_escape").decode("ascii")
 
 
+_WILDCARD_MESSAGE = "Refusing to bind a wildcard address; pass this node's hostname with --bind."
+
+
+def _is_unspecified(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address).is_unspecified
+    except ValueError:
+        return False
+
+
 def make_server(store: ReviewStore, host: str, port: int) -> tuple[ReviewServer, RemoteTarget]:
+    """Create the TLS server. Raises ValueError for a wildcard or unadvertisable host, OSError if binding fails.
+
+    No listening socket is left behind on failure.
+    """
+    if host.strip() in ("", "0.0.0.0", "::") or _is_unspecified(host.strip()):
+        raise ValueError(_WILDCARD_MESSAGE)
     token = secrets.token_urlsafe(16)
     cert, key_pem = generate_cert(host)
     context = make_ssl_context(cert, key_pem)
     server = ReviewServer((host, port), store, token)
-    # Handshake happens in the handler thread so a stalled client can't block accept()
-    server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
-    fingerprint = cert_fingerprint(cert.public_bytes(serialization.Encoding.DER))
-    target = RemoteTarget(host=host, port=server.server_address[1], token=token, fingerprint=fingerprint)
+    try:
+        if _is_unspecified(str(server.server_address[0])):  # e.g. "0" binds to 0.0.0.0
+            raise ValueError(_WILDCARD_MESSAGE)
+        # Handshake happens in the handler thread so a stalled client can't block accept()
+        server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+        fingerprint = cert_fingerprint(cert.public_bytes(serialization.Encoding.DER))
+        target = RemoteTarget(host=host, port=server.server_address[1], token=token, fingerprint=fingerprint)
+        try:
+            RemoteTarget.parse(target.to_uri())
+        except ValueError as e:
+            raise ValueError(
+                f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address."
+            ) from None
+    except BaseException:
+        server.server_close()
+        raise
     return server, target
 
 

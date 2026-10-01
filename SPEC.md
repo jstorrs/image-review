@@ -389,10 +389,11 @@ image-review serve [--work-dir DIR] [--bind HOST] [--port N]
 Opens a writable `LocalStore` (holding the work dir lock for the server's
 lifetime; `WorkDirLocked` is a `ClickException`, exit 1), calls
 `server.make_server`, and serves until interrupted.
-Wildcard binds (`0.0.0.0`, `::`, empty) are refused, as is any address the
-server ends up bound to that is unspecified, or whose connection string would
-not parse (`RemoteTarget.parse` round trip). Only IPv4 hostnames/addresses are
-supported.
+`make_server` itself refuses wildcard binds (`0.0.0.0`, `::`, empty), any
+address the server ends up bound to that is unspecified, and a host whose
+connection string would not parse (`RemoteTarget.parse` round trip), raising
+`ValueError` after closing its socket; the command reports these as
+`ClickException`s. Only IPv4 hostnames/addresses are supported.
 
 **Connection string delivery**: on a TTY, the string and ready-to-paste client
 commands (direct and `--via`) are printed. Otherwise (e.g. `sbatch`)
@@ -1142,7 +1143,9 @@ one `fp=`; a malformed token or fingerprint. `to_uri()` is the inverse.
 ## Server (`server.py`)
 
 `make_server(store, host, port) -> (ReviewServer, RemoteTarget)` generates a
-token, a certificate, the TLS context and the listening server.
+token, a certificate, the TLS context and the listening server. It enforces
+the no-wildcard and advertisable-host checks (see `serve`) and leaves no
+listener behind when it raises.
 `ReviewServer` is a `ThreadingHTTPServer` (daemon threads) holding the store,
 the token, a store lock, and the sets of known keys and batches taken from the
 manifest at start.
