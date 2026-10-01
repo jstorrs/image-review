@@ -64,9 +64,9 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `SOURCE` | (required) | One or more ZIP files, directories, or individual files |
-| `--batch-size` | 300 | Maximum images per batch subdirectory |
+| `--batch-size` | 300 | Maximum images per batch subdirectory (integer >= 1) |
 | `--work-dir` | `./review_work` | Work directory for all output (alias: `--output-dir`); must not exist or be empty |
-| `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale |
+| `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale (unknown names exit 2 before any output) |
 | `--access` | `private` | `private` (dirs 0700, files 0600) or `group` (dirs 2770, files 0660); env `IMAGE_REVIEW_ACCESS` |
 | `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
 
@@ -210,12 +210,12 @@ icon row.
    robust core exists (no inner values, or the core is empty or touches
    the min or max) a plain min-max rescale is used. Then overlay planes
    (see below) are drawn at 1.0
-5. Apply CLAHE (adaptive histogram equalization, 96-tile grid)
+5. Apply CLAHE (adaptive histogram equalization, 96-pixel tiles)
    (overlay pixels stay at or near the top of the range)
 6. Strip uniform rows/columns (`compress_image` -- removes letterboxing). If
    stripping would leave nothing (e.g. an all-zero image), the uncropped
    image is kept
-7. Apply colormap (grayscale only), save as 8-bit RGB JPG
+7. Apply colormap (grayscale only), save as 8-bit RGB JPG (quality 95, 4:4:4 chroma, no subsampling)
 
 **Overlays**: each overlay plane (even group 0x6000-0x601E with OverlayData
 `(g,3000)`) is decoded with `overlay_array`, placed at its OverlayOrigin

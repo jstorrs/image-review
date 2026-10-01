@@ -13,8 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 from zipfile import ZipFile
 
-import imageio.v3 as iio
-import matplotlib.pyplot as plt
+import matplotlib
 import numpy as np
 import pydicom
 import skimage as ski
@@ -36,7 +35,9 @@ EROSION_KERNEL_SIZE = 5
 OUTLIER_PERCENTILE = 0.01
 INTENSITY_MARGIN = 0.02
 TAIL_FRACTION = 0.10  # output range given to each outlier tail (below bot, above top)
-CLAHE_BINS = 96
+CLAHE_KERNEL_SIZE = 96  # CLAHE tile size in pixels
+JPEG_QUALITY = 95
+JPEG_SUBSAMPLING = 0  # 4:4:4, so small coloured text keeps its edges
 ALPHA_BACKGROUND = 0.5  # mid-gray, so content carried only by alpha stays visible whatever its colour
 SIDE_BY_SIDE_GAP = 4  # pixels between views placed side by side in one rendered image
 
@@ -266,7 +267,7 @@ def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray | None
     if constant:
         return _crop(img)
     img = _crop(img)
-    img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
+    img = ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE)
     return _crop(img)
 
 
@@ -313,7 +314,7 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
 
 
 def apply_colormap(img: np.ndarray, colormap: str = "inferno") -> np.ndarray:
-    cm = plt.get_cmap(colormap)
+    cm = matplotlib.colormaps[colormap]
     return ski.util.img_as_ubyte(cm(img)[:, :, :3])
 
 
@@ -404,7 +405,7 @@ def preprocess_raster(img: np.ndarray) -> np.ndarray:
     """Normalize a decoded raster to (H, W, 3) uint8, applying CLAHE to grayscale."""
     if img.ndim == 2:
         img = ski.util.img_as_float32(img)
-        img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
+        img = ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE)
         img = ski.util.img_as_ubyte(img)
         return np.stack([img] * 3, axis=2)
     if img.ndim == 3 and img.shape[2] == 3:
@@ -657,8 +658,10 @@ def discover(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> Ite
 
 
 def encode_jpeg(rgb: np.ndarray) -> bytes:
-    """Encode in memory with the same encoder and settings as `ski.io.imsave(path.jpg)`."""
-    return iio.imwrite("<bytes>", rgb, extension=".jpg")
+    """Encode to JPEG bytes in memory: quality 95, 4:4:4 chroma so small text stays crisp."""
+    buf = io.BytesIO()
+    Image.fromarray(rgb).save(buf, "JPEG", quality=JPEG_QUALITY, subsampling=JPEG_SUBSAMPLING)
+    return buf.getvalue()
 
 
 def _process(candidate: Candidate, colormap: str) -> list[tuple[str, bytes] | Skipped]:

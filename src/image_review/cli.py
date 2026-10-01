@@ -146,11 +146,19 @@ def _shared_with(work_dir: Path) -> str:
     return f"Shared with Unix group '{name}' (gid {gid})"
 
 
+def _known_colormap(ctx: click.Context, param: click.Parameter, value: str) -> str:
+    import matplotlib
+
+    if value not in matplotlib.colormaps:
+        raise click.BadParameter(f"unknown colormap {value!r}; see matplotlib.colormaps for valid names")
+    return value
+
+
 @cli.command()
 @click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True))
-@click.option("--batch-size", type=int, default=300, show_default=True, help="Images per batch.")
+@click.option("--batch-size", type=click.IntRange(min=1), default=300, show_default=True, help="Images per batch.")
 @click.option("--work-dir", "--output-dir", type=click.Path(), default="./review_work", show_default=True, help="Work directory for output.")
-@click.option("--colormap", type=str, default="inferno", show_default=True, help="Matplotlib colormap for rendering.")
+@click.option("--colormap", type=str, callback=_known_colormap, default="inferno", show_default=True, help="Matplotlib colormap for rendering.")
 @click.option(
     "--access",
     type=click.Choice(["private", "group"]),

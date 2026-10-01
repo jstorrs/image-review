@@ -130,7 +130,7 @@ cropped, with no windowing or colormap (overlay planes are drawn in white):
    ends of the range instead of clipping them, so bright burned-in text
    stays visible. DICOM overlay planes (annotations stored outside the pixel
    data) are then drawn at maximum brightness
-3. Applies adaptive histogram equalization (96 tiles)
+3. Applies adaptive histogram equalization (CLAHE with 96-pixel tiles)
 4. Strips uniform rows/columns (letterboxing removal)
 5. Applies colormap and saves as JPG
 

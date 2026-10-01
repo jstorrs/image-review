@@ -17,7 +17,7 @@ import pydicom
 import skimage as ski
 from click.testing import CliRunner
 from fixtures import add_overlay, write_dicom
-from PIL import Image
+from PIL import Image, JpegImagePlugin
 from pydicom.data import get_testdata_file
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import MediaStorageDirectoryStorage, generate_uid
@@ -142,6 +142,14 @@ class MixedSourceTest(unittest.TestCase):
             self.assertEqual(img.dtype, np.uint8)
             self.assertEqual(img.ndim, 3)
             self.assertEqual(img.shape[2], 3)
+
+    def test_output_jpgs_are_444_high_quality(self):
+        work = self.root / "work"
+        self.run_quietly(work)
+        for row in _read_tsv(work / "manifest.tsv"):
+            with Image.open(work / row["preprocessed_path"]) as img:
+                self.assertEqual(JpegImagePlugin.get_sampling(img), 0)
+                self.assertLess(max(img.quantization[0]), 20)  # q75 tables reach well above this
 
     def test_batches_are_numbered_by_write_order(self):
         work = self.root / "work"
@@ -1067,6 +1075,17 @@ class PreprocessCliTest(unittest.TestCase):
         env = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}  # ignore the developer's environment
         with quiet():
             return CliRunner().invoke(cli, ["preprocess", str(self.root / source), "--work-dir", str(self.root / "work"), *args], env=env)
+
+    def test_invalid_options_exit_2_before_any_output(self):
+        for args in (("--batch-size", "0"), ("--batch-size", "-3"), ("--colormap", "nope")):
+            with self.subTest(args=args):
+                before = sorted(self.root.iterdir())
+                result = self.invoke(*args)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertEqual(sorted(self.root.iterdir()), before)
+
+    def test_reversed_colormap_is_accepted(self):
+        self.assertEqual(self.invoke("--colormap", "viridis_r", "--allow-skipped").exit_code, 0)
 
     def test_all_good_source_exits_0(self):
         good = self.root / "good"
