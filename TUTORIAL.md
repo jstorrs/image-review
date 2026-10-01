@@ -507,6 +507,12 @@ whole path to the compute node.
   `Host` alias without `LocalForward`.
 - If ssh backgrounds itself (`ForkAfterAuthentication`), remove that option.
 
+**Troubleshooting "Cannot read work directory":** `review.tsv` or
+`manifest.tsv` is malformed (for example a hand edit left a short row, a
+status other than `CLEAN`/`DIRTY`, or a non-numeric pass). The message names
+the file and line. Fix or remove that line and run again; the tool never
+repairs or drops rows on its own.
+
 **Troubleshooting versions:** "server speaks API vN, this client vM" (or
 "server is too old to report its API version") means the laptop and the
 cluster have different image-review versions; install the same version on

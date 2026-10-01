@@ -48,6 +48,8 @@ def open_store(work_dir: str | None, remote: str | None, via: str | None = None)
             store = LocalStore(path)
         except FileNotFoundError:
             raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
+        except ValueError as e:
+            raise click.ClickException(f"Cannot read work directory: {e}") from e
         warn_if_world_accessible(path)
         yield store
         return
@@ -301,6 +303,8 @@ def serve(work_dir, bind, port):
         store = LocalStore(Path(work_dir))
     except FileNotFoundError:
         raise click.ClickException("No preprocessed data found. Run `image-review preprocess` first.")
+    except ValueError as e:
+        raise click.ClickException(f"Cannot read work directory: {e}") from e
     warn_if_world_accessible(Path(work_dir))
 
     host = bind or socket.getfqdn()

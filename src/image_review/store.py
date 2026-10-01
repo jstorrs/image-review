@@ -2,18 +2,25 @@ import csv
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 
 from .review_db import ReviewDB
+from .status import Status, Verdict
 
-Status = Literal["CLEAN", "DIRTY", "UNREVIEWED"]
-Verdict = Literal["CLEAN", "DIRTY"]
+__all__ = ["Status", "Verdict"]  # re-exported for callers that import them from here
 
 
 @dataclass(frozen=True)
 class ManifestRow:
     key: str  # preprocessed_path; the only identifier the client ever sees
     batch: str
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    batch: str
+    key: str  # preprocessed_path
+    image_id: str  # original source path; stays server-side
 
 
 @dataclass(frozen=True)
@@ -64,10 +71,28 @@ def safe_path(work_dir: Path, relative: str) -> Path:
     return resolved
 
 
-def load_manifest(work_dir: Path) -> list[dict]:
-    manifest_path = work_dir / "manifest.tsv"
-    with open(manifest_path, newline="") as f:
-        return list(csv.DictReader(f, delimiter="\t"))
+MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id"]
+
+
+def load_manifest(work_dir: Path) -> list[ManifestEntry]:
+    """Parse manifest.tsv strictly. ValueError (naming file:line) if malformed; FileNotFoundError if absent."""
+    path = work_dir / "manifest.tsv"
+    entries: list[ManifestEntry] = []
+    key_lines: dict[str, int] = {}
+    with open(path, newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        if next(reader, None) != MANIFEST_HEADER:
+            raise ValueError(f"{path}:1: header must be {', '.join(MANIFEST_HEADER)}")
+        for fields in reader:
+            line = reader.line_num
+            if len(fields) != len(MANIFEST_HEADER) or not all(fields):
+                raise ValueError(f"{path}:{line}: expected {len(MANIFEST_HEADER)} non-empty tab-separated fields ({', '.join(MANIFEST_HEADER)})")
+            batch, key, image_id = fields
+            if key in key_lines:
+                raise ValueError(f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})")
+            key_lines[key] = line
+            entries.append(ManifestEntry(batch, key, image_id))
+    return entries
 
 
 def load_skipped_counts(work_dir: Path) -> SkippedCounts | None:
@@ -90,9 +115,9 @@ def load_skipped_counts(work_dir: Path) -> SkippedCounts | None:
 class LocalStore:
     def __init__(self, work_dir: Path):
         self.work_dir = work_dir
-        self._raw = load_manifest(work_dir)
-        self._rows = [ManifestRow(key=r["preprocessed_path"], batch=r["batch"]) for r in self._raw]
-        self._image_ids = {r["preprocessed_path"]: r["image_id"] for r in self._raw}
+        entries = load_manifest(work_dir)
+        self._rows = [ManifestRow(key=e.key, batch=e.batch) for e in entries]
+        self._image_ids = {e.key: e.image_id for e in entries}
         self._keys_by_image_id: dict[str, list[str]] = {}
         for key, iid in self._image_ids.items():
             self._keys_by_image_id.setdefault(iid, []).append(key)
@@ -128,7 +153,7 @@ class LocalStore:
         }
 
     def current_pass(self) -> int:
-        return self._db.current_pass(self._raw)
+        return self._db.current_pass(self._image_ids.values())
 
     def skipped(self) -> SkippedCounts | None:
         return load_skipped_counts(self.work_dir)

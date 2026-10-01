@@ -408,6 +408,12 @@ Written by `preprocess`. Tab-separated, one row per image.
 inside `LocalStore`/`ReviewDB`. Everything else identifies an image by its
 `preprocessed_path`.
 
+The file is parsed strictly when the work directory is opened: the header must
+be exactly the three columns, every row must have three non-empty fields, and
+`preprocessed_path` must be unique (the same `image_id` may repeat). Any
+violation stops `review`, `status`, and `serve` with `Cannot read work
+directory: <file>:<line>: <problem>` (exit 1); the file is never repaired.
+
 ### `skipped.tsv`
 
 Written by `preprocess`, always (header only when nothing was skipped).
@@ -429,9 +435,16 @@ Written atomically by `ReviewDB` after every mark action (temp file + `os.replac
 |--------|-------------|
 | `image_id` | Matches `manifest.tsv` |
 | `batch` | Batch the image belongs to |
-| `status` | `CLEAN`, `DIRTY`, or `UNREVIEWED` |
-| `pass_number` | Integer pass in which this decision was made |
+| `status` | `CLEAN` or `DIRTY` |
+| `pass_number` | Integer pass (at least 1) in which this decision was made |
 | `timestamp` | ISO 8601 UTC timestamp |
+
+One row per `image_id`; if an `image_id` repeats, the last row wins. The file is
+parsed strictly: the header must be exactly these five columns, and every row
+must have five fields, a `status` of `CLEAN` or `DIRTY`, an integer
+`pass_number` of at least 1, and a non-empty `image_id`. A bad file stops the
+tool with `Cannot read work directory: <file>:<line>: <problem>` instead of
+being skipped or rewritten, so a hand edit cannot silently lose decisions.
 
 Only images that have been explicitly marked appear in `review.tsv`. An image
 absent from `review.tsv` is implicitly `UNREVIEWED`.

@@ -251,6 +251,15 @@ class WarningTest(unittest.TestCase):
         os.chmod(self.work, 0o755)
         self.assertIn("is accessible to all users (mode 0755)", self.invoke_serve().stderr)
 
+    def test_malformed_work_dir_is_a_clean_error(self):
+        (self.work / "review.tsv").write_text("image_id\tbatch\tstatus\tpass_number\ttimestamp\nx\tb\tdirty\t1\tt\n")
+        for result in (self.invoke_status(), self.invoke_serve()):
+            with self.subTest():
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("Cannot read work directory: ", result.stderr)
+                self.assertIn("review.tsv:2:", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_silent_for_private_and_group(self):
         for mode in (0o700, 0o2770):
             with self.subTest(mode=oct(mode)):

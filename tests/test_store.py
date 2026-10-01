@@ -136,6 +136,75 @@ class TestMissingManifest(unittest.TestCase):
             LocalStore(Path(tmp))
 
 
+class TestStrictLoading(unittest.TestCase):
+    GOOD_TS = "2026-01-01T00:00:00+00:00"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.work_dir = Path(self._tmp.name)
+        make_work_dir(self.work_dir)
+
+    def write_review(self, *lines: str) -> None:
+        (self.work_dir / "review.tsv").write_text("\n".join(lines) + "\n")
+
+    def write_manifest(self, *lines: str) -> None:
+        (self.work_dir / "manifest.tsv").write_text("\n".join(lines) + "\n")
+
+    REVIEW_HEADER = "image_id\tbatch\tstatus\tpass_number\ttimestamp"
+    MANIFEST_HEADER = "batch\tpreprocessed_path\timage_id"
+
+    def test_review_problems_name_file_and_line(self):
+        ts = self.GOOD_TS
+        good = f"/src/a.dcm\tbatch_001\tCLEAN\t1\t{ts}"
+        cases = {
+            "short row": (self.REVIEW_HEADER, good, "/src/b.dcm\tbatch_001\tCLEAN"),
+            "bad status": (self.REVIEW_HEADER, good, f"/src/b.dcm\tbatch_001\tdirty\t1\t{ts}"),
+            "bad pass": (self.REVIEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\tone\t{ts}"),
+            "zero pass": (self.REVIEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t0\t{ts}"),
+            "empty image_id": (self.REVIEW_HEADER, good, f"\tbatch_001\tCLEAN\t1\t{ts}"),
+        }
+        for name, lines in cases.items():
+            with self.subTest(name):
+                self.write_review(*lines)
+                with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
+                    LocalStore(self.work_dir)
+
+    def test_review_header_problems(self):
+        for header in ("image_id\tbatch\tstatus\tpass_number", "image_id\tbatch\tstatus\tpass_number\ttimestamp\textra"):
+            with self.subTest(header=header):
+                self.write_review(header)
+                with self.assertRaisesRegex(ValueError, r"review\.tsv:1: header"):
+                    LocalStore(self.work_dir)
+
+    def test_valid_review_loads(self):
+        self.write_review(self.REVIEW_HEADER, f"/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t1\t{self.GOOD_TS}")
+        self.assertEqual(LocalStore(self.work_dir).statuses(1)["batch_001/a.jpg"], "CLEAN")
+
+    def test_manifest_problems_name_file_and_line(self):
+        good = "batch_001\tbatch_001/a.jpg\t/src/a.dcm"
+        cases = {
+            "missing column": (self.MANIFEST_HEADER, good, "batch_001\tbatch_001/b.jpg"),
+            "duplicate key": (self.MANIFEST_HEADER, good, "batch_001\tbatch_001/a.jpg\t/src/b.dcm"),
+            "empty image_id": (self.MANIFEST_HEADER, good, "batch_001\tbatch_001/b.jpg\t"),
+        }
+        for name, lines in cases.items():
+            with self.subTest(name):
+                self.write_manifest(*lines)
+                with self.assertRaisesRegex(ValueError, r"manifest\.tsv:3: "):
+                    LocalStore(self.work_dir)
+
+    def test_duplicate_key_names_both_lines(self):
+        self.write_manifest(self.MANIFEST_HEADER, "b\tk.jpg\t/src/a.dcm", "b\tk.jpg\t/src/b.dcm")
+        with self.assertRaisesRegex(ValueError, r"manifest\.tsv:3: .*line 2"):
+            LocalStore(self.work_dir)
+
+    def test_manifest_header_missing_column(self):
+        self.write_manifest("batch\tpreprocessed_path")
+        with self.assertRaisesRegex(ValueError, r"manifest\.tsv:1: header"):
+            LocalStore(self.work_dir)
+
+
 class TestSession(StoreTestCase):
     def setUp(self):
         super().setUp()
