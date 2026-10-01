@@ -4,6 +4,7 @@ import contextlib
 import csv
 import io
 import os
+import stat
 import tempfile
 import unittest
 import warnings
@@ -18,10 +19,12 @@ from click.testing import CliRunner
 from fixtures import write_dicom
 from PIL import Image
 
+from image_review import preprocess as preprocess_module
 from image_review.cli import cli
 from image_review.preprocess import (
     SIDE_BY_SIDE_GAP,
     Unsupported,
+    WorkDirExists,
     _failed,
     decode_raster,
     render,
@@ -233,14 +236,88 @@ class RunErrorTest(unittest.TestCase):
         self.assertEqual(skip.image_id, src.as_posix())
         self.assertTrue(skip.reason.startswith("PermissionError:"), skip.reason)
 
-    def test_work_dir_write_error_aborts(self):
+    def test_work_dir_write_error_aborts_and_leaves_nothing(self):
         write_dicom(self.root / "good.dcm", _good_pixels())
         work = self.root / "work"
-        work.mkdir()
-        (work / "batch_001").write_text("not a directory")
-        with quiet(), self.assertRaises(OSError):
+        with quiet(), mock.patch("image_review.preprocess._write_tsv", side_effect=OSError("disk full")), self.assertRaises(OSError):
             run_preprocess([self.root / "good.dcm"], work)
-        self.assertFalse((work / "manifest.tsv").exists())
+        self.assertEqual(list(self.root.glob("*work*")), [])
+
+
+class StagingTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.src = self.root / "src"
+        self.src.mkdir()
+        write_dicom(self.src / "a.dcm", _good_pixels())
+        write_dicom(self.src / "b.dcm", _good_pixels())
+        self.work = self.root / "work"
+        self.staging = self.root / ".work.partial"
+
+    def run_quietly(self, sources=None):
+        with quiet():
+            return run_preprocess(sources or [self.src], self.work)
+
+    def test_second_run_is_refused_and_changes_nothing(self):
+        self.run_quietly()
+        manifest = (self.work / "manifest.tsv").read_bytes()
+        jpg = (self.work / "batch_001" / "img_00001.jpg").read_bytes()
+        other = self.root / "other"
+        other.mkdir()
+        write_dicom(other / "c.dcm", _good_pixels() // 2)
+        with self.assertRaises(WorkDirExists):
+            self.run_quietly([other])
+        self.assertEqual((self.work / "manifest.tsv").read_bytes(), manifest)
+        self.assertEqual((self.work / "batch_001" / "img_00001.jpg").read_bytes(), jpg)
+        self.assertFalse(self.staging.exists())
+
+    def test_work_dir_that_is_a_file_is_refused(self):
+        self.work.write_text("x")
+        with self.assertRaises(WorkDirExists):
+            self.run_quietly()
+        self.assertEqual(self.work.read_text(), "x")
+
+    def test_existing_empty_directory_is_used(self):
+        self.work.mkdir()
+        result = self.run_quietly()
+        self.assertEqual(result.written, 2)
+        self.assertTrue((self.work / "manifest.tsv").exists())
+        self.assertFalse(self.staging.exists())
+
+    def test_result_paths_refer_to_the_final_location(self):
+        result = self.run_quietly()
+        self.assertEqual(result.skipped_path, self.work / "skipped.tsv")
+        self.assertTrue(result.skipped_path.exists())
+
+    def test_interrupt_leaves_neither_work_dir_nor_staging(self):
+        real = preprocess_module._process
+        calls = []
+
+        def interrupt_on_second(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            return real(*args, **kwargs)
+
+        with quiet(), mock.patch("image_review.preprocess._process", side_effect=interrupt_on_second), self.assertRaises(KeyboardInterrupt):
+            run_preprocess([self.src], self.work)
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(self.work.exists())
+        self.assertFalse(self.staging.exists())
+
+    def test_leftover_staging_dir_is_named_in_the_error(self):
+        self.staging.mkdir()
+        with self.assertRaises(WorkDirExists) as ctx:
+            self.run_quietly()
+        self.assertIn(str(self.staging), str(ctx.exception))
+        self.assertFalse(self.work.exists())
+        self.assertTrue(self.staging.exists())
+
+    def test_work_dir_is_private(self):
+        self.run_quietly()
+        self.assertEqual(stat.S_IMODE(self.work.stat().st_mode), 0o700)
 
 
 def _halves(img: np.ndarray, width: int) -> tuple[np.ndarray, np.ndarray]:
@@ -406,6 +483,14 @@ class PreprocessCliTest(unittest.TestCase):
         result = self.invoke("--allow-skipped")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn(f"3 skipped (see {self.root / 'work' / 'skipped.tsv'})", result.output)
+
+    def test_existing_work_dir_exits_1(self):
+        self.invoke("--allow-skipped")
+        manifest = (self.root / "work" / "manifest.tsv").read_bytes()
+        result = self.invoke("--allow-skipped")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("already exists", result.output)
+        self.assertEqual((self.root / "work" / "manifest.tsv").read_bytes(), manifest)
 
 
 if __name__ == "__main__":

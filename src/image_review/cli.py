@@ -140,10 +140,13 @@ def preprocess(sources, batch_size, work_dir, colormap, allow_skipped):
     Every input is listed in either manifest.tsv or skipped.tsv. Exits 1 if any
     input failed, unless --allow-skipped is given.
     """
-    from .preprocess import run_preprocess
+    from .preprocess import WorkDirExists, run_preprocess
 
     source_paths = [Path(s).resolve() for s in sources]
-    result = run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap)
+    try:
+        result = run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap)
+    except WorkDirExists as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(
         f"Found {result.found} inputs: wrote {result.written} images in {result.batches} batches; "
         f"{len(result.skipped)} skipped (see {result.skipped_path})"

@@ -64,7 +64,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 |----------|---------|-------------|
 | `SOURCE` | (required) | One or more ZIP files, directories, or image files |
 | `--batch-size` | 300 | Maximum images per batch subdirectory |
-| `--work-dir` | `./review_work` | Work directory for all output (alias: `--output-dir`) |
+| `--work-dir` | `./review_work` | Work directory for all output (alias: `--output-dir`); must not exist or be empty |
 | `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale |
 | `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
 
@@ -76,6 +76,20 @@ RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and records them in the
 manifest. For ZIP entries `read()` reads from the open archive, so it is only
 valid until discovery moves on to the next item.
+
+**Work directory lifecycle.** The run builds everything (batch directories,
+JPGs, `manifest.tsv`, `skipped.tsv`) in a private staging directory
+`<parent>/.<name>.partial`, created with mode 0700 (not `exist_ok`), and
+renames it to the work directory only on success; the final directory keeps
+mode 0700. If the work directory already exists and is not an empty directory
+(or is a file) the run is refused with `WorkDirExists` (a `ValueError`; the CLI
+exits 1 asking for a new `--work-dir` or removal of the old one); an existing
+empty directory is replaced by the rename. If the staging directory already
+exists, a previous run did not finish (a crash or kill -9) and the run is
+refused naming it; remove it and re-run. On any error or interrupt
+(including `KeyboardInterrupt`) the staging directory is removed and the work
+directory is never created. There is no `--force`. Existing work directories
+are never modified, so a running `serve` is not affected.
 
 **Source loading** dispatches by type:
 
@@ -257,7 +271,9 @@ the connection file removed.
 
 ## Data Files
 
-All state lives in the work directory.
+All state lives in the work directory. `preprocess` creates it atomically
+(see *Work directory lifecycle*); while a run is in progress its output is in
+`.NAME.partial` beside it.
 
 ### `manifest.tsv`
 

@@ -45,7 +45,7 @@ image-review preprocess SOURCE [SOURCE ...] [options]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--batch-size` | 300 | Number of images per batch |
-| `--work-dir` | `./review_work` | Where to write preprocessed output |
+| `--work-dir` | `./review_work` | Where to write preprocessed output; must not exist or be empty |
 | `--colormap` | `inferno` | Matplotlib colormap for DICOM rendering |
 | `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
 
@@ -64,6 +64,14 @@ image-review preprocess scans.zip --batch-size 100 --colormap viridis
 # Custom output directory
 image-review preprocess scans.zip --work-dir /data/review_session_1
 ```
+
+**Re-running:** `preprocess` never writes into a work directory that already
+has content: choose a new `--work-dir` or remove the old one. (Reusing one
+would let your earlier CLEAN/DIRTY marks attach to different images.) Output is
+built in a hidden staging directory next to it (`.review_work.partial`) and
+renamed into place only when the run finishes, so Ctrl-C leaves nothing
+behind. If the machine crashed mid-run and `.review_work.partial` is left over,
+the next run tells you to remove it; do so and re-run.
 
 **What it produces:**
 

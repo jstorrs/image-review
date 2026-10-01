@@ -2,10 +2,11 @@ import csv
 import io
 import os
 import re
+import shutil
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -74,6 +75,10 @@ class PreprocessResult:
     batches: int
     skipped: list[Skipped]
     skipped_path: Path
+
+
+class WorkDirExists(ValueError):
+    """The work directory cannot be created: it is in use, or an earlier run left its staging dir."""
 
 
 class Unsupported(Exception):
@@ -337,18 +342,56 @@ def _write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]]) -> No
         writer.writerows(rows)
 
 
+STAGING_MODE = 0o700  # the work dir keeps the staging dir's mode through the final rename
+
+
+def staging_path(output_dir: Path) -> Path:
+    return output_dir.parent / f".{output_dir.name}.partial"
+
+
+def _claim_staging(output_dir: Path) -> Path:
+    """Refuse an in-use work dir, then create the private staging dir next to it."""
+    if output_dir.is_symlink() or (output_dir.exists() and not (output_dir.is_dir() and not any(output_dir.iterdir()))):
+        raise WorkDirExists(
+            f"work directory {output_dir} already exists; choose a new --work-dir or remove the old one"
+        )
+    staging = staging_path(output_dir)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        staging.mkdir(mode=STAGING_MODE)
+    except FileExistsError:
+        raise WorkDirExists(
+            f"a previous preprocess into {output_dir} did not finish; remove {staging}"
+        ) from None
+    return staging
+
+
 def run_preprocess(
     sources: list[Path],
     output_dir: Path,
     batch_size: int = 300,
     colormap: str = "inferno",
 ) -> PreprocessResult:
-    """Render every discovered input, writing each image as soon as it is encoded.
+    """Render every discovered input into a private staging dir, then rename it to `output_dir`.
 
     Every input ends up in exactly one of manifest.tsv or skipped.tsv. Write
-    errors (OSError on the work directory) propagate and abort the run.
+    errors (OSError on the work directory) propagate and abort the run. The
+    work dir appears only on success; an existing non-empty one is refused
+    (`WorkDirExists`), so verdicts can never attach to a replaced image.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
+    staging = _claim_staging(output_dir)
+    try:
+        result = _render_into(sources, staging, batch_size, colormap)
+        if output_dir.exists():
+            output_dir.rmdir()  # an empty directory the user made
+        os.rename(staging, output_dir)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return replace(result, skipped_path=output_dir / result.skipped_path.name)
+
+
+def _render_into(sources: list[Path], output_dir: Path, batch_size: int, colormap: str) -> PreprocessResult:
     manifest_rows: list[tuple[str, str, str]] = []
     skipped: list[Skipped] = []
     found = 0

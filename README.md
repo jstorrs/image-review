@@ -56,6 +56,14 @@ the composite over mid-gray beside the raw channels with alpha ignored, and
 MPO JPEGs (HDR gain maps, previews) show all their frames side by side.
 Output is organized into batch subdirectories with a `manifest.tsv` index.
 
+The work directory must not already exist (an empty directory is fine);
+`preprocess` refuses to write into one that has content, so verdicts can never
+be attached to a replaced image. Choose a new `--work-dir` or remove the old
+one. Output is built in a private staging directory next to it
+(`.NAME.partial`, mode 0700) and renamed into place only on success, so an
+interrupted run leaves no work directory behind. If a crash leaves
+`.NAME.partial` behind, the next run says so; remove it and re-run.
+
 Every input ends up in exactly one of `manifest.tsv` (rendered) or
 `skipped.tsv` (with the reason it failed, e.g. a corrupt file or an
 `unsupported:` multi-frame or colour DICOM). The run finishes with a summary
