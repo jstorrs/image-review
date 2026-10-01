@@ -34,6 +34,7 @@ from .access import Access, Modes, modes
 EROSION_KERNEL_SIZE = 5
 OUTLIER_PERCENTILE = 0.01
 INTENSITY_MARGIN = 0.02
+TAIL_FRACTION = 0.10  # output range given to each outlier tail (below bot, above top)
 CLAHE_BINS = 96
 ALPHA_BACKGROUND = 0.5  # mid-gray, so content carried only by alpha stays visible whatever its colour
 SIDE_BY_SIDE_GAP = 4  # pixels between views placed side by side in one rendered image
@@ -187,6 +188,28 @@ def _has_pixel_data(dcm: pydicom.FileDataset) -> bool:
     return any(keyword in dcm for keyword in _PIXEL_DATA_KEYWORDS)
 
 
+def _compress_tails(img: np.ndarray) -> np.ndarray:
+    """Map float `img` to [0, 1], squeezing the outlier tails instead of clipping them.
+
+    The robust core range [bot, top] fills [TAIL_FRACTION, 1 - TAIL_FRACTION]; values
+    below bot and above top are interpolated into the remaining tails, so extreme
+    values (e.g. burned-in text at the maximum) stay distinct from the core.
+    Falls back to a plain min-max rescale when no robust core can be found.
+    """
+    lo, hi = float(img.min()), float(img.max())
+    minmax = (img - lo) / (hi - lo)
+    margin_initial = OUTLIER_PERCENTILE * (hi - lo)
+    inner = img[(img > lo + margin_initial) & (img < hi - margin_initial)]
+    if inner.size == 0:
+        return minmax
+    bot, top = np.quantile(inner, [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
+    margin_final = INTENSITY_MARGIN * (top - bot)
+    bot, top = bot + margin_final, top - margin_final
+    if not lo < bot < top < hi:
+        return minmax
+    return np.interp(img, [lo, bot, top, hi], [0, TAIL_FRACTION, 1 - TAIL_FRACTION, 1]).astype(np.float32)
+
+
 def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
     if not _has_pixel_data(dcm):
         sop_class = _sop_class(dcm)
@@ -201,22 +224,12 @@ def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
         raise Unsupported(f"multi-frame DICOM ({pixels.shape[0]} frames)")
     if pixels.ndim != 2:
         raise Unsupported(f"pixel array with shape {pixels.shape}")
-    img = ski.util.img_as_float32(pixels)
+    img = pixels.astype(np.float32)
     if photometric == "MONOCHROME1":
-        img = ski.util.invert(img)
-    bot, top = img.min(), img.max()
-    margin_initial = OUTLIER_PERCENTILE * (top - bot)
-    bot, top = bot + margin_initial, top - margin_initial
-    filtered = img[(img > bot) & (img < top)]
-    if filtered.size == 0:
-        return _crop(img)
-    bot, top = np.quantile(filtered, [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
-    margin_final = INTENSITY_MARGIN * (top - bot)
-    bot, top = bot + margin_final, top - margin_final
-    if bot >= top:
-        return _crop(img)
-    img = ski.exposure.rescale_intensity(img, (bot, top))
-    img = np.clip(img, 0, 1)
+        img = -img
+    if img.min() >= img.max():
+        return _crop(np.zeros_like(img))
+    img = _compress_tails(img)
     img = _crop(img)
     img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
     return _crop(img)

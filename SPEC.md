@@ -183,9 +183,17 @@ the order given, each walked as above).
    `unsupported: no pixel data (Basic Text SR Storage)` naming the SOP class
    when known, `unsupported: multi-frame DICOM (3 frames)`,
    `unsupported: photometric interpretation RGB`)
-2. Extract pixel array, convert to float32
-3. Correct photometric interpretation (invert MONOCHROME1)
-4. Clip to robust intensity range (1st-99th percentile with 2% margin)
+2. Extract pixel array, convert to float32 (values keep their native scale)
+3. Correct photometric interpretation (invert MONOCHROME1 by negation)
+4. Compress the intensity tails: the robust core range (1st-99th percentile
+   of the values strictly inside the outer 1% of the min-max range, then
+   shrunk by a 2% margin) maps to [`TAIL_FRACTION`, 1 - `TAIL_FRACTION`]
+   (0.10-0.90), and the values below/above it are interpolated linearly into
+   the remaining tails [0, 0.10] and [0.90, 1] rather than clipped, so
+   extremes such as burned-in text at the maximum stay distinguishable from
+   a bright core. An image with a single value maps to all zeros; when no
+   robust core exists (no inner values, or the core is empty or touches
+   the min or max) a plain min-max rescale is used
 5. Apply CLAHE (adaptive histogram equalization, 96-tile grid)
 6. Strip uniform rows/columns (`compress_image` -- removes letterboxing). If
    stripping would leave nothing (e.g. an all-zero image), the uncropped

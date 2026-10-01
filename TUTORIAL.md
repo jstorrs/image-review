@@ -124,7 +124,9 @@ review_work/
 
 The DICOM preprocessing pipeline:
 1. Converts to float32, corrects photometric interpretation
-2. Removes quantile outliers (1st/99th percentile)
+2. Compresses intensity outliers (beyond the 1st/99th percentile) into the
+   ends of the range instead of clipping them, so bright burned-in text
+   stays visible
 3. Applies adaptive histogram equalization (96 tiles)
 4. Strips uniform rows/columns (letterboxing removal)
 5. Applies colormap and saves as JPG

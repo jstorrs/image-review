@@ -821,6 +821,42 @@ class RenderTest(unittest.TestCase):
         self.assertGreater(mono2.rgb[-10:].mean(), mono2.rgb[:10].mean() + 100)
         self.assertLess(mono1.rgb[-10:].mean(), mono1.rgb[:10].mean() - 100)
 
+    def luminance(self, rgb: np.ndarray) -> np.ndarray:
+        return rgb @ np.array([0.299, 0.587, 0.114])
+
+    def test_bright_text_on_bright_border_stays_visible(self):
+        rng = np.random.default_rng(1)
+        pixels = rng.integers(0, 1001, (200, 200)).astype(np.uint16)
+        band = np.zeros((200, 200), dtype=bool)
+        band[:, :12] = True
+        band[:, -12:] = True
+        pixels[band] = rng.integers(3800, 3951, int(band.sum()))
+        text = np.zeros_like(band)
+        text[20:24, 2:10] = True
+        text[60:64, 2:10] = True
+        text[100:104, -10:-2] = True
+        pixels[text] = 4095
+        for colormap in ("inferno", "gray"):
+            with self.subTest(colormap=colormap):
+                [out] = render("dicom", "id", self.dicom_bytes(pixels), colormap)
+                self.assertEqual(out.rgb.shape[:2], pixels.shape)
+                lum = self.luminance(out.rgb.astype(float))
+                self.assertGreaterEqual(lum[text].mean() - lum[band & ~text].mean(), 20)
+
+    def test_two_level_text_image_renders_text_bright(self):
+        for dtype, low, high in ((np.uint16, 0, 4095), (np.int16, -1000, 3000)):
+            with self.subTest(dtype=dtype.__name__):
+                pixels = np.full((60, 80), low, dtype=dtype)
+                pixels[20:30, 10:40:2] = high  # stripes, so cropping keeps the text
+                [out] = render("dicom", "id", self.dicom_bytes(pixels), "gray")
+                lum = self.luminance(out.rgb.astype(float))
+                self.assertGreater(lum.max(), 200)
+                self.assertLess(lum.min(), 50)
+
+    def test_uniform_dicom_renders(self):
+        [out] = render("dicom", "id", self.dicom_bytes(np.full((30, 40), 1234, dtype=np.uint16)), "gray")
+        self.assertEqual(out.rgb.shape, (30, 40, 3))
+
     def test_dicom_without_pixel_data_is_unsupported(self):
         ds = pydicom.dcmread(io.BytesIO(self.dicom_bytes(_good_pixels())))
         del ds.PixelData
