@@ -741,9 +741,12 @@ A grid's aggregate status is derived from the snapshot statuses of its keys:
 
 ### Todo
 
-An item is todo if its status is in `TODO_STATUSES` (UNREVIEWED or FLAGGED),
-or, with `--filter clean`, if it is CLEAN. In single mode a FLAGGED image is
-therefore todo; grids are never built with one.
+With `--filter unreviewed`, an item is todo if its status is in `TODO_STATUSES` (UNREVIEWED or
+FLAGGED); in single mode a FLAGGED image is therefore todo, and grids are never built with one.
+With `--filter clean` or `all`, every loaded item is a re-check: it is todo while at least one of
+its keys is not in the session's marked set. A successful mark adds the item's keys; a successful
+undo removes the keys it restored. The set is in memory only. Any unmarked key keeps a grid todo,
+so a partly undone grid comes back.
 
 ### Event Loop
 

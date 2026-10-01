@@ -347,9 +347,10 @@ image-review review --filter clean
 image-review review --filter all
 ```
 
-With `--filter clean`, the "todo" counter tracks how many CLEAN images remain
-(haven't been re-marked yet). With `--filter all`, "todo" tracks unreviewed
-and flagged images. In grid mode every filter, `all` included, leaves out
+With the default `--filter unreviewed`, "todo" means UNREVIEWED or FLAGGED. With `--filter clean` or
+`--filter all`, every listed image is a re-check, so "todo" means not yet marked in this session
+(whatever the verdict, re-confirming included); undoing a mark makes the image todo again. The count
+starts from the full list and is not remembered across restarts. In grid mode every filter, `all` included, leaves out
 DIRTY and FLAGGED images; if that leaves nothing, it tells you how many
 images need single-mode review. The `n` key jumps to the next todo item and `u` toggles todo-only
 navigation in all filter modes.

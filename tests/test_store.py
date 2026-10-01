@@ -977,6 +977,68 @@ class TestSession(SessionTestCase):
         s._restart_in_mode("grid")
         self.assertEqual(s._statuses["batch_001/a.jpg"], "CLEAN")
 
+    def recheck_session(self, status_filter: str) -> ReviewSession:
+        """A pass 1 single-mode session over already reviewed images: batch_002 (c, d CLEAN), or batch_001 (a DIRTY, b CLEAN) under all."""
+        self.finish_pass_one()
+        batch = "batch_001" if status_filter == "all" else "batch_002"
+        s = ReviewSession(self.store, reviewer="tester", mode="single", status_filter=status_filter, batch=batch, pass_number=1)
+        self.assertEqual(s._todo_count, len(s._items))
+        return s
+
+    def mark_and_next_todo_skips(self, s: ReviewSession, status: str) -> None:
+        s._cursor = 0
+        marked = s._items[0].keys
+        before = s._todo_count
+        s._mark(status)
+        self.assertEqual(s._todo_count, before - 1)
+        s._cursor = -1
+        self.assertTrue(s.next_todo())
+        self.assertNotEqual(s._items[s._cursor].keys, marked)
+
+    def test_clean_filter_marking_counts_as_done(self):
+        s = self.recheck_session("clean")
+        self.assertEqual(len(s._items), 2)
+        self.mark_and_next_todo_skips(s, "CLEAN")
+
+    def test_all_filter_marking_counts_as_done(self):
+        s = self.recheck_session("all")
+        self.assertEqual(len(s._items), 2)
+        self.mark_and_next_todo_skips(s, "CLEAN")
+
+    def test_all_filter_remarking_dirty_counts_as_done(self):
+        s = self.recheck_session("all")
+        dirty = next(i for i, item in enumerate(s._items) if item.keys == ("batch_001/a.jpg",))
+        s._items.insert(0, s._items.pop(dirty))
+        self.mark_and_next_todo_skips(s, "DIRTY")
+        self.assertEqual(s._statuses["batch_001/a.jpg"], "DIRTY")
+
+    def test_all_marked_means_no_todo_remaining(self):
+        s = self.recheck_session("clean")
+        for i in range(len(s._items)):
+            s._cursor = i
+            s._mark("CLEAN")
+        self.assertEqual(s._todo_count, 0)
+        s._cursor = -1
+        self.assertFalse(s.next_todo())
+
+    def check_undo_makes_item_todo_again(self, status_filter: str) -> None:
+        s = self.recheck_session(status_filter)
+        s._cursor = 0
+        before = s._todo_count
+        s._mark("CLEAN")
+        self.assertEqual(s._todo_count, before - 1)
+        s._undo()
+        self.assertEqual(s._todo_count, before)
+        s._cursor = -1
+        self.assertTrue(s.next_todo())
+        self.assertEqual(s._cursor, 0)
+
+    def test_clean_filter_undo_makes_item_todo_again(self):
+        self.check_undo_makes_item_todo_again("clean")
+
+    def test_all_filter_undo_makes_item_todo_again(self):
+        self.check_undo_makes_item_todo_again("all")
+
 
 def key(k: int) -> pg.event.Event:
     return pg.event.Event(pg.KEYDOWN, key=k, mod=0)

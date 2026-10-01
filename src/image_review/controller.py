@@ -131,6 +131,7 @@ class ReviewSession:
         self._shown_at: int | None = None  # ticks when the current item was first painted
         self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
         self._todo_only = False
+        self._marked_this_session: set[str] = set()  # keys marked here (less those undone): done under clean/all
         self._undoable = 0  # this session's marks since the current mode started, less those undone
         self._unloadable: set[str] = set()  # keys that failed to load: shown as placeholders, never marked CLEAN
 
@@ -287,19 +288,23 @@ class ReviewSession:
         self._ui_state = UIState.REVIEWING
         self.next_image()
 
-    def _is_todo(self, status: str) -> bool:
-        if self.status_filter == "clean":
-            return status == "CLEAN"
-        return status in TODO_STATUSES
+    def _is_todo(self, item: ReviewItem) -> bool:
+        """Under clean/all every item is a re-check, so it is todo until marked in this session.
+
+        Any unmarked key keeps a grid todo, so a partly undone grid comes back.
+        """
+        if self.status_filter == "unreviewed":
+            return self._item_status(item) in TODO_STATUSES
+        return not self._marked_this_session.issuperset(item.keys)
 
     def _count_todo(self) -> int:
-        return sum(1 for item in self._items if self._is_todo(self._item_status(item)))
+        return sum(1 for item in self._items if self._is_todo(item))
 
     def next_todo(self, direction: int = 1, *, wrap: bool = True) -> bool:
         """Navigate to next todo item. Returns True if found."""
         idx = next_index(
             len(self._items), self._cursor, direction,
-            is_todo=lambda i: self._is_todo(self._item_status(self._items[i])), wrap=wrap,
+            is_todo=lambda i: self._is_todo(self._items[i]), wrap=wrap,
         )
         if idx is None:
             return False
@@ -403,6 +408,7 @@ class ReviewSession:
             self._store_lost(exc)
             return
         self._undoable += 1
+        self._marked_this_session.update(item.keys)
         self._statuses.update(changed)
         self._todo_count = self._count_todo()
         self._viewer.set_status(status)
@@ -434,6 +440,7 @@ class ReviewSession:
             self._notify(NOTHING_TO_UNDO)
             return
         self._undoable -= 1
+        self._marked_this_session.difference_update(changed)
         self._statuses.update(changed)
         self._todo_count = self._count_todo()
         index = next((i for i, item in enumerate(self._items) if any(k in changed for k in item.keys)), None)
