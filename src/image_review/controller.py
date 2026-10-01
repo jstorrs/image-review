@@ -6,7 +6,7 @@ from enum import Enum, auto
 
 import pygame as pg
 
-from .grid_packer import pack_into_grids
+from .grid_packer import GridSpec, pack_into_grids
 from .store import (
     TODO_STATUSES,
     ManifestRow,
@@ -67,11 +67,15 @@ def _grid_clean_refused(snapshot: dict[str, Status], keys: tuple[str, ...]) -> b
     return not statuses <= GRID_ELIGIBLE and statuses != {"DIRTY"}
 
 
+# What a grid build depends on: the review rows' keys in order, the bin size and allow_rotation
+GridCacheKey = tuple[tuple[str, ...], tuple[int, int], bool]
+
+
 @dataclass(frozen=True)
 class ReviewItem:
     """One reviewable item: a single image (surface None, loaded when displayed) or a grid
     (composited when built). A grid's status and CLEAN refusal follow the grid rules even
-    when it holds one key (an overflow image), so `grid` is kept rather than read off len(keys)."""
+    when it holds one key, so `grid` is kept rather than read off len(keys)."""
 
     keys: tuple[str, ...]
     label: str
@@ -150,6 +154,9 @@ class ReviewSession:
         self._marked_this_session: set[str] = set()  # keys marked here (less those undone): done under clean/all
         self._undoable = 0  # this session's marks since the current mode started, less those undone
         self._unloadable: set[str] = set()  # keys that failed to load: shown as placeholders, never marked CLEAN
+        # The last pack_into_grids result and its key, so switching modes back and forth packs once;
+        # kept across single mode within a batch, dropped by b
+        self._grid_cache: tuple[GridCacheKey, list[GridSpec], list[str]] | None = None
 
         self._viewer = ImageViewer()
         self._joysticks = {}
@@ -251,9 +258,16 @@ class ReviewSession:
         grid_h -= self._viewer.border
 
         review_rows = self._review_rows(self.batch)
-        grid_specs, unloadable = pack_into_grids(
-            review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation, on_progress=self._show_grid_progress
-        )
+        # A mark that changes which rows are eligible changes the key, so a cached grid never holds
+        # a key the current snapshot excludes (e.g. one now DIRTY)
+        cache_key = (tuple(row.key for row in review_rows), (grid_w, grid_h), self.allow_rotation)
+        if self._grid_cache is None or self._grid_cache[0] != cache_key:
+            self._grid_cache = None  # hold at most one result, and none if packing fails
+            grid_specs, left_out = pack_into_grids(
+                review_rows, self.store, grid_w, grid_h, allow_rotation=self.allow_rotation, on_progress=self._show_grid_progress
+            )
+            self._grid_cache = (cache_key, grid_specs, left_out)
+        _, grid_specs, left_out = self._grid_cache
 
         items = [
             ReviewItem(keys=tuple(gs.keys), label=f"grid ({len(gs.keys)} images)", surface=gs.surface, grid=True)
@@ -261,9 +275,10 @@ class ReviewSession:
         ]
         random.shuffle(items)
         items.sort(key=lambda item: len(item.keys), reverse=True)
-        # Each unloadable image becomes a single image after the grids: it follows the single-image rules,
-        # and _show_current retries it and draws its placeholder only when it is shown
-        items += [ReviewItem(keys=(key,), label=key, surface=None, grid=False) for key in unloadable]
+        # Each image left out of the grids (unloadable, or left unpacked) becomes a single image after them:
+        # it follows the single-image rules, and _show_current loads it when it is shown, drawing a
+        # placeholder only if that fails
+        items += [ReviewItem(keys=(key,), label=key, surface=None, grid=False) for key in left_out]
         self._items = items
         self._todo_count = self._count_todo()
 
@@ -353,6 +368,7 @@ class ReviewSession:
             self._items = []
             self._store_lost(exc)
             return
+        self._grid_cache = None  # the batch is left (or the list ends): don't keep its canvases alive
         pass_changed = self.pass_number != old_pass
         batches = [b for b in self._batches() if not self._explicit_batch or b == self.batch]
         batch = next_batch(batches, None if pass_changed else self.batch, self._batch_has_todo, wrap=True)

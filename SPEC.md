@@ -645,8 +645,8 @@ Every item is a `ReviewItem`, a frozen dataclass: `keys` (a tuple of manifest
 keys), `label` (shown in the status bar: the key, or
 "grid (N images)"), `surface` (a grid's composited surface, or `None` for a
 single image, loaded when displayed) and `grid` (a grid's status and CLEAN
-refusal follow the grid rules below, even for a one-image overflow grid; an
-unloadable image's item in grid mode is a single image, not a grid).
+refusal follow the grid rules below, even for a one-image grid; the item for
+an image left out of the grids in grid mode is a single image, not a grid).
 
 ### Status Snapshot
 
@@ -689,15 +689,25 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
   filter including `all`. A grid mark applies to all its images, so one
   keypress must never clear an image already judged DIRTY (this pass) or
   FLAGGED (DIRTY in another pass); those are reviewed in single mode
-- Pass the rows and the store to `pack_into_grids()` with the screen dimensions
+- Pass the rows and the store to `pack_into_grids()` with the screen dimensions.
+  The session caches the last result (only one), keyed by the review rows'
+  keys in order, the grid size and `allow_rotation`; a rebuild with the same
+  key (e.g. `s` then `m` with nothing marked) reuses it instead of packing
+  again. A mark that changes which rows are eligible (e.g. one now DIRTY)
+  changes the key, so a cached grid never holds a key the snapshot excludes.
+  A failed pack leaves no cached result. The cache is kept across single mode
+  within a batch (so `m`, `s`, `m` packs once) and dropped by `b`, so a
+  previous batch's canvases are not kept alive. The items below are rebuilt
+  from the cached result on every build, including a fresh shuffle
 - Convert each returned `GridSpec` into a `ReviewItem` with its `surface`
   and `keys`
 - Shuffle the grid items, then sort by image count (largest grids first)
-- Append one item per unloadable key `pack_into_grids()` reported:
+- Append one item per key `pack_into_grids()` left out of the grids
+  (unloadable, or, should it ever happen, left unpacked):
   `ReviewItem(keys=(key,), label=key, surface=None, grid=False)`. Like a
-  single-mode item it is loaded (retried) when shown, so its placeholder is
-  drawn only then, and it follows the single-image status rules, not the grid
-  rules. No grid ever holds an unloadable key
+  single-mode item it is loaded when shown, so a placeholder is drawn only
+  then and only if loading fails, and it follows the single-image status rules,
+  not the grid rules. No grid ever holds a key whose pixels it does not show
 
 When a grid is marked CLEAN or DIRTY, `store.mark()` is called with all its
 `keys`, and every key in the result is written into the snapshot.
@@ -726,8 +736,8 @@ naming the key is printed to stderr, the key is added to the session's
 with a short reason ("image could not be fetched" or "image could not be read
 or decoded"; the error itself goes only to stderr). Navigation, `n`, todo-only and autoplay treat it
 like any other item (autoplay does not stop at it), so the cursor always points
-at a real item. An item with no surface (every single-mode item, and an
-unloadable image's item in grid mode) is loaded each time it is shown, so the
+at a real item. An item with no surface (every single-mode item, and the item
+for an image left out of the grids in grid mode) is loaded each time it is shown, so the
 key joins `_unloadable` before any verdict can count, and a key that loads
 again leaves it. Placeholders are never built up front.
 
@@ -911,33 +921,43 @@ on the review screen.
 | Field | Type | Description |
 |-------|------|-------------|
 | `surface` | `pg.Surface` | Composited grid image, ready for display |
-| `keys` | `list[str]` | Keys (preprocessed paths) of all images packed into this grid |
+| `keys` | `list[str]` | Keys (preprocessed paths) of the images drawn in this grid |
 
 ### `pack_into_grids(items, store, grid_w, grid_h, *, allow_rotation=True, on_progress=None) -> tuple[list[GridSpec], list[str]]`
 
-`items` is a list of `ManifestRow`. Returns the grids and the unloadable
-keys, in input order; no grid holds an unloadable key. What to do with
-unloadable keys is left to the caller.
+`items` is a list of `ManifestRow`. Returns the grids and the keys left out of
+every grid (missing, unreadable header, failed decode, or left unpacked), in input order. A
+grid holds only keys whose pixels it shows. What to do with the left-out keys is
+left to the caller. At most one bin's decoded images are alive at a time.
 
 1. **Load**: Fetch all image bytes with `store.image_bytes_many()` (an
-   8-worker pool for `RemoteStore`, a simple loop for `LocalStore`), decode each
-   with `util.load_surface(bytes)` and read dimensions from
-   `surface.get_size()`. This avoids fetching each image twice. Images that are
-   missing (the store warns) or fail to decode (warned here) are left out of
-   the packing and reported as unloadable. An image larger than the bin is
-   `pg.transform.smoothscale`d to fit, keeping its aspect ratio, so nothing
-   larger than the bin is kept: when rotation is allowed it is shrunk only as
-   far as the better of the upright and rotated orientations requires (an
-   image that fits rotated is not shrunk). `on_progress(i, n)`, if given, is
-   called after each of the n images is handled.
-2. **Pack**: Create a `rectpack` packer with `rotation=allow_rotation` and
-   `(grid_w, grid_h)` bins (unlimited bin count). Add each image as a rect.
-3. **Composite**: For each bin, create a black `pg.Surface(grid_w, grid_h)`.
-   Blit each pre-loaded surface at the packed position. If rectpack rotated
-   the rect (packed size differs from original), apply
-   `pg.transform.rotate(-90)` before blitting.
-4. **Overflow**: Any image the packer leaves out becomes a single-image
-   `GridSpec` with its surface (never larger than the bin).
+   8-worker pool for `RemoteStore`, a simple loop for `LocalStore`); compressed
+   JPGs are small. Read each image's dimensions from its header with
+   `PIL.Image.open(BytesIO(bytes)).size`, which decodes no pixels. Images that
+   are missing (the store warns) or whose header cannot be read (warned here)
+   are left out of the packing.
+2. **Pack**: Each image is packed at `fit_size(w, h, grid_w, grid_h,
+   allow_rotation)`: its own size if it fits the bin upright (or rotated, when
+   rotation is allowed), otherwise shrunk, keeping its aspect ratio, only as far
+   as the better allowed orientation requires, so nothing is larger than the
+   bin. Create a `rectpack` packer with `rotation=allow_rotation` and
+   `(grid_w, grid_h)` bins (unlimited bin count), and add each image as a rect
+   of its fit size.
+3. **Composite**: One bin at a time: create a black `pg.Surface(grid_w,
+   grid_h)`, decode each of the bin's images with `util.load_surface(bytes)`,
+   `pg.transform.smoothscale` it to its fit size, and blit it at the packed
+   position, after `pg.transform.rotate(-90)` if rectpack rotated the rect
+   (packed size differs from the fit size). The bin's decoded surfaces are
+   released before the next bin. An image that fails to decode here (a valid
+   header over a truncated body, a decoded size differing from the header's, or
+   a final size differing from its packed rectangle) is warned, its rectangle stays black, its key is left out of the grid's
+   `keys` and it is reported as left out. A bin left with no keys is dropped.
+4. **Overflow**: `fit_size` makes every image fit a bin, so the packer should
+   leave none out. Any it does is warned and reported as left out, so the
+   caller shows it as a single image loaded on display.
+
+`on_progress(i, n)`, if given, is called as each of the n images is handled
+(left out at load, composited or failed, or left unpacked), ending with `(n, n)`.
 
 `util.load_surface(buf: bytes) -> pg.Surface` decodes JPG bytes with
 Pillow (grayscale is converted to RGB). Truncated or undecodable input raises

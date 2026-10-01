@@ -1,6 +1,7 @@
 import contextlib
 import csv
 import errno
+import gc
 import io
 import json
 import os
@@ -14,6 +15,7 @@ import tempfile
 import time
 import types
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -27,6 +29,7 @@ from fixtures import ROWS, make_work_dir
 from PIL import Image
 
 from image_review import controller as controller_module
+from image_review import grid_packer as grid_packer_module
 from image_review import review_db as review_db_module
 from image_review import store as store_module
 from image_review.cli import cli, unknown_batch_message
@@ -46,7 +49,7 @@ from image_review.controller import (
     next_batch,
     next_index,
 )
-from image_review.grid_packer import _fit_to_bin, pack_into_grids
+from image_review.grid_packer import fit_size, pack_into_grids
 from image_review.review_db import HEADER, ReviewDB
 from image_review.store import (
     LOCK_NAME,
@@ -912,6 +915,44 @@ class TestSession(SessionTestCase):
         self.assertTrue(keys)
         self.assertEqual({s._statuses[k] for k in keys}, {"DIRTY"})
 
+    def test_mode_switches_pack_once(self):
+        with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
+            s = ReviewSession(self.store, reviewer="tester", mode="grid")
+            first = s._items
+            for _ in range(2):
+                s._switch_to_single()
+                s._switch_to_grid(True)
+            self.assertEqual(pack.call_count, 1)
+            self.assertEqual(sorted(item.keys for item in s._items), sorted(item.keys for item in first))
+            s._switch_to_grid(False)  # another key replaces the only cached result
+            s._switch_to_grid(True)
+            self.assertEqual(pack.call_count, 3)
+
+    def test_grid_size_change_packs_again(self):
+        with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
+            s = ReviewSession(self.store, reviewer="tester", mode="grid")
+            s._switch_to_single()
+            w, h = s._viewer.screen.get_size()
+            pg.display.set_mode((w // 2, h // 2))
+            s._switch_to_grid(True)
+            self.assertEqual(pack.call_count, 2)
+
+    def test_grid_cache_never_shows_a_key_marked_dirty(self):
+        with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
+            s = ReviewSession(self.store, reviewer="tester", mode="grid", status_filter="all")
+            s._cursor = 0
+            s._mark("CLEAN")  # still eligible under all: the rows, so the cache, are unchanged
+            s._switch_to_single()
+            s._switch_to_grid(True)
+            self.assertEqual(pack.call_count, 1)
+            s._cursor = 0
+            dirty = s._items[0].keys
+            s._mark("DIRTY")
+            s._switch_to_single()
+            s._switch_to_grid(True)
+            self.assertEqual(pack.call_count, 2)
+        self.assertFalse(set(dirty) & self.grid_keys(s))
+
     def finish_pass_one(self):
         """Pass 1 ends with a DIRTY and b, c, d CLEAN."""
         self.store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
@@ -998,7 +1039,7 @@ class TestSession(SessionTestCase):
         self.assertEqual(self.store.statuses(1)["batch_001/b.jpg"], "CLEAN")
 
     def test_one_key_grid_follows_grid_rules(self):
-        # an overflow grid holding one image that became FLAGGED mid-session is not single-mode todo
+        # a one-image grid holding an image that became FLAGGED mid-session is not single-mode todo
         self.finish_pass_one()
         s = ReviewSession(self.store, reviewer="tester", mode="grid")
         self.assertEqual(s._statuses["batch_001/a.jpg"], "FLAGGED")
@@ -1791,22 +1832,66 @@ class TestUnloadable(EventLoopTestCase):
         self.assertEqual(list(unloadable), [CORRUPT, "batch_009/missing.jpg"])
 
 
+def dropping_packer(rect_id: int):
+    """Patch grid_packer.newPacker so its packer leaves out the rect `rect_id` (the item's index)."""
+    real = grid_packer_module.newPacker
+
+    def factory(*args, **kwargs):
+        packer = real(*args, **kwargs)
+        rect_list = packer.rect_list
+        packer.rect_list = lambda: [r for r in rect_list() if r[5] != rect_id]
+        return packer
+
+    return mock.patch.object(grid_packer_module, "newPacker", factory)
+
+
+class TestLeftUnpacked(EventLoopTestCase):
+    def test_unpacked_key_is_a_loadable_single_item(self):
+        with dropping_packer(0), mock.patch("sys.stderr", io.StringIO()):
+            s = self.reviewing("grid")
+        dropped = s._review_rows(s.batch)[0].key
+        index = next(i for i, item in enumerate(s._items) if dropped in item.keys)
+        self.assertEqual(s._items[index], ReviewItem(keys=(dropped,), label=dropped, surface=None, grid=False))
+        self.assertNotIn(dropped, {k for item in s._items if item.grid for k in item.keys})
+        self.assertNotIn(dropped, s._unloadable)
+        s._cursor = index
+        s._show_current()
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+        self.assertEqual(s._viewer._name, dropped)
+        self.assertNotIn(dropped, s._unloadable)
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_called_once()
+        self.assertEqual(self.mark.call_args.args[:2], ([dropped], "CLEAN"))
+
+
 class TestPackShrinksOversize(unittest.TestCase):
     def setUp(self):
+        self.store = self.make_store({"big/a.jpg": (3000, 2500), "big/b.jpg": (100, 60), "big/c.jpg": (100, 60)})
+
+    def make_store(self, sizes: dict[str, tuple[int, int]], colours: dict[str, tuple[int, int, int]] | None = None) -> LocalStore:
+        """A store over solid JPGs of the given sizes (grey unless `colours` names one), one batch per directory."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = self.root = Path(tmp.name)
-        (root / "big").mkdir()
         rows = []
-        for name, size in (("big/a.jpg", (3000, 2500)), ("big/b.jpg", (100, 60)), ("big/c.jpg", (100, 60))):
-            Image.new("RGB", size, (90, 90, 90)).save(root / name, "JPEG", quality=95, subsampling=0)
+        for name, size in sizes.items():
+            (root / name).parent.mkdir(exist_ok=True)
+            colour = (colours or {}).get(name, (90, 90, 90))
+            Image.new("RGB", size, colour).save(root / name, "JPEG", quality=95, subsampling=0)
             rows.append((name.split("/")[0], name, f"/src/{name}"))
         with open(root / "manifest.tsv", "w", newline="") as f:
             writer = csv.writer(f, delimiter="\t")
             writer.writerow(["batch", "preprocessed_path", "image_id"])
             writer.writerows(rows)
-        self.store = LocalStore(root)
-        self.addCleanup(self.store.close)
+        store = LocalStore(root)
+        self.addCleanup(store.close)
+        return store
+
+    def quiet_stderr(self) -> io.StringIO:
+        patcher = mock.patch("sys.stderr", io.StringIO())
+        self.addCleanup(patcher.stop)
+        return patcher.start()
 
     def test_nothing_larger_than_the_bin_is_kept(self):
         calls: list[tuple[int, int]] = []
@@ -1821,32 +1906,122 @@ class TestPackShrinksOversize(unittest.TestCase):
         self.assertEqual(calls, [(1, 3), (2, 3), (3, 3)])
 
     def test_truncated_image_is_unloadable(self):
+        self.quiet_stderr()
         path = self.root / "big/b.jpg"
         data = path.read_bytes()
-        path.write_bytes(data[: len(data) // 2])
+        scan = data.index(b"\xff\xda")  # start of scan: everything before it is header
+        path.write_bytes(data[: scan + (len(data) - scan) // 2])
+        with Image.open(path) as im:  # the header still reads: the failure comes at decode time
+            self.assertEqual(im.size, (100, 60))
         grids, unloadable = pack_into_grids(self.store.manifest()[1:], self.store, 1920, 1030)
         self.assertEqual(unloadable, ["big/b.jpg"])
         self.assertEqual([gs.keys for gs in grids], [["big/c.jpg"]])
+        grids, unloadable = pack_into_grids(self.store.manifest()[1:2], self.store, 1920, 1030)
+        self.assertEqual((grids, unloadable), ([], ["big/b.jpg"]))  # a bin left with no keys is dropped
 
-    def test_fit_to_bin_rotated_orientation_wins(self):
-        self.assertEqual(_fit_to_bin(pg.Surface((1500, 2500), 0, 24), 1920, 1030, True).get_size(), (1030, 1716))
+    def test_unreadable_header_is_unloadable(self):
+        stderr = self.quiet_stderr()
+        (self.root / "big/b.jpg").write_bytes(b"not a jpeg")
+        calls: list[tuple[int, int]] = []
+        with mock.patch.object(grid_packer_module, "load_surface", wraps=load_surface) as decode:
+            grids, unloadable = pack_into_grids(
+                self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
+            )
+        self.assertEqual(unloadable, ["big/b.jpg"])
+        self.assertNotIn("big/b.jpg", {k for gs in grids for k in gs.keys})
+        self.assertEqual(decode.call_count, 2)  # never decoded: left out at the header
+        self.assertIn("cannot load big/b.jpg", stderr.getvalue())
+        self.assertEqual(calls[-1], (3, 3))
 
-    def test_fit_to_bin_always_fits_an_allowed_orientation(self):
+    def test_decodes_one_bin_at_a_time(self):
+        """Each 300x250 image fills its own 400x300 bin: when one is decoded, no earlier one is alive."""
+        names = [f"many/{i}.jpg" for i in range(6)]
+        store = self.make_store(dict.fromkeys(names, (300, 250)))
+        decoded: list[weakref.ref] = []
+        live_at_decode: list[int] = []
+
+        def counting_load(buf: bytes) -> pg.Surface:
+            gc.collect()
+            live_at_decode.append(sum(ref() is not None for ref in decoded))
+            surface = load_surface(buf)
+            decoded.append(weakref.ref(surface))
+            return surface
+
+        with mock.patch.object(grid_packer_module, "load_surface", counting_load):
+            grids, unloadable = pack_into_grids(store.manifest(), store, 400, 300)
+        self.assertEqual(unloadable, [])
+        self.assertEqual(sorted(gs.keys[0] for gs in grids), names)
+        self.assertEqual([len(gs.keys) for gs in grids], [1] * 6)
+        self.assertEqual(live_at_decode, [0] * 6)
+
+    def test_every_key_covers_its_fit_size(self):
+        """Each grid key's colour covers its fit_size area: shrunk, rotated and small images are all fully drawn."""
+        images = {
+            "pix/upright.jpg": ((3000, 2500), (200, 40, 40)),  # shrunk, upright
+            "pix/rotates.jpg": ((1000, 1800), (40, 200, 40)),  # fits only rotated (or shrunk without rotation)
+            "pix/shrunk_rotated.jpg": ((1500, 2500), (40, 40, 200)),  # fits as 1030x1716, placed rotated
+            "pix/s1.jpg": ((100, 60), (200, 200, 40)),
+            "pix/s2.jpg": ((60, 100), (200, 40, 200)),
+            "pix/s3.jpg": ((120, 80), (40, 200, 200)),
+        }
+        store = self.make_store({n: size for n, (size, _) in images.items()}, {n: c for n, (_, c) in images.items()})
+        for rot in (True, False):
+            with self.subTest(allow_rotation=rot):
+                grids, left_out = pack_into_grids(store.manifest(), store, 1920, 1030, allow_rotation=rot)
+                self.assertEqual(left_out, [])
+                self.assertEqual(sorted(k for gs in grids for k in gs.keys), sorted(images))
+                for gs in grids:
+                    for k in gs.keys:
+                        (w, h), colour = images[k]
+                        fw, fh = fit_size(w, h, 1920, 1030, rot)
+                        count = pg.mask.from_threshold(gs.surface, colour, (10, 10, 10, 255)).count()
+                        self.assertAlmostEqual(count / (fw * fh), 1, delta=0.02, msg=k)
+
+    def test_decoded_size_differing_from_header_is_left_out(self):
+        stderr = self.quiet_stderr()
+        bad = (self.root / "big/a.jpg").read_bytes()
+
+        def wrong_size(buf: bytes) -> pg.Surface:
+            return pg.Surface((7, 5), 0, 24) if buf == bad else load_surface(buf)
+
+        calls: list[tuple[int, int]] = []
+        with mock.patch.object(grid_packer_module, "load_surface", wrong_size):
+            grids, left_out = pack_into_grids(
+                self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
+            )
+        self.assertEqual(left_out, ["big/a.jpg"])
+        self.assertNotIn("big/a.jpg", {k for gs in grids for k in gs.keys})
+        self.assertIn("cannot load big/a.jpg", stderr.getvalue())
+        self.assertEqual(calls[-1], (3, 3))
+
+    def test_key_left_unpacked_is_left_out(self):
+        stderr = self.quiet_stderr()
+        calls: list[tuple[int, int]] = []
+        with dropping_packer(1):
+            grids, left_out = pack_into_grids(
+                self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
+            )
+        self.assertEqual(left_out, ["big/b.jpg"])
+        self.assertEqual(sorted(k for gs in grids for k in gs.keys), ["big/a.jpg", "big/c.jpg"])
+        self.assertIn("big/b.jpg was not packed", stderr.getvalue())
+        self.assertEqual(calls[-1], (3, 3))
+
+    def test_fit_size_rotated_orientation_wins(self):
+        self.assertEqual(fit_size(1500, 2500, 1920, 1030, True), (1030, 1716))
+
+    def test_fit_size_always_fits_an_allowed_orientation(self):
         for w, h in [(1921, 1), (1, 1031), (3000, 2500), (1920, 1031), (1921, 1030), (7, 4000), (4000, 7), (1031, 1921), (999, 1999)]:
             for rot in (False, True):
                 with self.subTest(w=w, h=h, rot=rot):
-                    nw, nh = _fit_to_bin(pg.Surface((w, h), 0, 24), 1920, 1030, rot).get_size()
+                    nw, nh = fit_size(w, h, 1920, 1030, rot)
                     self.assertTrue(nw >= 1 and nh >= 1)
                     self.assertTrue((nw <= 1920 and nh <= 1030) or (rot and nw <= 1030 and nh <= 1920))
 
     def test_oversize_image_keeps_aspect_ratio(self):
-        surface = pg.Surface((3000, 2500), 0, 24)
-        self.assertEqual(_fit_to_bin(surface, 1920, 1030, False).get_size(), (1236, 1030))
-        self.assertEqual(_fit_to_bin(surface, 1920, 1030, True).get_size(), (1236, 1030))
-        tall = pg.Surface((1000, 1800), 0, 24)  # fits only rotated: untouched
-        self.assertEqual(_fit_to_bin(tall, 1920, 1030, True).get_size(), (1000, 1800))
-        self.assertEqual(_fit_to_bin(tall, 1920, 1030, False).get_size(), (572, 1030))
-
+        self.assertEqual(fit_size(3000, 2500, 1920, 1030, False), (1236, 1030))
+        self.assertEqual(fit_size(3000, 2500, 1920, 1030, True), (1236, 1030))
+        self.assertEqual(fit_size(1000, 1800, 1920, 1030, True), (1000, 1800))  # fits only rotated: untouched
+        self.assertEqual(fit_size(1000, 1800, 1920, 1030, False), (572, 1030))
 
 class TestDwell(unittest.TestCase):
     def test_dwell_elapsed(self):
