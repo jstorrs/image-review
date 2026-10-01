@@ -347,3 +347,10 @@ mypy --python-executable "$(which python)"
 
 `mypy` reads its settings from `pyproject.toml`; `--python-executable` points it at the environment that has the
 project's dependencies installed.
+
+CI (`.github/workflows/ci.yml`) runs the same checks, plus `ruff format --check src tests`, on Linux and macOS
+with Python 3.12 and 3.13. To keep the one-off reformat out of `git blame`:
+
+```
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
