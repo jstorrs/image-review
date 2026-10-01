@@ -642,8 +642,39 @@ The session runs a pygame event loop processing:
 After marking, the viewer auto-advances to the next item after 200ms.
 Navigation stops at list boundaries with an "End of list" message.
 
-Marking, navigation, `n`, `Space`, and mode switches cancel autoplay. The display
-only redraws when a dirty flag is set, to minimize CPU usage.
+Marking, Left / hat left, `n`, `Space` (while playing), mode switches, the help
+screen (`h`) and display select (`w`) cancel autoplay; Right / hat right keeps
+it running. Left/Right, the hat, `n`, mode switches, `h` and `w` cancel a
+pending post-mark advance, and so does any change of the current item: the
+advance belongs to the item that was marked, so an `ADVANCE_EVENT` already
+queued when it was cancelled is ignored (`_advance_pending`). The autoplay and
+post-mark advance timers act only while an item is being reviewed, never behind
+the help, display-select or message screens.
+
+`run()` alternates two halves: `handle_events(events) -> bool` applies one
+`pg.event.get()` batch (False means quit; events after a quit are dropped) and
+`refresh_if_needed()` repaints. The display only redraws when a dirty flag is
+set, to minimize CPU usage, and only while reviewing: the splash, help,
+display-select and message screens ("End of list", "No items for grid mode",
+"Lost connection to server ...") are painted once by the viewer and stay until
+the state changes. When there are no items (an empty mode, or a lost connection
+during a mode restart), the navigation keys leave the message up; only `q`/Esc,
+`s`, `m` and `M` act.
+
+**Verdicts need a seen item.** A verdict (`c`/`d`, Button 1/3) applies only to
+an item that has been painted and on screen for `MIN_DWELL_MS` (200 ms);
+otherwise it is ignored (it still stops autoplay). The session records the tick
+of the first paint of the current item in `refresh_if_needed`, compares it
+with the clock read once at the start of the event batch (so slow events earlier
+in the batch, like a resize, do not count toward the dwell), and clears it
+whenever the current item or screen changes (a new item, a mode restart, the
+help or display-select screen); repainting the same item (resize, a mark) keeps
+it. So a verdict queued in the same event batch as a mode switch, an autoplay
+advance or a post-mark advance, or typed within 200 ms of the new item
+appearing, never judges an item the reviewer has not seen. All keyboard and
+gamepad button events queued during a blocking step (a grid build or mode
+restart) are also discarded with `pg.event.clear`, including `q`/Esc and the
+arrows. `_mark` itself is not gated.
 
 ## Grid Packer (`grid_packer.py`)
 

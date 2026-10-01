@@ -263,7 +263,10 @@ The viewer accepts keyboard and gamepad input:
 
 After marking an image, the viewer auto-advances to the next image after a
 short delay (200ms). Images are shuffled at review time to counter attention
-fatigue.
+fatigue. A verdict (`c`/`d` or gamepad Button 1/3) only counts once the image
+or grid has been on screen for 200ms: one pressed sooner is ignored, so press
+it again once you have looked. Every key and button pressed while grids are
+being computed is dropped, including `q`/`Esc` and the arrows.
 
 ### Multi-Pass Workflow
 

@@ -157,6 +157,9 @@ are shown one at a time for detailed inspection.
 | `f` | Toggle fullscreen |
 | `q` / Escape | Quit |
 
+`c` and `d` are ignored for 200 ms after an image or grid appears, so a verdict
+only applies to an item you have seen.
+
 The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
 orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
 verdict). Grids are built without DIRTY or FLAGGED images.

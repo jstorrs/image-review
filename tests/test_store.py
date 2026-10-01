@@ -20,9 +20,18 @@ import pygame as pg
 from click.testing import CliRunner
 from fixtures import ROWS, make_work_dir
 
+from image_review import controller as controller_module
 from image_review import store as store_module
 from image_review.cli import cli
-from image_review.controller import GRID_HAS_DIRTY, ReviewSession
+from image_review.controller import (
+    ADVANCE_EVENT,
+    AUTOPLAY_EVENT,
+    GRID_HAS_DIRTY,
+    MIN_DWELL_MS,
+    ReviewSession,
+    UIState,
+    _dwell_elapsed,
+)
 from image_review.store import (
     LOCK_NAME,
     LocalStore,
@@ -301,7 +310,7 @@ class TestPassMonotonic(StoreTestCase):
         self.assertIn("batch_001/b.jpg", keys)
 
 
-class TestSession(StoreTestCase):
+class SessionTestCase(StoreTestCase):
     def setUp(self):
         super().setUp()
         pg.init()
@@ -310,6 +319,8 @@ class TestSession(StoreTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+
+class TestSession(SessionTestCase):
     def test_single_mode_mark_updates_snapshot(self):
         s = ReviewSession(self.store, mode="single")
         s._cursor = 0
@@ -424,6 +435,211 @@ class TestSession(StoreTestCase):
         self.assertEqual(s._statuses["batch_001/a.jpg"], "UNREVIEWED")
         s._restart_in_mode("grid")
         self.assertEqual(s._statuses["batch_001/a.jpg"], "CLEAN")
+
+
+def key(k: int) -> pg.event.Event:
+    return pg.event.Event(pg.KEYDOWN, key=k, mod=0)
+
+
+class TestEventLoop(SessionTestCase):
+    """Drive the run loop's two halves, handle_events and refresh_if_needed, with synthetic events."""
+
+    def setUp(self):
+        super().setUp()
+        self.now = 10_000
+        for patcher in (
+            mock.patch.object(pg.time, "get_ticks", lambda: self.now),
+            mock.patch.object(self.store, "mark", wraps=self.store.mark),
+        ):
+            patched = patcher.start()
+            self.addCleanup(patcher.stop)
+        self.mark = patched
+
+    def reviewing(self, mode: str = "single") -> ReviewSession:
+        """A session past the splash with its first item painted and seen for the full dwell."""
+        s = ReviewSession(self.store, mode=mode)
+        s._show_splash()
+        self.assertTrue(s.handle_events([key(pg.K_SPACE)]))
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+        return s
+
+    @staticmethod
+    def paint(s: ReviewSession) -> None:
+        with mock.patch.object(s._viewer, "refresh") as refresh:
+            s.refresh_if_needed()
+        refresh.assert_called_once()
+
+    def test_verdict_after_dwell_marks(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_called_once()
+
+    def test_verdict_before_dwell_is_ignored(self):
+        s = ReviewSession(self.store, mode="single")
+        s._show_splash()
+        s.handle_events([key(pg.K_SPACE), key(pg.K_c)])  # before the first paint
+        self.paint(s)
+        self.now += MIN_DWELL_MS - 1
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_not_called()
+        self.now += 1
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_called_once()
+
+    def test_repaint_of_same_item_keeps_dwell(self):
+        s = self.reviewing()
+        s.handle_events([pg.event.Event(pg.WINDOWRESIZED)])
+        self.paint(s)
+        s.handle_events([key(pg.K_d)])
+        self.mark.assert_called_once()
+
+    def test_verdict_queued_behind_mode_switch_is_ignored(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_m), key(pg.K_c)])
+        self.assertEqual(s.mode, "grid")
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.mark.assert_not_called()
+
+    def test_gamepad_verdict_queued_behind_mode_switch_is_ignored(self):
+        s = self.reviewing("grid")
+        s.handle_events([key(pg.K_s), pg.event.Event(pg.JOYBUTTONDOWN, button=1)])
+        self.mark.assert_not_called()
+
+    def test_verdict_in_batch_with_autoplay_advance_is_ignored(self):
+        s = self.reviewing()
+        s.autoplay = True
+        s.handle_events([pg.event.Event(AUTOPLAY_EVENT), key(pg.K_c)])
+        self.assertEqual(s._cursor, 1)
+        self.assertFalse(s.autoplay)
+        self.mark.assert_not_called()
+
+    def test_verdict_in_batch_with_post_mark_advance_is_ignored(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        s.handle_events([pg.event.Event(ADVANCE_EVENT), key(pg.K_c)])
+        self.assertEqual(s._cursor, 1)
+        self.mark.assert_called_once()
+
+    def assert_message_stays(self, s: ReviewSession) -> None:
+        """With no items, the message survives the loop's refresh and the navigation keys."""
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        with mock.patch.object(s._viewer, "refresh") as refresh:
+            s.refresh_if_needed()
+            for k in (pg.K_SPACE, pg.K_RIGHT, pg.K_LEFT):
+                self.assertTrue(s.handle_events([key(k)]))
+                self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+                s.refresh_if_needed()
+        refresh.assert_not_called()
+
+    def test_empty_mode_message_is_not_painted_over(self):
+        s = self.reviewing()
+        self.store.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "batch_001", "DIRTY", 1)
+        s.handle_events([key(pg.K_m)])
+        self.assertTrue(s._dirty)
+        self.assert_message_stays(s)
+
+    def test_outage_on_restart_message_is_not_painted_over(self):
+        s = self.reviewing()
+        with (
+            mock.patch.object(self.store, "statuses", side_effect=store_module.StoreUnavailable("down")),
+            mock.patch("sys.stderr"),
+        ):
+            s.handle_events([key(pg.K_m)])
+        self.assertEqual(s._items, [])
+        self.assert_message_stays(s)
+
+    def test_stale_advance_after_mode_switch_is_ignored(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        s.handle_events([key(pg.K_m), pg.event.Event(ADVANCE_EVENT)])
+        self.assertEqual(s.mode, "grid")
+        self.assertEqual(s._cursor, 0)
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+
+    def test_stale_advance_after_manual_navigation_is_ignored(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        s.handle_events([key(pg.K_RIGHT), pg.event.Event(ADVANCE_EVENT)])
+        self.assertEqual(s._cursor, 1)  # the last item: a second advance would reach "End of list"
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+
+    def test_post_mark_advance_moves_on(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        s.handle_events([pg.event.Event(ADVANCE_EVENT)])
+        self.assertEqual(s._cursor, 1)
+        s.handle_events([pg.event.Event(ADVANCE_EVENT)])  # one mark, one advance
+        self.assertEqual(s._cursor, 1)
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+
+    def test_slow_event_earlier_in_batch_does_not_count_toward_dwell(self):
+        s = ReviewSession(self.store, mode="single")
+        s._show_splash()
+        s.handle_events([key(pg.K_SPACE)])
+        self.paint(s)
+        self.now += 5
+
+        def slow_resize():
+            self.now += MIN_DWELL_MS
+
+        with mock.patch.object(s._viewer, "resize", slow_resize):
+            s.handle_events([pg.event.Event(pg.WINDOWRESIZED), key(pg.K_c)])
+        self.mark.assert_not_called()
+
+    def test_input_during_grid_build_is_discarded(self):
+        s = self.reviewing()
+        real_pack = controller_module.pack_into_grids
+
+        def pack_while_typing(*args, **kwargs):
+            pg.event.post(key(pg.K_c))
+            pg.event.post(pg.event.Event(pg.JOYBUTTONDOWN, button=1))
+            return real_pack(*args, **kwargs)
+
+        pg.event.clear()
+        with mock.patch.object(controller_module, "pack_into_grids", pack_while_typing):
+            s._switch_to_grid(True)
+        self.assertEqual(pg.event.get((pg.KEYDOWN, pg.JOYBUTTONDOWN)), [])
+
+    def test_correction_after_dwell(self):
+        s = self.reviewing()
+        item_key = s._items[s._cursor].key
+        s.handle_events([key(pg.K_c)])
+        self.paint(s)
+        self.now += 50
+        s.handle_events([key(pg.K_d)])
+        self.assertEqual(s._statuses[item_key], "DIRTY")
+
+    def test_help_stops_autoplay(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_SPACE)])
+        self.assertTrue(s.autoplay)
+        cursor = s._cursor
+        s.handle_events([key(pg.K_h)])
+        self.assertEqual(s._ui_state, UIState.SPLASH)
+        self.assertFalse(s.autoplay)
+        s.autoplay = True  # a timer event already queued must not act behind the help screen
+        s.handle_events([pg.event.Event(AUTOPLAY_EVENT), pg.event.Event(ADVANCE_EVENT)])
+        self.assertEqual(s._cursor, cursor)
+        self.assertEqual(s._ui_state, UIState.SPLASH)
+
+    def test_display_select_stops_autoplay(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_SPACE), key(pg.K_w)])
+        self.assertFalse(s.autoplay)
+        self.assertEqual(s._ui_state, UIState.SPLASH)
+
+    def test_quit_stops_the_batch(self):
+        s = self.reviewing()
+        self.assertFalse(s.handle_events([key(pg.K_q), key(pg.K_c)]))
+        self.mark.assert_not_called()
+
+
+class TestDwell(unittest.TestCase):
+    def test_dwell_elapsed(self):
+        self.assertFalse(_dwell_elapsed(None, 10_000))
+        self.assertFalse(_dwell_elapsed(1_000, 1_000 + MIN_DWELL_MS - 1))
+        self.assertTrue(_dwell_elapsed(1_000, 1_000 + MIN_DWELL_MS))
 
 
 class TestPureFunctions(StoreTestCase):

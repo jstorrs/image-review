@@ -438,6 +438,12 @@ class TestSession(RemoteTestCase):
         self.assertEqual(s._statuses[key], "DIRTY")
         self.assertEqual(self.local_copy().statuses(1)[key], "DIRTY")
 
+    def assert_no_repaint(self, s: ReviewSession):
+        """The outage message stays: the loop's next refresh does not paint over it."""
+        with mock.patch.object(s._viewer, "refresh") as refresh:
+            s.refresh_if_needed()
+        refresh.assert_not_called()
+
     def lose_server(self):
         self.stop_server()
         self.store._local.conn.close()  # the handler thread would otherwise keep serving it
@@ -460,7 +466,7 @@ class TestSession(RemoteTestCase):
         with redirect_stderr(io.StringIO()) as err:
             s.next_image()
         self.assertEqual(s._ui_state, UIState.END_MESSAGE)
-        self.assertFalse(s._dirty)
+        self.assert_no_repaint(s)
         self.assertFalse(s.autoplay)
         self.assertIn("Lost connection to server", err.getvalue())
 
@@ -471,7 +477,7 @@ class TestSession(RemoteTestCase):
         with redirect_stderr(io.StringIO()):
             s._handle_splash_key(pg.K_SPACE)
         self.assertEqual(s._ui_state, UIState.END_MESSAGE)
-        self.assertFalse(s._dirty)
+        self.assert_no_repaint(s)
 
     def test_no_refresh_after_outage_when_statuses_fail_on_mode_switch(self):
         s = ReviewSession(self.store, mode="single")
@@ -479,7 +485,7 @@ class TestSession(RemoteTestCase):
         with redirect_stderr(io.StringIO()):
             s._switch_to_grid(True)
         self.assertEqual(s._ui_state, UIState.END_MESSAGE)
-        self.assertFalse(s._dirty)
+        self.assert_no_repaint(s)
 
     def test_no_refresh_after_outage_when_grid_fetch_fails_on_mode_switch(self):
         s = ReviewSession(self.store, mode="single")
@@ -489,7 +495,7 @@ class TestSession(RemoteTestCase):
         ):
             s._switch_to_grid(True)
         self.assertEqual(s._ui_state, UIState.END_MESSAGE)
-        self.assertFalse(s._dirty)
+        self.assert_no_repaint(s)
 
 
 class TestImports(unittest.TestCase):

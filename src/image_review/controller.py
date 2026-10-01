@@ -20,6 +20,17 @@ from .viewer import ImageViewer
 AUTOPLAY_EVENT = pg.USEREVENT + 1
 ADVANCE_EVENT = pg.USEREVENT + 2
 
+# A verdict key or button only counts once the current item has been painted for this long, so
+# input queued while the UI was blocked, or typed as the screen changed, never judges an unseen item.
+MIN_DWELL_MS = 200
+# Input events dropped after a blocking step (grid build, mode restart).
+VERDICT_INPUT_EVENTS = (pg.KEYDOWN, pg.JOYBUTTONDOWN)
+
+
+def _dwell_elapsed(shown_at: int | None, now: int) -> bool:
+    """True once an item painted at `shown_at` (None: not painted yet) has been on screen for MIN_DWELL_MS."""
+    return shown_at is not None and now - shown_at >= MIN_DWELL_MS
+
 
 # A grid verdict applies to every image in it, so grids only hold images not yet judged
 # DIRTY (this pass) or FLAGGED (DIRTY in another pass): one keypress must never clear those.
@@ -76,6 +87,8 @@ class ReviewSession:
         self._cursor = -1
         self._dirty = True
         self._ui_state = UIState.REVIEWING
+        self._shown_at: int | None = None  # ticks when the current item was first painted
+        self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
         self._todo_only = False
 
         self._viewer = ImageViewer()
@@ -89,20 +102,29 @@ class ReviewSession:
         if mode == "grid":
             self._viewer.show_message("Computing grids...")
             self._init_grid_mode()
+            pg.event.clear(VERDICT_INPUT_EVENTS)
         else:
             self._init_single_mode()
 
     def _store_lost(self, exc: StoreUnavailable):
-        pg.time.set_timer(ADVANCE_EVENT, 0)
-        self._stop_autoplay()
+        self._stop_timers()
         print(f"Lost connection to server: {exc}. Progress up to the last mark is saved on the server.", file=sys.stderr)
         self._viewer.show_message("Lost connection to server - progress saved. Press q to quit.")
         self._ui_state = UIState.END_MESSAGE
-        self._dirty = False  # a refresh would paint over the message
 
     def _stop_autoplay(self):
         self.autoplay = False
         pg.time.set_timer(AUTOPLAY_EVENT, 0)
+
+    def _cancel_advance(self):
+        """Cancel a pending post-mark advance, including an ADVANCE_EVENT already queued."""
+        pg.time.set_timer(ADVANCE_EVENT, 0)
+        self._advance_pending = False
+
+    def _stop_timers(self):
+        """Cancel autoplay and a pending post-mark advance."""
+        self._cancel_advance()
+        self._stop_autoplay()
 
     def _switch_to_grid(self, allow_rotation: bool):
         self.allow_rotation = allow_rotation
@@ -160,12 +182,16 @@ class ReviewSession:
         self._todo_count = self._count_todo()
 
     def _show_display_select(self):
+        self._stop_timers()
+        self._shown_at = None
         self._viewer.show_splash(
             self._viewer.display_lines(),
             footer="Press [1]-[9] to switch, [space] to confirm",
         )
 
     def _show_splash(self):
+        self._stop_timers()
+        self._shown_at = None
         footer_lines = [
             f"Press [space] for {self.mode} image review",
             "[s] single  [m] grid  [M] grid (no rotation)",
@@ -187,10 +213,10 @@ class ReviewSession:
         return " - ".join(parts)
 
     def _restart_in_mode(self, new_mode: str):
-        pg.time.set_timer(ADVANCE_EVENT, 0)
-        self._stop_autoplay()
+        self._stop_timers()
         self.mode = new_mode
         self._cursor = -1
+        self._shown_at = None
         self._dirty = True
         try:
             self._statuses = self.store.statuses(self.pass_number)
@@ -203,6 +229,8 @@ class ReviewSession:
             self._items = []  # half-switched state: nothing consistent to show
             self._store_lost(exc)
             return
+        finally:
+            pg.event.clear(VERDICT_INPUT_EVENTS)  # pressed while blocked, before anything new was shown
 
         if not self._items:
             self._viewer.show_message(self._held_back_message() or f"No items for {new_mode} mode")
@@ -237,6 +265,8 @@ class ReviewSession:
         return False
 
     def _show_current(self):
+        self._shown_at = None
+        self._advance_pending = False  # the advance belonged to the item being replaced
         if not self._items:
             return
         item = self._items[self._cursor]
@@ -338,6 +368,14 @@ class ReviewSession:
         self._viewer.set_status(status)
         self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
+        self._advance_pending = True
+
+    def _verdict_input(self, status: Verdict, now: int):
+        """A verdict key or button at tick `now`: stops autoplay, and marks only an item on screen
+        for MIN_DWELL_MS."""
+        self._stop_autoplay()
+        if _dwell_elapsed(self._shown_at, now):
+            self._mark(status)
 
     def _handle_splash_key(self, key) -> bool:
         """Handle key press while splash is shown. Returns True to quit."""
@@ -378,7 +416,7 @@ class ReviewSession:
             direction = 1
         elif key == pg.K_LEFT:
             direction = -1
-        if direction is not None:
+        if direction is not None and self._items:  # no items: keep the message (e.g. lost connection)
             self._ui_state = UIState.REVIEWING
             if self._todo_only:
                 if direction == 1:
@@ -398,19 +436,16 @@ class ReviewSession:
             self._switch_to_single()
         return False
 
-    def _handle_review_key(self, key) -> bool:
+    def _handle_review_key(self, key, now: int) -> bool:
         """Handle key press during review. Returns True to quit."""
         match key:
             case pg.K_ESCAPE | pg.K_q:
                 return True
             case pg.K_c:
-                self._stop_autoplay()
-                self._mark("CLEAN")
+                self._verdict_input("CLEAN", now)
             case pg.K_d:
-                self._stop_autoplay()
-                self._mark("DIRTY")
+                self._verdict_input("DIRTY", now)
             case pg.K_w:
-                self._stop_autoplay()
                 self._display_select = True
                 self._pre_display_index = self._viewer._display_index
                 self._show_display_select()
@@ -429,7 +464,7 @@ class ReviewSession:
                 self._switch_to_single()
             case pg.K_n:
                 self._stop_autoplay()
-                pg.time.set_timer(ADVANCE_EVENT, 0)
+                self._cancel_advance()
                 self.next_todo()
             case pg.K_u:
                 self._todo_only = not self._todo_only
@@ -440,10 +475,10 @@ class ReviewSession:
             case pg.K_h:
                 self._show_splash()
             case pg.K_LEFT:
-                pg.time.set_timer(ADVANCE_EVENT, 0)
+                self._cancel_advance()
                 self.prev_image()
             case pg.K_RIGHT:
-                pg.time.set_timer(ADVANCE_EVENT, 0)
+                self._cancel_advance()
                 self.next_image()
         return False
 
@@ -461,65 +496,75 @@ class ReviewSession:
             self._show_splash()
 
         clock = pg.time.Clock()
-        running = True
-        while running:
-            for event in pg.event.get():
-                match event.type:
-                    case pg.JOYBUTTONDOWN:
-                        if self._ui_state != UIState.REVIEWING:
-                            continue
-                        match event.button:
-                            case 1:
-                                self._stop_autoplay()
-                                self._mark("CLEAN")
-                            case 3:
-                                self._stop_autoplay()
-                                self._mark("DIRTY")
-                            case 7:
-                                running = False
-                    case pg.JOYHATMOTION:
-                        if self._ui_state != UIState.REVIEWING:
-                            continue
-                        if event.hat == 0:
-                            pg.time.set_timer(ADVANCE_EVENT, 0)
-                            if event.value[0] < 0:
-                                self.prev_image()
-                            elif event.value[0] > 0:
-                                self.next_image()
-                    case pg.KEYDOWN:
-                        if self._ui_state == UIState.END_MESSAGE:
-                            if self._handle_end_key(event.key):
-                                running = False
-                            continue
-                        if self._ui_state == UIState.SPLASH:
-                            if self._handle_splash_key(event.key):
-                                running = False
-                            continue
-                        if self._handle_review_key(event.key):
-                            running = False
-                    case pg.WINDOWRESIZED:
-                        self._viewer.resize()
-                        self._dirty = True
-                    case x if x == AUTOPLAY_EVENT:
-                        if self.autoplay and self._ui_state != UIState.END_MESSAGE:
-                            self.next_image()
-                    case x if x == ADVANCE_EVENT:
-                        if self._ui_state == UIState.REVIEWING:
-                            self.next_image()
-                    case pg.JOYDEVICEADDED:
-                        joy = pg.joystick.Joystick(event.device_index)
-                        self._joysticks[joy.get_instance_id()] = joy
-                        self._viewer.set_joystick_count(len(self._joysticks))
-                        self._dirty = True
-                    case pg.JOYDEVICEREMOVED:
-                        self._joysticks.pop(event.instance_id, None)
-                        self._viewer.set_joystick_count(len(self._joysticks))
-                        self._dirty = True
-                    case pg.QUIT:
-                        running = False
-
-            if self._dirty and self._ui_state != UIState.SPLASH:
-                self._viewer.refresh()
-                self._dirty = False
-
+        while self.handle_events(pg.event.get()):
+            self.refresh_if_needed()
             clock.tick(60)
+
+    def handle_events(self, events: list[pg.event.Event]) -> bool:
+        """Apply one batch of events. Returns False to quit.
+
+        The clock is read once, before the batch: time spent handling earlier events (a resize,
+        a fullscreen toggle) must not count toward a verdict's dwell."""
+        now = pg.time.get_ticks()
+        return not any(self._handle_event(event, now) for event in events)
+
+    def _handle_event(self, event: pg.event.Event, now: int) -> bool:
+        """Apply one event of a batch read at tick `now`. Returns True to quit."""
+        match event.type:
+            case pg.JOYBUTTONDOWN:
+                if self._ui_state != UIState.REVIEWING:
+                    return False
+                match event.button:
+                    case 1:
+                        self._verdict_input("CLEAN", now)
+                    case 3:
+                        self._verdict_input("DIRTY", now)
+                    case 7:
+                        return True
+            case pg.JOYHATMOTION:
+                if self._ui_state == UIState.REVIEWING and event.hat == 0:
+                    self._cancel_advance()
+                    if event.value[0] < 0:
+                        self.prev_image()
+                    elif event.value[0] > 0:
+                        self.next_image()
+            case pg.KEYDOWN:
+                match self._ui_state:
+                    case UIState.END_MESSAGE:
+                        return self._handle_end_key(event.key)
+                    case UIState.SPLASH:
+                        return self._handle_splash_key(event.key)
+                    case UIState.REVIEWING:
+                        return self._handle_review_key(event.key, now)
+            case pg.WINDOWRESIZED:
+                self._viewer.resize()
+                self._dirty = True
+            case x if x == AUTOPLAY_EVENT:
+                if self.autoplay and self._ui_state == UIState.REVIEWING:
+                    self.next_image()
+            case x if x == ADVANCE_EVENT:
+                if self._advance_pending and self._ui_state == UIState.REVIEWING:
+                    self._advance_pending = False
+                    self.next_image()
+            case pg.JOYDEVICEADDED:
+                joy = pg.joystick.Joystick(event.device_index)
+                self._joysticks[joy.get_instance_id()] = joy
+                self._viewer.set_joystick_count(len(self._joysticks))
+                self._dirty = True
+            case pg.JOYDEVICEREMOVED:
+                self._joysticks.pop(event.instance_id, None)
+                self._viewer.set_joystick_count(len(self._joysticks))
+                self._dirty = True
+            case pg.QUIT:
+                return True
+        return False
+
+    def refresh_if_needed(self):
+        """Repaint the current item if something changed. Only in REVIEWING: the splash, help and
+        message screens are painted once by the viewer and a repaint would cover them."""
+        if not self._dirty or self._ui_state != UIState.REVIEWING:
+            return
+        self._viewer.refresh()
+        self._dirty = False
+        if self._shown_at is None:
+            self._shown_at = pg.time.get_ticks()
