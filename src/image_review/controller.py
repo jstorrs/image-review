@@ -604,10 +604,9 @@ class ReviewSession:
         if key in (pg.K_SPACE, pg.K_h):
             if self._display_select:
                 self._display_select = False
-                if self._viewer._display_index != self._pre_display_index:
-                    if self.mode == "grid":
-                        self._restart_in_mode("grid")
-                        return False
+                if self._viewer._display_index != self._pre_display_index and self.mode == "grid":
+                    self._restart_in_mode("grid")
+                    return False
             self._ui_state = UIState.REVIEWING
             if self._cursor == -1:
                 self.next_image()

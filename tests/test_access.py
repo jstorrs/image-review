@@ -143,7 +143,7 @@ class PreprocessAccessTest(unittest.TestCase):
             subprocess.run(["setfacl", "-d", "-m", "o::rwx,g::rwx", str(parent)], check=True, capture_output=True)
         except (OSError, subprocess.CalledProcessError):
             self.skipTest("setfacl or ACLs unavailable")
-        for access, dir_mode, file_mode in [("private", 0o700, 0o600), ("group", 0o2770, 0o660)]:
+        for access, _dir_mode, _file_mode in [("private", 0o700, 0o600), ("group", 0o2770, 0o660)]:
             with self.subTest(access):
                 work = parent / access
                 self.run_pre(work, access)

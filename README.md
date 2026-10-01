@@ -337,3 +337,13 @@ From the repository root:
 ```
 python -m unittest discover
 ```
+
+Lint and type-check (install the tools with `pip install -e ".[dev]"`):
+
+```
+ruff check src tests
+mypy --python-executable "$(which python)"
+```
+
+`mypy` reads its settings from `pyproject.toml`; `--python-executable` points it at the environment that has the
+project's dependencies installed.

@@ -6,11 +6,11 @@ import shutil
 import stat
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, cast
 from zipfile import ZipFile
 
 import matplotlib
@@ -178,8 +178,7 @@ def compress_image(image):
         np.ones((EROSION_KERNEL_SIZE, EROSION_KERNEL_SIZE), dtype=bool),
     )
     image = np.delete(image, np.all(uniform, axis=1), axis=0)
-    image = np.delete(image, np.all(uniform, axis=0), axis=1)
-    return image
+    return np.delete(image, np.all(uniform, axis=0), axis=1)
 
 
 def _crop(image: np.ndarray) -> np.ndarray:
@@ -246,7 +245,9 @@ def _overlay_mask(dcm: pydicom.FileDataset, shape: tuple[int, int]) -> np.ndarra
             plane = dcm.overlay_array(group)
             if plane.ndim != 2:
                 raise ValueError(f"overlay array with shape {plane.shape}")
-            row0, col0 = (int(v) - 1 for v in dcm.get((group, _OVERLAY_ORIGIN_ELEMENT), [1, 1]))
+            # Dataset.get() with a tuple tag returns the DataElement, which is subscriptable but not typed as iterable.
+            origin = cast(Sequence[int], dcm.get((group, _OVERLAY_ORIGIN_ELEMENT), [1, 1]))
+            row0, col0 = (int(v) - 1 for v in origin)
         except Exception as exc:
             raise ValueError(f"overlay 0x{group:04X} cannot be decoded: {exc}") from exc
         top, left = max(row0, 0), max(col0, 0)
@@ -708,7 +709,7 @@ def _open_new(path: Path, perm: int, **kwargs):
     return os.fdopen(fd, **kwargs)
 
 
-def _write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]], perm: int) -> None:
+def _write_tsv(path: Path, header: list[str], rows: Sequence[tuple[str, ...]], perm: int) -> None:
     with _open_new(path, perm, mode="w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(header)

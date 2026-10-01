@@ -22,8 +22,52 @@ dependencies = [
     "pylibjpeg-openjpeg",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.16",
+    "mypy>=1.10",
+    "types-tqdm",
+    "coverage>=7",
+]
+
 [tool.setuptools.package-data]
 image_review = ["fonts/*.ttf"]
 
 [project.scripts]
 image-review = "image_review.cli:main"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# Explicit so that other ruff versions lint the same rule families. Left out as too noisy for this project:
+# D (docstrings), PT (the tests use unittest), T (print is the CLI's output), N and PTH (naming/pathlib churn).
+select = [
+    "ASYNC", "B", "BLE", "C4", "DTZ", "E", "EXE", "F", "FA", "FLY", "FURB", "G", "I", "INT", "ISC", "LOG",
+    "PERF", "PGH", "PIE", "PL", "PYI", "RET", "RUF", "S", "SIM", "TC", "TRY", "UP", "W", "YTT",
+]
+ignore = [
+    "E501",     # line length is left to the formatter
+    "B904",     # click handlers re-raise as ClickException; chaining would change tracebacks
+    "PLC0415",  # imports are deferred on purpose (optional dependencies, startup time)
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",  # complexity and magic-value heuristics
+    "RET504",   # naming the value before returning it is often clearer
+    "S101",     # asserts narrow Optional types for mypy
+    "S104",     # binding to all interfaces is an explicit option
+    "S603",     # subprocess is always called with an argument list, never a shell
+    "TC006",    # unquoted cast() types are more readable
+    "TRY003",   # long messages in exceptions are fine
+    "TRY301",   # raise inside try is deliberate
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]  # asserts, fixed tokens, chmod and subprocess are normal in tests
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.12"
+
+[[tool.mypy.overrides]]
+module = ["rectpack.*", "skimage.*"]
+ignore_missing_imports = true

@@ -18,7 +18,7 @@ import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import get_args
+from typing import cast, get_args
 from urllib.parse import parse_qs, urlsplit
 
 from cryptography import x509
@@ -109,7 +109,10 @@ def parse_mark(body: bytes, known_keys: frozenset[str]) -> MarkRequest:
     reviewer = _reviewer_field(reviewer)
     if mode not in get_args(MarkMode):
         raise BadRequest("mode must be single or grid")
-    return MarkRequest(keys=keys, status=status, pass_number=pass_number, reviewer=reviewer, mode=mode)
+    # The membership checks above guarantee these are valid Literal members; get_args() cannot narrow.
+    return MarkRequest(
+        keys=keys, status=cast(Verdict, status), pass_number=pass_number, reviewer=reviewer, mode=cast(MarkMode, mode)
+    )
 
 
 def parse_undo(body: bytes) -> UndoRequest:
@@ -177,7 +180,8 @@ class ReviewServer(ThreadingHTTPServer):
         self.known_keys = frozenset(r.key for r in rows)
 
     def handle_error(self, request, client_address) -> None:
-        print(f"connection error: {sys.exc_info()[0].__name__}", file=sys.stderr)
+        exc_type = sys.exc_info()[0]
+        print(f"connection error: {exc_type.__name__ if exc_type else 'unknown'}", file=sys.stderr)
 
 
 class ReviewHandler(BaseHTTPRequestHandler):

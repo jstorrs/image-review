@@ -2,6 +2,7 @@ import io
 import math
 from functools import cache
 from pathlib import Path
+from typing import ClassVar
 
 import pygame as pg
 import pygame.freetype
@@ -30,7 +31,7 @@ def placeholder_surface(text: str) -> pg.Surface:
     surface = pg.Surface((width, height))
     surface.fill(pg.Color(24, 24, 24))
     y = (height - line_height * len(lines)) // 2
-    for line, rect in zip(lines, rects):
+    for line, rect in zip(lines, rects, strict=True):
         font.render_to(surface, ((width - rect.width) // 2, y), line, fgcolor=pg.Color(200, 200, 200))
         y += line_height
     return surface
@@ -45,7 +46,7 @@ def scale_percent(scale: float) -> int:
 class ImageViewer:
     border: int = 50
 
-    STATUS_COLORS = {
+    STATUS_COLORS: ClassVar[dict[str, pg.Color]] = {
         "CLEAN": pg.Color(128, 255, 128),
         "DIRTY": pg.Color(255, 128, 128),
         "UNREVIEWED": pg.Color(128, 128, 128),
@@ -186,7 +187,7 @@ class ImageViewer:
             x = int((screen_w - bbox.width) / 2)
         self.font.render_to(self.screen, (x, y), text, fgcolor=color)
 
-    HELP_LINES = [
+    HELP_LINES: ClassVar[list[str]] = [
         "Keyboard                 Controller",
         "  c        Mark CLEAN      B / East   Mark CLEAN",
         "  d        Mark DIRTY      Y / North  Mark DIRTY",
@@ -212,10 +213,10 @@ class ImageViewer:
         line_height = splash_font.get_sized_height() + 6
         footer_lines = [footer] if isinstance(footer, str) else footer
         help_lines = self.HELP_LINES
-        all_lines = lines + [""] + help_lines + [""] + footer_lines
+        all_lines = [*lines, "", *help_lines, "", *footer_lines]
         info_end = len(lines)
         bright = pg.Color(255, 255, 255)
-        max_width = max(splash_font.get_rect(l).width for l in all_lines if l)
+        max_width = max(splash_font.get_rect(text).width for text in all_lines if text)
         total_height = line_height * len(all_lines)
         x_start = (screen_w - max_width) // 2
         y_start = (screen_h - total_height) // 2

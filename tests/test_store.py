@@ -617,7 +617,7 @@ class TestMigration(unittest.TestCase):
         self.path.write_bytes(self.old)
 
     def expected_rows(self) -> list[list[str]]:
-        return [line.split("\t") + ["", "", "", ""] for line in self.OLD_ROWS]
+        return [[*line.split("\t"), "", "", "", ""] for line in self.OLD_ROWS]
 
     def stored_rows(self) -> tuple[list[str], list[list[str]]]:
         with open(self.path, newline="") as f:
