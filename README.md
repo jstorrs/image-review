@@ -329,3 +329,11 @@ Sessions are resumable -- quitting saves all progress. The batch and pass
 number are auto-detected when not specified. Press `b` at the end of a batch to
 move on to the next one, and into the next pass once this one is done (not
 with `--batch`, which keeps you in that batch).
+
+## Running the tests
+
+From the repository root:
+
+```
+python -m unittest discover
+```

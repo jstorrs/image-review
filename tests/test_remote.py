@@ -16,7 +16,6 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame as pg
 from click.testing import CliRunner
-from fixtures import ROWS, make_work_dir, start_server
 
 from image_review.cli import cli
 from image_review.connection import RemoteTarget, package_version
@@ -35,6 +34,7 @@ from image_review.remote import (
 )
 from image_review.server import Reply, ReviewHandler
 from image_review.store import LocalStore, ManifestRow, SkippedCounts, StoreUnavailable
+from tests.fixtures import ROWS, make_work_dir, start_server
 
 KEYS = [key for _, key, _ in ROWS]
 

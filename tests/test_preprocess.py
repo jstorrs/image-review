@@ -16,7 +16,6 @@ import numpy as np
 import pydicom
 import skimage as ski
 from click.testing import CliRunner
-from fixtures import add_overlay, write_dicom
 from PIL import Image, JpegImagePlugin
 from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
@@ -39,6 +38,7 @@ from image_review.preprocess import (
     render,
     run_preprocess,
 )
+from tests.fixtures import add_overlay, write_dicom
 
 RNG = np.random.default_rng(0)
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"

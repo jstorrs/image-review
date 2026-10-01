@@ -13,7 +13,6 @@ from unittest import mock
 
 import numpy as np
 from click.testing import CliRunner
-from fixtures import make_work_dir, write_dicom
 
 from image_review.access import (
     Modes,
@@ -26,6 +25,7 @@ from image_review.cli import cli
 from image_review.preprocess import run_preprocess
 from image_review.review_db import ReviewDB
 from image_review.server import ReviewServer
+from tests.fixtures import make_work_dir, write_dicom
 
 ENV = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
 

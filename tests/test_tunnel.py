@@ -15,10 +15,10 @@ from unittest import mock
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 from click.testing import CliRunner
-from fixtures import make_work_dir, start_server
 
 from image_review.cli import cli
 from image_review.tunnel import TunnelError, parse_via, ssh_tunnel
+from tests.fixtures import make_work_dir, start_server
 
 FAKE_SSH = f"""#!{sys.executable}
 import json, os, signal, socket, sys, threading

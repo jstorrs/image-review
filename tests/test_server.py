@@ -18,12 +18,12 @@ from pathlib import Path
 from unittest import mock
 
 from click.testing import CliRunner
-from fixtures import ROWS, make_work_dir
 
 from image_review.cli import cli
 from image_review.connection import API_VERSION, RemoteTarget
-from image_review.server import ReviewServer, make_server
+from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
 from image_review.store import LocalStore
+from tests.fixtures import ROWS, make_work_dir
 
 FP = "a" * 64
 
@@ -110,11 +110,18 @@ class TestConnectionHandling(ServerTestCase):
         conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
         self.addCleanup(conn.close)
         headers = {"Authorization": f"Bearer {self.target.token}"}
-        start = time.perf_counter()
-        for _ in range(30):
-            conn.request("GET", "/current_pass", headers=headers)
-            self.assertEqual(conn.getresponse().read(), b'{"pass": 1}')
-        self.assertLess(time.perf_counter() - start, 0.9)  # Nagle + delayed ACK would be ~1.2s
+        # Nagle + delayed ACK costs ~40 ms per request (~1.2 s for 30), every time.
+        # A loaded machine can slow one run, but not all of three, so any fast run passes.
+        elapsed = []
+        for _ in range(3):
+            start = time.perf_counter()
+            for _ in range(30):
+                conn.request("GET", "/current_pass", headers=headers)
+                self.assertEqual(conn.getresponse().read(), b'{"pass": 1}')
+            elapsed.append(time.perf_counter() - start)
+            if elapsed[-1] < 0.9:
+                return
+        self.fail(f"30 keep-alive requests took {elapsed} s in 3 attempts; want one under 0.9 s")
 
     def test_connection_close_header_and_reconnect(self):
         cases = {
@@ -220,7 +227,8 @@ class TestPreAuthIdleSockets(ServerTestCase):
         start = time.perf_counter()
         resp, data, _ = self.request("GET", "/current_pass")
         self.assertEqual((resp.status, data), (200, b'{"pass": 1}'))
-        self.assertLess(time.perf_counter() - start, 3)
+        # Blocked behind the idle sockets, the request would wait out the handshake timeout.
+        self.assertLess(time.perf_counter() - start, HANDSHAKE_TIMEOUT_SECONDS / 2)
 
 
 class TestNoKeyFilesLeft(unittest.TestCase):

@@ -25,7 +25,6 @@ import numpy as np
 import pygame as pg
 import skimage as ski
 from click.testing import CliRunner
-from fixtures import ROWS, make_work_dir
 from PIL import Image
 
 from image_review import controller as controller_module
@@ -64,6 +63,7 @@ from image_review.store import (
 )
 from image_review.util import load_surface
 from image_review.viewer import ImageViewer, scale_percent
+from tests.fixtures import ROWS, make_work_dir
 
 
 class StoreTestCase(unittest.TestCase):
