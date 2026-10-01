@@ -79,11 +79,10 @@ class TestRoundTrips(RemoteTestCase):
     def test_image_bytes_many(self):
         local = self.local_copy()
         self.assertEqual(self.store.image_bytes_many(KEYS), local.image_bytes_many(KEYS))
-        stderr = io.StringIO()
-        with redirect_stderr(stderr):
+        with self.assertLogs("image_review.remote", "WARNING") as logs:
             found = self.store.image_bytes_many([KEYS[0], "batch_001/nope.jpg"])
         self.assertEqual(set(found), {KEYS[0]})
-        self.assertIn("batch_001/nope.jpg", stderr.getvalue())
+        self.assertIn("batch_001/nope.jpg", "\n".join(logs.output))
 
     def test_image_bytes_unknown_key(self):
         for key in ("batch_001/nope.jpg", "../manifest.tsv", "a b&c=d.jpg"):
@@ -182,7 +181,8 @@ class TestPinning(RemoteTestCase):
             mock.patch.object(
                 ReviewHandler, "_authorized", autospec=True, side_effect=ReviewHandler._authorized
             ) as auth,
-            redirect_stderr(io.StringIO()) as log,
+            mock.patch.object(ReviewHandler, "log_request") as log_request,
+            redirect_stderr(io.StringIO()),
         ):
             with self.assertRaises(FingerprintMismatch):
                 store.manifest()
@@ -190,7 +190,7 @@ class TestPinning(RemoteTestCase):
                 store.image_bytes_many(KEYS)
             time.sleep(0.2)  # let the handler threads notice the closed sockets
         auth.assert_not_called()
-        self.assertNotIn("GET", log.getvalue())
+        log_request.assert_not_called()  # no request line was ever read
 
     def test_mismatch_is_a_remote_error(self):
         self.assertTrue(issubclass(FingerprintMismatch, RemoteError))
@@ -552,12 +552,12 @@ class TestSession(RemoteTestCase):
     def test_server_lost_during_load(self):
         s = ReviewSession(self.store, reviewer="tester", mode="single")
         self.lose_server()
-        with redirect_stderr(io.StringIO()) as err:
+        with self.assertLogs("image_review.controller", "ERROR") as logs:
             s.next_image()
         self.assertEqual(s._ui_state, UIState.DISCONNECTED)
         self.assert_no_repaint(s)
         self.assertFalse(s.autoplay)
-        self.assertIn("Lost connection to server", err.getvalue())
+        self.assertIn("Lost connection to server", "\n".join(logs.output))
 
     def test_no_refresh_after_outage_on_first_fetch_after_splash(self):
         s = ReviewSession(self.store, reviewer="tester", mode="single")
@@ -590,14 +590,14 @@ class TestSession(RemoteTestCase):
         corrupt = KEYS[0]
         (self.work_dir / corrupt).write_bytes(b"not a jpeg")
         for mode in ("single", "grid"):
-            with self.subTest(mode=mode), redirect_stderr(io.StringIO()) as err:
+            with self.subTest(mode=mode), self.assertLogs("image_review", "WARNING") as logs:
                 s = ReviewSession(self.store, reviewer="tester", mode=mode)
                 s._cursor = next(i for i, item in enumerate(s._items) if corrupt in item.keys)
                 s._show_current()
                 self.assertEqual(s._ui_state, UIState.REVIEWING)
                 self.assertEqual(s._viewer._name, corrupt)
                 self.assertEqual(s._unloadable, {corrupt})
-                self.assertNotIn("Lost connection", err.getvalue())
+                self.assertNotIn("Lost connection", "\n".join(logs.output))
                 with mock.patch.object(self.store, "mark") as mark:
                     s._mark("CLEAN")
                 mark.assert_not_called()
@@ -607,7 +607,7 @@ class TestSession(RemoteTestCase):
         (self.work_dir / missing).unlink()  # the server answers 404, which the client raises as KeyError
         s = ReviewSession(self.store, reviewer="tester", mode="single")
         s._cursor = next(i for i, item in enumerate(s._items) if item.keys == (missing,))
-        with redirect_stderr(io.StringIO()) as err:
+        with self.assertLogs("image_review.controller", "WARNING") as logs:
             s._show_current()
             self.assertEqual(s._ui_state, UIState.REVIEWING)
             self.assertEqual(s._unloadable, {missing})
@@ -616,7 +616,7 @@ class TestSession(RemoteTestCase):
                 mark.assert_not_called()
                 s._mark("DIRTY")
                 mark.assert_called_once()
-        self.assertIn(f"cannot load {missing}: image could not be fetched", err.getvalue())
+        self.assertIn(f"cannot load {missing}: image could not be fetched", "\n".join(logs.output))
         self.assertEqual(self.local_copy().statuses(1)[missing], "DIRTY")
 
 

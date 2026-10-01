@@ -56,6 +56,47 @@ review (pygame)             serve (compute node)
 
 Entry point: `image-review` (mapped to `image_review.cli:main`).
 
+### Logging
+
+Diagnostics go through the stdlib `logging` module; each module logs to
+`logging.getLogger(__name__)` under the `image_review` package logger, which the
+CLI group configures for the duration of a command (one handler, no
+propagation to the root logger; third-party loggers are left alone).
+
+- **Destination and format**: stderr, one line per record:
+  `%(asctime)s %(levelname)s %(name)s: %(message)s`, with `asctime` as strict
+  ISO 8601 local time with its UTC offset (`2026-10-01T14:03:07+02:00`, second
+  resolution; `cli.LogFormatter`). During `preprocess` the handler is swapped
+  by `tqdm.contrib.logging.logging_redirect_tqdm`, so records are written with
+  `tqdm.write` and appear above the progress bars instead of through them.
+  The package logger name is `cli.PACKAGE_LOGGER`; `cli` logs as
+  `image_review.cli` even when run as `python -m image_review.cli`.
+- **Levels**: `-v/--verbose` (a group option, before the command name) logs
+  DEBUG and up (currently few: the work directory opened, the server address
+  connected to, the ssh tunnel command line, and each grid build's image,
+  grid and left-out counts and rotation); `-q/--quiet` logs only WARNING and
+  up; the default is INFO.
+  The two flags together are a usage error (exit 2). ERROR: the review session
+  lost its server, a server request failed with a 500. WARNING: an image that
+  cannot be loaded or was left out of every grid, an input skipped by
+  preprocess, a torn last line of `review.tsv`, a world-accessible work
+  directory, a refused verdict, a failed server connection. INFO: the server's
+  request log. Nothing else is logged at INFO, so the default stays quiet
+  outside `serve`.
+- **Never logged by the server**: access tokens, `Authorization` headers,
+  query strings, image keys, `image_id`s and source paths, request bodies, and
+  the messages of exceptions raised while serving (only their class names).
+  Nothing logs a token. Client-side warnings (`review`, `status`) do name image
+  keys, and `preprocess` warnings name the failed source file (its
+  `image_id`), on the machine where preprocess runs. Client-supplied fields in
+  server records are escaped with Python's `unicode_escape`, so control
+  characters cannot reach the terminal.
+- **Not diagnostics**: the CLI's own output stays plain `print`/`click.echo`:
+  the `preprocess` summary, `status` tables, `serve`'s connection-string
+  instructions, the review session's start and "nothing to review" lines (all
+  stdout), and error messages of failed commands (`Error: ...`, stderr, exit 1
+  or 2).
+
 ### `image-review preprocess`
 
 ```
@@ -127,9 +168,9 @@ group work directory. An existing, non-empty file keeps whatever mode it has,
 except that migrating an old-header file (see *`review.tsv`*) writes the new
 file with the policy's `file_mode`.
 `review`, `serve` and local `status` call `world_access_warning`: if the work
-directory or `manifest.tsv` has any other bit, they print
-`warning: <path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
-<work dir>`` to stderr (group bits alone are silent). Existing directories are
+directory or `manifest.tsv` has any other bit, they log a WARNING
+`<path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
+<work dir>`` (group bits alone are silent). Existing directories are
 never chmod'ed automatically. A team shares a work directory sequentially
 (one writer at a time, enforced by `review.lock`; see *Concurrency limits*) or
 splits a study into several work directories.
@@ -275,11 +316,11 @@ unused bits of PixelData are not drawn.
 rendering or JPEG-encoding one input (e.g. an image wider than libjpeg's
 65500-pixel limit) becomes a `failed` row in `skipped.tsv` with reason
 `<ExceptionClass>: <message>` (or the `unsupported: ...` message), with tabs
-and other control characters replaced by spaces and object reprs such as `<_io.BytesIO object at 0x...>` replaced by `<data>` (so `skipped.tsv` is reproducible); a warning is also printed to stderr. A render that
+and other control characters replaced by spaces and object reprs such as `<_io.BytesIO object at 0x...>` replaced by `<data>` (so `skipped.tsv` is reproducible); a warning is also logged. A render that
 yields no image becomes a `failed` row with reason `rendered no images`. A
 source that cannot be opened at all (corrupt ZIP, unreadable directory at any
 depth) becomes one `failed` row for its path. Content that is not an input
-(see *Source loading*) becomes an `ignored` row, without a stderr warning.
+(see *Source loading*) becomes an `ignored` row, without a logged warning.
 Only `failed` rows affect the exit status. Errors writing to the work
 directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`) still
 abort the run; since images are encoded in memory first, an input's content
@@ -492,7 +533,7 @@ being skipped or rewritten, so a hand edit cannot silently lose decisions.
 
 Two crash leftovers are tolerated. An empty file (created, but the first append
 never landed) holds no decisions. An unparseable last line with no line ending
-(`\r` or `\n`; a torn append) is ignored with a `WARNING:` on stderr, and the
+(`\r` or `\n`; a torn append) is ignored with a logged WARNING, and the
 next mark truncates the file back to the end of the last complete line before
 appending, so the file stays strictly parseable. The truncate happens only if
 the file still has the inode and size seen when it was loaded; otherwise the
@@ -579,7 +620,7 @@ image preprocessed more than once); they share a review status.
 |--------|-------------|
 | `manifest() -> list[ManifestRow]` | All rows, in manifest order |
 | `image_bytes(key) -> bytes` | JPG bytes; `KeyError` for an unknown key |
-| `image_bytes_many(keys) -> dict[str, bytes]` | Bytes for the keys that loaded; missing or unloadable keys are omitted with a stderr warning |
+| `image_bytes_many(keys) -> dict[str, bytes]` | Bytes for the keys that loaded; missing or unloadable keys are omitted with a logged warning |
 | `statuses(pass_number) -> dict[str, Status]` | Pass-aware status of every manifest key |
 | `mark(keys, status, pass_number, *, reviewer, mode) -> dict[str, Status]` | Record a verdict given by `reviewer` (an unauthenticated claim) in `mode` (`single` or `grid`); returns the new status of every key affected, including keys that share an `image_id` with a marked key |
 | `undo(pass_number, *, reviewer) -> dict[str, Status]` | Undo the latest mark not yet undone (one `mark` call: one image or a whole grid), restoring each of its images' decision from before it (see *Undo rows*); `reviewer` is checked and recorded like `mark`'s. Returns the new status, at `pass_number`, of every key affected, as `mark` does; `{}` when there is nothing to undo |
@@ -665,7 +706,7 @@ image, marking, restarting a mode, or moving to the next batch is treated as a l
 unloadable image: autoplay and the pending auto-advance are cancelled, the
 status snapshot is left unchanged (a failed mark is not applied), the viewer
 shows "Lost connection to server - progress saved. Press q to quit." and the
-reason is printed to stderr. The session is then `DISCONNECTED`: only `q`/Esc, the
+reason is logged (ERROR). The session is then `DISCONNECTED`: only `q`/Esc, the
 gamepad's Start and closing the window do anything (no navigation, mode switch or `z` reaches
 the store again). A failed mode restart or next-batch move clears the item list. Any
 other failure to load an image is an unloadable image (see *Unloadable Images*).
@@ -719,7 +760,7 @@ A grid can still come to hold a DIRTY key mid-session, when a key in it shares
 an `image_id` with an image marked DIRTY elsewhere. CLEAN on a grid holding any
 DIRTY or FLAGGED key is refused (no store call; the status bar shows "grid
 contains an image already marked DIRTY - review it in single mode", also
-printed to stderr), unless every key in the grid is DIRTY, which reverses that
+logged), unless every key in the grid is DIRTY, which reverses that
 grid's own verdict.
 
 If grid mode has no items but the status filter selected rows it left out, the
@@ -754,11 +795,11 @@ the stale flag.
 
 An image whose bytes are missing (`KeyError`, e.g. a 404 from the server) or
 cannot be read or decoded is not an outage (see *Store Failures*). A warning
-naming the key is printed to stderr, the key is added to the session's
+naming the key is logged, the key is added to the session's
 `_unloadable` set, and the item is shown as a placeholder from
 `viewer.placeholder_surface`: a dark surface reading `Cannot load image: <key>`
 with a short reason ("image could not be fetched" or "image could not be read
-or decoded"; the error itself goes only to stderr). Navigation, `n`, todo-only and autoplay treat it
+or decoded"; the error itself goes only to the log). Navigation, `n`, todo-only and autoplay treat it
 like any other item (autoplay does not stop at it), so the cursor always points
 at a real item. An item with no surface (every single-mode item, and the item
 for an image left out of the grids in grid mode) is loaded each time it is shown, so the
@@ -767,7 +808,7 @@ again leaves it. Placeholders are never built up front.
 
 A placeholder can be marked DIRTY but never CLEAN: CLEAN on an item holding
 any unloadable key is refused (no store call; the status bar shows "cannot mark
-CLEAN: image could not be loaded", also printed to stderr). DIRTY is recorded
+CLEAN: image could not be loaded", also logged). DIRTY is recorded
 normally, so the image stops being todo, batch auto-selection moves on and the
 pass can finish; in later passes it is FLAGGED and, if still unloadable, again
 a placeholder that only takes DIRTY.
@@ -1287,12 +1328,16 @@ access), and the lock is never held while writing to the network.
 
 ### Logging policy
 
-stderr only, one line per request: `METHOD path status`. The query string is
-dropped, control characters are escaped, and stdlib `log_message` output
-(which can echo request lines) is suppressed. Tokens, keys in queries and
-exception messages are not logged. Two other lines exist: `connection error:
-<ExceptionClass>` for failed handshakes and other connection-level failures,
-and `internal error: <ExceptionClass>` for 500s.
+Logger `image_review.server` (see *Logging* under *CLI Interface*). One INFO
+record per response: `peer-IP METHOD path status`; the formatter's timestamp
+supplies the time, so a line reads `2026-10-01T14:03:07+02:00 INFO
+image_review.server: 10.1.2.3 GET /image 200`. The query string is dropped,
+control characters in the peer, method and path are escaped (`_escape`, at the
+call site), and stdlib `log_message` output (which can echo request lines) is
+suppressed. Tokens, keys in queries and exception messages are not logged. Two
+other records exist: WARNING `connection error: <ExceptionClass>` for failed
+handshakes and other connection-level failures, and ERROR `internal error:
+<ExceptionClass>` for 500s.
 
 ## Remote Store (`remote.py`)
 

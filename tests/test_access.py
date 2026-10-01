@@ -257,15 +257,17 @@ class WarningTest(unittest.TestCase):
         result = self.invoke_status()
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn(
-            f"warning: {self.work} is accessible to all users (mode 0755); run `chmod -R o-rwx {shlex.quote(str(self.work))}`",
+            f"WARNING image_review.cli: {self.work} is accessible to all users (mode 0755); run `chmod -R o-rwx {shlex.quote(str(self.work))}`",
             result.stderr,
         )
-        self.assertNotIn("warning", result.stdout)
+        self.assertNotIn("accessible", result.stdout)
 
     def test_warns_for_world_readable_manifest(self):
         os.chmod(self.work, 0o700)
         os.chmod(self.work / "manifest.tsv", 0o644)
-        self.assertIn(f"warning: {self.work / 'manifest.tsv'} is accessible", self.invoke_status().stderr)
+        self.assertIn(
+            f"WARNING image_review.cli: {self.work / 'manifest.tsv'} is accessible", self.invoke_status().stderr
+        )
 
     def test_serve_warns(self):
         os.chmod(self.work, 0o755)
@@ -286,7 +288,7 @@ class WarningTest(unittest.TestCase):
                 os.chmod(self.work, mode)
                 os.chmod(self.work / "manifest.tsv", 0o600)
                 self.assertEqual(self.invoke_status().stderr, "")
-                self.assertNotIn("warning", self.invoke_serve().stderr)
+                self.assertNotIn("WARNING", self.invoke_serve().stderr)
                 self.assertIsNone(world_access_warning(self.work))
 
 

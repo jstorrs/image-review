@@ -3,10 +3,10 @@ import csv
 import errno
 import getpass
 import json
+import logging
 import os
 import secrets
 import socket
-import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -17,6 +17,8 @@ from typing import Literal, Protocol, Self, get_args
 from .access import policy_of_dir
 from .review_db import Change, MarkMode, ReviewDB
 from .status import TODO_STATUSES, Status, Verdict
+
+log = logging.getLogger(__name__)
 
 __all__ = ["TODO_STATUSES", "MarkMode", "Status", "Verdict"]  # re-exported for callers that import them from here
 
@@ -64,7 +66,7 @@ class ReviewStore(Protocol):
     def image_bytes(self, key: str) -> bytes: ...
 
     def image_bytes_many(self, keys: list[str]) -> dict[str, bytes]:
-        """Bytes for the keys that loaded; missing or unloadable keys are omitted with a stderr warning."""
+        """Bytes for the keys that loaded; missing or unloadable keys are omitted with a logged warning."""
         ...
 
     def statuses(self, pass_number: int) -> dict[str, Status]:
@@ -436,7 +438,7 @@ class LocalStore:
             try:
                 found[key] = self.image_bytes(key)
             except (KeyError, ValueError, OSError) as exc:
-                print(f"WARNING: cannot load {key}: {exc}", file=sys.stderr)
+                log.warning("cannot load %s: %s", key, exc)
         return found
 
     def statuses(self, pass_number: int) -> dict[str, Status]:

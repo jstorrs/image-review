@@ -1,5 +1,7 @@
 import contextlib
+import datetime
 import getpass
+import logging
 import signal
 import socket
 import sys
@@ -18,6 +20,36 @@ if TYPE_CHECKING:
     from .server import ReviewServer
 
 DEFAULT_WORK_DIR = "./review_work"
+
+PACKAGE_LOGGER = "image_review"  # every module logs under it; the CLI configures only this tree
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+log = logging.getLogger(f"{PACKAGE_LOGGER}.cli")  # not __name__: that is "__main__" under `python -m`
+
+
+class LogFormatter(logging.Formatter):
+    """LOG_FORMAT with asctime as strict ISO 8601 local time, e.g. 2026-10-01T14:03:07+02:00."""
+
+    def __init__(self) -> None:
+        super().__init__(LOG_FORMAT)
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        return datetime.datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="seconds")
+
+
+@contextlib.contextmanager
+def log_to(handler: logging.Handler, level: int) -> Iterator[None]:
+    """Send this package's log records at `level` and above to `handler` only, restoring the previous setup on exit."""
+    package = logging.getLogger(PACKAGE_LOGGER)
+    handler.setFormatter(LogFormatter())
+    saved = package.handlers, package.level, package.propagate
+    package.handlers, package.propagate = [handler], False
+    package.setLevel(level)
+    try:
+        yield
+    finally:
+        package.handlers, package.propagate = saved[0], saved[2]
+        package.setLevel(saved[1])
 
 
 def work_dir_option(f):
@@ -50,7 +82,7 @@ def via_option(f):
 def warn_if_world_accessible(work_dir: Path) -> None:
     warning = world_access_warning(work_dir)
     if warning is not None:
-        click.echo(warning, err=True)
+        log.warning(warning)
 
 
 def open_local_store(path: Path, read_only: bool = False) -> LocalStore:
@@ -69,6 +101,7 @@ def open_local_store(path: Path, read_only: bool = False) -> LocalStore:
         raise click.ClickException(f"Cannot read work directory: {e}") from e
     except RuntimeError as e:  # review.tsv changed under the lock while being migrated
         raise click.ClickException(f"Cannot update work directory: {e}") from e
+    log.debug("opened work directory %s (%s)", path, "read-only" if read_only else "writable, locked")
     warn_if_world_accessible(path)
     return store
 
@@ -115,6 +148,7 @@ def open_store(
         except ValueError as e:
             raise click.ClickException(f"Invalid --via: {e}")
     where = f"{target.host}:{target.port}" + (f" (via {via})" if via else "")
+    log.debug("connecting to server at %s", where)
     try:
         with contextlib.ExitStack() as stack:
             if via is None:
@@ -178,8 +212,11 @@ class FullHelpGroup(click.Group):
 
 
 @click.group(cls=FullHelpGroup)
+@click.option("-v", "--verbose", is_flag=True, help="Also log debug messages.")
+@click.option("-q", "--quiet", is_flag=True, help="Log only warnings and errors.")
 @click.version_option()
-def cli():
+@click.pass_context
+def cli(ctx: click.Context, verbose: bool, quiet: bool):
     """Review DICOM / medical images for burned-in PHI.
 
     Workflow:
@@ -188,7 +225,13 @@ def cli():
       1. preprocess  — convert source DICOMs/images to JPG batches
       2. review      — interactively classify images as CLEAN or DIRTY
       3. status      — check review progress and counts
+
+    Diagnostics are logged to stderr as `time LEVEL module: message`.
     """
+    if verbose and quiet:
+        raise click.UsageError("-v/--verbose and -q/--quiet are mutually exclusive.")
+    level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
+    ctx.with_resource(log_to(logging.StreamHandler(sys.stderr), level))
 
 
 def _shared_with(work_dir: Path) -> str:
@@ -254,8 +297,13 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
     from .preprocess import WorkDirExists, run_preprocess
 
     source_paths = [Path(s).resolve() for s in sources]
+    from tqdm.contrib.logging import logging_redirect_tqdm
+
     try:
-        result = run_preprocess(source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap, access=access)
+        with logging_redirect_tqdm(loggers=[logging.getLogger(PACKAGE_LOGGER)]):  # log lines print above the bars
+            result = run_preprocess(
+                source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap, access=access
+            )
     except WorkDirExists as exc:
         raise click.ClickException(str(exc)) from exc
     failed = sum(1 for s in result.skipped if s.kind == "failed")

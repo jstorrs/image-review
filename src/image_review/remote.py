@@ -7,8 +7,8 @@ in memory; nothing is cached on disk.
 import hmac
 import http.client
 import json
+import logging
 import ssl
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Self, get_args
@@ -23,6 +23,8 @@ from .store import (
     StoreUnavailable,
     Verdict,
 )
+
+log = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 30
 MAX_WORKERS = 8
@@ -229,7 +231,7 @@ class RemoteStore:
                 try:
                     found[key] = future.result()
                 except KeyError as exc:
-                    print(f"WARNING: cannot load {key}: {exc!r}", file=sys.stderr)
+                    log.warning("cannot load %s: %r", key, exc)
         except BaseException:
             for future in futures.values():
                 future.cancel()

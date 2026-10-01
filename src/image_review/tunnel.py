@@ -4,7 +4,9 @@ Must stay importable without pygame/numpy/skimage. The tunnel carries the
 already-pinned TLS connection end to end; it adds no trust of its own.
 """
 
+import logging
 import re
+import shlex
 import socket
 import subprocess
 import time
@@ -12,6 +14,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from .signals import TERMINATION_SIGNALS, interrupt_on
+
+log = logging.getLogger(__name__)
 
 POLL_SECONDS = 0.1
 TERMINATE_WAIT_SECONDS = 5
@@ -74,6 +78,7 @@ def ssh_tunnel(via: str, host: str, port: int, *, ready_timeout: float = 120) ->
         "--",
         via,
     ]  # fmt: skip
+    log.debug("starting tunnel: %s", shlex.join(argv))  # host, ports and login node only; no credentials
     with interrupt_on(*TERMINATION_SIGNALS):  # so ssh is torn down
         try:
             proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL)  # stdin/stderr inherited for prompts and errors

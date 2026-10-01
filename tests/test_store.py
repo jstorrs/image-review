@@ -404,11 +404,8 @@ class TestReviewLog(unittest.TestCase):
         self.path = self.work_dir / "review.tsv"
 
     def reload(self) -> ReviewDB:
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            db = ReviewDB(self.work_dir)
-        self.assertEqual(stderr.getvalue(), "")
-        return db
+        with self.assertNoLogs("image_review"):
+            return ReviewDB(self.work_dir)
 
     def test_marks_append_lines_and_reload(self):
         db = ReviewDB(self.work_dir)
@@ -443,11 +440,10 @@ class TestReviewLog(unittest.TestCase):
         intact = self.path.read_bytes()
         with open(self.path, "ab") as f:
             f.write(b"y\tbatch_0")  # a crash mid-append
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
+        with self.assertLogs("image_review.review_db", "WARNING") as logs:
             db = ReviewDB(self.work_dir)
-        self.assertIn("WARNING: ignoring the unfinished last line", stderr.getvalue())
-        self.assertIn("review.tsv:3:", stderr.getvalue())
+        self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
+        self.assertIn("review.tsv:3:", logs.records[0].getMessage())
         self.assertEqual(set(db._rows), {"x"})
         db.mark("z", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
         after = self.path.read_bytes()
@@ -486,10 +482,9 @@ class TestReviewLog(unittest.TestCase):
         ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
         with open(self.path, "ab") as f:
             f.write("é\tb".encode()[:2])
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
+        with self.assertLogs("image_review.review_db", "WARNING") as logs:
             db = ReviewDB(self.work_dir)
-        self.assertIn("WARNING: ignoring the unfinished last line", stderr.getvalue())
+        self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
         db.mark("z", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
         self.assertEqual(set(self.reload()._rows), {"x", "z"})
 
@@ -708,10 +703,9 @@ class TestMigration(unittest.TestCase):
     def test_torn_tail_of_old_file_is_dropped_by_migration(self):
         with open(self.path, "ab") as f:
             f.write(b"/src/patient_lee/c.dcm\tbatch_0")
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr), LocalStore(self.work_dir) as store:
+        with self.assertLogs("image_review.review_db", "WARNING") as logs, LocalStore(self.work_dir) as store:
             store.mark(["batch_002/d.jpg"], "CLEAN", 1, reviewer="alice", mode="single")
-        self.assertIn("unfinished last line", stderr.getvalue())
+        self.assertIn("unfinished last line", logs.records[0].getMessage())
         _, rows = self.stored_rows()
         self.assertEqual(rows[:3], self.expected_rows())
         self.assertEqual([r[0] for r in rows[3:]], ["/src/patient_kim/d.dcm"])
@@ -762,10 +756,9 @@ class TestReadOnlyTornLog(StoreTestCase):
         with open(path, "ab") as f:
             f.write(b"/src/patient_jones/b.dcm\tbatch_0")
         before, mtime = path.read_bytes(), path.stat().st_mtime_ns
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
+        with self.assertLogs("image_review.review_db", "WARNING") as logs:
             ro = LocalStore(self.work_dir, read_only=True)
-        self.assertIn("WARNING: ignoring the unfinished last line", stderr.getvalue())
+        self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
         self.assertEqual(ro.statuses(1)["batch_001/a.jpg"], "CLEAN")
         with self.assertRaises(PermissionError):
             ro.mark(["batch_001/b.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
@@ -2176,13 +2169,15 @@ class TestUnloadable(EventLoopTestCase):
         return labels
 
     def test_single_navigation_reaches_placeholder_both_ways(self):
-        s = self.reviewing()
-        self.assertEqual(s.batch, "batch_001")
-        forward = self.walk(s, pg.K_RIGHT)
+        # Items are shuffled: CORRUPT may be the first item shown, so capture from the session's start
+        with self.assertLogs("image_review.controller", "WARNING") as logs:
+            s = self.reviewing()
+            self.assertEqual(s.batch, "batch_001")
+            forward = self.walk(s, pg.K_RIGHT)
         self.assertEqual(sorted(forward), ["batch_001/a.jpg", "batch_001/b.jpg"])
         self.assertEqual(s._cursor, len(s._items) - 1)
         self.assertIn(CORRUPT, s._unloadable)
-        self.assertIn(f"cannot load {CORRUPT}", self.stderr.getvalue())
+        self.assertIn(f"cannot load {CORRUPT}", "\n".join(logs.output))
         s.handle_events([key(pg.K_LEFT)])  # from "End of list" back onto the last item
         self.paint(s)
         self.assertEqual(self.walk(s, pg.K_LEFT), forward[::-1])
@@ -2342,17 +2337,19 @@ class TestPackShrinksOversize(unittest.TestCase):
         self.assertEqual((grids, unloadable), ([], ["big/b.jpg"]))  # a bin left with no keys is dropped
 
     def test_unreadable_header_is_unloadable(self):
-        stderr = self.quiet_stderr()
         (self.root / "big/b.jpg").write_bytes(b"not a jpeg")
         calls: list[tuple[int, int]] = []
-        with mock.patch.object(grid_packer_module, "load_surface", wraps=load_surface) as decode:
+        with (
+            mock.patch.object(grid_packer_module, "load_surface", wraps=load_surface) as decode,
+            self.assertLogs("image_review.grid_packer", "WARNING") as logs,
+        ):
             grids, unloadable = pack_into_grids(
                 self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
             )
         self.assertEqual(unloadable, ["big/b.jpg"])
         self.assertNotIn("big/b.jpg", {k for gs in grids for k in gs.keys})
         self.assertEqual(decode.call_count, 2)  # never decoded: left out at the header
-        self.assertIn("cannot load big/b.jpg", stderr.getvalue())
+        self.assertIn("cannot load big/b.jpg", "\n".join(logs.output))
         self.assertEqual(calls[-1], (3, 3))
 
     def test_decodes_one_bin_at_a_time(self):
@@ -2402,32 +2399,33 @@ class TestPackShrinksOversize(unittest.TestCase):
                         self.assertAlmostEqual(count / (fw * fh), 1, delta=0.02, msg=k)
 
     def test_decoded_size_differing_from_header_is_left_out(self):
-        stderr = self.quiet_stderr()
         bad = (self.root / "big/a.jpg").read_bytes()
 
         def wrong_size(buf: bytes) -> pg.Surface:
             return pg.Surface((7, 5), 0, 24) if buf == bad else load_surface(buf)
 
         calls: list[tuple[int, int]] = []
-        with mock.patch.object(grid_packer_module, "load_surface", wrong_size):
+        with (
+            mock.patch.object(grid_packer_module, "load_surface", wrong_size),
+            self.assertLogs("image_review.grid_packer", "WARNING") as logs,
+        ):
             grids, left_out = pack_into_grids(
                 self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
             )
         self.assertEqual(left_out, ["big/a.jpg"])
         self.assertNotIn("big/a.jpg", {k for gs in grids for k in gs.keys})
-        self.assertIn("cannot load big/a.jpg", stderr.getvalue())
+        self.assertIn("cannot load big/a.jpg", "\n".join(logs.output))
         self.assertEqual(calls[-1], (3, 3))
 
     def test_key_left_unpacked_is_left_out(self):
-        stderr = self.quiet_stderr()
         calls: list[tuple[int, int]] = []
-        with dropping_packer(1):
+        with dropping_packer(1), self.assertLogs("image_review.grid_packer", "WARNING") as logs:
             grids, left_out = pack_into_grids(
                 self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
             )
         self.assertEqual(left_out, ["big/b.jpg"])
         self.assertEqual(sorted(k for gs in grids for k in gs.keys), ["big/a.jpg", "big/c.jpg"])
-        self.assertIn("big/b.jpg was not packed", stderr.getvalue())
+        self.assertIn("big/b.jpg was not packed", "\n".join(logs.output))
         self.assertEqual(calls[-1], (3, 3))
 
     def pack_recording(self, store: LocalStore, rotation: str) -> tuple[list[PlacedRect], int]:

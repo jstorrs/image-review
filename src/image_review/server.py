@@ -8,6 +8,7 @@ import datetime
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -35,6 +36,8 @@ from .connection import (
     parse_reviewer,
 )
 from .store import MarkMode, ReviewStore, Verdict
+
+log = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1 << 20
 CERT_VALIDITY = datetime.timedelta(days=30)
@@ -182,7 +185,7 @@ class ReviewServer(ThreadingHTTPServer):
 
     def handle_error(self, request, client_address) -> None:
         exc_type = sys.exc_info()[0]
-        print(f"connection error: {exc_type.__name__ if exc_type else 'unknown'}", file=sys.stderr)
+        log.warning("connection error: %s", exc_type.__name__ if exc_type else "unknown")
 
 
 class ReviewHandler(BaseHTTPRequestHandler):
@@ -235,7 +238,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         except BadRequest:
             reply = Reply(400, close=True)
         except Exception as e:  # noqa: BLE001 - any store failure must become a 500, not a dead connection
-            print(f"internal error: {type(e).__name__}", file=sys.stderr)
+            log.error("internal error: %s", type(e).__name__)  # noqa: TRY400 - class name only, never the message
             reply = Reply(500, close=True)
         self._send(reply)
 
@@ -313,10 +316,12 @@ class ReviewHandler(BaseHTTPRequestHandler):
     do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_OTHER
 
     def log_request(self, code="-", size="-") -> None:
-        # command and path are attacker-controlled: escape control chars; drop the query
+        # One INFO line per response: peer, method, path, status. The formatter adds the time.
+        # Command and path are attacker-controlled: escape control chars; drop the query (it carries keys)
+        peer = str(self.client_address[0])
         command = str(getattr(self, "command", None) or "-")
         path = str(getattr(self, "path", "-")).split("?", 1)[0]
-        print(f"{_escape(command)} {_escape(path)} {code}", file=sys.stderr)
+        log.info("%s %s %s %s", _escape(peer), _escape(command), _escape(path), code)
 
     def log_message(self, format, *args) -> None:
         pass  # stdlib error messages can echo request lines; log_request is the only log

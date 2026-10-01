@@ -56,5 +56,5 @@ def world_access_warning(work_dir: Path) -> str | None:
         except OSError:
             continue
         if world_accessible(mode):
-            return f"warning: {path} is accessible to all users (mode {mode:04o}); run `chmod -R o-rwx {shlex.quote(str(work_dir))}`"
+            return f"{path} is accessible to all users (mode {mode:04o}); run `chmod -R o-rwx {shlex.quote(str(work_dir))}`"
     return None

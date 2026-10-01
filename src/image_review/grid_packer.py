@@ -1,5 +1,5 @@
 import io
-import sys
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, NamedTuple
@@ -10,6 +10,8 @@ from rectpack import newPacker
 
 from .store import ManifestRow, ReviewStore
 from .util import load_surface
+
+log = logging.getLogger(__name__)
 
 # When images may be rotated 90 degrees in a grid: "auto" rotates only if that saves a grid
 Rotation = Literal["auto", "always", "never"]
@@ -94,7 +96,7 @@ def _composite_bin(
             if surface.get_size() != (w, h):
                 raise ValueError(f"surface size {surface.get_size()} differs from its packed rectangle {(w, h)}")
         except Exception as exc:  # noqa: BLE001 - any decode failure makes the image unloadable, not fatal
-            print(f"WARNING: cannot load {key}: {exc}", file=sys.stderr)
+            log.warning("cannot load %s: %s", key, exc)
             failed.append(rect_id)
         else:
             canvas.blit(surface, (x, y))
@@ -146,7 +148,7 @@ def pack_into_grids(
         try:
             w, h = _header_size(blobs[item.key])
         except Exception as exc:  # noqa: BLE001 - an unreadable header makes the image unloadable, not fatal
-            print(f"WARNING: cannot load {item.key}: {exc}", file=sys.stderr)
+            log.warning("cannot load %s: %s", item.key, exc)
             left_out.add(idx)
             advance()
             continue
@@ -173,8 +175,18 @@ def pack_into_grids(
     # left to the caller (shown as a single image, loaded on display) rather than dropped
     placed = {rect.rect_id for rects in bins.values() for rect in rects}
     for idx in sizes.keys() - placed:
-        print(f"WARNING: {items[idx].key} was not packed into a grid", file=sys.stderr)
+        log.warning("%s was not packed into a grid", items[idx].key)
         left_out.add(idx)
         advance()
 
+    log.debug(
+        "packed %d images into %d grids of %dx%d (rotation %s, rotated: %s); %d left out",
+        n,
+        len(grids),
+        grid_w,
+        grid_h,
+        rotation,
+        rotated,
+        len(left_out),
+    )
     return grids, [items[idx].key for idx in sorted(left_out)]

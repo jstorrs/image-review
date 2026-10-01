@@ -1,5 +1,5 @@
+import logging
 import random
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -21,6 +21,8 @@ from .store import (
 )
 from .util import load_surface
 from .viewer import ImageViewer, placeholder_surface
+
+log = logging.getLogger(__name__)
 
 AUTOPLAY_EVENT = pg.USEREVENT + 1
 ADVANCE_EVENT = pg.USEREVENT + 2
@@ -182,9 +184,7 @@ class ReviewSession:
 
     def _store_lost(self, exc: StoreUnavailable):
         self._stop_timers()
-        print(
-            f"Lost connection to server: {exc}. Progress up to the last mark is saved on the server.", file=sys.stderr
-        )
+        log.error("Lost connection to server: %s. Progress up to the last mark is saved on the server.", exc)
         self._viewer.show_message("Lost connection to server - progress saved. Press q to quit.")
         self._ui_state = UIState.DISCONNECTED
 
@@ -469,7 +469,7 @@ class ReviewSession:
         surface = item.surface
         if surface is None:
             key = item.keys[0]
-            reason = detail = None  # reason: shown on the placeholder; detail: the error, for stderr only
+            reason = detail = None  # reason: shown on the placeholder; detail: the error, for the log only
             try:
                 surface = load_surface(self.store.image_bytes(key))
             except StoreUnavailable as exc:
@@ -482,7 +482,7 @@ class ReviewSession:
             if reason is None:
                 self._unloadable.discard(key)
             else:
-                print(f"WARNING: cannot load {key}: {detail}", file=sys.stderr)
+                log.warning("cannot load %s: %s", key, detail)
                 self._unloadable.add(key)
                 surface = _placeholder(key, reason)
 
@@ -540,15 +540,12 @@ class ReviewSession:
             return
         item = self._items[self._cursor]
         if status == "CLEAN" and not self._unloadable.isdisjoint(item.keys):
-            print(
-                f"WARNING: {UNLOADABLE_CLEAN}: {', '.join(k for k in item.keys if k in self._unloadable)}",
-                file=sys.stderr,
-            )
+            log.warning("%s: %s", UNLOADABLE_CLEAN, ", ".join(k for k in item.keys if k in self._unloadable))
             self._viewer.set_info(UNLOADABLE_CLEAN)
             self._dirty = True
             return
         if item.grid and status == "CLEAN" and _grid_clean_refused(self._statuses, item.keys):
-            print(f"WARNING: {GRID_HAS_DIRTY}", file=sys.stderr)
+            log.warning("%s", GRID_HAS_DIRTY)
             self._viewer.set_info(GRID_HAS_DIRTY)
             self._dirty = True
             return

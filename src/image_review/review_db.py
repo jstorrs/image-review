@@ -2,9 +2,9 @@ import contextlib
 import csv
 import errno
 import io
+import logging
 import os
 import stat
-import sys
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -15,6 +15,8 @@ from typing import Literal, get_args
 from .access import policy_of_dir
 from .connection import package_version, parse_reviewer
 from .status import TODO_STATUSES, Status, Verdict
+
+log = logging.getLogger(__name__)
 
 HEADER = ["image_id", "batch", "status", "pass_number", "timestamp", "reviewer", "mode", "grid_size", "tool_version"]
 LEGACY_HEADER = HEADER[:5]  # before the audit columns; migrate() rewrites such a file with HEADER
@@ -194,10 +196,7 @@ class ReviewDB:
             decisions, legacy = parse_log(
                 self.review_path, data[:end]
             )  # raises if the problem is not only the last line
-            print(
-                f"WARNING: ignoring the unfinished last line of {self.review_path} (an interrupted write): {exc}",
-                file=sys.stderr,
-            )
+            log.warning("ignoring the unfinished last line of %s (an interrupted write): %s", self.review_path, exc)
             self._truncate = PendingTruncate(st.st_ino, len(data), end)
         self._rows = latest(decisions)
         if legacy:

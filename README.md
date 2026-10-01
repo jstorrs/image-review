@@ -48,6 +48,17 @@ image-review status
 
 The default work directory is `./review_work`; don't create work directories inside a git checkout (the repo's `.gitignore` excludes them as a safety net).
 
+Warnings and other diagnostics are logged to stderr as `time LEVEL module: message`.
+Put `-q`/`--quiet` before the command to show only warnings and errors, or
+`-v`/`--verbose` to enable debug messages (currently few: the work directory or
+server opened, the ssh tunnel command, grid packing results), e.g.
+`image-review -q status`. The default shows INFO and up; only `serve` logs at
+INFO (one line per request: peer address, method, path without its query
+string, and status). The server never logs tokens, query strings, image keys,
+source paths or exception messages. Warnings from `review` and `status` do name
+image keys (e.g. an image that cannot be loaded), and `preprocess` warnings
+name the source files that failed, on the machine where preprocess runs.
+
 ## Commands
 
 ### `image-review preprocess`

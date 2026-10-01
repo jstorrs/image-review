@@ -3,6 +3,7 @@ import csv
 import http.client
 import io
 import json
+import logging
 import os
 import signal
 import socket
@@ -19,13 +20,14 @@ from unittest import mock
 
 from click.testing import CliRunner
 
-from image_review.cli import cli
+from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, RemoteTarget
 from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
 from image_review.store import LocalStore
 from tests.fixtures import ROWS, make_work_dir
 
 FP = "a" * 64
+SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
 
 
 class MakeServerChecksTest(unittest.TestCase):
@@ -207,19 +209,19 @@ class TestConnectionHandling(ServerTestCase):
         self.assertTrue(data.startswith(b"HTTP/1.1 400"))
 
     def test_handler_failure_is_500_and_server_survives(self):
-        err = io.StringIO()
         body = json.dumps(
             {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
         ).encode()
         with (
-            contextlib.redirect_stderr(err),
+            self.assertLogs(SERVER_LOGGER, "INFO") as logs,
             mock.patch.object(self.server.store, "mark", side_effect=OSError("secret-detail")),
         ):
             resp, data, conn = self.request("POST", "/mark", body=body)
             self.assertEqual((resp.status, data), (500, b""))
             self.assertEqual(resp.getheader("Connection"), "close")
-            self.assertIn("OSError", err.getvalue())
-            self.assertNotIn("secret-detail", err.getvalue())
+        errors = [r for r in logs.records if r.levelno == logging.ERROR]
+        self.assertEqual([r.getMessage() for r in errors], ["internal error: OSError"])
+        self.assertNotIn("secret-detail", "\n".join(logs.output))
         conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {self.target.token}"})
         self.assertEqual(conn.getresponse().status, 200)
 
@@ -229,28 +231,70 @@ class TestConnectionHandling(ServerTestCase):
 
 
 class TestLogging(ServerTestCase):
+    def logged(self, logs) -> tuple[list[str], str]:
+        """Each record's message, and all records as the CLI's formatter renders them."""
+        formatter = LogFormatter()
+        return [r.getMessage() for r in logs.records], "\n".join(formatter.format(r) for r in logs.records)
+
     def test_logs_escape_control_chars_and_drop_query(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
+        with self.assertLogs(SERVER_LOGGER, "INFO") as logs:
             self.raw(b"GET /a\x1b[31mb?key=SECRETKEY HTTP/1.1\r\nHost: x\r\n\r\n")
-        log = err.getvalue()
-        self.assertNotIn("\x1b", log)
-        self.assertIn("\\x1b[31mb", log)
-        self.assertNotIn("SECRETKEY", log)
+        messages, formatted = self.logged(logs)
+        self.assertEqual(messages, ["127.0.0.1 GET /a\\x1b[31mb 401"])
+        for text in (*messages, formatted):
+            self.assertNotIn("\x1b", text)
+            self.assertNotIn("SECRETKEY", text)
+            self.assertNotIn("?", text)
+
+    def test_request_line_format(self):
+        with self.assertLogs(SERVER_LOGGER, "INFO") as logs:
+            self.request("GET", "/current_pass")
+        (record,) = logs.records
+        self.assertEqual(record.levelno, logging.INFO)
+        self.assertEqual(record.getMessage(), "127.0.0.1 GET /current_pass 200")
+        _, formatted = self.logged(logs)
+        self.assertRegex(
+            formatted,
+            r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d INFO image_review.server: 127.0.0.1 GET /current_pass 200$",
+        )
 
     def test_logs_never_contain_token_or_key(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
+        with self.assertLogs(SERVER_LOGGER, "INFO") as logs:
             self.request("GET", "/image?key=batch_001%2Fa.jpg")
             self.request("GET", "/image?key=batch_001%2Fa.jpg", token="wrong")
             self.request("GET", "/image?key=batch_001%2Fnope.jpg")
             self.request("GET", "/statuses?pass=zzz")
             self.request("POST", "/mark", body=b"{}")
-        log = err.getvalue()
-        self.assertIn("GET /image 200", log)
-        self.assertNotIn(self.target.token, log)
-        self.assertNotIn("batch_001", log)
-        self.assertNotIn("key=", log)
+        messages, formatted = self.logged(logs)
+        self.assertEqual(
+            messages,
+            [
+                "127.0.0.1 GET /image 200",
+                "127.0.0.1 GET /image 401",
+                "127.0.0.1 GET /image 404",
+                "127.0.0.1 GET /statuses 400",
+                "127.0.0.1 POST /mark 400",
+            ],
+        )
+        for text in (*messages, formatted):
+            self.assertNotIn(self.target.token, text)
+            self.assertNotIn("wrong", text)
+            self.assertNotIn("batch_001", text)
+            self.assertNotIn("key=", text)
+            self.assertNotIn("pass=", text)
+            self.assertNotIn("?", text)
+
+    def test_connection_error_logs_class_name_only(self):
+        with self.assertLogs(SERVER_LOGGER, "WARNING") as logs:
+            self.server.handle_error(None, ("127.0.0.1", 1))
+        self.assertEqual(logs.records[0].getMessage(), "connection error: unknown")
+        try:
+            raise ssl.SSLError("secret-detail")
+        except ssl.SSLError:
+            with self.assertLogs(SERVER_LOGGER, "WARNING") as logs:
+                self.server.handle_error(None, ("127.0.0.1", 1))
+        (record,) = logs.records
+        self.assertEqual((record.levelno, record.getMessage()), (logging.WARNING, "connection error: SSLError"))
 
 
 class TestPreAuthIdleSockets(ServerTestCase):

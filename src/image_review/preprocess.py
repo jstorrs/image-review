@@ -1,10 +1,10 @@
 import csv
 import io
+import logging
 import os
 import re
 import shutil
 import stat
-import sys
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
@@ -30,6 +30,8 @@ from pydicom.uid import (
 from tqdm import tqdm
 
 from .access import Access, Modes, modes
+
+log = logging.getLogger(__name__)
 
 EROSION_KERNEL_SIZE = 5
 OUTLIER_PERCENTILE = 0.01
@@ -810,7 +812,7 @@ def _render_into(
         for part in outcome:
             if isinstance(part, Skipped):
                 if part.kind == "failed":
-                    tqdm.write(f"WARNING: skipping {part.image_id}: {part.reason}", file=sys.stderr)
+                    log.warning("skipping %s: %s", part.image_id, part.reason)
                 skipped.append(part)
                 continue
             image_id, jpeg = part
