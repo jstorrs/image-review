@@ -8,6 +8,7 @@ from .grid_packer import pack_into_grids
 from .store import (
     TODO_STATUSES,
     ManifestRow,
+    MarkMode,
     ReviewStore,
     Status,
     StoreUnavailable,
@@ -64,13 +65,15 @@ class ReviewSession:
     def __init__(
         self,
         store: ReviewStore,
-        mode: str = "single",
+        reviewer: str,
+        mode: MarkMode = "single",
         pass_number: int | None = None,
         batch: str | None = None,
         status_filter: str = "unreviewed",
         allow_rotation: bool = True,
     ):
         self.store = store
+        self.reviewer = reviewer  # checked by the CLI (connection.parse_reviewer); recorded with each verdict
         self.mode = mode
         self.batch = batch
         self.status_filter = status_filter
@@ -212,7 +215,7 @@ class ReviewSession:
         parts.append(f"{self.mode} image review")
         return " - ".join(parts)
 
-    def _restart_in_mode(self, new_mode: str):
+    def _restart_in_mode(self, new_mode: MarkMode):
         self._stop_timers()
         self.mode = new_mode
         self._cursor = -1
@@ -350,16 +353,16 @@ class ReviewSession:
             return
         item = self._items[self._cursor]
         if self.mode == "grid":
-            keys, batch = item["keys"], item["batch"]
+            keys = item["keys"]
             if status == "CLEAN" and _grid_clean_refused(self._statuses, keys):
                 print(f"WARNING: {GRID_HAS_DIRTY}", file=sys.stderr)
                 self._viewer.set_info(GRID_HAS_DIRTY)
                 self._dirty = True
                 return
         else:
-            keys, batch = [item.key], item.batch
+            keys = [item.key]
         try:
-            changed = self.store.mark(keys, batch, status, self.pass_number)
+            changed = self.store.mark(keys, status, self.pass_number, reviewer=self.reviewer, mode=self.mode)
         except StoreUnavailable as exc:
             self._store_lost(exc)
             return

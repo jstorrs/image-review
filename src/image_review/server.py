@@ -6,7 +6,6 @@ leave the store; clients only ever see keys (preprocessed paths).
 
 import datetime
 import hmac
-import importlib.metadata
 import json
 import os
 import re
@@ -27,8 +26,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from .connection import API_VERSION, RemoteTarget, cert_fingerprint
-from .store import ReviewStore, Verdict
+from .connection import (
+    API_VERSION,
+    RemoteTarget,
+    cert_fingerprint,
+    package_version,
+    parse_reviewer,
+)
+from .store import MarkMode, ReviewStore, Verdict
 
 MAX_BODY_BYTES = 1 << 20
 CERT_VALIDITY = datetime.timedelta(days=30)
@@ -43,9 +48,10 @@ class BadRequest(Exception):
 @dataclass(frozen=True)
 class MarkRequest:
     keys: list[str]
-    batch: str
     status: Verdict
     pass_number: int
+    reviewer: str
+    mode: MarkMode
 
 
 def parse_pass(raw: str | None) -> int:
@@ -58,32 +64,29 @@ def parse_pass(raw: str | None) -> int:
     return value
 
 
-def parse_mark(body: bytes, known_keys: frozenset[str], known_batches: frozenset[str]) -> MarkRequest:
+def parse_mark(body: bytes, known_keys: frozenset[str]) -> MarkRequest:
     try:
         data = json.loads(body)
     except (ValueError, RecursionError) as e:
         raise BadRequest("invalid JSON") from e
     if not isinstance(data, dict):
         raise BadRequest("body must be an object")
-    keys, batch, status, pass_number = (data.get(k) for k in ("keys", "batch", "status", "pass"))
+    keys, status, pass_number, reviewer, mode = (data.get(k) for k in ("keys", "status", "pass", "reviewer", "mode"))
     if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
         raise BadRequest("keys must be a non-empty list of strings")
     if not all(k in known_keys for k in keys):
         raise BadRequest("unknown key")
-    if not isinstance(batch, str) or batch not in known_batches:
-        raise BadRequest("unknown batch")
     if status not in get_args(Verdict):
         raise BadRequest("status must be CLEAN or DIRTY")
     if not isinstance(pass_number, int) or isinstance(pass_number, bool) or pass_number < 1:
         raise BadRequest("pass must be an integer >= 1")
-    return MarkRequest(keys=keys, batch=batch, status=status, pass_number=pass_number)
-
-
-def package_version() -> str:
     try:
-        return importlib.metadata.version("image-review")
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
+        reviewer = parse_reviewer(reviewer)
+    except ValueError as e:
+        raise BadRequest(str(e)) from e
+    if mode not in get_args(MarkMode):
+        raise BadRequest("mode must be single or grid")
+    return MarkRequest(keys=keys, status=status, pass_number=pass_number, reviewer=reviewer, mode=mode)
 
 
 def generate_cert(host: str) -> tuple[x509.Certificate, bytes]:
@@ -144,7 +147,6 @@ class ReviewServer(ThreadingHTTPServer):
         self.store_lock = threading.Lock()
         rows = store.manifest()
         self.known_keys = frozenset(r.key for r in rows)
-        self.known_batches = frozenset(r.batch for r in rows)
 
     def handle_error(self, request, client_address) -> None:
         print(f"connection error: {sys.exc_info()[0].__name__}", file=sys.stderr)
@@ -237,7 +239,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if is_mark:
             req = self._read_mark()
             with lock:
-                changed = store.mark(req.keys, req.batch, req.status, req.pass_number)
+                changed = store.mark(req.keys, req.status, req.pass_number, reviewer=req.reviewer, mode=req.mode)
             return json_reply(changed)
         return Reply(404, close=True)
 
@@ -259,7 +261,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             length = -1
         if not 0 <= length <= MAX_BODY_BYTES:
             raise BadRequest("missing, repeated or oversized Content-Length")
-        return parse_mark(self.rfile.read(length), self.server.known_keys, self.server.known_batches)
+        return parse_mark(self.rfile.read(length), self.server.known_keys)
 
     def do_GET(self) -> None:
         self._handle("GET")

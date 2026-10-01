@@ -15,7 +15,14 @@ from typing import Self, get_args
 from urllib.parse import urlencode
 
 from .connection import API_VERSION, RemoteTarget, cert_fingerprint
-from .store import ManifestRow, SkippedCounts, Status, StoreUnavailable, Verdict
+from .store import (
+    ManifestRow,
+    MarkMode,
+    SkippedCounts,
+    Status,
+    StoreUnavailable,
+    Verdict,
+)
 
 TIMEOUT_SECONDS = 30
 MAX_WORKERS = 8
@@ -227,8 +234,8 @@ class RemoteStore:
     def statuses(self, pass_number: int) -> dict[str, Status]:
         return parse_statuses(self._get(f"/statuses?{urlencode({'pass': pass_number})}"))
 
-    def mark(self, keys: list[str], batch: str, status: Verdict, pass_number: int) -> dict[str, Status]:
-        body = json.dumps({"keys": keys, "batch": batch, "status": status, "pass": pass_number}).encode()
+    def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
+        body = json.dumps({"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}).encode()
         code, data = self._request("POST", "/mark", body)
         if code != 200:
             raise RemoteError(f"server returned HTTP {code}", code)

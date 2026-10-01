@@ -19,7 +19,7 @@ from click.testing import CliRunner
 from fixtures import ROWS, make_work_dir, start_server
 
 from image_review.cli import cli
-from image_review.connection import RemoteTarget
+from image_review.connection import RemoteTarget, package_version
 from image_review.controller import ReviewSession, UIState
 from image_review.remote import (
     ApiMismatch,
@@ -91,18 +91,27 @@ class TestRoundTrips(RemoteTestCase):
                 self.store.image_bytes(key)
 
     def test_mark_equals_local(self):
-        changed = self.store.mark([KEYS[0], KEYS[1]], "batch_001", "CLEAN", 1)
+        changed = self.store.mark([KEYS[0], KEYS[1]], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertEqual(changed, {KEYS[0]: "CLEAN", KEYS[1]: "CLEAN"})
-        self.store.mark([KEYS[2]], "batch_002", "DIRTY", 1)
+        self.store.mark([KEYS[2]], "DIRTY", 1, reviewer="tester", mode="single")
         local = self.local_copy()
         self.assertEqual(self.store.statuses(1), local.statuses(1))
         self.assertEqual(local.statuses(1)[KEYS[2]], "DIRTY")
         self.assertEqual(self.store.statuses(2)[KEYS[2]], "FLAGGED")
         self.assertEqual(self.store.statuses(2), local.statuses(2))
 
+    def test_mark_writes_audit_columns_on_server(self):
+        self.store.mark([KEYS[1], KEYS[2]], "DIRTY", 1, reviewer="Dr. Lee", mode="grid")
+        with open(self.work_dir / "review.tsv", newline="") as f:
+            rows = list(csv.DictReader(f, delimiter="\t"))
+        self.assertEqual(
+            [(r["image_id"], r["batch"], r["reviewer"], r["mode"], r["grid_size"], r["tool_version"]) for r in rows],
+            [(ROWS[i][2], ROWS[i][0], "Dr. Lee", "grid", "2", package_version()) for i in (1, 2)],
+        )
+
     def test_bad_mark_is_remote_error(self):
         with self.assertRaises(RemoteError):
-            self.store.mark(["nope"], "batch_001", "CLEAN", 1)
+            self.store.mark(["nope"], "CLEAN", 1, reviewer="tester", mode="single")
 
     def test_wrong_token_is_remote_error_without_token(self):
         bad = RemoteStore(dataclasses.replace(self.target, token="wrong_token_value"))
@@ -163,7 +172,7 @@ class TestReconnect(RemoteTestCase):
 
             with mock.patch.object(PinnedHTTPSConnection, "connect", counting_connect):
                 self.assertEqual(self.store.current_pass(), 1)
-                self.assertEqual(self.store.mark([KEYS[0]], "batch_001", "CLEAN", 1)[KEYS[0]], "CLEAN")
+                self.assertEqual(self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")[KEYS[0]], "CLEAN")
             self.assertEqual(len(connects), 1)
 
     def test_second_failure_is_not_retried_again(self):
@@ -281,8 +290,8 @@ class TestCli(RemoteTestCase):
         return CliRunner().invoke(cli, list(args), **kwargs)
 
     def test_status_identical_to_local(self):
-        self.store.mark([KEYS[0]], "batch_001", "CLEAN", 1)
-        self.store.mark([KEYS[2]], "batch_002", "DIRTY", 1)
+        self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")
+        self.store.mark([KEYS[2]], "DIRTY", 1, reviewer="tester", mode="single")
         remote = self.invoke("status", "--remote", self.target.to_uri())
         local = self.invoke("status", "--work-dir", str(self.work_dir))
         self.assertEqual(remote.exit_code, 0, remote.output)
@@ -290,9 +299,9 @@ class TestCli(RemoteTestCase):
         self.assertEqual(remote.stdout, local.stdout)
 
     def test_status_flagged_identical_to_local(self):
-        self.store.mark([KEYS[0]], "batch_001", "DIRTY", 1)
-        self.store.mark([KEYS[1]], "batch_001", "CLEAN", 1)
-        self.store.mark([KEYS[2], KEYS[3]], "batch_002", "CLEAN", 1)
+        self.store.mark([KEYS[0]], "DIRTY", 1, reviewer="tester", mode="single")
+        self.store.mark([KEYS[1]], "CLEAN", 1, reviewer="tester", mode="single")
+        self.store.mark([KEYS[2], KEYS[3]], "CLEAN", 1, reviewer="tester", mode="single")
         remote = self.invoke("status", "--remote", self.target.to_uri())
         local = self.invoke("status", "--work-dir", str(self.work_dir))
         self.assertEqual(remote.exit_code, 0, remote.output)
@@ -324,10 +333,10 @@ class TestCli(RemoteTestCase):
         self.assertNotIn("Traceback", result.output)
 
     def test_api_mismatch_message(self):
-        with mock.patch("image_review.remote.API_VERSION", 4):
+        with mock.patch("image_review.remote.API_VERSION", 5):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("server speaks API v3, this client v4; install the same image-review version on both machines", result.output)
+        self.assertIn("server speaks API v4, this client v5; install the same image-review version on both machines", result.output)
         self.assertNotIn(self.target.token, result.output)
 
     def test_server_without_version_endpoint(self):
@@ -345,7 +354,7 @@ class TestCli(RemoteTestCase):
 
     def test_check_api(self):
         self.store.check_api()
-        with mock.patch("image_review.remote.API_VERSION", 4), self.assertRaises(ApiMismatch):
+        with mock.patch("image_review.remote.API_VERSION", 5), self.assertRaises(ApiMismatch):
             self.store.check_api()
 
     def test_status_envvar(self):
@@ -419,24 +428,30 @@ class TestSession(RemoteTestCase):
         with open(self.work_dir / "review.tsv", newline="") as f:
             return {r["image_id"] for r in csv.DictReader(f, delimiter="\t")}
 
+    def recorded_audit(self) -> set[tuple[str, str]]:
+        with open(self.work_dir / "review.tsv", newline="") as f:
+            return {(r["reviewer"], r["mode"]) for r in csv.DictReader(f, delimiter="\t")}
+
     def test_grid_mode_marks_on_server(self):
-        s = ReviewSession(self.store, mode="grid")
+        s = ReviewSession(self.store, reviewer="tester", mode="grid")
         s._cursor = 0
         keys = s._items[0]["keys"]
         self.assertTrue(keys)
         s._mark("CLEAN")
         self.assertEqual({s._statuses[k] for k in keys}, {"CLEAN"})
         self.assertEqual(len(self.reviewed_ids()), len(keys))
+        self.assertEqual(self.recorded_audit(), {("tester", "grid")})
         self.assertEqual(self.local_copy().statuses(1), s.store.statuses(1))
 
     def test_single_mode_marks_on_server(self):
-        s = ReviewSession(self.store, mode="single")
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
         s._cursor = 0
         s._show_current()
         key = s._items[0].key
         s._mark("DIRTY")
         self.assertEqual(s._statuses[key], "DIRTY")
         self.assertEqual(self.local_copy().statuses(1)[key], "DIRTY")
+        self.assertEqual(self.recorded_audit(), {("tester", "single")})
 
     def assert_no_repaint(self, s: ReviewSession):
         """The outage message stays: the loop's next refresh does not paint over it."""
@@ -449,7 +464,7 @@ class TestSession(RemoteTestCase):
         self.store._local.conn.close()  # the handler thread would otherwise keep serving it
 
     def test_server_lost_during_mark(self):
-        s = ReviewSession(self.store, mode="single")
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
         s._cursor = 0
         before = dict(s._statuses)
         todo = s._todo_count
@@ -461,7 +476,7 @@ class TestSession(RemoteTestCase):
         self.assertFalse((self.work_dir / "review.tsv").exists() and self.reviewed_ids())
 
     def test_server_lost_during_load(self):
-        s = ReviewSession(self.store, mode="single")
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
         self.lose_server()
         with redirect_stderr(io.StringIO()) as err:
             s.next_image()
@@ -471,7 +486,7 @@ class TestSession(RemoteTestCase):
         self.assertIn("Lost connection to server", err.getvalue())
 
     def test_no_refresh_after_outage_on_first_fetch_after_splash(self):
-        s = ReviewSession(self.store, mode="single")
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
         s._show_splash()
         self.lose_server()
         with redirect_stderr(io.StringIO()):
@@ -480,7 +495,7 @@ class TestSession(RemoteTestCase):
         self.assert_no_repaint(s)
 
     def test_no_refresh_after_outage_when_statuses_fail_on_mode_switch(self):
-        s = ReviewSession(self.store, mode="single")
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
         self.lose_server()
         with redirect_stderr(io.StringIO()):
             s._switch_to_grid(True)
@@ -488,7 +503,7 @@ class TestSession(RemoteTestCase):
         self.assert_no_repaint(s)
 
     def test_no_refresh_after_outage_when_grid_fetch_fails_on_mode_switch(self):
-        s = ReviewSession(self.store, mode="single")
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
         with (
             mock.patch.object(self.store, "image_bytes_many", side_effect=RemoteError("down")),
             redirect_stderr(io.StringIO()),

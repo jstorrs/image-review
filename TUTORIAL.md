@@ -211,6 +211,7 @@ image-review review [options]
 | `--batch` | first batch with images matching the filter | Restrict review to a specific batch (e.g., `batch_001`); an unknown or empty name is rejected with the list of known batches |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
 | `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images for tighter grid packing |
+| `--reviewer` | your login name | Name recorded with each verdict in `review.tsv`, 1-64 printable characters, not all spaces (also `$IMAGE_REVIEW_REVIEWER`). An unauthenticated claim: it is recorded as given, not verified |
 | `--work-dir` | `./review_work` | Work directory from preprocessing |
 | `--remote` | -- | Review a server started with `image-review serve` instead (also `$IMAGE_REVIEW_REMOTE`); see [Reviewing on an HPC Cluster](#reviewing-on-an-hpc-cluster) |
 | `--via` | -- | With `--remote`: reach the server through an SSH tunnel via this login node (also `$IMAGE_REVIEW_VIA`) |
@@ -583,13 +584,27 @@ All state lives in the work directory (default `./review_work`):
 |------|--------|-------------|
 | `manifest.tsv` | TSV | Master image list (batch, preprocessed_path, image_id) |
 | `skipped.tsv` | TSV | Inputs that produced no image (image_id, kind, reason) |
-| `review.tsv` | TSV | Review decisions (image_id, batch, status, pass, timestamp) |
+| `review.tsv` | TSV | Review decisions (image_id, batch, status, pass_number, timestamp, reviewer, mode, grid_size, tool_version) |
 | `batch_NNN/img_NNNNN.jpg` | JPG | Preprocessed individual images |
 
 `review.tsv` is an append-only log: every rating action appends a line per
 image and syncs it to disk, and when an image appears more than once its last
-line wins. It is safe to kill the process at any time; a line cut short by a
-crash is skipped with a warning and dropped on the next rating.
+line wins. It is safe to kill the process at any time. A last line cut short by
+a crash is skipped with a warning and dropped on the next rating, unless all
+of its fields made it to disk: then it is kept, and only its last field
+(`tool_version`, or `timestamp` in an old five-column file) may be cut short
+or empty.
+
+Each line also records who rated and how: `reviewer` (the `--reviewer` name,
+the client's own unverified claim), `mode` (`single` or `grid`), `grid_size`
+(how many images one keypress rated; 1 in single mode) and `tool_version` (the
+image-review version that wrote it). A `review.tsv` written by an older
+version has only the first five columns; `review` or `serve` upgrades it once,
+leaving the new columns empty for the old lines, while `status` reads it as is.
+Older image-review versions cannot read the upgraded file, so upgrade everyone
+sharing a work directory together. If the upgrade is interrupted, a
+`.review.tsv.*.tmp` file may be left in the work directory: the tool ignores
+it, but it contains source paths, so delete it.
 
 ## Tips
 

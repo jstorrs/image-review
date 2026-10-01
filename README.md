@@ -136,6 +136,7 @@ shown.
 image-review review [--mode {single,grid}]            [--pass N]
                     [--batch BATCH_ID]                 [--work-dir DIR]
                     [--filter {unreviewed,clean,all}]  [--rotate/--no-rotate]
+                    [--reviewer NAME]
                     [--remote CONNECTION_STRING [--via DESTINATION]]
 ```
 
@@ -169,6 +170,19 @@ verdict). Grids are built without DIRTY or FLAGGED images.
 `--pass` must be 1 or more. `--batch` defaults to the first batch with images
 matching the filter; an empty or unknown batch name is rejected (exit 2) with a
 list of known batches.
+
+Every verdict is saved to `review.tsv` in the work directory with who gave it
+and how: the columns are `image_id`, `batch`, `status`, `pass_number`,
+`timestamp`, `reviewer`, `mode` (`single` or `grid`), `grid_size` (how many
+images the one keypress covered) and `tool_version`. `--reviewer NAME` (or
+`$IMAGE_REVIEW_REVIEWER`) sets the reviewer name, by default your login name;
+it must be 1-64 printable characters, not all spaces (no tabs or newlines),
+else the command exits 2. The name is an unauthenticated claim made by the client, recorded as
+given; nothing verifies it, also with `--remote`. A `review.tsv` from an older
+version (five columns) is upgraded in place the first time `review` or `serve`
+opens it, with the new columns left empty for its existing rows. Older
+image-review versions cannot read the upgraded file, so everyone sharing a
+work directory should upgrade together.
 
 Xbox-style controllers are also supported (see help screen for mappings).
 

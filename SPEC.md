@@ -26,7 +26,7 @@ cli.py              Command-line entry point, argument parsing
 preprocess.py       DICOM/image loading and normalization
 store.py            ReviewStore Protocol, LocalStore, pure filter/summary functions
 server.py           HTTPS + bearer-token server exposing a ReviewStore
-connection.py       RemoteTarget: the ir:// connection string
+connection.py       RemoteTarget: the ir:// connection string; API_VERSION, package_version, parse_reviewer
 remote.py           RemoteStore: ReviewStore client with certificate pinning
 tunnel.py           SSH local port-forward for --via
 controller.py       Review session orchestration and event loop
@@ -122,7 +122,9 @@ work directory (`group` if the group bits are rwx, else
 `os.open(O_APPEND | O_CREAT, file_mode)` and, when the file is new or empty and
 its mode differs from that policy's `file_mode` (the umask may have narrowed
 it), `fchmod`s it, so a new `review.tsv` is 0600 in a private and 0660 in a
-group work directory. An existing, non-empty file keeps whatever mode it has.
+group work directory. An existing, non-empty file keeps whatever mode it has,
+except that migrating an old-header file (see *`review.tsv`*) writes the new
+file with the policy's `file_mode`.
 `review`, `serve` and local `status` call `world_access_warning`: if the work
 directory or `manifest.tsv` has any other bit, they print
 `warning: <path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
@@ -304,6 +306,7 @@ after writing everything.
 image-review review [--mode {single,grid}]            [--pass N]
                     [--batch BATCH_ID]                 [--work-dir DIR]
                     [--filter {unreviewed,clean,all}]  [--rotate/--no-rotate]
+                    [--reviewer NAME]
                     [--remote CONNECTION_STRING [--via DESTINATION]]
 ```
 
@@ -314,6 +317,7 @@ image-review review [--mode {single,grid}]            [--pass N]
 | `--batch` | first batch with images matching the filter | Restrict to a named batch (e.g. `batch_001`); an empty or unknown name exits 2 listing up to 5 known batches |
 | `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
 | `--rotate/--no-rotate` | `--rotate` | Allow rectpack to rotate images 90° for tighter grid packing |
+| `--reviewer` | `getpass.getuser()` at run time | Name recorded in the `reviewer` column of every verdict; also read from `$IMAGE_REVIEW_REVIEWER`. Checked by `connection.parse_reviewer` (1-64 characters, all `str.isprintable()`, so no tab, newline or other control character, and not all whitespace); a bad value, or no login name to default to, exits 2. It is the client's unauthenticated claim, recorded as given |
 | `--work-dir` | `./review_work` | Work directory from preprocessing (local review) |
 | `--remote` | (none) | `ir://` connection string of an `image-review serve` process; also read from `$IMAGE_REVIEW_REMOTE` |
 | `--via` | (none) | SSH destination of a login node to tunnel through; requires `--remote`; also read from `$IMAGE_REVIEW_VIA` |
@@ -449,9 +453,10 @@ naming the holder; see *Concurrency limits*.
 
 An append-only log written by `ReviewDB`. Each mark action encodes its rows
 into one buffer and writes it to a file opened `O_APPEND`, looping until a short
-`write` has written it all, then `fsync`s. The file's inode never changes, and
-neither do earlier bytes, with one exception: a torn tail (see below) is cut off
-before the next append. A crash mid-write can therefore record only some rows
+`write` has written it all, then `fsync`s. Appends never change earlier bytes
+or the inode, with two exceptions: a torn tail (see below) is cut off before
+the next append, and an old five-column file is migrated once (see below),
+which replaces the file with a new inode. A crash mid-write can therefore record only some rows
 of a multi-image mark. A new or empty file gets the header first and is
 `fchmod`ed (if needed) to the file mode of the work directory's access policy
 (0600 private, 0660 group). Lines end in `\r\n` (Python `csv`'s default, as the file has
@@ -464,12 +469,19 @@ always used); the reader accepts `\n` too.
 | `status` | `CLEAN` or `DIRTY` |
 | `pass_number` | Integer pass (at least 1) in which this decision was made |
 | `timestamp` | ISO 8601 UTC timestamp |
+| `reviewer` | Who gave the verdict, as the client claims it (`review --reviewer`, default the login name); unauthenticated, recorded as given. Empty in migrated rows (and, in an old five-column file, absent) |
+| `mode` | `single` or `grid` (`review_db.MarkMode`): the display mode the verdict was given in. Empty in migrated rows |
+| `grid_size` | Integer >= 1: how many keys the one verdict covered (1 in single mode). Empty in migrated rows |
+| `tool_version` | `image-review` package version of the writing process (`connection.package_version()`, resolved once per process; `unknown` if not installed). Empty in migrated rows, and possibly cut short or empty in a kept torn last row (see below) |
 
 An `image_id` may repeat; its last row wins. Files written before the log format
 (one row per `image_id`) are already valid logs. The file is parsed strictly:
-it must be UTF-8, the header must be exactly these five columns, and every row
-must have five fields, a `status` of `CLEAN` or `DIRTY`, an integer
-`pass_number` of at least 1, and a non-empty `image_id`. A bad file stops the
+it must be UTF-8, the header must be exactly these nine columns or the old first
+five, every row must have as many fields as the header, a `status` of `CLEAN` or
+`DIRTY`, an integer `pass_number` of at least 1, a non-empty `image_id`, a
+`mode` of `single`, `grid` or empty, and a `grid_size` that is empty or an
+integer of at least 1 (`reviewer` and `tool_version` are free text, possibly
+empty). A bad file stops the
 tool with `Cannot read work directory: <file>:<line>: <problem>` instead of
 being skipped or rewritten, so a hand edit cannot silently lose decisions.
 
@@ -485,9 +497,33 @@ possible, else by the next mark. A read-only store warns but never writes.
 
 A last line with no line ending that does parse is kept; the next mark first
 writes its missing line ending (`\n` after a bare `\r`, else `\r\n`). Such a
-row's `timestamp` may be cut short (it is not validated), but its `status` and
-`pass_number` are complete. A bad line anywhere else, or a bad last line that
+row's last field may be cut short or empty, since it is not validated:
+`timestamp` in an old five-column file, `tool_version` in a current one. Its
+other fields (`status`, `pass_number` and, in a current file, `reviewer`,
+`mode` and `grid_size`) are complete, since they parsed. A bad line anywhere else, or a bad last line that
 is terminated, is still an error.
+
+**Migration.** A file with the old five-column header (`image_id`, `batch`,
+`status`, `pass_number`, `timestamp`) still loads, for readers too (`status`,
+read-only stores), and is never rewritten by them. A writable `LocalStore`
+calls `ReviewDB.migrate()` after taking the work dir lock: it writes every
+loaded row, in order, under the new header with the four new columns empty, to
+a temp file `.review.tsv.*.tmp` in the work directory (`mkstemp`, then
+`fchmod` to the policy's `file_mode`), `fsync`s it, and `os.replace`s it over
+`review.tsv`, then `fsync`s the directory (ignoring only `EINVAL`, `ENOTSUP`/
+`EOPNOTSUPP` and `EBADF`, where a filesystem cannot sync directories). If
+writing or renaming fails, the temp file is removed and the old file is left
+as it was; a `LocalStore` open then fails and releases the lock (the CLI shows
+`Cannot update work directory: ...` for a `changed since it was loaded`). This happens once: the result has the new
+header, so later opens leave it alone. A torn tail of the old file is not
+copied (it was never loaded). Migration refuses (`changed since it was loaded`)
+if the file's inode or size changed since the load. `ReviewDB` refuses to
+append to an old-header file that was not migrated, so the file never mixes
+five- and nine-field rows.
+
+Compatibility: image-review versions before this format cannot read a migrated
+(nine-column) `review.tsv`; teammates sharing a group work directory must all
+upgrade before any of them opens it with `review` or `serve`.
 
 Only images that have been explicitly marked appear in `review.tsv`. An image
 absent from `review.tsv` is implicitly `UNREVIEWED`. `FLAGGED` is derived when
@@ -526,7 +562,7 @@ image preprocessed more than once); they share a review status.
 | `image_bytes(key) -> bytes` | JPG bytes; `KeyError` for an unknown key |
 | `image_bytes_many(keys) -> dict[str, bytes]` | Bytes for the keys that loaded; missing or unloadable keys are omitted with a stderr warning |
 | `statuses(pass_number) -> dict[str, Status]` | Pass-aware status of every manifest key |
-| `mark(keys, batch, status, pass_number) -> dict[str, Status]` | Record a verdict; returns the new status of every key affected, including keys that share an `image_id` with a marked key |
+| `mark(keys, status, pass_number, *, reviewer, mode) -> dict[str, Status]` | Record a verdict given by `reviewer` (an unauthenticated claim) in `mode` (`single` or `grid`); returns the new status of every key affected, including keys that share an `image_id` with a marked key |
 | `current_pass() -> int` | Auto-detected pass number |
 | `close()`, `__enter__`, `__exit__` | Release what the store holds (`RemoteStore`: pool and connections; `LocalStore`: the work dir lock); idempotent. Stores are context managers that close on exit |
 | `skipped() -> SkippedCounts \| None` | Counts of `failed` and `ignored` rows in preprocess's `skipped.tsv` (frozen `SkippedCounts(failed, ignored)`); `None` if the file is absent; `ValueError` naming `file:line` if it is malformed |
@@ -535,11 +571,12 @@ image preprocessed more than once); they share a review status.
 
 Loads `manifest.tsv` (written once by `preprocess`, so before locking); a
 writable store then takes the work dir lock (see *Concurrency limits*) and
-loads a `ReviewDB`, releasing the lock if that fails. `close()` releases it. A `read_only` store takes no lock and its
+loads a `ReviewDB` and calls its `migrate()` (see *`review.tsv`*), releasing the lock if either fails. `close()` releases it. A `read_only` store takes no lock and its
 `mark` raises `PermissionError` (as does `mark` after `close()`). `image_bytes` reads the file via
 `safe_path`; `image_bytes_many` loops over it, catching `KeyError`,
-`ValueError` (path escape) and `OSError`. `mark` translates keys to
-`image_id`s and calls `ReviewDB.mark_many`. `statuses` and `current_pass`
+`ValueError` (path escape) and `OSError`. `mark` translates each key to its
+`image_id` and its own manifest batch (a grid's keys need not share one) and
+calls `ReviewDB.mark_many`, so `grid_size` is the number of keys. `statuses` and `current_pass`
 delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
 `skipped.tsv` strictly (header `image_id`, `kind`, `reason`; `kind` is `failed`
 or `ignored`) and returns only the counts.
@@ -557,7 +594,9 @@ or `ignored`) and returns only the counts.
 
 ### Initialization
 
-`ReviewSession(store, mode, pass_number, batch, status_filter, allow_rotation)`:
+`ReviewSession(store, reviewer, mode, pass_number, batch, status_filter, allow_rotation)`:
+`reviewer` comes from `review --reviewer` (already checked) and is passed, with
+the session's current display mode, to every `store.mark()`.
 
 1. Fetch `store.manifest()` (a list of `ManifestRow`)
 2. Determine the pass: `store.current_pass()` if not specified. The store's
@@ -781,14 +820,18 @@ Used only through `LocalStore`, which is the one place that maps keys to
 `fsync`s, and only then updates the in-memory dict; a failed append leaves the
 dict unchanged and its partial bytes are cut off. Loading folds the log (last row per `image_id` wins). Safe to kill the
 process at any point: a torn append is ignored on load and dropped by the next mark (see
-*`review.tsv`*).
+*`review.tsv`*). A kill during migration leaves `review.tsv` either old or
+migrated, but may leave a `.review.tsv.*.tmp` behind; it is ignored by the
+tool and harmless to it, but it holds `image_id`s (source paths), so delete it
+by hand.
 
 ### Key Methods
 
 | Method | Description |
 |--------|-------------|
-| `mark(image_id, batch, status, pass_number)` | Record a single review decision |
-| `mark_many(image_ids, batch, status, pass_number)` | Record decisions for multiple images (same timestamp) |
+| `mark(image_id, batch, status, pass_number, *, reviewer, mode)` | Record a single review decision |
+| `mark_many(targets, status, pass_number, *, reviewer, mode)` | Record one verdict on every `(image_id, batch)` in `targets` (same timestamp; `grid_size` = `len(targets)`; `tool_version` = `package_version()`) |
+| `migrate()` | Rewrite an old five-column file with the current header, once (see *`review.tsv`*); no-op otherwise |
 | `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*) |
 | `current_pass(image_ids) -> int` | Auto-detect pass number |
 
@@ -874,13 +917,15 @@ the boundary (`parse_pass`, `parse_mark`).
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`), or `null` if the work dir has no `skipped.tsv`. Only counts are sent, never `image_id`s or reasons (which contain source paths) |
-| `POST /mark` | Body `{"keys": [str, ...], "batch": str, "status": "CLEAN"\|"DIRTY", "pass": N}`; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
+| `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
 
 Only keys and skip counts appear on the wire; original `image_id`s never do.
 
-**API version rule.** `connection.API_VERSION` (an integer, currently 3; v2 added `GET /skipped`;
+**API version rule.** `connection.API_VERSION` (an integer, currently 4; v2 added `GET /skipped`;
 v3 added `FLAGGED` to the `Status` vocabulary, which `/statuses` responses
-may contain; `/mark` responses hold only the verdict just recorded) is
+may contain; `/mark` responses hold only the verdict just recorded; v4 dropped
+`batch` from the `/mark` body, the server taking each key's batch from the
+manifest, and added `reviewer` and `mode`) is
 shared by client and server. Any change to request or response shapes, or to
 the `Status` vocabulary, must bump it. Client and server are installed
 separately, so skew is expected and must fail clearly rather than as a
@@ -890,7 +935,7 @@ malformed reply or a 404.
 
 | Status | Cause |
 |--------|-------|
-| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark`; `/image` without exactly one `key`; invalid `pass`; `/mark` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, empty or non-string `keys`, an unknown key or batch, a status other than CLEAN/DIRTY |
+| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark`; `/image` without exactly one `key`; invalid `pass`; `/mark` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a missing or invalid `reviewer`, a `mode` other than single/grid |
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 500 | Any unexpected store failure; only the exception class name is logged |

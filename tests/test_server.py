@@ -165,7 +165,7 @@ class TestConnectionHandling(ServerTestCase):
 
     def test_handler_failure_is_500_and_server_survives(self):
         err = io.StringIO()
-        body = json.dumps({"keys": ["batch_001/a.jpg"], "batch": "batch_001", "status": "CLEAN", "pass": 1}).encode()
+        body = json.dumps({"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}).encode()
         with (
             contextlib.redirect_stderr(err),
             mock.patch.object(self.server.store, "mark", side_effect=OSError("secret-detail")),
@@ -466,9 +466,9 @@ class TestReads(ServerTestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
 
-    def test_api_version_is_3(self):
-        self.assertEqual(API_VERSION, 3)
-        self.assertEqual(self.get_json("/version")["api"], 3)
+    def test_api_version_is_4(self):
+        self.assertEqual(API_VERSION, 4)
+        self.assertEqual(self.get_json("/version")["api"], 4)
 
     def test_skipped_absent_is_null(self):
         resp, data, _ = self.request("GET", "/skipped")
@@ -500,7 +500,7 @@ class TestReads(ServerTestCase):
 class TestMark(ServerTestCase):
     def test_mark_round_trip(self):
         resp, data = self.post_mark(
-            {"keys": ["batch_001/a.jpg", "batch_001/b.jpg"], "batch": "batch_001", "status": "CLEAN", "pass": 1}
+            {"keys": ["batch_001/a.jpg", "batch_001/b.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
         )
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"batch_001/a.jpg": "CLEAN", "batch_001/b.jpg": "CLEAN"})
@@ -511,12 +511,18 @@ class TestMark(ServerTestCase):
             stored = {r["image_id"] for r in csv.DictReader(f, delimiter="\t")}
         self.assertEqual(stored, {"/src/patient_smith/a.dcm", "/src/patient_jones/b.dcm"})
 
+    def test_reviewer_at_limits_is_accepted(self):
+        for reviewer in ("r", "r" * 64, "Dr. Émilie O'Neil"):
+            with self.subTest(reviewer=reviewer):
+                resp, _ = self.post_mark({"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": reviewer, "mode": "grid"})
+                self.assertEqual(resp.status, 200)
+
     def test_prior_pass_dirty_is_flagged(self):
-        self.post_mark({"keys": ["batch_001/a.jpg"], "batch": "batch_001", "status": "DIRTY", "pass": 1})
+        self.post_mark({"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"})
         self.assertEqual(self.get_json("/statuses?pass=2")["batch_001/a.jpg"], "FLAGGED")
 
     def test_bad_bodies_are_400(self):
-        good = {"keys": ["batch_001/a.jpg"], "batch": "batch_001", "status": "DIRTY", "pass": 1}
+        good = {"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": 1, "reviewer": "tester", "mode": "single"}
         bad = {
             "status UNREVIEWED": {**good, "status": "UNREVIEWED"},
             "status FLAGGED": {**good, "status": "FLAGGED"},
@@ -524,7 +530,17 @@ class TestMark(ServerTestCase):
             "empty keys": {**good, "keys": []},
             "non-str key": {**good, "keys": [1]},
             "unknown key": {**good, "keys": ["batch_001/zzz.jpg"]},
-            "unknown batch": {**good, "batch": "x\ty"},
+            "reviewer with tab": {**good, "reviewer": "a\tb"},
+            "reviewer with newline": {**good, "reviewer": "a\nb"},
+            "reviewer with control char": {**good, "reviewer": "a\x1bb"},
+            "reviewer empty": {**good, "reviewer": ""},
+            "reviewer only spaces": {**good, "reviewer": "  "},
+            "reviewer too long": {**good, "reviewer": "r" * 65},
+            "reviewer not a string": {**good, "reviewer": 7},
+            "missing reviewer": {k: v for k, v in good.items() if k != "reviewer"},
+            "bad mode": {**good, "mode": "undo"},
+            "mode not a string": {**good, "mode": 1},
+            "missing mode": {k: v for k, v in good.items() if k != "mode"},
             "pass not int": {**good, "pass": "1"},
             "pass bool": {**good, "pass": True},
             "pass zero": {**good, "pass": 0},

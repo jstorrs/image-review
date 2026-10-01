@@ -1,4 +1,6 @@
+import functools
 import hashlib
+import importlib.metadata
 import ipaddress
 import re
 from dataclasses import dataclass, field
@@ -6,12 +8,35 @@ from urllib.parse import parse_qsl, urlsplit
 
 # Wire API version, shared by client and server. Any change to request/response
 # shapes or to the Status vocabulary must bump it.
-API_VERSION = 3
+API_VERSION = 4
+
+MAX_REVIEWER_LENGTH = 64
 
 _FP_PATTERN = re.compile(r"sha256:([0-9a-f]{64})")
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 _LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
 _HOSTNAME_PATTERN = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
+
+
+@functools.cache  # resolved once: the running code's version, without a metadata scan per mark
+def package_version() -> str:
+    """This process's image-review version, or "unknown" when it is not installed as a package."""
+    try:
+        return importlib.metadata.version("image-review")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def parse_reviewer(value: object) -> str:
+    """A reviewer name: 1-64 printable characters (no tab, newline or other control character), not all spaces.
+
+    It is the client's own, unauthenticated claim, recorded as given. ValueError otherwise.
+    """
+    if not isinstance(value, str) or not 1 <= len(value) <= MAX_REVIEWER_LENGTH or not value.isprintable() or not value.strip():
+        raise ValueError(
+            f"reviewer must be 1-{MAX_REVIEWER_LENGTH} printable characters, not all spaces (no tabs, newlines or control characters)"
+        )
+    return value
 
 
 def cert_fingerprint(der: bytes) -> str:

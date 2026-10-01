@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Protocol, Self, get_args
 
 from .access import policy_of_dir
-from .review_db import ReviewDB
+from .review_db import MarkMode, ReviewDB
 from .status import TODO_STATUSES, Status, Verdict
 
-__all__ = ["TODO_STATUSES", "Status", "Verdict"]  # re-exported for callers that import them from here
+__all__ = ["TODO_STATUSES", "MarkMode", "Status", "Verdict"]  # re-exported for callers that import them from here
 
 
 @dataclass(frozen=True)
@@ -71,8 +71,11 @@ class ReviewStore(Protocol):
         """Key -> status for every manifest row."""
         ...
 
-    def mark(self, keys: list[str], batch: str, status: Verdict, pass_number: int) -> dict[str, Status]:
-        """Record a verdict; returns the new status of every key affected (incl. keys sharing an image_id)."""
+    def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
+        """Record a verdict on keys, given by `reviewer` (an unauthenticated claim) in `mode`.
+
+        Returns the new status of every key affected (incl. keys sharing an image_id).
+        """
         ...
 
     def current_pass(self) -> int: ...
@@ -367,6 +370,7 @@ class LocalStore:
         entries = load_manifest(work_dir)  # written once by preprocess; safe to read before locking
         self._rows = [ManifestRow(key=e.key, batch=e.batch) for e in entries]
         self._image_ids = {e.key: e.image_id for e in entries}
+        self._batches = {e.key: e.batch for e in entries}
         self._keys_by_image_id: dict[str, list[str]] = {}
         for key, iid in self._image_ids.items():
             self._keys_by_image_id.setdefault(iid, []).append(key)
@@ -374,6 +378,8 @@ class LocalStore:
         self._lock: LockHolder | None = None if read_only else acquire_lock(work_dir)
         try:
             self._db = ReviewDB(work_dir)
+            if not read_only:
+                self._db.migrate()  # under the lock: an old-header review.tsv gains the audit columns, once
         except BaseException:
             self.close()
             raise
@@ -409,12 +415,12 @@ class LocalStore:
     def statuses(self, pass_number: int) -> dict[str, Status]:
         return {key: self._db.get_status(iid, pass_number) for key, iid in self._image_ids.items()}
 
-    def mark(self, keys: list[str], batch: str, status: Verdict, pass_number: int) -> dict[str, Status]:
+    def mark(self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> dict[str, Status]:
         if self._lock is None:
             state = "opened read-only" if self.read_only else "closed"
             raise PermissionError(f"store for {self.work_dir} was {state}; cannot record verdicts")
         image_ids = [self._image_ids[key] for key in keys]
-        self._db.mark_many(image_ids, batch, status, pass_number)
+        self._db.mark_many([(self._image_ids[k], self._batches[k]) for k in keys], status, pass_number, reviewer=reviewer, mode=mode)
         return {
             k: self._db.get_status(iid, pass_number)
             for iid in dict.fromkeys(image_ids)

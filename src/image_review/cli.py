@@ -1,4 +1,5 @@
 import contextlib
+import getpass
 import ipaddress
 import signal
 import socket
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 import click
 
 from .access import world_access_warning
+from .connection import parse_reviewer
 from .store import LOCK_NAME, LocalStore, ReviewStore, WorkDirLocked
 
 if TYPE_CHECKING:
@@ -50,6 +52,8 @@ def open_local_store(path: Path, read_only: bool = False) -> LocalStore:
         raise click.ClickException(f"Cannot read work directory: {e}") from e
     except ValueError as e:
         raise click.ClickException(f"Cannot read work directory: {e}") from e
+    except RuntimeError as e:  # review.tsv changed under the lock while being migrated
+        raise click.ClickException(f"Cannot update work directory: {e}") from e
     warn_if_world_accessible(path)
     return store
 
@@ -237,6 +241,19 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
         )
 
 
+def _reviewer(ctx: click.Context, param: click.Parameter, value: str | None) -> str:
+    """--reviewer, else $IMAGE_REVIEW_REVIEWER, else the login name, checked like the server checks it."""
+    if value is None:
+        try:
+            value = getpass.getuser()
+        except (KeyError, OSError):  # no USER/LOGNAME and no passwd entry (some containers): KeyError <3.13, OSError >=3.13
+            raise click.BadParameter("cannot determine your user name; pass --reviewer NAME") from None
+    try:
+        return parse_reviewer(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from None
+
+
 def unknown_batch_message(batch: str, known: set[str]) -> str | None:
     """Why `batch` cannot be reviewed, or None when it names a batch in the manifest."""
     if batch in known:
@@ -252,10 +269,18 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
 @click.option("--batch", type=str, default=None, help="Restrict to a specific batch [default: the first batch with images matching the filter].")
 @click.option("--filter", "status_filter", type=click.Choice(["unreviewed", "clean", "all"]), default="unreviewed", show_default=True, help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).")
 @click.option("--rotate/--no-rotate", default=True, show_default=True, help="Allow rectpack to rotate images for tighter grid packing.")
+@click.option(
+    "--reviewer",
+    envvar="IMAGE_REVIEW_REVIEWER",
+    default=None,
+    callback=_reviewer,
+    help="Name recorded with each verdict in review.tsv, 1-64 printable characters, not all spaces [default: your login name]. "
+    "An unauthenticated claim: it is recorded as given, not verified. Also read from $IMAGE_REVIEW_REVIEWER.",
+)
 @work_dir_option
 @remote_option
 @via_option
-def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote, via):
+def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, remote, via):
     """Open an interactive review session for classifying images.
 
     \b
@@ -278,6 +303,7 @@ def review(mode, pass_number, batch, status_filter, rotate, work_dir, remote, vi
         try:
             session = ReviewSession(
                 store=store,
+                reviewer=reviewer,
                 mode=mode,
                 pass_number=pass_number,
                 batch=batch,

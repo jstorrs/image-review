@@ -1,19 +1,29 @@
 import contextlib
 import csv
+import errno
 import io
 import os
 import stat
 import sys
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import get_args
+from typing import Literal, get_args
 
 from .access import policy_of_dir
+from .connection import package_version, parse_reviewer
 from .status import TODO_STATUSES, Status, Verdict
 
-HEADER = ["image_id", "batch", "status", "pass_number", "timestamp"]
+HEADER = ["image_id", "batch", "status", "pass_number", "timestamp", "reviewer", "mode", "grid_size", "tool_version"]
+LEGACY_HEADER = HEADER[:5]  # before the audit columns; migrate() rewrites such a file with HEADER
+
+# fsync errors that only mean a directory cannot be synced on this filesystem
+DIR_FSYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF})
+
+# How a verdict was given: on one image, or on every image of a grid at once.
+MarkMode = Literal["single", "grid"]
 
 
 @dataclass(frozen=True)
@@ -23,13 +33,18 @@ class Decision:
     status: Verdict
     pass_number: int
     timestamp: str
+    reviewer: str  # the client's unauthenticated claim; "" in rows from before it was recorded
+    mode: MarkMode | Literal[""]  # "" in rows from before it was recorded
+    grid_size: int | None  # how many keys the verdict covered; None in rows from before it was recorded
+    tool_version: str  # image-review version that wrote the row; "" in rows from before it was recorded
 
 
-def parse_decision(path: Path, line: int, fields: list[str]) -> Decision:
+def parse_decision(path: Path, line: int, fields: list[str], header: list[str] = HEADER) -> Decision:
+    """One row of a review.tsv whose header is `header` (HEADER or LEGACY_HEADER); legacy rows get empty audit columns."""
     where = f"{path}:{line}"
-    if len(fields) != len(HEADER):
-        raise ValueError(f"{where}: expected {len(HEADER)} tab-separated fields ({', '.join(HEADER)}), got {len(fields)}")
-    image_id, batch, status, pass_text, timestamp = fields
+    if len(fields) != len(header):
+        raise ValueError(f"{where}: expected {len(header)} tab-separated fields ({', '.join(header)}), got {len(fields)}")
+    image_id, batch, status, pass_text, timestamp, reviewer, mode, size_text, tool_version = fields + [""] * (len(HEADER) - len(header))
     if not image_id:
         raise ValueError(f"{where}: image_id is empty")
     if status not in get_args(Verdict):
@@ -40,7 +55,18 @@ def parse_decision(path: Path, line: int, fields: list[str]) -> Decision:
         raise ValueError(f"{where}: pass_number must be an integer, got {pass_text!r}") from None
     if pass_number < 1:
         raise ValueError(f"{where}: pass_number must be at least 1, got {pass_number}")
-    return Decision(image_id, batch, status, pass_number, timestamp)  # type: ignore[arg-type]  # status checked above
+    if mode not in ("", *get_args(MarkMode)):
+        raise ValueError(f"{where}: mode must be one of {', '.join(get_args(MarkMode))} or empty, got {mode!r}")
+    grid_size = None
+    if size_text:
+        try:
+            grid_size = int(size_text)
+        except ValueError:
+            raise ValueError(f"{where}: grid_size must be an integer or empty, got {size_text!r}") from None
+        if grid_size < 1:
+            raise ValueError(f"{where}: grid_size must be at least 1, got {grid_size}")
+    # status and mode checked above
+    return Decision(image_id, batch, status, pass_number, timestamp, reviewer, mode, grid_size, tool_version)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -55,28 +81,49 @@ class PendingTruncate:
         return st.st_ino == self.ino and self.size in (None, st.st_size)
 
 
-def _header_line() -> str:
+@dataclass(frozen=True)
+class LegacyLog:
+    """A review.tsv with LEGACY_HEADER, as loaded: every row, and the file (inode, size) they came from."""
+
+    ino: int
+    size: int
+    decisions: list[Decision]
+
+
+def _format(header: bool, decisions: Iterable[Decision]) -> str:
     buf = io.StringIO()
-    csv.writer(buf, delimiter="\t").writerow(HEADER)
+    writer = csv.writer(buf, delimiter="\t")  # csv's default "\r\n" line ending, as review.tsv has always used
+    if header:
+        writer.writerow(HEADER)
+    writer.writerows(
+        [d.image_id, d.batch, d.status, d.pass_number, d.timestamp, d.reviewer, d.mode, "" if d.grid_size is None else d.grid_size, d.tool_version]
+        for d in decisions
+    )
     return buf.getvalue()
 
 
-def parse_log(path: Path, data: bytes) -> dict[str, Decision]:
-    """Fold review.tsv's bytes into the latest decision per image_id; an empty file holds none."""
+def parse_log(path: Path, data: bytes) -> tuple[list[Decision], bool]:
+    """Every decision in review.tsv's bytes, in file order, and whether the file has LEGACY_HEADER.
+
+    An empty file holds none and counts as current.
+    """
     if not data:
-        return {}  # created but the first append never landed
+        return [], False  # created but the first append never landed
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"{path}: not valid UTF-8 at byte {exc.start}") from None
     reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t")
-    if next(reader, None) != HEADER:
+    header = next(reader, None)
+    if header not in (HEADER, LEGACY_HEADER):
         raise ValueError(f"{path}:1: header must be {', '.join(HEADER)}")
-    rows: dict[str, Decision] = {}
-    for fields in reader:
-        decision = parse_decision(path, reader.line_num, fields)
-        rows[decision.image_id] = decision  # last row wins
-    return rows
+    decisions = [parse_decision(path, reader.line_num, fields, header) for fields in reader]
+    return decisions, header == LEGACY_HEADER
+
+
+def latest(decisions: Iterable[Decision]) -> dict[str, Decision]:
+    """The last decision per image_id."""
+    return {d.image_id: d for d in decisions}
 
 
 class ReviewDB:
@@ -87,6 +134,7 @@ class ReviewDB:
         self.review_path = work_dir / "review.tsv"
         self._rows: dict[str, Decision] = {}  # keyed by image_id; last row wins
         self._truncate: PendingTruncate | None = None  # a torn tail to drop before the next append
+        self._legacy: LegacyLog | None = None  # an old-header file; appends refuse until migrate()
         if self.review_path.exists():
             self._load()
 
@@ -95,23 +143,64 @@ class ReviewDB:
             st = os.fstat(f.fileno())
             data = f.read()
         try:
-            self._rows = parse_log(self.review_path, data)
+            decisions, legacy = parse_log(self.review_path, data)
         except ValueError as exc:
             end = max(data.rfind(b"\n"), data.rfind(b"\r")) + 1  # just past the last complete line; csv also ends lines at a bare \r
             if end == len(data):
                 raise
-            self._rows = parse_log(self.review_path, data[:end])  # raises if the problem is not only the last line
+            decisions, legacy = parse_log(self.review_path, data[:end])  # raises if the problem is not only the last line
             print(f"WARNING: ignoring the unfinished last line of {self.review_path} (an interrupted write): {exc}", file=sys.stderr)
             self._truncate = PendingTruncate(st.st_ino, len(data), end)
+        self._rows = latest(decisions)
+        if legacy:
+            self._legacy = LegacyLog(st.st_ino, len(data), decisions)
+
+    def migrate(self) -> None:
+        """Rewrite an old-header review.tsv with HEADER, every row kept and the new columns empty; else nothing.
+
+        Only for a writer holding the work dir lock. The new file is written and synced beside the old one, then
+        renamed over it, so readers see either file whole. A torn tail is dropped (it was never loaded).
+        """
+        if self._legacy is None:
+            return
+        legacy = self._legacy
+        st = os.stat(self.review_path)
+        if (st.st_ino, st.st_size) != (legacy.ino, legacy.size):
+            raise RuntimeError(f"{self.review_path} changed since it was loaded; not migrating it")
+        file_mode = policy_of_dir(self.work_dir).file_mode
+        fd, tmp = tempfile.mkstemp(dir=self.work_dir, prefix=".review.tsv.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                os.fchmod(f.fileno(), file_mode)  # mkstemp creates 0600; teammates may need group access
+                f.write(_format(True, legacy.decisions).encode("utf-8"))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.review_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+        self._legacy = None
+        self._truncate = None  # the torn tail was not copied
+        try:  # make the rename itself durable, where the filesystem can
+            dir_fd = os.open(self.work_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError as exc:
+            if exc.errno not in DIR_FSYNC_UNSUPPORTED:
+                raise
 
     def _append(self, decisions: list[Decision]) -> None:
         """Append decisions to review.tsv as one buffer (written in a loop that handles short writes), then fsync.
 
         Earlier bytes never change, except a torn tail: one found by _load, or left by a failed append, is cut off first.
+        An old-header file is refused: its rows would not match the header until migrate() rewrites it.
         """
-        buf = io.StringIO()
-        writer = csv.writer(buf, delimiter="\t")  # csv's default "\r\n" line ending, as review.tsv has always used
-        writer.writerows([d.image_id, d.batch, d.status, d.pass_number, d.timestamp] for d in decisions)
+        if self._legacy is not None:
+            raise RuntimeError(f"{self.review_path} has the old {len(LEGACY_HEADER)}-column header; migrate() it before appending")
+        rows = _format(False, decisions)
         file_mode = policy_of_dir(self.work_dir).file_mode
         fd = os.open(self.review_path, os.O_RDWR | os.O_APPEND | os.O_CREAT, file_mode)
         try:
@@ -125,11 +214,11 @@ class ReviewDB:
             if start == 0:
                 if stat.S_IMODE(st.st_mode) != file_mode:
                     os.fchmod(fd, file_mode)  # the umask may have stripped group bits teammates need to read it
-                payload = _header_line() + buf.getvalue()
+                payload = _format(True, []) + rows
             else:
                 last = os.pread(fd, 1, start - 1)
                 prefix = "" if last == b"\n" else "\n" if last == b"\r" else "\r\n"  # finish a last line that parsed but lacks its ending
-                payload = prefix + buf.getvalue()
+                payload = prefix + rows
             remaining = payload.encode("utf-8")
             try:
                 while remaining:
@@ -145,18 +234,23 @@ class ReviewDB:
             os.close(fd)
         self._truncate = None
 
-    def mark(self, image_id: str, batch: str, status: Verdict, pass_number: int) -> None:
-        self.mark_many([image_id], batch, status, pass_number)
+    def mark(self, image_id: str, batch: str, status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> None:
+        self.mark_many([(image_id, batch)], status, pass_number, reviewer=reviewer, mode=mode)
 
-    def mark_many(self, image_ids: list[str], batch: str, status: Verdict, pass_number: int) -> None:
+    def mark_many(self, targets: list[tuple[str, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode) -> None:
+        """Record one verdict on every (image_id, batch) in targets; grid_size is len(targets)."""
         if status not in get_args(Verdict):
             raise ValueError(f"Invalid status {status!r}, must be one of {get_args(Verdict)}")
+        if mode not in get_args(MarkMode):
+            raise ValueError(f"Invalid mode {mode!r}, must be one of {get_args(MarkMode)}")
+        reviewer = parse_reviewer(reviewer)  # a tab or newline would corrupt the log
         ts = datetime.now(UTC).isoformat()
+        tool_version = package_version()
         decisions = []
-        for image_id in image_ids:
+        for image_id, batch in targets:
             existing = self._rows.get(image_id)
             recorded_pass = max(existing.pass_number, pass_number) if existing else pass_number  # never decreases
-            decisions.append(Decision(image_id, batch, status, recorded_pass, ts))
+            decisions.append(Decision(image_id, batch, status, recorded_pass, ts, reviewer, mode, len(targets), tool_version))
         self._append(decisions)  # on disk first; a failed append changes neither memory nor, once its tail is cut, the file
         self._rows.update((d.image_id, d) for d in decisions)
 
