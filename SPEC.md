@@ -545,7 +545,7 @@ unwind like Ctrl-C and remove a half-written output.
 - A writer that took the lock while export read the work directory: when
   there was none at the start, `live_writer` is checked again after
   `export_rows()`, with the same `--allow-live` override.
-- `review.tsv` ends in a torn line (`ReviewDB.has_torn_tail()`). This is not
+- `review.tsv` ends in a torn line (`ReviewDB.decisions()` raises). This is not
   overridable. The torn line is dropped by a writer's next append, so the
   message says to record a verdict with `review` (or through `serve`) and to
   re-check the last image reviewed.
@@ -1403,8 +1403,7 @@ by hand.
 | `undo_many(changes, *, reviewer)` | Append the undo rows for one `mark_many` result in one append (see *Undo rows*); an `image_id` listed twice (keys sharing it) gets one row |
 | `migrate()` | Rewrite an old five-column file with the current header, once (see *`review.tsv`*); no-op otherwise |
 | `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*) |
-| `decisions() -> dict[str, Decision]` | A copy of the latest decision per `image_id` (never a tombstone), for `export` |
-| `has_torn_tail() -> bool` | Whether `review.tsv` ended in a torn line when loaded (not yet dropped by an append); `export` refuses then |
+| `decisions() -> dict[str, Decision]` | A copy of the latest decision per `image_id` (never a tombstone), for `export`; `ValueError` if `review.tsv` ended in a torn line when loaded (not yet dropped by an append) |
 | `current_pass(image_ids) -> int` | Auto-detect pass number |
 
 ### Pass Logic

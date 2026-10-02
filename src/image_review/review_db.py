@@ -362,12 +362,18 @@ class ReviewDB:
         fold(self._rows, decisions)
 
     def decisions(self) -> dict[str, Decision]:
-        """The latest decision per image_id (a copy; never a tombstone)."""
-        return dict(self._rows)
+        """The latest decision per image_id (a copy; never a tombstone).
 
-    def has_torn_tail(self) -> bool:
-        """Whether review.tsv ended in an unfinished line when loaded (dropped by the next append)."""
-        return self._truncate is not None
+        ValueError if review.tsv ended in an unfinished line when loaded (the next append drops it): the last verdict
+        may be missing, so a result built from these decisions could be wrong.
+        """
+        if self._truncate is not None:
+            raise ValueError(
+                f"{self.review_path} ends in an unfinished line from an interrupted write, so the last verdict "
+                "may be missing. The next verdict recorded with `review` (or through `serve`) drops it; re-check the "
+                "last image reviewed before the interruption, then export again"
+            )
+        return dict(self._rows)
 
     def get_status(self, image_id: str, current_pass: int) -> Status:
         row = self._rows.get(image_id)

@@ -517,12 +517,6 @@ class LocalStore:
     def export_rows(self) -> list["ExportRow"]:
         """The study's result, one row per source file (see export_rows). Local only: image_ids never leave the work
         dir's machine. ValueError if skipped.tsv is malformed or review.tsv ends in a torn line."""
-        if self._db.has_torn_tail():
-            raise ValueError(
-                f"{self._db.review_path} ends in an unfinished line from an interrupted write, so the last verdict "
-                "may be missing. The next verdict recorded with `review` (or through `serve`) drops it; re-check the "
-                "last image reviewed before the interruption, then export again"
-            )
         return export_rows(self._entries, self._db.decisions(), load_skipped(self.work_dir) or [])
 
 
