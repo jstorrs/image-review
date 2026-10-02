@@ -59,7 +59,7 @@ def _placeholder(key: str, reason: str) -> pg.Surface:
     return placeholder_surface(f"Cannot load image: {key}\n{reason}\nIt can only be marked DIRTY")
 
 
-def _grid_status(snapshot: dict[str, Status], keys: tuple[str, ...]) -> str:
+def _grid_status(snapshot: dict[str, Status], keys: tuple[str, ...]) -> Status:
     statuses = {snapshot[key] for key in keys}
     if not statuses <= GRID_ELIGIBLE:
         return "DIRTY"  # e.g. a key sharing an image_id with one marked DIRTY elsewhere this session
@@ -319,7 +319,7 @@ class ReviewSession:
         self._ui_state = UIState.DISPLAY_SELECT
         self._viewer.show_splash(
             self._viewer.display_lines(),
-            footer="Press [1]-[9] to switch, [space] to confirm",
+            footer=["Press [1]-[9] to switch, [space] to confirm"],
         )
 
     def _show_splash(self):
@@ -503,7 +503,7 @@ class ReviewSession:
         info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
         self._viewer.set_image(surface, item.label, status, info, item.source_scale)
 
-    def _item_status(self, item: ReviewItem) -> str:
+    def _item_status(self, item: ReviewItem) -> Status:
         if item.grid:
             return _grid_status(self._statuses, item.keys)
         return self._statuses[item.keys[0]]

@@ -2,10 +2,12 @@ import io
 import math
 from functools import cache
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import pygame as pg
 import pygame.freetype
+
+from .status import Status
 
 _FONTS_DIR = Path(__file__).parent / "fonts"
 
@@ -47,8 +49,9 @@ def scale_percent(scale: float) -> int:
 
 class ImageViewer:
     border: int = 50
+    _status: Status
 
-    STATUS_COLORS: ClassVar[dict[str, pg.Color]] = {
+    STATUS_COLORS: ClassVar[dict[Status, pg.Color]] = {
         "CLEAN": pg.Color(128, 255, 128),
         "DIRTY": pg.Color(255, 128, 128),
         "UNREVIEWED": pg.Color(128, 128, 128),
@@ -77,7 +80,7 @@ class ImageViewer:
         self._todo_only = False
         self._dirty = True  # a setter changed what refresh() draws; refresh_if_dirty() paints it
 
-    def set_image(self, surface: pg.Surface, name: str, status: str, info: str, source_scale: float = 1.0) -> None:
+    def set_image(self, surface: pg.Surface, name: str, status: Status, info: str, source_scale: float = 1.0) -> None:
         self._image = surface
         self._source_scale = source_scale
         self._name = name
@@ -131,7 +134,7 @@ class ImageViewer:
         self._todo_only = enabled
         self._dirty = True
 
-    def set_status(self, status: str) -> None:
+    def set_status(self, status: Status) -> None:
         self._status = status
         self._dirty = True
 
@@ -206,7 +209,9 @@ class ImageViewer:
             self.screen.blit(self._content, self._offset)
         pg.display.flip()
 
-    def _bar_text(self, text: str, align: str, *, color: pg.Color | None = None, inset: int = 0) -> None:
+    def _bar_text(
+        self, text: str, align: Literal["left", "right", "center"], *, color: pg.Color | None = None, inset: int = 0
+    ) -> None:
         """Draw `text` in the status bar; `inset` moves aligned text away from its edge (left text right, right text left); `color` None is the font's."""
         bbox = self.font.get_rect(text)
         screen_w, screen_h = self.screen.get_size()
@@ -238,14 +243,13 @@ class ImageViewer:
         "  q / Esc  Quit",
     ]
 
-    def show_splash(self, lines: list[str], footer: str | list[str] = "Press [space] to continue") -> None:
+    def show_splash(self, lines: list[str], footer: list[str]) -> None:
         screen_w, screen_h = self.screen.get_size()
         self.screen.fill(BACKGROUND)
         splash_font = self._splash_font
         line_height = splash_font.get_sized_height() + 6
-        footer_lines = [footer] if isinstance(footer, str) else footer
         help_lines = self.HELP_LINES
-        all_lines = [*lines, "", *help_lines, "", *footer_lines]
+        all_lines = [*lines, "", *help_lines, "", *footer]
         info_end = len(lines)
         bright = pg.Color(255, 255, 255)
         max_width = max(splash_font.get_rect(text).width for text in all_lines if text)
