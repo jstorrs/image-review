@@ -88,6 +88,10 @@ class ImageViewer:
         pg.display.set_caption(name)
         self.resize()
 
+    @property
+    def display_index(self) -> int:
+        return self._display_index
+
     def switch_display(self, display_index: int) -> bool:
         """Switch to the given display (0-based). Returns True if the display changed."""
         sizes = pg.display.get_desktop_sizes()

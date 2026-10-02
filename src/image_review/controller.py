@@ -116,6 +116,7 @@ def next_batch(batches: list[str], current: str | None, has_rows: Callable[[str]
 
 class UIState(Enum):
     SPLASH = auto()
+    DISPLAY_SELECT = auto()
     REVIEWING = auto()
     END_MESSAGE = auto()
     DISCONNECTED = auto()  # the store was lost: only quitting is possible
@@ -169,7 +170,6 @@ class ReviewSession:
         # for each of them; only the CONTROLLER* events are handled, so a pad is counted once.
         sdl_controller.init()
         self._gamepads: dict[int, sdl_controller.Controller] = {}
-        self._display_select = False
         self._pre_display_index = 0
 
         if self.batch is None:
@@ -299,6 +299,7 @@ class ReviewSession:
     def _show_display_select(self):
         self._stop_timers()
         self._shown_at = None
+        self._ui_state = UIState.DISPLAY_SELECT
         self._viewer.show_splash(
             self._viewer.display_lines(),
             footer="Press [1]-[9] to switch, [space] to confirm",
@@ -607,26 +608,43 @@ class ReviewSession:
         if _dwell_elapsed(self._shown_at, now):
             self._mark(status)
 
+    def _resume(self):
+        """Leave the splash or display-select screen for the current image."""
+        self._ui_state = UIState.REVIEWING
+        if self._cursor == -1:
+            self.next_image()
+        else:
+            self._show_current()
+
     def _handle_splash_key(self, key) -> bool:
         """Handle key press while splash is shown. Returns True to quit."""
         if key in (pg.K_ESCAPE, pg.K_q):
             return True
-        if self._display_select and pg.K_1 <= key <= pg.K_9:
-            idx = key - pg.K_1
-            if self._viewer.switch_display(idx):
-                self._show_display_select()
-            return False
         if key in (pg.K_SPACE, pg.K_h):
-            if self._display_select:
-                self._display_select = False
-                if self._viewer._display_index != self._pre_display_index and self.mode == "grid":
-                    self._restart_in_mode("grid")
-                    return False
-            self._ui_state = UIState.REVIEWING
-            if self._cursor == -1:
-                self.next_image()
+            self._resume()
+        elif key == pg.K_m:
+            if pg.key.get_mods() & pg.KMOD_SHIFT:
+                self._switch_to_grid("never")
             else:
-                self._show_current()
+                self._switch_to_grid(self._default_rotation)
+        elif key == pg.K_s:
+            self._switch_to_single()
+        elif key == pg.K_f:
+            pg.display.toggle_fullscreen()
+        return False
+
+    def _handle_display_select_key(self, key) -> bool:
+        """Handle key press on the display-select screen. Returns True to quit."""
+        if key in (pg.K_ESCAPE, pg.K_q):
+            return True
+        if pg.K_1 <= key <= pg.K_9:
+            if self._viewer.switch_display(key - pg.K_1):
+                self._show_display_select()
+        elif key in (pg.K_SPACE, pg.K_h):
+            if self._viewer.display_index != self._pre_display_index and self.mode == "grid":
+                self._restart_in_mode("grid")
+            else:
+                self._resume()
         elif key == pg.K_m:
             if pg.key.get_mods() & pg.KMOD_SHIFT:
                 self._switch_to_grid("never")
@@ -685,10 +703,8 @@ class ReviewSession:
             case pg.K_z:
                 self._undo()
             case pg.K_w:
-                self._display_select = True
-                self._pre_display_index = self._viewer._display_index
+                self._pre_display_index = self._viewer.display_index
                 self._show_display_select()
-                self._ui_state = UIState.SPLASH
             case pg.K_SPACE:
                 if self.autoplay:
                     self._stop_autoplay()
@@ -729,6 +745,8 @@ class ReviewSession:
         match self._ui_state:
             case UIState.SPLASH if button == pg.CONTROLLER_BUTTON_A:
                 return self._handle_splash_key(pg.K_SPACE)
+            case UIState.DISPLAY_SELECT if button == pg.CONTROLLER_BUTTON_A:
+                return self._handle_display_select_key(pg.K_SPACE)
             case UIState.END_MESSAGE if button == pg.CONTROLLER_BUTTON_A:
                 return self._handle_end_key(pg.K_SPACE)
             case UIState.REVIEWING:
@@ -790,6 +808,8 @@ class ReviewSession:
                         return self._handle_end_key(event.key)
                     case UIState.SPLASH:
                         return self._handle_splash_key(event.key)
+                    case UIState.DISPLAY_SELECT:
+                        return self._handle_display_select_key(event.key)
                     case UIState.REVIEWING:
                         return self._handle_review_key(event.key, now)
             case pg.WINDOWRESIZED:

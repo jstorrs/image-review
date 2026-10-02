@@ -1538,7 +1538,61 @@ class TestEventLoop(EventLoopTestCase):
         s = self.reviewing()
         s.handle_events([key(pg.K_SPACE), key(pg.K_w)])
         self.assertFalse(s.autoplay)
-        self.assertEqual(s._ui_state, UIState.SPLASH)
+        self.assertEqual(s._ui_state, UIState.DISPLAY_SELECT)
+
+    def test_display_select_confirm_resumes_in_single_mode(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])
+        cursor = s._cursor
+        for confirm in (key(pg.K_SPACE), key(pg.K_h), button(pg.CONTROLLER_BUTTON_A)):
+            with self.subTest(confirm=confirm):
+                s.handle_events([key(pg.K_w)])
+                self.assertEqual(s._ui_state, UIState.DISPLAY_SELECT)
+                s.handle_events([confirm])
+                self.assertEqual((s._ui_state, s._cursor, s._undoable), (UIState.REVIEWING, cursor, 1))
+
+    def test_display_select_confirm_restarts_grid_mode_after_a_display_change(self):
+        s = self.reviewing("grid")
+
+        def fake_switch(idx: int) -> bool:
+            s._viewer._display_index = idx
+            return True
+
+        for confirm in (key(pg.K_SPACE), key(pg.K_h), button(pg.CONTROLLER_BUTTON_A)):
+            with self.subTest(confirm=confirm):
+                s.handle_events([key(pg.K_w)])
+                with mock.patch.object(s._viewer, "switch_display", side_effect=fake_switch):
+                    s.handle_events([key(pg.K_2 if s._viewer.display_index == 0 else pg.K_1)])
+                with mock.patch.object(s, "_restart_in_mode", wraps=s._restart_in_mode) as restart:
+                    s.handle_events([confirm])
+                restart.assert_called_once_with("grid")
+                self.assertEqual(s._ui_state, UIState.REVIEWING)
+
+    def test_help_after_display_switch_and_mode_change_is_plain_help(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_w)])
+        self.assertEqual(s._ui_state, UIState.DISPLAY_SELECT)
+
+        def fake_switch(idx: int) -> bool:
+            s._viewer._display_index = idx
+            return True
+
+        with mock.patch.object(s._viewer, "switch_display", side_effect=fake_switch) as switch:
+            s.handle_events([key(pg.K_2)])
+            switch.assert_called_once_with(1)
+            s.handle_events([key(pg.K_m)])
+            self.assertEqual((s.mode, s._ui_state), ("grid", UIState.REVIEWING))
+            self.paint(s)
+            self.now += MIN_DWELL_MS
+            s.handle_events([key(pg.K_c)])
+            self.assertEqual(s._undoable, 1)
+            cursor = s._cursor
+            s.handle_events([key(pg.K_h)])
+            self.assertEqual(s._ui_state, UIState.SPLASH)
+            s.handle_events([key(pg.K_1)])
+            switch.assert_called_once_with(1)  # digits do nothing on the help screen
+            s.handle_events([key(pg.K_SPACE)])
+        self.assertEqual((s._ui_state, s._cursor, s._undoable), (UIState.REVIEWING, cursor, 1))
 
     def test_quit_stops_the_batch(self):
         s = self.reviewing()

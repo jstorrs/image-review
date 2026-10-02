@@ -1103,7 +1103,7 @@ The session runs a pygame event loop processing:
 | Right arrow / D-pad right | Next item |
 | Left arrow / D-pad left | Previous item |
 | Space | Toggle autoplay (500ms auto-advance) |
-| `w` key | Select display |
+| `w` key | Select display (see below) |
 | `f` key | Toggle fullscreen |
 | `n` key | Jump to next todo item |
 | `u` key | Toggle todo-only navigation |
@@ -1111,10 +1111,15 @@ The session runs a pygame event loop processing:
 | `m` key | Switch to grid mode (the `--rotate` policy, default `auto`) |
 | `M` key (shift+m) | Switch to grid mode (`never` rotate) |
 | `h` key | Show help/splash screen |
-| A button | On the splash/help and end-of-list screens: continue, as Space |
+| A button | On the splash/help, display-select and end-of-list screens: continue, as Space |
 | `q` / Escape / Start button | Quit (Start in every state, including `DISCONNECTED`) |
 | Window resize | Refit current image; in grid mode also rebuild the grids (see *Resize rebuild*) |
 | Controller added/removed | Hot-plug handling: open or drop the `Controller`; the status bar shows the count |
+
+The display-select screen (`UIState.DISPLAY_SELECT`, opened by `w`) takes `1`-`9` to
+switch display, Space/`h`/A to confirm (in grid mode, rebuilding the grids if the
+display changed), `f` to toggle fullscreen, `s`/`m`/`M` to switch mode, and `q`/Escape to quit; the
+digits do nothing on the ordinary help screen.
 
 Gamepads go through SDL's GameController API (`pygame._sdl2.controller`,
 initialised when the session starts), so buttons are numbered by SDL's
@@ -1127,7 +1132,7 @@ is counted once and a pad's raw button indices never act. A pad with no SDL
 mapping is not supported: it gets no `CONTROLLER*` events and is not counted. A
 mapping can be added through the `SDL_GAMECONTROLLERCONFIG` environment
 variable. B, Y and the D-pad act only while reviewing; A acts only on the
-splash/help and end-of-list screens; Start quits in every state.
+splash/help, display-select and end-of-list screens; Start quits in every state.
 
 After marking, the viewer auto-advances to the next item after 200ms.
 Navigation stops at list boundaries with an "End of list - K todo left - [b]
