@@ -382,16 +382,13 @@ def acquire_lock(work_dir: Path) -> LockHolder:
             return me
         try:
             with _open_lock(path) as (file_id, text):
-                try:
-                    holder = parse_lock(text)
-                except ValueError as e:
-                    raise WorkDirLocked(path, None, str(e) or "empty") from e
+                holder = parse_lock(text)
                 if not (attempt == 0 and is_stale(holder, me)):
                     raise WorkDirLocked(path, holder)
                 _unlink_if_same(path, file_id)
         except FileNotFoundError:
             pass  # released between our create and read; retry
-        except OSError as e:
+        except (OSError, ValueError) as e:
             raise WorkDirLocked(path, None, str(e)) from e
     raise WorkDirLocked(path, None, "it kept changing while being checked")
 
@@ -777,5 +774,5 @@ def live_writer(work_dir: Path) -> WorkDirLocked | None:
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as e:
-        return WorkDirLocked(path, None, str(e) or "empty")
+        return WorkDirLocked(path, None, str(e))
     return None if is_stale(holder, this_process()) else WorkDirLocked(path, holder)

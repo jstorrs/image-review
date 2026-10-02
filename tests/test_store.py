@@ -2951,21 +2951,22 @@ class TestWorkDirLock(LockTestCase):
 
     @mock.patch.object(store_module, "EMPTY_LOCK_WAIT", 0.1)
     def test_corrupt_lock_is_refused(self):
-        for text in (
-            "",
-            "not json",
-            "[]",
-            '{"host": "h", "user": "u", "pid": "1", "started": "t"}',
-            '{"host": "h", "user": "u", "pid": 0, "started": "t"}',
+        for data in (
+            b"",
+            b"not json",
+            b"[]",
+            b'{"host": "h", "user": "u", "pid": "1", "started": "t"}',
+            b'{"host": "h", "user": "u", "pid": 0, "started": "t"}',
+            b"\xff\xfe\x00",
         ):
-            with self.subTest(text=text):
-                self.lock_path.write_text(text)
+            with self.subTest(data=data):
+                self.lock_path.write_bytes(data)
                 with self.assertRaises(WorkDirLocked) as ctx:
                     LocalStore(self.work_dir)
                 self.assertIn(str(self.lock_path), str(ctx.exception))
                 self.assertIn("corrupt", str(ctx.exception))
                 self.assertIn("by hand", str(ctx.exception))
-                self.assertEqual(self.lock_path.read_text(), text)
+                self.assertEqual(self.lock_path.read_bytes(), data)
 
     def test_hard_links_unsupported_falls_back_to_direct_create(self):
         for err in (errno.EPERM, errno.ENOTSUP, errno.ENOSYS):
@@ -3090,6 +3091,15 @@ class TestLockCli(LockTestCase):
         session.assert_not_called()
         for part in ("alice", "node042", "pid 1234", str(self.lock_path)):
             self.assertIn(part, result.output)
+
+    def test_review_on_undecodable_lock_names_it(self):
+        self.lock_path.write_bytes(b"\xff\xfe\x00")
+        with mock.patch("image_review.controller.ReviewSession") as session:
+            result = self.invoke("review")
+        self.assertEqual(result.exit_code, 1, result.output)
+        session.assert_not_called()
+        self.assertIn(str(self.lock_path), result.output)
+        self.assertNotIn("Cannot read work directory", result.output)
 
     def test_review_holds_lock_while_running(self):
         seen = []
