@@ -139,6 +139,11 @@ class TestMarkAndStatuses(StoreTestCase):
             {"/src/patient_smith/a.dcm", "/src/patient_jones/b.dcm", "/src/patient_lee/c.dcm"},
         )
 
+    def test_mark_unknown_key_raises_and_writes_nothing(self):
+        with self.assertRaises(KeyError):
+            mark(self.store, ["batch_001/a.jpg", "nope.jpg"], "CLEAN")
+        self.assertFalse((self.work_dir / "review.tsv").exists())
+
     def test_prior_pass_semantics(self):
         mark(self.store, ["batch_001/a.jpg"], "CLEAN")
         mark(self.store, ["batch_001/b.jpg"], "DIRTY")

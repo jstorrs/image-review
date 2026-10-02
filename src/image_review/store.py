@@ -427,12 +427,10 @@ class LocalStore:
         entries = load_manifest(work_dir)  # written once by preprocess; safe to read before locking
         self._entries = entries
         self._rows = [ManifestRow(key=e.key, batch=e.batch) for e in entries]
-        self._image_ids = {e.key: e.image_id for e in entries}
-        self._batches = {e.key: e.batch for e in entries}
-        self._jpeg_hashes = {e.key: e.jpeg_sha256 for e in entries}
+        self._by_key: dict[str, ManifestEntry] = {e.key: e for e in entries}
         self._keys_by_image_id: dict[str, list[str]] = {}
-        for key, iid in self._image_ids.items():
-            self._keys_by_image_id.setdefault(iid, []).append(key)
+        for key, e in self._by_key.items():
+            self._keys_by_image_id.setdefault(e.image_id, []).append(key)
         # Lock before loading review.tsv, so the state loaded is not one another writer is about to overwrite.
         self._lock: LockHolder | None = None if read_only else acquire_lock(work_dir)
         self._undo: list[list[Change]] = []  # one entry per mark, latest last
@@ -459,9 +457,8 @@ class LocalStore:
         return list(self._rows)
 
     def image_bytes(self, key: str) -> bytes:
-        if key not in self._image_ids:
-            raise KeyError(key)
-        return check_jpeg_hash(key, safe_path(self.work_dir, key).read_bytes(), self._jpeg_hashes[key])
+        entry = self._by_key[key]
+        return check_jpeg_hash(key, safe_path(self.work_dir, key).read_bytes(), entry.jpeg_sha256)
 
     def image_bytes_many(self, keys: list[str]) -> dict[str, bytes]:
         found: dict[str, bytes] = {}
@@ -473,7 +470,7 @@ class LocalStore:
         return found
 
     def statuses(self, pass_number: int) -> dict[str, Status]:
-        return {key: self._db.get_status(iid, pass_number) for key, iid in self._image_ids.items()}
+        return {key: self._db.get_status(e.image_id, pass_number) for key, e in self._by_key.items()}
 
     def _require_writable(self) -> None:
         if self._lock is None:
@@ -492,12 +489,12 @@ class LocalStore:
         self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
     ) -> dict[str, Status]:
         self._require_writable()
-        image_ids = [self._image_ids[key] for key in keys]
+        targets = [self._by_key[k] for k in keys]  # an unknown key raises before anything is written
         changes = self._db.mark_many(
-            [(self._image_ids[k], self._batches[k]) for k in keys], status, pass_number, reviewer=reviewer, mode=mode
+            [(e.image_id, e.batch) for e in targets], status, pass_number, reviewer=reviewer, mode=mode
         )
         self._undo.append(changes)  # only once written
-        return self._affected(image_ids, pass_number)
+        return self._affected([e.image_id for e in targets], pass_number)
 
     def undo(self, pass_number: int, *, reviewer: str) -> dict[str, Status]:
         self._require_writable()
@@ -509,7 +506,7 @@ class LocalStore:
         return self._affected([c.written.image_id for c in changes], pass_number)
 
     def current_pass(self) -> int:
-        return self._db.current_pass(self._image_ids.values())
+        return self._db.current_pass(e.image_id for e in self._by_key.values())
 
     def skipped(self) -> SkippedCounts | None:
         return load_skipped_counts(self.work_dir)
