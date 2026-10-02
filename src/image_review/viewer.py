@@ -78,6 +78,7 @@ class ImageViewer:
         self._splash_font.fgcolor = pg.Color(200, 200, 200)
         self._joystick_count = 0
         self._todo_only = False
+        self._dirty = True  # a setter changed what refresh() draws; refresh_if_dirty() paints it
 
     def set_image(self, surface: pg.Surface, name: str, status: str, info: str, source_scale: float = 1.0) -> None:
         self._image = surface
@@ -116,18 +117,23 @@ class ImageViewer:
 
     def set_joystick_count(self, count: int) -> None:
         self._joystick_count = count
+        self._dirty = True
 
     def set_todo_only(self, enabled: bool) -> None:
         self._todo_only = enabled
+        self._dirty = True
 
     def set_status(self, status: str) -> None:
         self._status = status
+        self._dirty = True
 
     def set_info(self, info: str) -> None:
         """Replace the centered status-bar text (e.g. with a short notice)."""
         self._info = info
+        self._dirty = True
 
     def resize(self) -> None:
+        self._dirty = True
         if self._image is None:
             return
         self.screen = pg.display.get_surface()  # a resize may have replaced the window surface
@@ -144,6 +150,14 @@ class ImageViewer:
         self._content = pg.transform.smoothscale(self._image, scaled_size)
         cx, cy = self._content.get_size()
         self._offset = ((screen_w - cx) // 2, (content_height - cy) // 2)
+
+    def refresh_if_dirty(self) -> bool:
+        """Repaint if a setter or resize changed the frame since the last paint. Returns True if it did."""
+        if not self._dirty:
+            return False
+        self.refresh()
+        self._dirty = False
+        return True
 
     def refresh(self) -> None:
         self.screen = pg.display.get_surface()

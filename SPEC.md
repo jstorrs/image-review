@@ -1359,7 +1359,9 @@ uses DejaVu Sans Mono 24pt.
 |--------|-------------|
 | `set_image(surface, name, status, info, source_scale=1.0)` | Set new image; triggers resize/scale |
 | `set_status(status)` | Update status bar color without changing image |
+| `set_info(info)`, `set_todo_only(enabled)`, `set_joystick_count(count)` | Update the centered text, the todo-only and the gamepad indicators |
 | `resize()` | Recalculate scaling (and the scale percent) for current screen size |
+| `refresh_if_dirty() -> bool` | `refresh()` if the frame is dirty, clear the flag, return True; else False. Every method above, plus `switch_display` (through `resize`) and a new viewer, marks the frame dirty; `show_message` and `show_splash` do not |
 | `refresh()` | Render frame: background, status bar, text, scaled image |
 | `show_splash(lines, footer)` | Render centered splash/help overlay |
 | `show_message(text)` | Render centered text message (e.g. loading indicator) |

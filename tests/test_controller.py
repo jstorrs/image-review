@@ -335,6 +335,8 @@ class EventLoopTestCase(SessionTestCase):
     def assert_message_stays(self, s: ReviewSession, state: UIState = UIState.END_MESSAGE) -> None:
         """With no items, the message survives the loop's refresh and the navigation keys."""
         self.assertEqual(s._ui_state, state)
+        s.handle_events([pg.event.Event(pg.WINDOWRESIZED)])  # a repaint is pending
+        self.assertTrue(s._viewer._dirty)
         with mock.patch.object(s._viewer, "refresh") as refresh:
             s.refresh_if_needed()
             for k in (pg.K_SPACE, pg.K_RIGHT, pg.K_LEFT):
@@ -456,7 +458,6 @@ class TestEventLoop(EventLoopTestCase):
         s = self.reviewing()
         mark(self.store, ["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY")
         s.handle_events([key(pg.K_m)])
-        self.assertTrue(s._dirty)
         self.assert_message_stays(s)
 
     def test_outage_on_restart_message_is_not_painted_over(self):

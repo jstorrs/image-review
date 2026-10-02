@@ -152,7 +152,6 @@ class ReviewSession:
 
         self.autoplay = False
         self._cursor = -1
-        self._dirty = True
         self._grids_stale = False  # grid mode: the window was resized since the grids were packed
         self._ui_state = UIState.REVIEWING
         self._shown_at: int | None = None  # ticks when the current item was first painted
@@ -348,7 +347,6 @@ class ReviewSession:
         self._cursor = -1
         self._undoable = 0  # z only undoes marks it can show; the old mode's items are gone
         self._shown_at = None
-        self._dirty = True
         self._grids_stale = False  # the items are rebuilt at the current size below
         try:
             if refetch_statuses:
@@ -496,7 +494,6 @@ class ReviewSession:
         status = self._item_status(item)
         info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
         self._viewer.set_image(surface, item.label, status, info, item.source_scale)
-        self._dirty = True
 
     def _item_status(self, item: ReviewItem) -> str:
         if item.grid:
@@ -527,12 +524,10 @@ class ReviewSession:
         if status == "CLEAN" and not self._unloadable.isdisjoint(item.keys):
             log.warning("%s: %s", UNLOADABLE_CLEAN, ", ".join(k for k in item.keys if k in self._unloadable))
             self._viewer.set_info(UNLOADABLE_CLEAN)
-            self._dirty = True
             return
         if item.grid and status == "CLEAN" and _grid_clean_refused(self._statuses, item.keys):
             log.warning("%s", GRID_HAS_DIRTY)
             self._viewer.set_info(GRID_HAS_DIRTY)
-            self._dirty = True
             return
         try:
             changed = self.store.mark(list(item.keys), status, self.pass_number, reviewer=self.reviewer, mode=self.mode)
@@ -543,7 +538,6 @@ class ReviewSession:
         self._marked_this_session.update(item.keys)
         self._statuses.update(changed)
         self._viewer.set_status(status)
-        self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
         self._advance_pending = True
 
@@ -551,7 +545,6 @@ class ReviewSession:
         """Show text in the info bar while reviewing, else as the screen's message."""
         if self._ui_state == UIState.REVIEWING:
             self._viewer.set_info(text)
-            self._dirty = True
         else:
             self._viewer.show_message(text)
 
@@ -674,7 +667,6 @@ class ReviewSession:
             case pg.K_u:
                 self._todo_only = not self._todo_only
                 self._viewer.set_todo_only(self._todo_only)
-                self._dirty = True
             case pg.K_f:
                 pg.display.toggle_fullscreen()
             case pg.K_h:
@@ -764,7 +756,6 @@ class ReviewSession:
                         self._handle_review_key(event.key, now)
             case pg.WINDOWRESIZED:
                 self._viewer.resize()
-                self._dirty = True
                 self._grids_stale = self._grids_stale or self.mode == "grid"
             case x if x == AUTOPLAY_EVENT:
                 if self.autoplay and self._ui_state == UIState.REVIEWING:
@@ -777,11 +768,9 @@ class ReviewSession:
                 pad = sdl_controller.Controller(event.device_index)
                 self._gamepads[pad.as_joystick().get_instance_id()] = pad
                 self._viewer.set_joystick_count(len(self._gamepads))
-                self._dirty = True
             case pg.CONTROLLERDEVICEREMOVED:
                 self._gamepads.pop(event.instance_id, None)
                 self._viewer.set_joystick_count(len(self._gamepads))
-                self._dirty = True
             case pg.QUIT:
                 return True
         return False
@@ -826,9 +815,5 @@ class ReviewSession:
             self._rebuild_grids_for_resize()
             if self._ui_state != UIState.REVIEWING:  # the rebuild ended on a message screen
                 return
-        if not self._dirty:
-            return
-        self._viewer.refresh()
-        self._dirty = False
-        if self._shown_at is None:
+        if self._viewer.refresh_if_dirty() and self._shown_at is None:
             self._shown_at = pg.time.get_ticks()
