@@ -153,14 +153,13 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 | `--jobs` | `$SLURM_CPUS_PER_TASK`, else the usable CPUs | Worker processes rendering in parallel (integer >= 1; 0 exits 2 before any output). Resolved when the command runs from the usable CPUs (`len(os.sched_getaffinity(0))` where available, else `os.cpu_count()`, else 1): `$SLURM_CPUS_PER_TASK` capped at the usable CPUs if it is a whole number >= 1 (ASCII or other decimal digits only), else the usable CPUs capped at the smallest cgroup v2 CPU quota `ceil(quota / period)` among the `cpu.max` files of the process's own cgroup (the `0::<path>` line of `/proc/self/cgroup`, under `/sys/fs/cgroup`) and each ancestor up to the mount root, e.g. a login node's per-user `CPUQuota=` on `user-UID.slice`, or a container's quota at its namespace root (`0::/`). `max`, a missing or unreadable file, or an unreadable `/proc/self/cgroup` means no cap at that level; a path outside the cgroup namespace (`..`) reads only the mount root. cgroup v1 quotas are not read |
 
 The pipeline has three parts: **discovery** (IO) yields one `Candidate`
-(`image_id`, `kind` = `dicom` or `raster`, and a `read()` returning the raw
-bytes) per input without decoding anything (or a `Skipped` row for content
+(`image_id`, `kind` = `dicom` or `raster`, and its raw
+bytes, read during discovery) per input without decoding anything (or a `Skipped` row for content
 that is not an input or cannot be read); a pure **`render(kind, image_id,
 data, colormap) -> list[Rendered]`** turns the bytes into `(H, W, 3)` uint8
 RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and, once collisions are
-known (see *Collisions*), records them in the manifest. For ZIP entries `read()` reads from the open archive, so it is only
-valid until discovery moves on to the next item. Each input's bytes are read
+known (see *Collisions*), records them in the manifest. Each input's bytes are read
 once; their SHA-256 becomes the `source_sha256` of every image rendered from
 them (a DICOM and its icon share it), and the SHA-256 of each JPG's encoded
 bytes its `jpeg_sha256` (see *`manifest.tsv`*).
@@ -169,8 +168,7 @@ bytes its `jpeg_sha256` (see *`manifest.tsv`*).
 rendering and encoding one input is the pure, top-level
 `render_and_encode(kind, image_id, data, colormap) -> list[Encoded | Skipped]`.
 With `jobs` = 1 it runs in the main process and no pool exists. With `jobs` >
-1 the main process reads each candidate's bytes during discovery (a ZIP entry
-is readable only then) and submits them to a `ProcessPoolExecutor(jobs)` using
+1 the main process submits each candidate's bytes (read during discovery) to a `ProcessPoolExecutor(jobs)` using
 the `spawn` start method on every platform (workers import the package afresh:
 no inherited threads, signal handlers or open archives); workers hash the
 bytes and return JPEG bytes or `Skipped` rows. While the pool exists,

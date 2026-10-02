@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager, nullcontext, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from itertools import groupby
@@ -138,15 +138,11 @@ class Rejected:
 
 @dataclass(frozen=True)
 class Candidate:
-    """One discovered input; `read` returns its raw bytes (no decoding happens in discovery).
-
-    For ZIP entries `read` reads from the open archive, so it is only valid until
-    the discovery generator advances past the source; call it before the next item.
-    """
+    """One discovered input, with its raw bytes (no decoding happens in discovery)."""
 
     image_id: str
     kind: Kind
-    read: Callable[[], bytes]
+    data: bytes = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -655,6 +651,14 @@ def _failed(image_id: str, exc: Exception) -> Skipped:
     return Skipped(image_id, "failed", _clean_reason(reason))
 
 
+def _candidate(image_id: str, kind: Kind, read: Callable[[], bytes]) -> Candidate | Skipped:
+    """The input with the bytes `read` returns, or a failed row if they cannot be read."""
+    try:
+        return Candidate(image_id, kind, read())
+    except Exception as exc:  # noqa: BLE001 - an unreadable input is recorded in skipped.tsv
+        return _failed(image_id, exc)
+
+
 def _discover_zip(path: Path) -> Iterator[Candidate | Skipped]:
     try:
         zf = ZipFile(path)
@@ -685,7 +689,7 @@ def _discover_zip(path: Path) -> Iterator[Candidate | Skipped]:
                 case Rejected(kind, reason):
                     yield Skipped(image_id, kind, reason)
                 case "dicom" | "raster" as kind:
-                    yield Candidate(image_id, kind, partial(zf.read, info))
+                    yield _candidate(image_id, kind, partial(zf.read, info))
 
 
 def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | Skipped]:
@@ -712,7 +716,7 @@ def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | Skip
         case Rejected(kind, reason):
             yield Skipped(image_id, kind, reason)
         case "dicom" | "raster" as kind:
-            yield Candidate(image_id, kind, path.read_bytes)
+            yield _candidate(image_id, kind, path.read_bytes)
 
 
 def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]) -> Skipped:
@@ -813,20 +817,9 @@ def render_and_encode(kind: Kind, image_id: str, data: bytes, colormap: str) -> 
     return encoded
 
 
-def _read(candidate: Candidate) -> bytes | Skipped:
-    """The input's bytes, read once (a ZIP entry only while discovery is at it), or why they cannot be."""
-    try:
-        return candidate.read()
-    except Exception as exc:  # noqa: BLE001 - an unreadable input is recorded in skipped.tsv
-        return _failed(candidate.image_id, exc)
-
-
 def _process(candidate: Candidate, colormap: str) -> list[Encoded | Skipped]:
-    """Read one input and `render_and_encode` it, in this process."""
-    data = _read(candidate)
-    if isinstance(data, Skipped):
-        return [data]
-    return render_and_encode(candidate.kind, candidate.image_id, data, colormap)
+    """`render_and_encode` one input, in this process."""
+    return render_and_encode(candidate.kind, candidate.image_id, candidate.data, colormap)
 
 
 Outcome = tuple[str, list[Encoded | Skipped]]  # (input image_id, its output rows)
@@ -841,7 +834,7 @@ def _outcomes_pooled(
     items: Iterable[Candidate | Skipped], colormap: str, pool: Executor, limit: int
 ) -> Iterator[Outcome]:
     """`_outcomes_serial`, rendered by `pool`: yielded in input order, with at most `limit` inputs submitted and
-    not yet yielded. Bytes are read here (a ZIP entry is readable only while discovery is at it); workers hash.
+    not yet yielded. Workers hash.
 
     A dead worker breaks the pool and every input in flight with it, so the run fails (`WorkerCrashed`) rather
     than retrying in this process, where the same input could take the whole run down without a message.
@@ -852,11 +845,9 @@ def _outcomes_pooled(
     def start(item: Candidate | Skipped) -> Future[list[Encoded | Skipped]] | list[Encoded | Skipped]:
         if isinstance(item, Skipped):
             return [item]
-        data = _read(item)  # the pool keeps these bytes until the result is back; `limit` bounds them
-        if isinstance(data, Skipped):
-            return [data]
         with _sigint_blocked():  # a worker spawned here starts with SIGINT blocked, until it ignores it
-            return pool.submit(render_and_encode, item.kind, item.image_id, data, colormap)
+            # the pool keeps the bytes until the result is back; `limit` bounds them
+            return pool.submit(render_and_encode, item.kind, item.image_id, item.data, colormap)
 
     def finish() -> Outcome:
         nonlocal in_flight
