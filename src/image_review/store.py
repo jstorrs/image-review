@@ -2,9 +2,11 @@ import contextlib
 import csv
 import errno
 import getpass
+import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import time
@@ -35,6 +37,10 @@ class ManifestEntry:
     batch: str
     key: str  # preprocessed_path
     image_id: str  # original source path; stays server-side
+    # SHA-256 (64 lowercase hex) of the source file or ZIP entry, shared by X and X#icon; None in a 3-column manifest.
+    # Derived from PHI content: stays server-side like image_id.
+    source_sha256: str | None = None
+    jpeg_sha256: str | None = None  # SHA-256 of the JPG as written; image_bytes checks it. None in a 3-column manifest
 
 
 @dataclass(frozen=True)
@@ -106,32 +112,65 @@ def safe_path(work_dir: Path, relative: str) -> Path:
     return resolved
 
 
-MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id"]
+MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id", "source_sha256", "jpeg_sha256"]
+LEGACY_MANIFEST_HEADER = MANIFEST_HEADER[:3]  # before the hash columns; still loads, with both hashes None
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _parse_sha256(text: str, name: str) -> str:
+    """A SHA-256 hex digest: exactly 64 lowercase hex characters. ValueError otherwise."""
+    if not _SHA256.fullmatch(text):
+        raise ValueError(f"{name} must be 64 lowercase hex characters")
+    return text
 
 
 def load_manifest(work_dir: Path) -> list[ManifestEntry]:
-    """Parse manifest.tsv strictly. ValueError (naming file:line) if malformed; FileNotFoundError if absent."""
+    """Parse manifest.tsv strictly. ValueError (naming file:line) if malformed; FileNotFoundError if absent.
+
+    Both the current header and the legacy 3-column one (no hashes) are accepted; every row has the header's width.
+    """
     path = work_dir / "manifest.tsv"
     entries: list[ManifestEntry] = []
     key_lines: dict[str, int] = {}
     with open(path, newline="") as f:
         reader = csv.reader(f, delimiter="\t")
-        if next(reader, None) != MANIFEST_HEADER:
-            raise ValueError(f"{path}:1: header must be {', '.join(MANIFEST_HEADER)}")
+        header = next(reader, None)
+        if header not in (MANIFEST_HEADER, LEGACY_MANIFEST_HEADER):
+            raise ValueError(
+                f"{path}:1: header must be {', '.join(MANIFEST_HEADER)} (or {', '.join(LEGACY_MANIFEST_HEADER)})"
+            )
         for fields in reader:
             line = reader.line_num
-            if len(fields) != len(MANIFEST_HEADER) or not all(fields):
+            if len(fields) != len(header) or not all(fields):
                 raise ValueError(
-                    f"{path}:{line}: expected {len(MANIFEST_HEADER)} non-empty tab-separated fields ({', '.join(MANIFEST_HEADER)})"
+                    f"{path}:{line}: expected {len(header)} non-empty tab-separated fields ({', '.join(header)})"
                 )
-            batch, key, image_id = fields
+            batch, key, image_id, *hashes = fields
+            try:
+                source_sha256, jpeg_sha256 = (
+                    (_parse_sha256(hashes[0], "source_sha256"), _parse_sha256(hashes[1], "jpeg_sha256"))
+                    if hashes
+                    else (None, None)
+                )
+            except ValueError as e:
+                raise ValueError(f"{path}:{line}: {e}") from None
             if key in key_lines:
                 raise ValueError(
                     f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})"
                 )
             key_lines[key] = line
-            entries.append(ManifestEntry(batch, key, image_id))
+            entries.append(ManifestEntry(batch, key, image_id, source_sha256, jpeg_sha256))
     return entries
+
+
+def check_jpeg_hash(key: str, data: bytes, expected: str | None) -> bytes:
+    """data, if it matches the recorded SHA-256 (or none is recorded). ValueError otherwise: the image is unloadable.
+
+    Pillow decodes a JPG cut short but still ending in EOI without complaint (grey rows); the hash catches it.
+    """
+    if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+        raise ValueError(f"{key} does not match its recorded hash")
+    return data
 
 
 LOCK_NAME = "review.lock"
@@ -423,6 +462,7 @@ class LocalStore:
         self._rows = [ManifestRow(key=e.key, batch=e.batch) for e in entries]
         self._image_ids = {e.key: e.image_id for e in entries}
         self._batches = {e.key: e.batch for e in entries}
+        self._jpeg_hashes = {e.key: e.jpeg_sha256 for e in entries}
         self._keys_by_image_id: dict[str, list[str]] = {}
         for key, iid in self._image_ids.items():
             self._keys_by_image_id.setdefault(iid, []).append(key)
@@ -454,7 +494,7 @@ class LocalStore:
     def image_bytes(self, key: str) -> bytes:
         if key not in self._image_ids:
             raise KeyError(key)
-        return safe_path(self.work_dir, key).read_bytes()
+        return check_jpeg_hash(key, safe_path(self.work_dir, key).read_bytes(), self._jpeg_hashes[key])
 
     def image_bytes_many(self, keys: list[str]) -> dict[str, bytes]:
         found: dict[str, bytes] = {}
@@ -566,7 +606,7 @@ def summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[str, i
 # What an export says about one source file. NOT_REVIEWED: preprocess failed to render it (or part of it), so nobody
 # saw that part.
 ExportStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]
-EXPORT_HEADER = ["image_id", "status", "pass_number", "timestamp", "reviewer", "reason"]
+EXPORT_HEADER = ["image_id", "status", "pass_number", "timestamp", "reviewer", "reason", "source_sha256"]
 ICON_SUFFIX = "#icon"  # preprocess.ICON_SUFFIX: a DICOM's embedded icon image (not imported: preprocess needs numpy)
 # The worst part decides a file's status: CLEAN only if every part is CLEAN.
 _SEVERITY: dict[ExportStatus, int] = {"CLEAN": 0, "UNREVIEWED": 1, "NOT_REVIEWED": 2, "DIRTY": 3}
@@ -582,6 +622,7 @@ class ExportRow:
     timestamp: str
     reviewer: str
     reason: str  # why the row is not simply its main image's verdict (skip reasons, the icon's state); often ""
+    source_sha256: str  # the source file's SHA-256 from the manifest; "" when it has none (legacy, or never rendered)
 
 
 @dataclass(frozen=True)
@@ -615,7 +656,7 @@ def _parts(entries: list[ManifestEntry], decisions: dict[str, Decision], skipped
 _MAIN_MISSING = _Part("NOT_REVIEWED", None, "main image missing")  # an icon without its file: never CLEAN
 
 
-def _fold(image_id: str, main: _Part | None, icon: _Part | None) -> ExportRow:
+def _fold(image_id: str, main: _Part | None, icon: _Part | None, source_sha256: str) -> ExportRow:
     """One file's row: the worst status of its main image and its icon; pass, timestamp and reviewer from the main
     image's decision. A missing main image counts as NOT_REVIEWED."""
     main = _MAIN_MISSING if main is None else main
@@ -629,8 +670,8 @@ def _fold(image_id: str, main: _Part | None, icon: _Part | None) -> ExportRow:
         notes.append(f"icon {icon.status}")
     d = main.decision
     if d is None:
-        return ExportRow(image_id, status, None, "", "", "; ".join(notes))
-    return ExportRow(image_id, status, d.pass_number, d.timestamp, d.reviewer, "; ".join(notes))
+        return ExportRow(image_id, status, None, "", "", "; ".join(notes), source_sha256)
+    return ExportRow(image_id, status, d.pass_number, d.timestamp, d.reviewer, "; ".join(notes), source_sha256)
 
 
 def export_rows(
@@ -644,11 +685,16 @@ def export_rows(
     `status`) is DIRTY: it still contains PHI. A DICOM's icon (`X#icon`) is folded into `X`'s row, whose status is
     the worse of the two (DIRTY, then NOT_REVIEWED, then UNREVIEWED, then CLEAN); an icon without its `X` is
     reported under `X`, as if `X` were NOT_REVIEWED. `decisions` is the latest decision per image_id (review_db.latest); ones for image_ids in
-    neither file are ignored.
+    neither file are ignored. A row's source_sha256 is the first one the manifest records for `X` or `X#icon` (they
+    share it), else "".
     """
     parts = _parts(entries, decisions, skipped)
+    hashes: dict[str, str] = {}
+    for e in entries:
+        if e.source_sha256 is not None:
+            hashes.setdefault(e.image_id.removesuffix(ICON_SUFFIX), e.source_sha256)
     files = dict.fromkeys(image_id.removesuffix(ICON_SUFFIX) for image_id in parts)
-    return [_fold(f, parts.get(f), parts.get(f + ICON_SUFFIX)) for f in files]
+    return [_fold(f, parts.get(f), parts.get(f + ICON_SUFFIX), hashes.get(f, "")) for f in files]
 
 
 def format_export(rows: list[ExportRow]) -> str:
@@ -661,7 +707,7 @@ def format_export(rows: list[ExportRow]) -> str:
     lines = ["\t".join(EXPORT_HEADER)]
     for r in rows:
         fields = [r.image_id, r.status, "" if r.pass_number is None else str(r.pass_number), r.timestamp]
-        fields += [r.reviewer, r.reason]
+        fields += [r.reviewer, r.reason, r.source_sha256]
         for name, value in zip(EXPORT_HEADER, fields, strict=True):
             if value.startswith('"') or any(c in _LINE_SEPARATORS or unicodedata.category(c) == "Cc" for c in value):
                 raise ValueError(

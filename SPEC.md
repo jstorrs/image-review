@@ -126,10 +126,13 @@ data, colormap) -> list[Rendered]`** turns the bytes into `(H, W, 3)` uint8
 RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and records them in the
 manifest. For ZIP entries `read()` reads from the open archive, so it is only
-valid until discovery moves on to the next item.
+valid until discovery moves on to the next item. Each input's bytes are read
+once; their SHA-256 becomes the `source_sha256` of every image rendered from
+them (a DICOM and its icon share it), and the SHA-256 of each JPG's encoded
+bytes its `jpeg_sha256` (see *`manifest.tsv`*).
 
 **Work directory lifecycle.** The run builds everything (batch directories,
-JPGs, `manifest.tsv`, `skipped.tsv`) in a staging directory
+JPGs, `manifest.tsv`, `skipped.tsv`, `preprocess.json`) in a staging directory
 `<parent>/.<name>.partial`, created with the access policy's directory mode
 (not `exist_ok`), and renames it to the work directory only on success; the
 final directory keeps that mode. If the work directory already exists and is not an empty directory
@@ -324,16 +327,16 @@ source that cannot be opened at all (corrupt ZIP, unreadable directory at any
 depth) becomes one `failed` row for its path. Content that is not an input
 (see *Source loading*) becomes an `ignored` row, without a logged warning.
 Only `failed` rows affect the exit status. Errors writing to the work
-directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`) still
-abort the run; since images are encoded in memory first, an input's content
+directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`,
+`preprocess.json`) still abort the run; since images are encoded in memory first, an input's content
 cannot cause one.
 
 **Batching**: Each input is rendered, encoded and written as soon as discovery yields
 it, so memory does not grow with batch size. The n-th written image
 (0-based) goes to `batch_{n // batch_size + 1:03d}/img_{n % batch_size + 1:05d}.jpg`.
 
-**Output**: `manifest.tsv` and `skipped.tsv` (always written, even when
-empty), plus the summary line
+**Output**: `manifest.tsv`, `skipped.tsv` (always written, even when
+empty) and `preprocess.json`, plus the summary line
 
 ```
 Found N inputs: wrote K images in B batches; S skipped (F failed, I ignored; see WORK_DIR/skipped.tsv)
@@ -469,7 +472,7 @@ work directory) and calls its `export_rows()`. That applies the pure
 `load_skipped`.
 
 **Format** (`store.format_export`): UTF-8 text, the header line
-`image_id status pass_number timestamp reviewer reason`, then one line per row.
+`image_id status pass_number timestamp reviewer reason source_sha256`, then one line per row.
 Fields are joined with tabs and every line ends in LF. There is no quoting or
 escaping: fields are written exactly as stored (a `"` not at the start
 included), which the refusals above make unambiguous.
@@ -480,6 +483,7 @@ included), which the refusals above make unambiguous.
 | `status` | The worst status of the file's parts (below): `DIRTY`, then `NOT_REVIEWED`, then `UNREVIEWED`, then `CLEAN` |
 | `pass_number`, `timestamp`, `reviewer` | From the latest decision on the main part (`X` itself), as recorded; empty when it has none (`UNREVIEWED`, `NOT_REVIEWED`, or no main part). After an undo they come from the undo row (its time and the undoing reviewer; the restored pass). `reviewer` is the client's unauthenticated claim, possibly empty in old rows; it is not sanitized, so it may begin with `=`, `+`, `-` or `@`, and the file must be read as text, not as spreadsheet formulas |
 | `reason` | `; `-joined notes, in this order: the main part's skip reason if it is `NOT_REVIEWED`; `main image missing` if there is no main part (it then counts as a `NOT_REVIEWED` part, so the row is never CLEAN); `icon: <skip reason>` if the icon is `NOT_REVIEWED`, else `icon <STATUS>` if the icon is not `CLEAN`. Empty otherwise |
+| `source_sha256` | The SHA-256 of the source file (or ZIP entry) recorded in the manifest for `X` or `X#icon` (they share it), for matching rows to files downstream. Empty when the manifest has none: a file that never rendered (only in `skipped.tsv`), or a manifest from before the hash columns. It is derived from PHI content and, like `image_id`, appears only in this local file, never over the wire |
 
 **Parts and folding.** Every distinct `image_id` of the manifest, and of the
 `failed` rows of `skipped.tsv`, is a part:
@@ -572,16 +576,56 @@ Written by `preprocess`. Tab-separated, one row per image.
 | `batch` | Batch subdirectory name (e.g. `batch_001`) |
 | `preprocessed_path` | Relative path to the JPG within the work directory |
 | `image_id` | Unique string identifier (fully-resolved absolute path; `{path}#icon` for a DICOM's embedded icon image) |
+| `source_sha256` | SHA-256 (64 lowercase hex characters) of the source file's bytes, or of the ZIP entry's bytes for `<zip>::<entry>`. One per source: `X` and `X#icon` share it |
+| `jpeg_sha256` | SHA-256 (64 lowercase hex characters) of the JPG's bytes as written |
 
-`image_id` (source paths, which may carry patient identifiers) is used only
-inside `LocalStore`/`ReviewDB`. Everything else identifies an image by its
-`preprocessed_path`.
+`image_id` (source paths, which may carry patient identifiers) and
+`source_sha256` (derived from PHI content; a digest of a small input can be
+recovered by guessing) are used only inside `LocalStore`/`ReviewDB` and in the
+local `export`. Everything else identifies an image by its
+`preprocessed_path`; no hash is ever sent over the wire.
 
-The file is parsed strictly when the work directory is opened: the header must
-be exactly the three columns, every row must have three non-empty fields, and
-`preprocessed_path` must be unique (the same `image_id` may repeat). Any
-violation stops `review`, `status`, and `serve` with `Cannot read work
-directory: <file>:<line>: <problem>` (exit 1); the file is never repaired.
+The file is parsed strictly (`store.load_manifest`) when the work directory is
+opened: the header must be exactly the five columns above, or the three
+columns `batch`, `preprocessed_path`, `image_id` of work dirs from older
+versions (which load with both hashes `None`); every row must have as many
+non-empty fields as the header, each hash must be exactly 64 lowercase hex
+characters, and `preprocessed_path` must be unique (the same `image_id` may
+repeat). Any violation stops `review`, `status`, and `serve` with `Cannot read
+work directory: <file>:<line>: <problem>` (exit 1); the file is never repaired.
+
+**Integrity check.** When the manifest records a `jpeg_sha256`,
+`LocalStore.image_bytes` (and so `image_bytes_many`) hashes the bytes it read
+and raises `ValueError("<key> does not match its recorded hash")` on a
+mismatch. Every caller already treats that as an unloadable image: the grid
+packer leaves it out of every grid, the review session shows a placeholder that
+takes only DIRTY (see *Unloadable Images*), and the server answers `/image`
+with 404 (which the client raises as `KeyError`, again a placeholder). This
+catches what Pillow's strict decode cannot: a JPG whose scan data was cut short
+but which still ends in an EOI marker decodes without error, with grey rows,
+and could otherwise be marked CLEAN with its missing rows never seen. The cost
+is one SHA-256 per image load (about 9 ms for a 0.9 MB JPG on the reference
+machine, against about 74 ms to decode it). Old manifests without hashes are
+not checked.
+
+### `preprocess.json`
+
+Written by `preprocess`, in the staging directory with the policy's file mode
+like the other files. One JSON object recording how the work directory was made:
+
+| Key | Description |
+|-----|-------------|
+| `tool_version` | The image-review package version (`"unknown"` if not installed) |
+| `created` | UTC time the run finished, ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) |
+| `sources` | The SOURCES, as resolved absolute paths, in the order given |
+| `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `access` |
+| `libraries` | Versions of `pydicom`, `numpy`, `scikit-image`, `Pillow`, `matplotlib`, plus `gdcm`, `pylibjpeg`, `openjpeg` when importable |
+| `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored` |
+
+It holds source paths, so it is as sensitive as `manifest.tsv`. Nothing reads
+it back and the server never serves it: `/image` serves only keys listed in
+the manifest (the key map is checked before `safe_path`), and no JPG key can
+name it.
 
 ### `skipped.tsv`
 
@@ -712,7 +756,8 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 | `StatusFilter` | `Literal["unreviewed", "clean", "all"]`: the `review --filter` vocabulary, parsed by the CLI's choice and taken by `filter_rows` and `ReviewSession` |
 | `ManifestRow` | Frozen dataclass: `key` (the `preprocessed_path`) and `batch` |
 | `SkippedRow` | Frozen dataclass: one `skipped.tsv` row, `image_id`, `kind` (`SkipKind`, `Literal["failed", "ignored"]`) and `reason` |
-| `ExportRow` | Frozen dataclass: one `export` row (a source file), `image_id`, `status` (`ExportStatus`, `Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]`), `pass_number` (`int \| None`), `timestamp`, `reviewer`, `reason` |
+| `ManifestEntry` | Frozen dataclass: one `manifest.tsv` row, `batch`, `key`, `image_id`, and `source_sha256` and `jpeg_sha256` (`str \| None`; `None` in a 3-column manifest). Local only |
+| `ExportRow` | Frozen dataclass: one `export` row (a source file), `image_id`, `status` (`ExportStatus`, `Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]`), `pass_number` (`int \| None`), `timestamp`, `reviewer`, `reason`, `source_sha256` (`""` when unknown) |
 | `StoreUnavailable` | Exception: the store cannot be reached (as opposed to a bad key or image) |
 
 ### Key versus `image_id`
@@ -744,8 +789,9 @@ Loads `manifest.tsv` (written once by `preprocess`, so before locking); a
 writable store then takes the work dir lock (see *Concurrency limits*) and
 loads a `ReviewDB` and calls its `migrate()` (see *`review.tsv`*), releasing the lock if either fails. `close()` releases it. A `read_only` store takes no lock and its
 `mark` and `undo` raise `PermissionError` (as they do after `close()`). `image_bytes` reads the file via
-`safe_path`; `image_bytes_many` loops over it, catching `KeyError`,
-`ValueError` (path escape) and `OSError`. `mark` translates each key to its
+`safe_path` and checks it against its `jpeg_sha256` when the manifest has one
+(see *Integrity check*); `image_bytes_many` loops over it, catching `KeyError`,
+`ValueError` (path escape, hash mismatch) and `OSError`. `mark` translates each key to its
 `image_id` and its own manifest batch (a grid's keys need not share one) and
 calls `ReviewDB.mark_many`, so `grid_size` is the number of keys. After a
 successful `mark_many`, the rows it wrote and each image's decision from just
@@ -914,8 +960,9 @@ the stale flag.
 
 ### Unloadable Images
 
-An image whose bytes are missing (`KeyError`, e.g. a 404 from the server) or
-cannot be read or decoded is not an outage (see *Store Failures*). A warning
+An image whose bytes are missing (`KeyError`, e.g. a 404 from the server),
+do not match the manifest's `jpeg_sha256` (`ValueError`), or cannot be read or
+decoded is not an outage (see *Store Failures*). A warning
 naming the key is logged, the key is added to the session's
 `_unloadable` set, and the item is shown as a placeholder from
 `viewer.placeholder_surface`: a dark surface reading `Cannot load image: <key>`
@@ -1339,7 +1386,7 @@ the boundary (`parse_pass`, `parse_mark`, `parse_undo`).
 |---------|----------|
 | `GET /version` | `{"api": N, "version": str}`: the wire API version (`connection.API_VERSION`) and the installed `image-review` package version (`"unknown"` if not installed) |
 | `GET /manifest` | `[{"key": str, "batch": str}, ...]` |
-| `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown or unreadable |
+| `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown, unreadable, or does not match its recorded `jpeg_sha256` |
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`), or `null` if the work dir has no `skipped.tsv`. Only counts are sent, never `image_id`s or reasons (which contain source paths) |

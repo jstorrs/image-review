@@ -46,11 +46,13 @@ def free_port() -> int:
 
 
 class RemoteTestCase(unittest.TestCase):
+    HASHED = False  # manifest.tsv with the hash columns
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.work_dir = Path(tmp.name)
-        make_work_dir(self.work_dir)
+        make_work_dir(self.work_dir, hashed=self.HASHED)
         self.server, self.target, stop = start_server(self.work_dir)
         self.stopped = False
         self.addCleanup(self.stop_server)
@@ -618,6 +620,41 @@ class TestSession(RemoteTestCase):
                 mark.assert_called_once()
         self.assertIn(f"cannot load {missing}: image could not be fetched", "\n".join(logs.output))
         self.assertEqual(self.local_copy().statuses(1)[missing], "DIRTY")
+
+
+class TestHashMismatch(RemoteTestCase):
+    """A JPG that no longer matches its manifest hash: the server answers 404, the client shows a placeholder."""
+
+    HASHED = True
+
+    def setUp(self):
+        super().setUp()
+        pg.init()
+        self.addCleanup(pg.quit)
+        patcher = mock.patch.object(pg.display, "toggle_fullscreen", lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.corrupt = KEYS[0]
+        path = self.work_dir / self.corrupt
+        data = bytearray(path.read_bytes())
+        data[len(data) // 2] ^= 0x01
+        path.write_bytes(bytes(data))
+
+    def test_image_bytes_is_key_error(self):
+        with self.assertRaises(KeyError):
+            self.store.image_bytes(self.corrupt)
+
+    def test_is_a_placeholder(self):
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
+        s._cursor = next(i for i, item in enumerate(s._items) if item.keys == (self.corrupt,))
+        with self.assertLogs("image_review.controller", "WARNING") as logs:
+            s._show_current()
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertEqual(s._unloadable, {self.corrupt})
+        self.assertIn(f"cannot load {self.corrupt}: image could not be fetched", "\n".join(logs.output))
+        with mock.patch.object(self.store, "mark") as mark, redirect_stderr(io.StringIO()):
+            s._mark("CLEAN")
+        mark.assert_not_called()
 
 
 class TestImports(unittest.TestCase):

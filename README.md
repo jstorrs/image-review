@@ -90,7 +90,14 @@ embedded icon image becomes an extra manifest row whose image id ends in
 contrast enhancement applied to grayscale. Transparent images are shown as
 the composite over mid-gray beside the raw channels with alpha ignored, and
 MPO JPEGs (HDR gain maps, previews) show all their frames side by side.
-Output is organized into batch subdirectories with a `manifest.tsv` index.
+Output is organized into batch subdirectories with a `manifest.tsv` index,
+which records for each JPG the SHA-256 of its source file (or ZIP entry) and of
+the JPG itself. Viewing an image checks it against that hash: a JPG changed or
+cut short after preprocessing is shown as an unloadable placeholder (DIRTY
+only), never as an image that could be marked CLEAN. `preprocess.json` beside
+it records the tool and library versions, the resolved SOURCES, the rendering
+parameters and the input counts. Like the manifest, it holds source paths and
+stays in the work directory; the server never sends it.
 
 The work directory must not already exist (an empty directory is fine);
 `preprocess` refuses to write into one that has content, so verdicts can never
@@ -310,6 +317,7 @@ split or merge rows there. A `"` anywhere else is written as is.
 | `status` | `CLEAN`, `DIRTY`, `UNREVIEWED` (no verdict yet) or `NOT_REVIEWED` (preprocess could not render it, or its icon) |
 | `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. After an undo they are the undo's time and reviewer. `reviewer` is the reviewer's unverified claim |
 | `reason` | Why the row is not simply the main image's verdict: preprocess's error for a `NOT_REVIEWED` file, `icon DIRTY` / `icon UNREVIEWED` / `icon: <error>` for its icon, `main image missing` (an icon whose file is not in the manifest; the row is then at best `NOT_REVIEWED`); otherwise empty |
+| `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest, for matching rows to files downstream; empty for a file that never rendered or a work dir from an older version. It is derived from the file's content, so treat it like the `image_id` |
 
 - A DICOM's embedded icon (`<path>#icon` in the manifest) is folded into its
   file's row: the row is CLEAN only if the image and its icon both are, else

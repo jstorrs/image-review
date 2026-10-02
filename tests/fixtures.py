@@ -1,4 +1,5 @@
 import csv
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -16,15 +17,28 @@ ROWS = [
 ]
 
 
-def make_work_dir(root: Path) -> None:
+def make_work_dir(root: Path, hashed: bool = False) -> None:
+    """The ROWS work dir: solid grey JPGs and a legacy 3-column manifest, or (`hashed`) one with hash columns."""
     for _, key, _ in ROWS:
         path = root / key
         path.parent.mkdir(exist_ok=True)
         ski.io.imsave(path, np.full((12, 20, 3), 128, dtype=np.uint8), check_contrast=False)
+    write_manifest(root, hashed)
+
+
+def write_manifest(root: Path, hashed: bool = False) -> None:
+    """Write ROWS as manifest.tsv. `hashed`: the current 5-column format, with each JPG's SHA-256 as it is on disk
+    now (and a stand-in source hash); otherwise the legacy 3-column format."""
     with open(root / "manifest.tsv", "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
-        writer.writerow(["batch", "preprocessed_path", "image_id"])
-        writer.writerows(ROWS)
+        if not hashed:
+            writer.writerow(["batch", "preprocessed_path", "image_id"])
+            writer.writerows(ROWS)
+            return
+        writer.writerow(["batch", "preprocessed_path", "image_id", "source_sha256", "jpeg_sha256"])
+        for batch, key, image_id in ROWS:
+            source = hashlib.sha256(image_id.encode()).hexdigest()
+            writer.writerow([batch, key, image_id, source, hashlib.sha256((root / key).read_bytes()).hexdigest()])
 
 
 def write_dicom(

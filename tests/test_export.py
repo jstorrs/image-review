@@ -2,6 +2,7 @@ import csv
 import dataclasses
 import errno
 import grp
+import hashlib
 import json
 import os
 import stat
@@ -24,9 +25,16 @@ from tests.fixtures import ROWS, make_work_dir, start_server
 
 ENV = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
 KEYS = [key for _, key, _ in ROWS]
-MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id"]
+MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id", "source_sha256", "jpeg_sha256"]
+LEGACY_MANIFEST_HEADER = MANIFEST_HEADER[:3]
 
-# (batch, preprocessed_path, image_id)
+
+def sha(text: str) -> str:
+    """A stand-in SHA-256 for a source or JPG (export never reads either)."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+# (batch, preprocessed_path, image_id); an icon shares its file's source hash
 MANIFEST = [
     ("b1", "b1/a.jpg", "/src/a.dcm"),
     ("b1", "b1/a_again.jpg", "/src/a.dcm"),  # two keys share an image_id
@@ -42,6 +50,7 @@ MANIFEST = [
     ("b2", "b2/k.jpg", "/src/k.dcm"),
     ("b2", "b2/m_icon.jpg", "/src/m.dcm#icon"),  # an icon without its file
 ]
+MANIFEST_WITH_HASHES = [(b, k, i, sha(i.removesuffix("#icon")), sha(k)) for b, k, i in MANIFEST]
 T = "2026-01-0{}T00:00:0{}+00:00".format
 REVIEW = [
     ("/src/a.dcm", "b1", "CLEAN", "1", T(1, 1), "alice", "single", "1", "0.1"),
@@ -72,20 +81,20 @@ SKIPPED = (
 )
 # d.dcm is DIRTY from pass 1 while b.dcm is in pass 2 (the current pass is 1: c.dcm is unreviewed)
 EXPECTED = (
-    b"image_id\tstatus\tpass_number\ttimestamp\treviewer\treason\n"
-    b"/src/a.dcm\tCLEAN\t1\t2026-01-01T00:00:01+00:00\talice\t\n"
-    b"/src/b.dcm\tDIRTY\t2\t2026-01-02T00:00:05+00:00\tcarol\t\n"
-    b"/src/c.dcm\tUNREVIEWED\t\t\t\t\n"
-    b"/src/d.dcm\tDIRTY\t1\t2026-01-01T00:00:03+00:00\tbob\t\n"
-    b"/src/e.dcm\tUNREVIEWED\t\t\t\t\n"
-    b"/src/h.dcm\tDIRTY\t1\t2026-01-02T00:00:07+00:00\tdave\ticon DIRTY\n"
-    b"/src/i.dcm\tNOT_REVIEWED\t1\t2026-01-02T00:00:08+00:00\tdave\ticon: ValueError: bad icon\n"
-    b"/src/j.dcm\tNOT_REVIEWED\t\t\t\tDecodeError: truncated\n"
-    b"/src/k.dcm\tCLEAN\t1\t2026-01-03T00:00:02+00:00\tfrank\t\n"
-    b"/src/m.dcm\tDIRTY\t\t\t\tmain image missing; icon DIRTY\n"
-    b"/src/f.dcm\tNOT_REVIEWED\t\t\t\tcannot decode pixel data\n"
-    b"/src/g.zip::x.dcm\tNOT_REVIEWED\t\t\t\tunsupported: nested zip\n"
-)
+    "image_id\tstatus\tpass_number\ttimestamp\treviewer\treason\tsource_sha256\n"
+    f"/src/a.dcm\tCLEAN\t1\t2026-01-01T00:00:01+00:00\talice\t\t{sha('/src/a.dcm')}\n"
+    f"/src/b.dcm\tDIRTY\t2\t2026-01-02T00:00:05+00:00\tcarol\t\t{sha('/src/b.dcm')}\n"
+    f"/src/c.dcm\tUNREVIEWED\t\t\t\t\t{sha('/src/c.dcm')}\n"
+    f"/src/d.dcm\tDIRTY\t1\t2026-01-01T00:00:03+00:00\tbob\t\t{sha('/src/d.dcm')}\n"
+    f"/src/e.dcm\tUNREVIEWED\t\t\t\t\t{sha('/src/e.dcm')}\n"
+    f"/src/h.dcm\tDIRTY\t1\t2026-01-02T00:00:07+00:00\tdave\ticon DIRTY\t{sha('/src/h.dcm')}\n"
+    f"/src/i.dcm\tNOT_REVIEWED\t1\t2026-01-02T00:00:08+00:00\tdave\ticon: ValueError: bad icon\t{sha('/src/i.dcm')}\n"
+    f"/src/j.dcm\tNOT_REVIEWED\t\t\t\tDecodeError: truncated\t{sha('/src/j.dcm')}\n"
+    f"/src/k.dcm\tCLEAN\t1\t2026-01-03T00:00:02+00:00\tfrank\t\t{sha('/src/k.dcm')}\n"
+    f"/src/m.dcm\tDIRTY\t\t\t\tmain image missing; icon DIRTY\t{sha('/src/m.dcm')}\n"
+    "/src/f.dcm\tNOT_REVIEWED\t\t\t\tcannot decode pixel data\t\n"  # never rendered: no source hash
+    "/src/g.zip::x.dcm\tNOT_REVIEWED\t\t\t\tunsupported: nested zip\t\n"
+).encode()
 
 
 def write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]]) -> None:
@@ -112,7 +121,7 @@ class ExportTestCase(unittest.TestCase):
         self.root = Path(tmp.name)
         self.work = self.root / "work"
         self.work.mkdir(mode=0o700)
-        write_tsv(self.work / "manifest.tsv", MANIFEST_HEADER, MANIFEST)
+        write_tsv(self.work / "manifest.tsv", MANIFEST_HEADER, MANIFEST_WITH_HASHES)
         write_tsv(self.work / "review.tsv", HEADER, REVIEW)
         (self.work / "skipped.tsv").write_text(SKIPPED)
 
@@ -149,7 +158,9 @@ class TestExportRows(ExportTestCase):
         before = (self.work / "review.tsv").read_bytes()
         result = self.export()
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(result.stdout.splitlines()[1], "/src/a.dcm\tCLEAN\t2\tt2\t\t")  # reviewer not recorded
+        self.assertEqual(
+            result.stdout.splitlines()[1], f"/src/a.dcm\tCLEAN\t2\tt2\t\t\t{sha('/src/a.dcm')}"
+        )  # no reviewer
         self.assertEqual((self.work / "review.tsv").read_bytes(), before)  # a reader does not migrate it
 
     def test_without_skipped_or_review_files(self):
@@ -163,7 +174,7 @@ class TestExportRows(ExportTestCase):
         self.assertEqual([r[:2] for r in rows], expected)
 
     def test_clean_icon_without_its_file_is_not_clean(self):
-        write_tsv(self.work / "manifest.tsv", MANIFEST_HEADER, [("b1", "b1/s.jpg", "/src/scan.dcm#icon")])
+        write_tsv(self.work / "manifest.tsv", LEGACY_MANIFEST_HEADER, [("b1", "b1/s.jpg", "/src/scan.dcm#icon")])
         write_tsv(
             self.work / "review.tsv",
             HEADER,
@@ -172,7 +183,7 @@ class TestExportRows(ExportTestCase):
         (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/scan.dcm\tignored\tDICOMDIR\n")
         result = self.export()
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(result.stdout.splitlines()[1], "/src/scan.dcm\tNOT_REVIEWED\t\t\t\tmain image missing")
+        self.assertEqual(result.stdout.splitlines()[1], "/src/scan.dcm\tNOT_REVIEWED\t\t\t\tmain image missing\t")
 
     def test_malformed_skipped_is_a_clean_error(self):
         (self.work / "skipped.tsv").write_text("wrong\n")
@@ -182,10 +193,12 @@ class TestExportRows(ExportTestCase):
         self.assertNotIn("Traceback", result.output)
 
     def test_quote_is_written_as_is(self):
-        write_tsv(self.work / "manifest.tsv", MANIFEST_HEADER, [("b1", "b1/q.jpg", '/src/"q".dcm')])
+        write_tsv(self.work / "manifest.tsv", LEGACY_MANIFEST_HEADER, [("b1", "b1/q.jpg", '/src/"q".dcm')])
         result = self.export()
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(result.stdout_bytes.splitlines()[1], b'/src/"q".dcm\tUNREVIEWED\t\t\t\t')
+        self.assertEqual(
+            result.stdout_bytes.splitlines()[1], b'/src/"q".dcm\tUNREVIEWED\t\t\t\t\t'
+        )  # legacy manifest: no hash
 
     def test_unsafe_image_id_is_refused(self):
         for image_id in (
@@ -200,7 +213,7 @@ class TestExportRows(ExportTestCase):
             '"/src/q.dcm',
         ):
             with self.subTest(image_id=image_id):
-                write_tsv(self.work / "manifest.tsv", MANIFEST_HEADER, [("b1", "b1/x.jpg", image_id)])
+                write_tsv(self.work / "manifest.tsv", LEGACY_MANIFEST_HEADER, [("b1", "b1/x.jpg", image_id)])
                 out = self.root / "out.tsv"
                 result = self.export("--output", str(out))
                 self.assertEqual(result.exit_code, 1)
@@ -208,7 +221,7 @@ class TestExportRows(ExportTestCase):
                 self.assertFalse(out.exists())
 
     def test_reviewer_starting_with_a_quote_is_refused(self):
-        write_tsv(self.work / "manifest.tsv", MANIFEST_HEADER, [("b1", "b1/a.jpg", "/src/a.dcm")])
+        write_tsv(self.work / "manifest.tsv", LEGACY_MANIFEST_HEADER, [("b1", "b1/a.jpg", "/src/a.dcm")])
         write_tsv(
             self.work / "review.tsv",
             HEADER,

@@ -2,13 +2,16 @@
 
 import contextlib
 import csv
+import hashlib
 import io
+import json
 import os
 import stat
 import tempfile
 import unittest
 import warnings
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -235,6 +238,114 @@ def _discovered(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> 
     """(image_id, kind or skip kind) for each discovered item."""
     with quiet():
         return [(item.image_id, item.kind) for item in discover(sources, exclude)]
+
+
+def _dicom_with_icon(path: Path) -> None:
+    icon = pydicom.Dataset()
+    icon.Rows, icon.Columns, icon.SamplesPerPixel = 8, 8, 1
+    icon.PhotometricInterpretation = "MONOCHROME2"
+    icon.BitsAllocated, icon.BitsStored, icon.HighBit, icon.PixelRepresentation = 8, 8, 7, 0
+    icon.PixelData = np.arange(64, dtype=np.uint8).tobytes()
+    write_dicom(path, _good_pixels(), IconImageSequence=[icon])
+
+
+class ProvenanceTest(unittest.TestCase):
+    """preprocess.json records how the work dir was made; manifest.tsv records source and JPG hashes."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.src = self.root / "src"
+        self.src.mkdir()
+        _dicom_with_icon(self.src / "icon.dcm")
+        write_dicom(self.src / "plain.dcm", _good_pixels())
+        (self.src / "notes.txt").write_text("not an image")  # ignored
+        (self.src / "broken.dcm").write_bytes(b"\xff\xd8\xff truncated jpeg")  # failed
+        self.entry = _png_bytes(RNG.integers(0, 255, (20, 30, 3), dtype=np.uint8))
+        self.archive = self.root / "scans.zip"
+        with zipfile.ZipFile(self.archive, "w") as zf:
+            zf.writestr("dir/scan.png", self.entry)
+        self.work = self.root / "work"
+        with quiet():
+            self.result = run_preprocess([self.src, self.archive], self.work, batch_size=2, colormap="gray")
+        self.manifest = {r["image_id"]: r for r in _read_tsv(self.work / "manifest.tsv")}
+
+    def test_preprocess_json_records_parameters_and_counts(self):
+        record = json.loads((self.work / "preprocess.json").read_text())
+        self.assertEqual(record["tool_version"], preprocess_module.package_version())
+        created = datetime.strptime(record["created"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        self.assertLess(abs((datetime.now(UTC) - created).total_seconds()), 600)
+        self.assertEqual(record["sources"], [self.src.as_posix(), self.archive.as_posix()])
+        self.assertEqual(
+            record["parameters"],
+            {
+                "batch_size": 2,
+                "colormap": "gray",
+                "clahe_kernel_size": preprocess_module.CLAHE_KERNEL_SIZE,
+                "outlier_percentile": preprocess_module.OUTLIER_PERCENTILE,
+                "intensity_margin": preprocess_module.INTENSITY_MARGIN,
+                "tail_fraction": preprocess_module.TAIL_FRACTION,
+                "jpeg_quality": preprocess_module.JPEG_QUALITY,
+                "jpeg_subsampling": preprocess_module.JPEG_SUBSAMPLING,
+                "access": "private",
+            },
+        )
+        self.assertLessEqual({"pydicom", "numpy", "scikit-image", "Pillow", "matplotlib"}, set(record["libraries"]))
+        self.assertEqual(record["libraries"]["pydicom"], pydicom.__version__)
+        self.assertEqual(record["counts"], {"inputs": 5, "written": 4, "skipped_failed": 1, "skipped_ignored": 1})
+        self.assertEqual((self.result.found, self.result.written), (5, 4))
+        self.assertEqual(stat.S_IMODE((self.work / "preprocess.json").stat().st_mode), 0o600)
+
+    def test_preprocess_json_follows_group_policy(self):
+        work = self.root / "shared"
+        with quiet():
+            run_preprocess([self.src], work, access="group")
+        self.assertEqual(stat.S_IMODE((work / "preprocess.json").stat().st_mode), 0o660)
+        self.assertEqual(json.loads((work / "preprocess.json").read_text())["parameters"]["access"], "group")
+
+    def test_source_sha256_of_a_file_is_shared_by_its_icon(self):
+        main = (self.src / "icon.dcm").as_posix()
+        expected = hashlib.sha256((self.src / "icon.dcm").read_bytes()).hexdigest()
+        self.assertEqual(self.manifest[main]["source_sha256"], expected)
+        self.assertEqual(self.manifest[f"{main}#icon"]["source_sha256"], expected)
+        plain = (self.src / "plain.dcm").as_posix()
+        self.assertEqual(
+            self.manifest[plain]["source_sha256"], hashlib.sha256((self.src / "plain.dcm").read_bytes()).hexdigest()
+        )
+
+    def test_source_sha256_of_a_zip_entry_is_of_the_entry(self):
+        row = self.manifest[f"{self.archive.as_posix()}::dir/scan.png"]
+        self.assertEqual(row["source_sha256"], hashlib.sha256(self.entry).hexdigest())
+        self.assertNotEqual(row["source_sha256"], hashlib.sha256(self.archive.read_bytes()).hexdigest())
+
+    def test_jpeg_sha256_matches_the_file(self):
+        self.assertEqual(len(self.manifest), 4)
+        for row in self.manifest.values():
+            data = (self.work / row["preprocessed_path"]).read_bytes()
+            self.assertEqual(row["jpeg_sha256"], hashlib.sha256(data).hexdigest())
+
+    def test_source_is_read_once(self):
+        reads = []
+
+        def counting(path: Path) -> bytes:
+            reads.append(path)
+            return real(path)
+
+        real = Path.read_bytes
+        with mock.patch.object(Path, "read_bytes", counting), quiet():
+            run_preprocess([self.src / "icon.dcm"], self.root / "once")
+        self.assertEqual(reads, [self.src / "icon.dcm"])
+
+    def test_manifest_loads_with_hashes(self):
+        from image_review.store import load_manifest
+
+        entries = {e.image_id: e for e in load_manifest(self.work)}
+        for image_id, row in self.manifest.items():
+            self.assertEqual(
+                (entries[image_id].source_sha256, entries[image_id].jpeg_sha256),
+                (row["source_sha256"], row["jpeg_sha256"]),
+            )
 
 
 class ClassifyTest(unittest.TestCase):

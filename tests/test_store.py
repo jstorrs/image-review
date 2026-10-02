@@ -2,6 +2,7 @@ import contextlib
 import csv
 import errno
 import gc
+import hashlib
 import io
 import json
 import os
@@ -53,17 +54,19 @@ from image_review.review_db import HEADER, ReviewDB
 from image_review.store import (
     LOCK_NAME,
     LocalStore,
+    ManifestEntry,
     ManifestRow,
     SkippedCounts,
     WorkDirLocked,
     batch_summary,
     boot_id,
     filter_rows,
+    load_manifest,
     summary,
 )
 from image_review.util import load_surface
 from image_review.viewer import ImageViewer, scale_percent
-from tests.fixtures import ROWS, make_work_dir
+from tests.fixtures import ROWS, make_work_dir, write_manifest
 
 
 class StoreTestCase(unittest.TestCase):
@@ -71,9 +74,12 @@ class StoreTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.work_dir = Path(self._tmp.name)
-        make_work_dir(self.work_dir)
+        self.make_work_dir()
         self.store = LocalStore(self.work_dir)
         self.addCleanup(self.store.close)
+
+    def make_work_dir(self) -> None:
+        make_work_dir(self.work_dir)
 
 
 def _jpeg_bytes(mode: str) -> bytes:
@@ -389,6 +395,52 @@ class TestStrictLoading(unittest.TestCase):
         self.write_manifest("batch\tpreprocessed_path")
         with self.assertRaisesRegex(ValueError, r"manifest\.tsv:1: header"):
             LocalStore(self.work_dir)
+
+    HASHED_HEADER = "batch\tpreprocessed_path\timage_id\tsource_sha256\tjpeg_sha256"
+    SOURCE_HASH = hashlib.sha256(b"source").hexdigest()
+    JPEG_HASH = hashlib.sha256(b"jpeg").hexdigest()
+
+    def test_legacy_manifest_loads_without_hashes(self):
+        self.write_manifest(self.MANIFEST_HEADER, "batch_001\tbatch_001/a.jpg\t/src/a.dcm")
+        self.assertEqual(load_manifest(self.work_dir), [ManifestEntry("batch_001", "batch_001/a.jpg", "/src/a.dcm")])
+        self.assertEqual(LocalStore(self.work_dir, read_only=True).image_bytes("batch_001/a.jpg")[:2], b"\xff\xd8")
+
+    def test_hashed_manifest_loads_hashes(self):
+        self.write_manifest(
+            self.HASHED_HEADER, f"batch_001\tbatch_001/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}"
+        )
+        self.assertEqual(
+            load_manifest(self.work_dir),
+            [ManifestEntry("batch_001", "batch_001/a.jpg", "/src/a.dcm", self.SOURCE_HASH, self.JPEG_HASH)],
+        )
+
+    def test_malformed_hash_names_file_and_line(self):
+        good = f"batch_001\tbatch_001/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}"
+        row = "batch_001\tbatch_001/b.jpg\t/src/b.dcm\t{}\t{}".format
+        cases = {
+            "uppercase source": (row(self.SOURCE_HASH.upper(), self.JPEG_HASH), "source_sha256"),
+            "short jpeg": (row(self.SOURCE_HASH, self.JPEG_HASH[:63]), "jpeg_sha256"),
+            "long jpeg": (row(self.SOURCE_HASH, self.JPEG_HASH + "0"), "jpeg_sha256"),
+            "non-hex source": (row("g" * 64, self.JPEG_HASH), "source_sha256"),
+            "prefixed source": (row(f"sha256:{self.SOURCE_HASH[7:]}", self.JPEG_HASH), "source_sha256"),
+            "trailing space in hash": (row(self.SOURCE_HASH, f"{self.JPEG_HASH} "), "jpeg_sha256"),
+            # a quoted field spans two lines; csv reports the line it ends on
+            "trailing newline in hash": (row(self.SOURCE_HASH, f'"{self.JPEG_HASH}\n"'), "4: jpeg_sha256"),
+            "empty jpeg": (row(self.SOURCE_HASH, ""), "non-empty"),
+            "legacy-width row": ("batch_001\tbatch_001/b.jpg\t/src/b.dcm", "expected 5"),
+        }
+        for name, (line, message) in cases.items():
+            with self.subTest(name):
+                self.write_manifest(self.HASHED_HEADER, good, line)
+                with self.assertRaisesRegex(ValueError, rf"manifest\.tsv:(3: .*)?{message}"):
+                    load_manifest(self.work_dir)
+
+    def test_hashed_row_under_legacy_header_is_refused(self):
+        self.write_manifest(
+            self.MANIFEST_HEADER, f"batch_001\tbatch_001/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}"
+        )
+        with self.assertRaisesRegex(ValueError, r"manifest\.tsv:2: expected 3"):
+            load_manifest(self.work_dir)
 
 
 class TestReviewLog(unittest.TestCase):
@@ -2245,6 +2297,80 @@ class TestUnloadable(EventLoopTestCase):
         missing = [*rows, ManifestRow(key="batch_009/missing.jpg", batch="batch_009")]
         _, unloadable = pack_into_grids(missing, self.store, 400, 300)
         self.assertEqual(list(unloadable), [CORRUPT, "batch_009/missing.jpg"])
+
+
+class TestJpegHash(EventLoopTestCase):
+    """manifest.tsv records each JPG's SHA-256; a JPG that no longer matches is unloadable everywhere."""
+
+    def make_work_dir(self) -> None:
+        make_work_dir(self.work_dir)
+        (self.work_dir / CORRUPT).write_bytes(_jpeg_bytes("RGB"))  # big enough to cut mid-scan
+        write_manifest(self.work_dir, hashed=True)
+
+    def setUp(self):
+        super().setUp()
+        self.original = (self.work_dir / CORRUPT).read_bytes()
+        stderr = mock.patch("sys.stderr", io.StringIO())
+        stderr.start()
+        self.addCleanup(stderr.stop)
+
+    def flip_one_byte(self) -> None:
+        data = bytearray(self.original)
+        data[len(data) // 2] ^= 0x01
+        (self.work_dir / CORRUPT).write_bytes(bytes(data))
+
+    def truncate_keeping_eoi(self) -> bytes:
+        scan = self.original.index(b"\xff\xda")  # start of scan
+        cut = self.original[: scan + (len(self.original) - scan) // 2] + b"\xff\xd9"
+        (self.work_dir / CORRUPT).write_bytes(cut)
+        return cut
+
+    def assert_placeholder(self, mode: str) -> None:
+        with self.assertLogs("image_review.controller", "WARNING") as logs:
+            s = self.reviewing(mode)
+            index = next(i for i, item in enumerate(s._items) if CORRUPT in item.keys)
+            self.assertEqual(s._items[index].keys, (CORRUPT,))  # never packed into a grid
+            s._cursor = index
+            s._show_current()
+        self.assertEqual(s._unloadable, {CORRUPT})
+        self.assertIn("does not match its recorded hash", "\n".join(logs.output))
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_not_called()
+        self.assertEqual(s._viewer._info, UNLOADABLE_CLEAN)
+
+    def test_intact_image_loads(self):
+        self.assertEqual(self.store.image_bytes(CORRUPT), self.original)
+        entry = next(e for e in load_manifest(self.work_dir) if e.key == CORRUPT)
+        self.assertEqual(entry.jpeg_sha256, hashlib.sha256(self.original).hexdigest())
+
+    def test_flipped_byte_image_bytes_raises(self):
+        self.flip_one_byte()
+        with self.assertRaisesRegex(ValueError, f"^{CORRUPT} does not match its recorded hash$"):
+            self.store.image_bytes(CORRUPT)
+        with self.assertLogs("image_review.store", "WARNING") as logs:
+            found = self.store.image_bytes_many([CORRUPT, "batch_001/b.jpg"])
+        self.assertEqual(list(found), ["batch_001/b.jpg"])
+        self.assertIn(f"cannot load {CORRUPT}", "\n".join(logs.output))
+
+    def test_flipped_byte_is_a_placeholder(self):
+        self.flip_one_byte()
+        for mode in ("single", "grid"):
+            with self.subTest(mode=mode):
+                self.assert_placeholder(mode)
+
+    def test_flipped_byte_is_left_out_of_grids(self):
+        self.flip_one_byte()
+        rows = [row for row in self.store.manifest() if row.batch == "batch_001"]
+        grids, left_out = pack_into_grids(rows, self.store, 400, 300)
+        self.assertEqual(left_out, [CORRUPT])
+        self.assertEqual([gs.keys for gs in grids], [["batch_001/b.jpg"]])
+
+    def test_truncated_with_eoi_is_a_placeholder(self):
+        cut = self.truncate_keeping_eoi()
+        self.assertEqual(load_surface(cut).get_size(), (257, 131))  # the gap: Pillow decodes it, with grey rows
+        self.assert_placeholder("single")
 
 
 def dropping_packer(rect_id: int):

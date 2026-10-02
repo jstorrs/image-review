@@ -1,5 +1,9 @@
 import csv
+import hashlib
+import importlib.metadata
+import importlib.util
 import io
+import json
 import logging
 import os
 import re
@@ -8,9 +12,10 @@ import stat
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from zipfile import ZipFile
 
 import matplotlib
@@ -30,6 +35,8 @@ from pydicom.uid import (
 from tqdm import tqdm
 
 from .access import Access, Modes, modes
+from .connection import package_version
+from .store import MANIFEST_HEADER
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +101,10 @@ _HEIF_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b
 _ALPHA_MODES = {"RGBA", "RGBa", "LA", "La", "PA"}
 _HIGH_BIT_GRAY_MODES = {"I", "F", "I;16", "I;16L", "I;16B", "I;16N"}
 _PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
+PROVENANCE_NAME = "preprocess.json"
+_LIBRARIES = ("pydicom", "numpy", "scikit-image", "Pillow", "matplotlib")  # distribution names
+# Optional pixel-data codecs, recorded when importable: module name -> distribution name
+_CODEC_DISTRIBUTIONS = {"gdcm": "python-gdcm", "pylibjpeg": "pylibjpeg", "openjpeg": "pylibjpeg-openjpeg"}
 
 Kind = Literal["dicom", "raster"]
 Content = Literal["dicom", "raster", "zip"]
@@ -136,6 +147,15 @@ class Rendered:
 
     image_id: str
     rgb: np.ndarray
+
+
+@dataclass(frozen=True)
+class Encoded:
+    """One output image as JPEG bytes, with the SHA-256 of the source file (or ZIP entry) it came from."""
+
+    image_id: str
+    jpeg: bytes
+    source_sha256: str
 
 
 @dataclass(frozen=True)
@@ -702,15 +722,20 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def _process(candidate: Candidate, colormap: str) -> list[tuple[str, bytes] | Skipped]:
+def _process(candidate: Candidate, colormap: str) -> list[Encoded | Skipped]:
     """Read, render and JPEG-encode one input into its output rows: encoded images and skipped parts.
 
-    A failure of the input itself is a single `Skipped`; an embedded icon that fails is a `Skipped`
-    beside the main image.
+    The source is read once; every image rendered from it (main and icon) carries the SHA-256 of those
+    bytes. A failure of the input itself is a single `Skipped`; an embedded icon that fails is a
+    `Skipped` beside the main image.
     """
     try:
-        rendered = render(candidate.kind, candidate.image_id, candidate.read(), colormap)
-        encoded = [r if isinstance(r, Skipped) else (r.image_id, encode_jpeg(r.rgb)) for r in rendered]
+        data = candidate.read()
+        source_sha256 = hashlib.sha256(data).hexdigest()
+        rendered = render(candidate.kind, candidate.image_id, data, colormap)
+        encoded = [
+            r if isinstance(r, Skipped) else Encoded(r.image_id, encode_jpeg(r.rgb), source_sha256) for r in rendered
+        ]
     except NotAnImage as exc:
         return [Skipped(candidate.image_id, "ignored", _clean_reason(str(exc)))]
     except Exception as exc:  # noqa: BLE001 - one bad input must not abort the run; it is recorded in skipped.tsv
@@ -735,6 +760,56 @@ def _write_tsv(path: Path, header: list[str], rows: Sequence[tuple[str, ...]], p
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(header)
         writer.writerows(rows)
+
+
+def _library_versions() -> dict[str, str]:
+    """Versions of the libraries that shape the output; the optional codecs only when importable."""
+    versions = {name: importlib.metadata.version(name) for name in _LIBRARIES}
+    for module, distribution in _CODEC_DISTRIBUTIONS.items():
+        if importlib.util.find_spec(module) is None:
+            continue
+        try:
+            versions[module] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            versions[module] = "unknown"
+    return versions
+
+
+def provenance(
+    sources: list[Path],
+    batch_size: int,
+    colormap: str,
+    access: Access,
+    result: PreprocessResult,
+    created: datetime,
+    tool_version: str,
+    libraries: dict[str, str],
+) -> dict[str, Any]:
+    """The content of preprocess.json: how this work dir was made. Sources are absolute, resolved paths."""
+    failed = sum(s.kind == "failed" for s in result.skipped)
+    return {
+        "tool_version": tool_version,
+        "created": created.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sources": [s.resolve().as_posix() for s in sources],
+        "parameters": {
+            "batch_size": batch_size,
+            "colormap": colormap,
+            "clahe_kernel_size": CLAHE_KERNEL_SIZE,
+            "outlier_percentile": OUTLIER_PERCENTILE,
+            "intensity_margin": INTENSITY_MARGIN,
+            "tail_fraction": TAIL_FRACTION,
+            "jpeg_quality": JPEG_QUALITY,
+            "jpeg_subsampling": JPEG_SUBSAMPLING,
+            "access": access,
+        },
+        "libraries": libraries,
+        "counts": {
+            "inputs": result.found,
+            "written": result.written,
+            "skipped_failed": failed,
+            "skipped_ignored": len(result.skipped) - failed,
+        },
+    }
 
 
 def staging_path(output_dir: Path) -> Path:
@@ -775,7 +850,8 @@ def run_preprocess(
     Every directory and file follows the `access` policy (see `access.modes`),
     enforced by a umask held for the whole run and restored afterwards.
 
-    Every input ends up in exactly one of manifest.tsv or skipped.tsv. Write
+    Every input ends up in exactly one of manifest.tsv or skipped.tsv; preprocess.json
+    records how the work dir was made (see `provenance`). Write
     errors (OSError on the work directory) propagate and abort the run. The
     work dir appears only on success; an existing non-empty one is refused
     (`WorkDirExists`), so verdicts can never attach to a replaced image.
@@ -788,6 +864,11 @@ def run_preprocess(
         exclude = frozenset({output_dir.resolve(), staging.resolve()})  # never ingest our own output
         try:
             result = _render_into(sources, exclude, staging, batch_size, colormap, policy)
+            record = provenance(
+                sources, batch_size, colormap, access, result, datetime.now(UTC), package_version(), _library_versions()
+            )
+            with _open_new(staging / PROVENANCE_NAME, policy.file_mode, mode="w", encoding="utf-8") as f:
+                f.write(json.dumps(record, indent=2) + "\n")
             if output_dir.exists():
                 output_dir.rmdir()  # an empty directory the user made
             os.rename(staging, output_dir)
@@ -802,7 +883,7 @@ def run_preprocess(
 def _render_into(
     sources: list[Path], exclude: frozenset[Path], output_dir: Path, batch_size: int, colormap: str, policy: Modes
 ) -> PreprocessResult:
-    manifest_rows: list[tuple[str, str, str]] = []
+    manifest_rows: list[tuple[str, str, str, str, str]] = []
     skipped: list[Skipped] = []
     found = 0
 
@@ -815,7 +896,6 @@ def _render_into(
                     log.warning("skipping %s: %s", part.image_id, part.reason)
                 skipped.append(part)
                 continue
-            image_id, jpeg = part
             n = len(manifest_rows)
             batch_id = f"batch_{n // batch_size + 1:03d}"
             batch_dir = output_dir / batch_id
@@ -824,10 +904,12 @@ def _render_into(
                 os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
             img_path = batch_dir / f"img_{n % batch_size + 1:05d}.jpg"
             with _open_new(img_path, policy.file_mode, mode="wb") as f:
-                f.write(jpeg)
-            manifest_rows.append((batch_id, img_path.relative_to(output_dir).as_posix(), image_id))
+                f.write(part.jpeg)
+            key = img_path.relative_to(output_dir).as_posix()
+            jpeg_sha256 = hashlib.sha256(part.jpeg).hexdigest()
+            manifest_rows.append((batch_id, key, part.image_id, part.source_sha256, jpeg_sha256))
 
-    _write_tsv(output_dir / "manifest.tsv", ["batch", "preprocessed_path", "image_id"], manifest_rows, policy.file_mode)
+    _write_tsv(output_dir / "manifest.tsv", MANIFEST_HEADER, manifest_rows, policy.file_mode)
     skipped_path = output_dir / "skipped.tsv"
     _write_tsv(
         skipped_path,

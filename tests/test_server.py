@@ -23,7 +23,7 @@ from click.testing import CliRunner
 from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, RemoteTarget
 from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
-from image_review.store import LocalStore
+from image_review.store import LocalStore, load_manifest
 from tests.fixtures import ROWS, make_work_dir
 
 FP = "a" * 64
@@ -57,11 +57,13 @@ class MakeServerChecksTest(unittest.TestCase):
 
 
 class ServerTestCase(unittest.TestCase):
+    HASHED = False  # manifest.tsv with the hash columns
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.work_dir = Path(tmp.name)
-        make_work_dir(self.work_dir)
+        make_work_dir(self.work_dir, hashed=self.HASHED)
         store = LocalStore(self.work_dir)
         self.addCleanup(store.close)
         self.server, self.target = make_server(store, "127.0.0.1", 0)
@@ -551,6 +553,15 @@ class TestReads(ServerTestCase):
                 resp, data, _ = self.request("GET", f"/image?key={quote(key, safe='')}")
                 self.assertEqual((resp.status, data), (404, b""))
 
+    def test_work_dir_files_are_not_images(self):
+        (self.work_dir / "preprocess.json").write_text('{"sources": ["/src/patient_smith"]}')
+        for key in ("preprocess.json", "manifest.tsv", "skipped.tsv", "review.tsv", "./preprocess.json"):
+            with self.subTest(key=key):
+                from urllib.parse import quote
+
+                resp, data, _ = self.request("GET", f"/image?key={quote(key, safe='')}")
+                self.assertEqual((resp.status, data), (404, b""))
+
     def test_image_without_key_is_400(self):
         resp, _, _ = self.request("GET", "/image")
         self.assertEqual(resp.status, 400)
@@ -591,6 +602,29 @@ class TestReads(ServerTestCase):
         for path in ("/statuses", "/statuses?pass=x", "/statuses?pass=0", "/statuses?pass=-1"):
             with self.subTest(path=path):
                 self.assertEqual(self.request("GET", path)[0].status, 400)
+
+
+class TestHashedManifest(ServerTestCase):
+    HASHED = True
+
+    def test_manifest_has_no_hashes(self):
+        resp, data, _ = self.request("GET", "/manifest")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(data), [{"key": key, "batch": batch} for batch, key, _ in ROWS])
+        for entry in load_manifest(self.work_dir):
+            for digest in (entry.source_sha256, entry.jpeg_sha256):
+                self.assertIsNotNone(digest)
+                self.assertNotIn(str(digest).encode(), data)
+
+    def test_image_not_matching_its_hash_is_404(self):
+        path = self.work_dir / "batch_001/a.jpg"
+        data = bytearray(path.read_bytes())
+        data[len(data) // 2] ^= 0x01
+        path.write_bytes(bytes(data))
+        resp, body, _ = self.request("GET", "/image?key=batch_001%2Fa.jpg")
+        self.assertEqual((resp.status, body), (404, b""))
+        resp, body, _ = self.request("GET", "/image?key=batch_001%2Fb.jpg")
+        self.assertEqual(resp.status, 200)
 
 
 class TestMark(ServerTestCase):

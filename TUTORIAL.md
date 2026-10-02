@@ -118,8 +118,9 @@ the next run tells you to remove it; do so and re-run.
 
 ```
 review_work/
-  manifest.tsv        # Master list: batch, preprocessed_path, image_id
+  manifest.tsv        # Master list: batch, preprocessed_path, image_id, source_sha256, jpeg_sha256
   skipped.tsv         # Inputs that produced no image: image_id, kind, reason
+  preprocess.json     # How it was made: versions, sources, parameters, counts
   review.tsv          # (created later during review)
   batch_001/
     img_00001.jpg      # Individual preprocessed images
@@ -465,13 +466,15 @@ image-review export --work-dir ./review_work > result.tsv   # or to stdout
 ```
 
 ```
-image_id                      status        pass_number  timestamp                         reviewer  reason
-/data/site_a.zip::001.dcm     CLEAN         1            2026-03-02T10:14:07.512+00:00     alice
-/data/site_a.zip::002.dcm     DIRTY         2            2026-03-03T09:01:44.020+00:00     bob
-/data/site_a.zip::003.dcm     DIRTY         1            2026-03-02T10:15:30.101+00:00     alice     icon DIRTY
-/data/site_a.zip::004.dcm     UNREVIEWED
+image_id                      status        pass_number  timestamp                         reviewer  reason                    source_sha256
+/data/site_a.zip::001.dcm     CLEAN         1            2026-03-02T10:14:07.512+00:00     alice                               3f1c...e09a
+/data/site_a.zip::002.dcm     DIRTY         2            2026-03-03T09:01:44.020+00:00     bob                                 a27b...51c4
+/data/site_a.zip::003.dcm     DIRTY         1            2026-03-02T10:15:30.101+00:00     alice     icon DIRTY                0d9e...7f30
+/data/site_a.zip::004.dcm     UNREVIEWED                                                                                   c6b2...18de
 /data/site_b/broken.dcm       NOT_REVIEWED                                                           cannot decode pixel data
 ```
+
+(Hashes shortened here; each is 64 hex characters.)
 
 (Columns are aligned here for reading. The file is tab-separated UTF-8 with
 LF line endings and no quoting. Export refuses if any field holds
@@ -500,6 +503,11 @@ as one cell.)
 - Export covers only the files and entries it lists. It never vouches for a
   ZIP or directory as a whole, because ignored members (a DICOMDIR, a PDF, ...)
   are not listed.
+- `source_sha256` is the SHA-256 of the source file (or ZIP entry), so you
+  can match rows to files even after they are moved or renamed. It is empty
+  for a file that never rendered, and for work directories made by versions
+  before the hash columns. It is derived from the file's content: treat it as
+  carefully as the `image_id`.
 - `reviewer` is whatever name each reviewer gave, unverified, and can start
   with `=`, `+`, `-` or `@` (one starting with `"` makes export refuse). Import the file into a spreadsheet as text
   columns rather than opening it directly, so no value is taken as a formula.
@@ -680,8 +688,8 @@ rm /scratch/me/review_work/review.lock
 
 **Troubleshooting "Cannot read work directory":** `review.tsv` or
 `manifest.tsv` is malformed (for example a hand edit left a short row, a
-status other than `CLEAN`/`DIRTY`, or a non-numeric pass). The message names
-the file and line. Fix or remove that line and run again; the tool never
+status other than `CLEAN`/`DIRTY`, a non-numeric pass, or a hash that is not
+64 lowercase hex characters). The message names the file and line. Fix or remove that line and run again; the tool never
 repairs or drops rows on its own.
 
 **Troubleshooting versions:** "server speaks API vN, this client vM" (or
@@ -728,8 +736,9 @@ All state lives in the work directory (default `./review_work`):
 
 | File | Format | Description |
 |------|--------|-------------|
-| `manifest.tsv` | TSV | Master image list (batch, preprocessed_path, image_id) |
+| `manifest.tsv` | TSV | Master image list (batch, preprocessed_path, image_id, source_sha256, jpeg_sha256). Work dirs from older versions have only the first three columns and still load |
 | `skipped.tsv` | TSV | Inputs that produced no image (image_id, kind, reason) |
+| `preprocess.json` | JSON | How the work directory was made: tool and library versions, time (UTC), resolved sources, parameters (batch size, colormap, contrast settings, JPEG quality, access), and counts. Holds source paths; never served |
 | `review.tsv` | TSV | Review decisions (image_id, batch, status, pass_number, timestamp, reviewer, mode, grid_size, tool_version) |
 | `batch_NNN/img_NNNNN.jpg` | JPG | Preprocessed individual images |
 
