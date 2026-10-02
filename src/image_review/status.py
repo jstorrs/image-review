@@ -9,3 +9,6 @@ TODO_STATUSES: frozenset[Status] = frozenset({"UNREVIEWED", "FLAGGED"})
 
 # How a verdict was given: on one image, or on every image of a grid at once. A client may only give these.
 MarkMode = Literal["single", "grid"]
+
+# When images may be rotated 90 degrees in a grid: "auto" rotates only if that saves a grid
+Rotation = Literal["auto", "always", "never"]

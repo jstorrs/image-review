@@ -51,7 +51,7 @@ interactively in a fullscreen viewer, and report **status** on review progress.
 ```
 cli.py              Command-line entry point, argument parsing
 preprocess.py       DICOM/image loading and normalization
-status.py           Status, Verdict, MarkMode, TODO_STATUSES vocabulary (stdlib only)
+status.py           Status, Verdict, MarkMode, Rotation, TODO_STATUSES vocabulary (stdlib only)
 store.py            ReviewStore Protocol, LocalStore, pure filter/summary functions
 lock.py             The work directory's review.lock: acquire, release, live_writer (stdlib only)
 export.py           Export rows and their TSV format: export_rows, format_export (stdlib only)
@@ -858,7 +858,7 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 
 ### Types
 
-`Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode`) are defined in `status.py`.
+`Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode` and `Rotation`) are defined in `status.py`.
 
 | Name | Description |
 |------|-------------|

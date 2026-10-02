@@ -2,19 +2,17 @@ import io
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 import pygame as pg
 from PIL import Image
 from rectpack import newPacker
 
+from .status import Rotation
 from .store import ManifestRow, ReviewStore
 from .util import load_surface
 
 log = logging.getLogger(__name__)
-
-# When images may be rotated 90 degrees in a grid: "auto" rotates only if that saves a grid
-Rotation = Literal["auto", "always", "never"]
 
 
 @dataclass(frozen=True)

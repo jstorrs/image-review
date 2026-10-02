@@ -8,8 +8,8 @@ from typing import NamedTuple
 import pygame as pg
 from pygame._sdl2 import controller as sdl_controller
 
-from .grid_packer import GridSpec, Rotation, pack_into_grids
-from .status import TODO_STATUSES, MarkMode, Status, Verdict
+from .grid_packer import GridSpec, pack_into_grids
+from .status import TODO_STATUSES, MarkMode, Rotation, Status, Verdict
 from .store import (
     ManifestRow,
     ReviewStore,

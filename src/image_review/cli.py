@@ -13,18 +13,19 @@ from typing import TYPE_CHECKING, get_args
 
 import click
 
-from .access import access_of, modes, world_access_warning
+from .access import Access, access_of, modes, world_access_warning
 from .atomic import write_new_file
 from .connection import RemoteTarget, parse_reviewer
 from .export import format_export
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
 from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on
-from .status import Status
+from .status import MarkMode, Rotation, Status
 from .store import LocalStore, ReviewStore, SkippedCounts, StatusFilter, batch_summary, summary
 
 if TYPE_CHECKING:
-    from .remote import RemoteStore
+    from .remote import RemoteError, RemoteStore
     from .server import ReviewServer
+    from .tunnel import TunnelError
 
 DEFAULT_WORK_DIR = "./review_work"
 
@@ -207,9 +208,9 @@ def _remote_store(target: RemoteTarget, via: str | None) -> Iterator["RemoteStor
         yield store
 
 
-def _remote_failure(e: Exception, where: str, via: str | None) -> click.ClickException:
+def _remote_failure(e: "TunnelError | RemoteError", where: str, via: str | None) -> click.ClickException:
     """The user-facing error for a tunnel or remote-store failure at `where`."""
-    from .remote import ApiMismatch, FingerprintMismatch, RemoteError
+    from .remote import ApiMismatch, FingerprintMismatch
     from .tunnel import TunnelError
 
     if isinstance(e, (TunnelError, ApiMismatch)):
@@ -225,8 +226,6 @@ def _remote_failure(e: Exception, where: str, via: str | None) -> click.ClickExc
                 else ""
             )
         )
-    if not isinstance(e, RemoteError):
-        raise e
     if e.status == 401:
         return click.ClickException(
             f"Server at {where} rejected the access token (connection string from a different or restarted server?)"
@@ -373,7 +372,7 @@ def default_jobs() -> int:
 )
 @click.option(
     "--access",
-    type=click.Choice(["private", "group"]),
+    type=click.Choice(get_args(Access)),
     envvar="IMAGE_REVIEW_ACCESS",
     default="private",
     show_default=True,
@@ -458,7 +457,7 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
 
 @cli.command()
 @click.option(
-    "--mode", type=click.Choice(["single", "grid"]), default="single", show_default=True, help="Review display mode."
+    "--mode", type=click.Choice(get_args(MarkMode)), default="single", show_default=True, help="Review display mode."
 )
 @click.option(
     "--pass",
@@ -483,7 +482,7 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
 )
 @click.option(
     "--rotate",
-    type=click.Choice(["auto", "always", "never"]),
+    type=click.Choice(get_args(Rotation)),
     default="auto",
     show_default=True,
     help="Rotate images 90 degrees in grids: auto = only when that saves a grid.",
