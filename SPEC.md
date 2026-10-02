@@ -10,12 +10,20 @@ interactively in a fullscreen viewer, and report **status** on review progress.
 ## Requirements
 
 - Python >= 3.12
-- Dependencies: click, matplotlib, numpy, pydicom, Pillow, scikit-image,
-  rectpack, tqdm, pygame-ce, cryptography, and the DICOM codecs python-gdcm
-  (JPEG baseline/extended/lossless, JPEG-LS, JPEG 2000, RLE) and pylibjpeg +
-  pylibjpeg-openjpeg (JPEG 2000, HTJ2K). `pylibjpeg-libjpeg` is deliberately
-  not used (GPL-3), so 12-bit JPEG Extended (Process 4) and JPEG-LS with 6- or
-  7-bit samples cannot be decoded
+- Dependencies, with the minimums declared in `pyproject.toml`: click >= 8.2,
+  matplotlib >= 3.7.3, numpy >= 1.26, pydicom >= 3.0, Pillow >= 10.3 except
+  11.x (11.x misdecodes an MPO frame whose mode differs from the one before),
+  scikit-image >= 0.22, scipy >= 1.11.2, rectpack == 0.2.2 (unmaintained;
+  pinned because grid packing depends on its exact behaviour), tqdm >= 4.60
+  (`tqdm.contrib.logging`), pygame-ce >= 2.3.1, cryptography >= 41, and the
+  DICOM codecs python-gdcm >= 3.0.25 (JPEG baseline/extended/lossless,
+  JPEG-LS, JPEG 2000, RLE; older releases decode a corrupt JPEG 2000
+  codestream without an error) and pylibjpeg >= 2.0 + pylibjpeg-openjpeg >= 2.0
+  (JPEG 2000, HTJ2K). Most minimums are the oldest release with a CPython 3.12
+  wheel; each was checked by running the test suite on CPython 3.12. click
+  8.2 is needed only by the tests (`CliRunner` with separate stderr).
+  `pylibjpeg-libjpeg` is deliberately not used (GPL-3), so 12-bit JPEG
+  Extended (Process 4) and JPEG-LS with 6- or 7-bit samples cannot be decoded
 - `review --via` / `status --via` additionally need an OpenSSH client (`ssh`)
   on the client machine
 

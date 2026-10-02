@@ -17,6 +17,15 @@ Requires Python >= 3.12.
 pip install .
 ```
 
+Minimum dependency versions (declared in `pyproject.toml`, checked by running
+the test suite on CPython 3.12): click >= 8.2, matplotlib >= 3.7.3,
+numpy >= 1.26, pydicom >= 3.0, Pillow >= 10.3 except 11.x (which misdecodes
+multi-frame MPO JPEGs), scikit-image >= 0.22, scipy >= 1.11.2, tqdm >= 4.60,
+pygame-ce >= 2.3.1, cryptography >= 41, python-gdcm >= 3.0.25,
+pylibjpeg >= 2.0, pylibjpeg-openjpeg >= 2.0, and rectpack pinned at 0.2.2
+(unmaintained; grid packing depends on its exact behaviour). See
+[CHANGELOG.md](CHANGELOG.md) for what changed between releases.
+
 Compressed DICOMs (JPEG, JPEG Lossless, JPEG-LS, JPEG 2000, HTJ2K, RLE) are
 decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`, installed
 with the package. Wheels exist for CPython 3.12 and 3.13 on Linux (x86_64 and

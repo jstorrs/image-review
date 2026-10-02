@@ -4,29 +4,31 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "image-review"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.12"
 dependencies = [
-    "click",
-    "matplotlib",
-    "numpy",
-    "pydicom",
-    "Pillow",
-    "scikit-image",
-    "scipy",
-    "rectpack",
-    "tqdm",
-    "pygame-ce",
-    "cryptography",
-    "python-gdcm",
-    "pylibjpeg",
-    "pylibjpeg-openjpeg",
+    # Minimums verified by running the test suite on CPython 3.12, installing wheels only. Where
+    # no comment says why, the minimum is the oldest release with a CPython 3.12 wheel.
+    "click>=8.2",  # the tests read CliRunner stderr separately
+    "matplotlib>=3.7.3",
+    "numpy>=1.26",
+    "pydicom>=3.0",  # pydicom.pixels, the 3.x decoders, Dataset.set_pixel_data (tests)
+    "Pillow>=10.3,!=11.*",  # 10.3: 16-bit grayscale PNG; 11.x misdecodes an MPO frame after a mode change
+    "scikit-image>=0.22",
+    "scipy>=1.11.2",
+    "rectpack==0.2.2",  # unmaintained; grid packing results depend on its exact behaviour
+    "tqdm>=4.60",  # tqdm.contrib.logging
+    "pygame-ce>=2.3.1",
+    "cryptography>=41",  # 3.1 is the oldest that runs; 41 is a floor without old known CVEs
+    "python-gdcm>=3.0.25",  # older releases "decode" a corrupt JPEG 2000 codestream without error
+    "pylibjpeg>=2.0",  # what pydicom 3 supports
+    "pylibjpeg-openjpeg>=2.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.16",
-    "mypy>=1.10",
+    "mypy>=1.16",  # older releases misread the numpy 2.x stubs
     "types-tqdm",
     "coverage>=7",
 ]
