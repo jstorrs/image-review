@@ -665,7 +665,7 @@ All state lives in the work directory. `preprocess` creates it atomically
 
 ### `manifest.tsv`
 
-Written by `preprocess`. Tab-separated, one row per image.
+Written by `preprocess`. Tab-separated UTF-8 with `\r\n` line endings, one row per image. A file that is not valid UTF-8 stops the tool.
 
 | Column | Description |
 |--------|-------------|
@@ -726,7 +726,7 @@ name it.
 ### `skipped.tsv`
 
 Written by `preprocess`, always (header only when nothing was skipped).
-Tab-separated, one row per input that produced no image.
+Tab-separated UTF-8 with `\r\n` line endings, one row per input that produced no image. A file that is not valid UTF-8 stops the tool.
 
 | Column | Description |
 |--------|-------------|

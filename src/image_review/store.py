@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import io
 import logging
 import re
 from collections.abc import Iterable
@@ -10,7 +11,7 @@ from typing import Literal, Protocol, Self, get_args
 from .access import MANIFEST_NAME
 from .export import ExportRow, export_rows
 from .lock import LockHolder, acquire_lock, release_lock
-from .review_db import Change, ReviewDB
+from .review_db import Change, ReviewDB, decode_utf8
 from .status import TODO_STATUSES, MarkMode, Status, Verdict
 
 log = logging.getLogger(__name__)
@@ -115,41 +116,41 @@ def _parse_sha256(text: str, name: str) -> str:
 
 
 def load_manifest(work_dir: Path) -> list[ManifestEntry]:
-    """Parse manifest.tsv strictly. ValueError (naming file:line) if malformed; FileNotFoundError if absent.
+    """Parse manifest.tsv strictly. ValueError (naming file:line, or file and byte offset if not UTF-8) if malformed;
+    FileNotFoundError if absent.
 
     Both the current header and the legacy 3-column one (no hashes) are accepted; every row has the header's width.
     """
     path = work_dir / MANIFEST_NAME
     entries: list[ManifestEntry] = []
     key_lines: dict[str, int] = {}
-    with open(path, newline="") as f:
-        reader = csv.reader(f, delimiter="\t")
-        header = next(reader, None)
-        if header not in (MANIFEST_HEADER, LEGACY_MANIFEST_HEADER):
+    reader = csv.reader(io.StringIO(decode_utf8(path, path.read_bytes()), newline=""), delimiter="\t")
+    header = next(reader, None)
+    if header not in (MANIFEST_HEADER, LEGACY_MANIFEST_HEADER):
+        raise ValueError(
+            f"{path}:1: header must be {', '.join(MANIFEST_HEADER)} (or {', '.join(LEGACY_MANIFEST_HEADER)})"
+        )
+    for fields in reader:
+        line = reader.line_num
+        if len(fields) != len(header) or not all(fields):
             raise ValueError(
-                f"{path}:1: header must be {', '.join(MANIFEST_HEADER)} (or {', '.join(LEGACY_MANIFEST_HEADER)})"
+                f"{path}:{line}: expected {len(header)} non-empty tab-separated fields ({', '.join(header)})"
             )
-        for fields in reader:
-            line = reader.line_num
-            if len(fields) != len(header) or not all(fields):
-                raise ValueError(
-                    f"{path}:{line}: expected {len(header)} non-empty tab-separated fields ({', '.join(header)})"
-                )
-            batch, key, image_id, *hashes = fields
-            try:
-                source_sha256, jpeg_sha256 = (
-                    (_parse_sha256(hashes[0], "source_sha256"), _parse_sha256(hashes[1], "jpeg_sha256"))
-                    if hashes
-                    else (None, None)
-                )
-            except ValueError as e:
-                raise ValueError(f"{path}:{line}: {e}") from None
-            if key in key_lines:
-                raise ValueError(
-                    f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})"
-                )
-            key_lines[key] = line
-            entries.append(ManifestEntry(batch, key, image_id, source_sha256, jpeg_sha256))
+        batch, key, image_id, *hashes = fields
+        try:
+            source_sha256, jpeg_sha256 = (
+                (_parse_sha256(hashes[0], "source_sha256"), _parse_sha256(hashes[1], "jpeg_sha256"))
+                if hashes
+                else (None, None)
+            )
+        except ValueError as e:
+            raise ValueError(f"{path}:{line}: {e}") from None
+        if key in key_lines:
+            raise ValueError(
+                f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})"
+            )
+        key_lines[key] = line
+        entries.append(ManifestEntry(batch, key, image_id, source_sha256, jpeg_sha256))
     return entries
 
 
@@ -178,20 +179,19 @@ class SkippedRow:
 
 
 def load_skipped(work_dir: Path) -> list[SkippedRow] | None:
-    """Parse skipped.tsv strictly, in file order; None if the work dir has none. ValueError (naming file:line) if malformed."""
+    """Parse skipped.tsv strictly, in file order; None if the work dir has none. ValueError (naming file:line, or file and byte offset if not UTF-8) if malformed."""
     path = work_dir / SKIPPED_NAME
     if not path.exists():
         return None
     rows: list[SkippedRow] = []
-    with open(path, newline="") as f:
-        reader = csv.reader(f, delimiter="\t")
-        if next(reader, None) != SKIPPED_HEADER:
-            raise ValueError(f"{path}:1: header must be {', '.join(SKIPPED_HEADER)}")
-        for fields in reader:
-            if len(fields) != len(SKIPPED_HEADER) or fields[1] not in get_args(SkipKind):
-                raise ValueError(f"{path}:{reader.line_num}: expected image_id, kind (failed or ignored), reason")
-            image_id, kind, reason = fields
-            rows.append(SkippedRow(image_id, kind, reason))  # type: ignore[arg-type]  # kind checked above
+    reader = csv.reader(io.StringIO(decode_utf8(path, path.read_bytes()), newline=""), delimiter="\t")
+    if next(reader, None) != SKIPPED_HEADER:
+        raise ValueError(f"{path}:1: header must be {', '.join(SKIPPED_HEADER)}")
+    for fields in reader:
+        if len(fields) != len(SKIPPED_HEADER) or fields[1] not in get_args(SkipKind):
+            raise ValueError(f"{path}:{reader.line_num}: expected image_id, kind (failed or ignored), reason")
+        image_id, kind, reason = fields
+        rows.append(SkippedRow(image_id, kind, reason))  # type: ignore[arg-type]  # kind checked above
     return rows
 
 

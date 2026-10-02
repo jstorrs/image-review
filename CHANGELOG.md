@@ -55,6 +55,14 @@ if you share work directories with other people.
 - **Malformed `review.tsv` or `manifest.tsv` stops the tool.** It reports
   "Cannot read work directory: ..." naming the file and line. Bad rows are no
   longer skipped and then silently dropped on the next save.
+- **`manifest.tsv`, `review.tsv` and `skipped.tsv` must be UTF-8.** 0.2.0
+  wrote `manifest.tsv` and `review.tsv` in the locale's encoding. A work
+  directory from 0.2.0 whose source paths were non-ASCII, under a non-UTF-8
+  locale, now fails with "not valid UTF-8". Re-encode each file, keeping its
+  mode and group (they hold PHI), e.g. `cp -p f f.orig && iconv -f LATIN1 -t
+  UTF-8 f.orig > f && rm f.orig` (writing into the existing `f` keeps its mode
+  and group; use the locale's charset in place of LATIN1). `skipped.tsv` is new in 0.3.0; it
+  needs this only if you preprocessed with 0.3.0 under such a locale.
 - **A plain `pip install image-review` no longer installs the viewer or
   preprocess dependencies.** It installs only click and cryptography, enough
   for `serve`, `status` and `export`. Use `pip install 'image-review[all]'`
@@ -102,6 +110,9 @@ if you share work directories with other people.
 
 ### On-disk format
 
+- **`manifest.tsv` and `skipped.tsv` are always UTF-8** with `\r\n` line
+  endings, whatever the locale. 0.2.0 wrote `manifest.tsv` in the locale's
+  encoding; `review.tsv` was likewise locale-encoded and is now read as UTF-8.
 - **`skipped.tsv`** (new). Every input that was not rendered, with kind
   `failed` (corrupt, unsupported, unreadable, or its image id collides with
   another input's) or `ignored` (not an image). `status` reports the counts.

@@ -10,6 +10,8 @@ import multiprocessing
 import os
 import signal
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -90,7 +92,7 @@ def _text_mask(shape=(40, 60)) -> np.ndarray:
 
 
 def _read_tsv(path: Path) -> list[dict[str, str]]:
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
@@ -194,7 +196,7 @@ class EmptySkippedTest(unittest.TestCase):
             with quiet():
                 result = run_preprocess([root / "good.dcm"], root / "work")
             self.assertEqual(result.skipped, [])
-            with open(root / "work" / "skipped.tsv", newline="") as f:
+            with open(root / "work" / "skipped.tsv", newline="", encoding="utf-8") as f:
                 self.assertEqual(list(csv.reader(f, delimiter="\t")), [["image_id", "kind", "reason"]])
             self.assertEqual(len(_read_tsv(root / "work" / "manifest.tsv")), 1)
 
@@ -222,6 +224,40 @@ class ZipSourceTest(unittest.TestCase):
                 ],
             )
             self.assertEqual(result.found, 3)
+
+    def test_non_ascii_entry_names_round_trip_under_an_ascii_locale(self):
+        script = (
+            "import sys, zipfile\n"
+            "from pathlib import Path\n"
+            "from image_review.preprocess import run_preprocess\n"
+            "from image_review.store import load_manifest, load_skipped\n"
+            "root = Path(sys.argv[1])\n"
+            "with zipfile.ZipFile(root / 'scans.zip', 'w') as zf:\n"
+            "    zf.writestr('\\u00e9\\u65e5.png', Path(sys.argv[2]).read_bytes())\n"
+            "    zf.writestr('\\u00e8.txt', b'not an image')\n"
+            "run_preprocess([root / 'scans.zip'], root / 'work')\n"
+            "print(ascii([e.image_id for e in load_manifest(root / 'work')]))\n"
+            "print(ascii([r.image_id for r in load_skipped(root / 'work') or []]))\n"
+        )
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            png = root / "in.png"
+            png.write_bytes(_png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)))
+            proc = subprocess.run(
+                [sys.executable, "-c", script, str(root), str(png)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            archive = (root / "scans.zip").as_posix()
+            self.assertEqual(
+                proc.stdout.splitlines(),
+                [ascii([f"{archive}::\u00e9\u65e5.png"]), ascii([f"{archive}::\u00e8.txt"])],
+            )
+            self.assertIn("\u00e9\u65e5".encode(), (root / "work" / "manifest.tsv").read_bytes())
 
     def test_duplicate_entry_names_are_distinct_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1245,7 +1281,7 @@ class RenderTest(unittest.TestCase):
             (root / "src" / "bad.dcm").write_bytes(self.with_elements(_good_pixels(), edit=edit))
             with quiet():
                 result = run_preprocess([root / "src"], root / "work")
-            with open(root / "work" / "manifest.tsv", newline="") as f:
+            with open(root / "work" / "manifest.tsv", newline="", encoding="utf-8") as f:
                 ids = [row["image_id"] for row in csv.DictReader(f, delimiter="\t")]
         ok, bad = str(root / "src" / "ok.dcm"), str(root / "src" / "bad.dcm")
         self.assertEqual(sorted(ids), sorted([ok, f"{ok}#icon", bad]))

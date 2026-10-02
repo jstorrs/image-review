@@ -119,6 +119,11 @@ class TestSkipped(StoreTestCase):
                 with self.assertRaisesRegex(ValueError, rf"skipped\.tsv:{line}:"):
                     self.store.skipped()
 
+    def test_non_utf8_names_file(self):
+        (self.work_dir / "skipped.tsv").write_bytes(b"image_id\tkind\treason\n\xe9\tfailed\tx\n")
+        with self.assertRaisesRegex(ValueError, r"skipped\.tsv: not valid UTF-8"):
+            self.store.skipped()
+
 
 class TestMarkAndStatuses(StoreTestCase):
     def test_initially_unreviewed(self):
@@ -332,6 +337,11 @@ class TestStrictLoading(unittest.TestCase):
                 self.write_manifest(*lines)
                 with self.assertRaisesRegex(ValueError, r"manifest\.tsv:3: "):
                     LocalStore(self.work_dir)
+
+    def test_non_utf8_manifest_names_file(self):
+        (self.work_dir / "manifest.tsv").write_bytes(b"batch\tpreprocessed_path\timage_id\nb\tk.jpg\t\xe9\n")
+        with self.assertRaisesRegex(ValueError, r"manifest\.tsv: not valid UTF-8"):
+            load_manifest(self.work_dir)
 
     def test_duplicate_key_names_both_lines(self):
         self.write_manifest(self.MANIFEST_HEADER, "b\tk.jpg\t/src/a.dcm", "b\tk.jpg\t/src/b.dcm")

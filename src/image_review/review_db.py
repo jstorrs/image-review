@@ -102,10 +102,18 @@ class LegacyLog:
     decisions: list[Decision]
 
 
-def _tsv(rows: Iterable[Sequence[object]]) -> str:
+def format_tsv(rows: Iterable[Sequence[object]]) -> str:
     buf = io.StringIO()
     csv.writer(buf, delimiter="\t").writerows(rows)  # csv's default "\r\n" line ending, as review.tsv has always used
     return buf.getvalue()
+
+
+def decode_utf8(path: Path, data: bytes) -> str:
+    """`data` (the bytes of `path`) as text. ValueError naming the file and byte offset if it is not UTF-8."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path}: not valid UTF-8 at byte {exc.start}") from None
 
 
 def parse_log(path: Path, data: bytes) -> tuple[list[Decision], bool]:
@@ -115,11 +123,7 @@ def parse_log(path: Path, data: bytes) -> tuple[list[Decision], bool]:
     """
     if not data:
         return [], False  # created but the first append never landed
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{path}: not valid UTF-8 at byte {exc.start}") from None
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t")
+    reader = csv.reader(io.StringIO(decode_utf8(path, data), newline=""), delimiter="\t")
     header = next(reader, None)
     if header not in (HEADER, LEGACY_HEADER):
         raise ValueError(f"{path}:1: header must be {', '.join(HEADER)}")
@@ -199,7 +203,7 @@ class ReviewDB:
         try:
             with os.fdopen(fd, "wb") as f:
                 os.fchmod(f.fileno(), file_mode)  # mkstemp creates 0600; teammates may need group access
-                f.write(_tsv([HEADER, *map(astuple, legacy.decisions)]).encode("utf-8"))
+                f.write(format_tsv([HEADER, *map(astuple, legacy.decisions)]).encode("utf-8"))
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.review_path)
@@ -229,7 +233,7 @@ class ReviewDB:
             raise RuntimeError(
                 f"{self.review_path} has the old {len(LEGACY_HEADER)}-column header; migrate() it before appending"
             )
-        rows = _tsv(map(astuple, decisions))
+        rows = format_tsv(map(astuple, decisions))
         file_mode = policy_of_dir(self.work_dir).file_mode
         fd = os.open(self.review_path, os.O_RDWR | os.O_APPEND | os.O_CREAT, file_mode)
         try:
@@ -245,7 +249,7 @@ class ReviewDB:
             if start == 0:
                 if stat.S_IMODE(st.st_mode) != file_mode:
                     os.fchmod(fd, file_mode)  # the umask may have stripped group bits teammates need to read it
-                payload = _tsv([HEADER]) + rows
+                payload = format_tsv([HEADER]) + rows
             else:
                 last = os.pread(fd, 1, start - 1)
                 prefix = (

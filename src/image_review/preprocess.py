@@ -1,4 +1,3 @@
-import csv
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -43,6 +42,7 @@ from tqdm import tqdm
 from .access import MANIFEST_NAME, Access, Modes, modes
 from .connection import package_version
 from .export import ICON_SUFFIX
+from .review_db import format_tsv
 from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind
 
 log = logging.getLogger(__name__)
@@ -951,21 +951,19 @@ def _worker_pool(jobs: int) -> Iterator[Executor]:
             pool.shutdown(wait=True, cancel_futures=True)
 
 
-def _open_new(path: Path, perm: int, **kwargs):
-    """Create `path` exclusively with `perm` as its creation mode.
+def _write_new(path: Path, perm: int, data: bytes) -> None:
+    """Create `path` exclusively with `perm` as its creation mode, and write `data` to it.
 
     A POSIX default ACL on the parent makes Linux ignore the umask, so the mode
     is given explicitly (an ACL's other entry can only narrow it).
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, perm)
-    return os.fdopen(fd, **kwargs)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
 
 
 def _write_tsv(path: Path, header: list[str], rows: Sequence[tuple[str, ...]], perm: int) -> None:
-    with _open_new(path, perm, mode="w", newline="") as f:
-        writer = csv.writer(f, delimiter="\t")
-        writer.writerow(header)
-        writer.writerows(rows)
+    _write_new(path, perm, format_tsv([header, *rows]).encode("utf-8"))
 
 
 def _library_versions() -> dict[str, str]:
@@ -1106,8 +1104,9 @@ def run_preprocess(
                 tool_version=package_version(),
                 libraries=_library_versions(),
             )
-            with _open_new(staging / PROVENANCE_NAME, policy.file_mode, mode="w", encoding="utf-8") as f:
-                f.write(json.dumps(record, indent=2) + "\n")
+            _write_new(
+                staging / PROVENANCE_NAME, policy.file_mode, (json.dumps(record, indent=2) + "\n").encode("utf-8")
+            )
             if output_dir.exists():
                 output_dir.rmdir()  # an empty directory the user made
             os.rename(staging, output_dir)
@@ -1169,8 +1168,7 @@ def _stage(
                     continue
                 staged += 1
                 path = pending / f"{staged:08d}.jpg"
-                with _open_new(path, policy.file_mode, mode="wb") as f:
-                    f.write(part.jpeg)
+                _write_new(path, policy.file_mode, part.jpeg)
                 parts.append(Staged(part.image_id, path, part.source_sha256, hashlib.sha256(part.jpeg).hexdigest()))
             inputs.append((input_id, parts))
     return inputs
