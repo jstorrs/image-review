@@ -350,7 +350,7 @@ def make_server(store: ReviewStore, host: str, port: int) -> tuple[ReviewServer,
 
     No listening socket is left behind on failure.
     """
-    if host.strip() in ("", "0.0.0.0", "::") or _is_unspecified(host.strip()):
+    if not host.strip() or _is_unspecified(host.strip()):
         raise ValueError(_WILDCARD_MESSAGE)
     token = secrets.token_urlsafe(16)
     cert, key_pem = generate_cert(host)
