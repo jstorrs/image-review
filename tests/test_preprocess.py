@@ -19,7 +19,7 @@ import numpy as np
 import pydicom
 import skimage as ski
 from click.testing import CliRunner
-from PIL import Image, JpegImagePlugin
+from PIL import Image, JpegImagePlugin, PngImagePlugin
 from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import MediaStorageDirectoryStorage, generate_uid
@@ -27,6 +27,7 @@ from pydicom.uid import MediaStorageDirectoryStorage, generate_uid
 from image_review import preprocess as preprocess_module
 from image_review.cli import cli
 from image_review.preprocess import (
+    COLLISION_REASON,
     SIDE_BY_SIDE_GAP,
     Candidate,
     DecodeError,
@@ -36,6 +37,7 @@ from image_review.preprocess import (
     WorkDirExists,
     _failed,
     classify,
+    colliding_ids,
     decode_raster,
     discover,
     render,
@@ -240,13 +242,195 @@ def _discovered(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> 
         return [(item.image_id, item.kind) for item in discover(sources, exclude)]
 
 
-def _dicom_with_icon(path: Path) -> None:
+def _dicom_with_icon(path: Path, icon_pixels: np.ndarray | None = None) -> None:
+    """A DICOM with an 8x8 8-bit icon: `icon_pixels`, or a ramp by default."""
     icon = pydicom.Dataset()
     icon.Rows, icon.Columns, icon.SamplesPerPixel = 8, 8, 1
     icon.PhotometricInterpretation = "MONOCHROME2"
     icon.BitsAllocated, icon.BitsStored, icon.HighBit, icon.PixelRepresentation = 8, 8, 7, 0
-    icon.PixelData = np.arange(64, dtype=np.uint8).tobytes()
+    icon.PixelData = (np.arange(64, dtype=np.uint8) if icon_pixels is None else icon_pixels).tobytes()
     write_dicom(path, _good_pixels(), IconImageSequence=[icon])
+
+
+def _png_text(key: str, value: str) -> PngImagePlugin.PngInfo:
+    info = PngImagePlugin.PngInfo()
+    info.add_text(key, value)
+    return info
+
+
+def _solid_png(value: int) -> bytes:
+    return _png_bytes(np.full((40, 60, 3), value, dtype=np.uint8))
+
+
+class CollisionTest(unittest.TestCase):
+    """An image_id naming two different images would share one verdict: every input involved fails instead."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.src = self.root / "src"
+        self.src.mkdir()
+        self.work = self.root / "work"
+
+    def run_quietly(self, *sources: Path):
+        with quiet():
+            return run_preprocess(list(sources or [self.src]), self.work)
+
+    def assert_no_orphans(self, manifest: list[dict[str, str]]) -> None:
+        """Colliding JPGs are deleted: the batch dirs hold exactly the manifest's JPGs, and no staging is left."""
+        on_disk = {p.relative_to(self.work).as_posix() for p in self.work.glob("batch_*/*")}
+        self.assertEqual(on_disk, {r["preprocessed_path"] for r in manifest})
+        self.assertEqual(sorted(p.name for p in self.work.iterdir() if p.name.startswith(".")), [])
+
+    def assert_collision(self, expected_ids: list[str], kept: list[str], inputs: int) -> None:
+        manifest = _read_tsv(self.work / "manifest.tsv")
+        skipped = _read_tsv(self.work / "skipped.tsv")
+        self.assertEqual([r["image_id"] for r in manifest], kept)
+        self.assertEqual(
+            [(r["image_id"], r["kind"], r["reason"]) for r in skipped],
+            [(i, "failed", COLLISION_REASON) for i in expected_ids],
+        )
+        self.assert_no_orphans(manifest)
+        record = json.loads((self.work / "preprocess.json").read_text())
+        self.assertEqual(
+            record["counts"],
+            {"inputs": inputs, "written": len(kept), "skipped_failed": len(expected_ids), "skipped_ignored": 0},
+        )
+
+    def assert_cli_exit_codes(self) -> None:
+        env = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
+        for extra, code in (((), 1), (("--allow-skipped",), 0)):
+            with self.subTest(args=extra), quiet():
+                work = self.root / f"cli{code}"
+                args = ["preprocess", str(self.src), "--work-dir", str(work), *extra]
+                result = CliRunner().invoke(cli, args, env=env)
+            self.assertEqual(result.exit_code, code, result.output)
+
+    def test_zip_entry_named_like_a_numbered_duplicate(self):
+        archive = self.src / "z.zip"
+        with warnings.catch_warnings(), zipfile.ZipFile(archive, "w") as zf:
+            warnings.simplefilter("ignore")  # zipfile warns about the duplicate name
+            zf.writestr("a.png", _solid_png(0))
+            zf.writestr("a.png", _solid_png(255))  # becomes a.png#2
+            zf.writestr("a.png#2", _solid_png(128))
+        self.run_quietly()
+        base = f"{archive.as_posix()}::a.png"
+        self.assert_collision([f"{base}#2", f"{base}#2"], kept=[base], inputs=3)
+        self.assert_cli_exit_codes()
+
+    def test_file_named_like_a_zip_entry(self):
+        archive = self.src / "z.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("a.png", _solid_png(0))
+        (self.src / "z.zip::a.png").write_bytes(_solid_png(255))
+        self.run_quietly()
+        image_id = f"{archive.as_posix()}::a.png"
+        self.assert_collision([image_id, image_id], kept=[], inputs=2)
+        self.assert_cli_exit_codes()
+
+    def test_file_named_like_a_dicom_icon(self):
+        _dicom_with_icon(self.src / "a.dcm")
+        (self.src / "a.dcm#icon").write_bytes(_solid_png(255))
+        (self.src / "b.png").write_bytes(_solid_png(0))
+        self.run_quietly()
+        dicom = (self.src / "a.dcm").as_posix()
+        # a.dcm fails as a whole: its main image is not kept without its icon
+        self.assert_collision([dicom, f"{dicom}#icon"], kept=[(self.src / "b.png").as_posix()], inputs=3)
+        self.assert_cli_exit_codes()
+
+    def test_input_whose_main_image_and_icon_both_collide_is_listed_once(self):
+        _dicom_with_icon(self.root / "x.dcm")
+        dicom = (self.root / "x.dcm").read_bytes()
+        archive = self.src / "z.zip"
+        with warnings.catch_warnings(), zipfile.ZipFile(archive, "w") as zf:
+            warnings.simplefilter("ignore")  # zipfile warns about the duplicate name
+            zf.writestr("a.dcm", dicom)
+            zf.writestr("a.dcm", dicom)  # becomes a.dcm#2, icon a.dcm#2#icon
+            # random noise makes the main image differ; the icon differs too
+            _dicom_with_icon(self.root / "y.dcm", np.full(64, 200, dtype=np.uint8))
+            zf.writestr("a.dcm#2", (self.root / "y.dcm").read_bytes())
+        self.run_quietly()
+        base = f"{archive.as_posix()}::a.dcm"
+        self.assert_collision([f"{base}#2", f"{base}#2"], kept=[base, f"{base}#icon"], inputs=3)
+
+    def test_dicom_with_icon_is_not_a_collision(self):
+        _dicom_with_icon(self.src / "a.dcm")
+        result = self.run_quietly()
+        dicom = (self.src / "a.dcm").as_posix()
+        self.assertEqual([r["image_id"] for r in _read_tsv(self.work / "manifest.tsv")], [dicom, f"{dicom}#icon"])
+        self.assertEqual(result.skipped, [])
+        self.assertFalse((self.work / preprocess_module.PENDING_NAME).exists())
+
+    def test_same_file_through_overlapping_sources_is_not_a_collision(self):
+        (self.src / "a.png").write_bytes(_solid_png(0))
+        result = self.run_quietly(self.src, self.src / "a.png")
+        ids = [r["image_id"] for r in _read_tsv(self.work / "manifest.tsv")]
+        self.assertEqual(ids, [(self.src / "a.png").as_posix()] * 2)
+        self.assertEqual(result.skipped, [])
+
+    def test_colliding_ids_are_those_naming_two_source_and_jpg_pairs(self):
+        images = [
+            ("a", "s1", "j1"), ("a", "s1", "j2"),  # different JPGs
+            ("b", "s1", "j1"), ("b", "s2", "j1"),  # same JPG from different sources
+            ("c", "s1", "j1"), ("c", "s1", "j1"),  # the same source reached twice
+            ("d", "s3", "j3"),
+        ]  # fmt: skip
+        self.assertEqual(colliding_ids(images), frozenset({"a", "b"}))
+        self.assertEqual(colliding_ids([]), frozenset())
+
+    def test_different_files_rendering_identically_collide(self):
+        pixels = RNG.integers(0, 255, (40, 60, 3), dtype=np.uint8)
+        plain = _png_bytes(pixels)
+        buf = io.BytesIO()
+        Image.fromarray(pixels).save(buf, "PNG", compress_level=1, pnginfo=_png_text("note", "other bytes"))
+        archive = self.src / "z.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("a.png", plain)
+        (self.src / "z.zip::a.png").write_bytes(buf.getvalue())
+        self.assertNotEqual(plain, buf.getvalue())
+        rendered = [render("raster", "x", data, "gray")[0].rgb for data in (plain, buf.getvalue())]
+        self.assertTrue(np.array_equal(*rendered))
+        self.run_quietly()
+        image_id = f"{archive.as_posix()}::a.png"
+        self.assert_collision([image_id, image_id], kept=[], inputs=2)
+
+    def test_kept_images_are_renumbered_around_a_collision(self):
+        (self.src / "a.png").write_bytes(_solid_png(10))
+        archive = self.src / "b.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("x.png", _solid_png(20))
+        (self.src / "b.zip::x.png").write_bytes(_solid_png(30))
+        (self.src / "c.png").write_bytes(_solid_png(40))
+        (self.src / "d.png").write_bytes(_solid_png(50))
+        with quiet():
+            result = run_preprocess([self.src], self.work, batch_size=1)
+        manifest = _read_tsv(self.work / "manifest.tsv")
+        self.assertEqual(
+            [(r["preprocessed_path"], r["image_id"]) for r in manifest],
+            [
+                ("batch_001/img_00001.jpg", (self.src / "a.png").as_posix()),
+                ("batch_002/img_00001.jpg", (self.src / "c.png").as_posix()),
+                ("batch_003/img_00001.jpg", (self.src / "d.png").as_posix()),
+            ],
+        )
+        self.assertEqual(result.batches, 3)
+        for row in manifest:
+            data = (self.work / row["preprocessed_path"]).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), row["jpeg_sha256"])
+        self.assert_no_orphans(manifest)
+
+    def test_colliding_dicom_with_a_failed_icon_is_one_row(self):
+        broken_icon = pydicom.Dataset()
+        broken_icon.Rows = 4  # no pixel data: the icon fails to render
+        write_dicom(self.root / "a.dcm", _good_pixels(), IconImageSequence=[broken_icon])
+        archive = self.src / "z.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("a.dcm", (self.root / "a.dcm").read_bytes())
+        (self.src / "z.zip::a.dcm").write_bytes(_solid_png(255))
+        self.run_quietly()
+        dicom = f"{archive.as_posix()}::a.dcm"
+        self.assert_collision([dicom, dicom], kept=[], inputs=2)  # no `#icon` row is left behind
 
 
 class ProvenanceTest(unittest.TestCase):

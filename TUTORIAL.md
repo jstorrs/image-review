@@ -174,6 +174,12 @@ Every file the run finds is listed in `manifest.tsv` or `skipped.tsv`. The
   inside a ZIP, a `.tar.gz` or other non-ZIP archive, a symlinked directory
   outside your sources, or any file you named on the command line that is
   not an image, such as `notes.txt`). These make `preprocess` exit 1.
+  An input whose image id would name a different image from another input's
+  (a file literally called `scan.dcm#icon` beside a `scan.dcm` with an icon,
+  a file called `site.zip::a.png` beside `site.zip`, or a ZIP entry called
+  `a.png#2` beside two `a.png` entries) is also `failed`, every one of them,
+  with `image_id collides with another input (rename one of them)`: they
+  would otherwise share one verdict.
 - `ignored`: a file that is not an image (`not an image (unrecognized
   content)`, e.g. a text file; macOS `._name` AppleDouble files and
   `__MACOSX/` entries; a DICOMDIR index; a ZIP with no files), or a symlink

@@ -124,8 +124,8 @@ bytes) per input without decoding anything (or a `Skipped` row for content
 that is not an input or cannot be read); a pure **`render(kind, image_id,
 data, colormap) -> list[Rendered]`** turns the bytes into `(H, W, 3)` uint8
 RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
-the encoded bytes the moment they are produced and records them in the
-manifest. For ZIP entries `read()` reads from the open archive, so it is only
+the encoded bytes the moment they are produced and, once collisions are
+known (see *Collisions*), records them in the manifest. For ZIP entries `read()` reads from the open archive, so it is only
 valid until discovery moves on to the next item. Each input's bytes are read
 once; their SHA-256 becomes the `source_sha256` of every image rendered from
 them (a DICOM and its icon share it), and the SHA-256 of each JPG's encoded
@@ -222,9 +222,9 @@ A DICOM without pixel data whose SOP class is DICOMDIR
 (`1.2.840.10008.1.3.10`) is `ignored`: `DICOMDIR index`.
 ZIP entries are read by their `ZipInfo`, so entries that share a name are
 distinct inputs: the first keeps `{zip}::{name}`, later ones get
-`{zip}::{name}#2`, `#3`, ... (no entry name ends in `#N`, so these cannot
-clash with a real entry). Manifest rows follow discovery order (sources in
-the order given, each walked as above).
+`{zip}::{name}#2`, `#3`, ... These can clash with a real entry literally
+named `{name}#2` (see *Collisions*). Manifest rows follow discovery order
+(sources in the order given, each walked as above).
 
 **Image IDs** are fully-resolved absolute paths derived from the source:
 - ZIP entry: `{absolute_zip_path}::{filename}` (also for a ZIP inside a directory)
@@ -238,6 +238,29 @@ colour as is). The main image keeps its `image_id`. If the icon cannot be
 rendered the main image is still written and `{image_id}#icon` is a `failed`
 row in `skipped.tsv`. If the main image fails the file is `failed` and has no
 icon row.
+
+**Collisions.** Verdicts are stored per `image_id`, so an `image_id` must
+name one image. The naming is not escaped (changing it would orphan existing
+`review.tsv` rows), so different inputs can produce the same `image_id`: a ZIP
+entry literally named `a.png#2` beside two `a.png` entries; a file literally
+named `z.zip::a.png` beside `z.zip` holding `a.png`; a file literally named
+`a.dcm#icon` beside an `a.dcm` with an icon. After every input is rendered,
+the pure `colliding_ids(images)` takes the `(image_id, source_sha256,
+jpeg_sha256)` of every rendered image and returns the `image_id`s that name
+more than one distinct `(source_sha256, jpeg_sha256)` pair: a different image,
+or the same JPG from a different source (two sources that render identically
+still collide, since `export` attests one `source_sha256` per `image_id`). Every input that rendered any such image (main or icon) is replaced by
+one `failed` row for its own `image_id` (so a DICOM whose main image and icon
+both collide is listed once, and a DICOM whose icon collides loses its main
+image too), reason `image_id collides with another input (rename one of
+them)`, with a logged warning; its JPGs are deleted and never appear in the
+manifest. `{path}` and `{path}#icon` from one DICOM are distinct ids, never a
+collision. The same source reached twice under one `image_id` (a file reached
+through overlapping SOURCEs, so the same pair) is not a collision either: one verdict is right
+for both, and both rows stay in the manifest (see *Key versus `image_id`*).
+Only rendered images are compared: a `failed` or `ignored` row sharing an
+`image_id` with an image changes nothing (`export` already reports an
+`image_id` with a `failed` row as `NOT_REVIEWED`).
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
@@ -332,7 +355,11 @@ directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`,
 cannot cause one.
 
 **Batching**: Each input is rendered, encoded and written as soon as discovery yields
-it, so memory does not grow with batch size. The n-th written image
+it, so memory does not grow with batch size. The JPG is first written to
+`<staging>/.pending/` under a provisional name; once every input is rendered
+and collisions are known (see *Collisions*), the JPGs of non-colliding inputs
+are renamed into their batches in discovery order, the rest are deleted, and
+`.pending` is removed. The n-th kept image
 (0-based) goes to `batch_{n // batch_size + 1:03d}/img_{n % batch_size + 1:05d}.jpg`.
 
 **Output**: `manifest.tsv`, `skipped.tsv` (always written, even when

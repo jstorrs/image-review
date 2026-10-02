@@ -144,9 +144,10 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
 or `.zip` whose content is not one, a `.tar.gz` or other non-ZIP archive, an
 `unsupported:` multi-frame DICOM, an unreadable subdirectory, a
 symlinked directory outside the sources, a file named on the command line
-that is not an image) or `ignored` (not an image: unrecognized content, macOS
-AppleDouble files, a DICOMDIR index, an empty ZIP). The run finishes with a summary line (`Found N inputs:
-wrote K images in B batches; S skipped (F failed, I ignored; see
+that is not an image, an input whose image id collides with another's) or
+`ignored` (not an image: unrecognized content, macOS AppleDouble files, a
+DICOMDIR index, an empty ZIP). The run finishes with a summary line (`Found N
+inputs: wrote K images in B batches; S skipped (F failed, I ignored; see
 .../skipped.tsv)`) and exits 1 if any input failed, unless `--allow-skipped`
 is given. Check `skipped.tsv` before reviewing: those images will not be
 shown.

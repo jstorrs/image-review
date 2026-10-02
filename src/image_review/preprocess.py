@@ -10,7 +10,7 @@ import re
 import shutil
 import stat
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -102,6 +102,8 @@ _ALPHA_MODES = {"RGBA", "RGBa", "LA", "La", "PA"}
 _HIGH_BIT_GRAY_MODES = {"I", "F", "I;16", "I;16L", "I;16B", "I;16N"}
 _PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
 PROVENANCE_NAME = "preprocess.json"
+PENDING_NAME = ".pending"  # staging subdirectory holding JPGs until their image_ids are known not to collide
+COLLISION_REASON = "image_id collides with another input (rename one of them)"
 _LIBRARIES = ("pydicom", "numpy", "scikit-image", "Pillow", "matplotlib")  # distribution names
 # Optional pixel-data codecs, recorded when importable: module name -> distribution name
 _CODEC_DISTRIBUTIONS = {"gdcm": "python-gdcm", "pylibjpeg": "pylibjpeg", "openjpeg": "pylibjpeg-openjpeg"}
@@ -156,6 +158,16 @@ class Encoded:
     image_id: str
     jpeg: bytes
     source_sha256: str
+
+
+@dataclass(frozen=True)
+class Staged:
+    """An encoded image saved under a provisional name until it is known not to collide."""
+
+    image_id: str
+    path: Path
+    source_sha256: str
+    jpeg_sha256: str
 
 
 @dataclass(frozen=True)
@@ -601,7 +613,8 @@ def _discover_zip(path: Path) -> Iterator[Candidate | Skipped]:
         return
     with zf:
         # Repeated names are distinct entries: read each by its ZipInfo and give
-        # later ones `#2`, `#3`, ... (no entry name can end in `#N`, so no clash).
+        # later ones `#2`, `#3`, ... An entry literally named `a.png#2` can still
+        # clash with the second `a.png`; `colliding_ids` catches that after rendering.
         files = [info for info in zf.infolist() if not info.is_dir()]
         if not files:
             yield Skipped(path.as_posix(), "ignored", "zip contains no files")
@@ -880,21 +893,71 @@ def run_preprocess(
     return replace(result, skipped_path=output_dir / result.skipped_path.name)
 
 
+def colliding_ids(images: Iterable[tuple[str, str, str]]) -> frozenset[str]:
+    """The image_ids, among `(image_id, source_sha256, jpeg_sha256)` triples, naming more than one distinct
+    `(source_sha256, jpeg_sha256)` pair.
+
+    Verdicts are stored per image_id, so such an id would let a verdict on one image
+    cover another nobody saw; and export attests a single source_sha256 per id, so
+    two different sources that render the same JPG collide too. The same source
+    reached twice (through overlapping SOURCEs) has the same pair: not a collision.
+    """
+    pairs: dict[str, set[tuple[str, str]]] = {}
+    for image_id, source_sha256, jpeg_sha256 in images:
+        pairs.setdefault(image_id, set()).add((source_sha256, jpeg_sha256))
+    return frozenset(image_id for image_id, found in pairs.items() if len(found) > 1)
+
+
 def _render_into(
     sources: list[Path], exclude: frozenset[Path], output_dir: Path, batch_size: int, colormap: str, policy: Modes
 ) -> PreprocessResult:
-    manifest_rows: list[tuple[str, str, str, str, str]] = []
-    skipped: list[Skipped] = []
+    """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches.
+
+    An input with any colliding image (main or icon) becomes one `failed` row and its JPGs are deleted.
+    """
+    pending = output_dir / PENDING_NAME
+    pending.mkdir()
+    os.chmod(pending, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
+    inputs: list[tuple[str, list[Staged | Skipped]]] = []  # (input image_id, its output rows), in discovery order
+    staged = 0
     found = 0
 
     for item in discover(sources, exclude):
         found += 1
         outcome = _process(item, colormap) if isinstance(item, Candidate) else [item]
+        parts: list[Staged | Skipped] = []
         for part in outcome:
             if isinstance(part, Skipped):
                 if part.kind == "failed":
                     log.warning("skipping %s: %s", part.image_id, part.reason)
-                skipped.append(part)
+                parts.append(part)
+                continue
+            staged += 1
+            path = pending / f"{staged:08d}.jpg"
+            with _open_new(path, policy.file_mode, mode="wb") as f:
+                f.write(part.jpeg)
+            parts.append(Staged(part.image_id, path, part.source_sha256, hashlib.sha256(part.jpeg).hexdigest()))
+        inputs.append((item.image_id, parts))
+
+    collisions = colliding_ids(
+        (row.image_id, row.source_sha256, row.jpeg_sha256)
+        for _, rows in inputs
+        for row in rows
+        if isinstance(row, Staged)
+    )
+    manifest_rows: list[tuple[str, str, str, str, str]] = []
+    skipped: list[Skipped] = []
+    for input_id, rows in inputs:
+        if any(isinstance(row, Staged) and row.image_id in collisions for row in rows):
+            for row in rows:
+                if isinstance(row, Staged):
+                    row.path.unlink()
+            log.warning("skipping %s: %s", input_id, COLLISION_REASON)
+            skipped.append(Skipped(input_id, "failed", COLLISION_REASON))
+            continue
+        for row in rows:
+            if isinstance(row, Skipped):
+                skipped.append(row)
                 continue
             n = len(manifest_rows)
             batch_id = f"batch_{n // batch_size + 1:03d}"
@@ -903,11 +966,10 @@ def _render_into(
                 batch_dir.mkdir(parents=True, exist_ok=True)
                 os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
             img_path = batch_dir / f"img_{n % batch_size + 1:05d}.jpg"
-            with _open_new(img_path, policy.file_mode, mode="wb") as f:
-                f.write(part.jpeg)
+            os.rename(row.path, img_path)
             key = img_path.relative_to(output_dir).as_posix()
-            jpeg_sha256 = hashlib.sha256(part.jpeg).hexdigest()
-            manifest_rows.append((batch_id, key, part.image_id, part.source_sha256, jpeg_sha256))
+            manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
+    pending.rmdir()  # every staged JPG was moved or deleted
 
     _write_tsv(output_dir / "manifest.tsv", MANIFEST_HEADER, manifest_rows, policy.file_mode)
     skipped_path = output_dir / "skipped.tsv"
