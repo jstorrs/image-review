@@ -85,16 +85,35 @@ class GridCacheKey(NamedTuple):
 
 
 @dataclass(frozen=True)
-class ReviewItem:
-    """One reviewable item: a single image (surface None, loaded when displayed) or a grid
-    (composited when built). A grid's status and CLEAN refusal follow the grid rules even
-    when it holds one key, so `grid` is kept rather than read off len(keys)."""
+class SingleItem:
+    """A single image, loaded when it is displayed."""
+
+    key: str
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return (self.key,)
+
+    @property
+    def label(self) -> str:
+        return self.key
+
+
+@dataclass(frozen=True)
+class GridItem:
+    """A grid, composited when built. Its status and CLEAN refusal follow the grid rules even
+    when it holds one key, so it is its own type rather than read off len(keys)."""
 
     keys: tuple[str, ...]
-    label: str
-    surface: pg.Surface | None
-    grid: bool
-    source_scale: float = 1.0  # a grid's smallest image scale vs. its source; shown with the display scale
+    surface: pg.Surface
+    source_scale: float  # the smallest image scale vs. its source; shown with the display scale
+
+    @property
+    def label(self) -> str:
+        return f"grid ({len(self.keys)} images)"
+
+
+ReviewItem = SingleItem | GridItem
 
 
 def next_index(n: int, cursor: int, direction: int, *, is_todo: Callable[[int], bool] | None, wrap: bool) -> int | None:
@@ -255,7 +274,7 @@ class ReviewSession:
     def _single_items(self) -> list[ReviewItem]:
         rows = self._review_rows(self.batch)
         random.shuffle(rows)
-        return [ReviewItem(keys=(row.key,), label=row.key, surface=None, grid=False) for row in rows]
+        return [SingleItem(row.key) for row in rows]
 
     def _build_items(self):
         """Build the items for the current mode and batch, then drop verdict input queued while blocked."""
@@ -292,22 +311,15 @@ class ReviewSession:
             self._grid_cache = (cache_key, grid_specs, left_out)
         _, grid_specs, left_out = self._grid_cache
 
-        items = [
-            ReviewItem(
-                keys=gs.keys,
-                label=f"grid ({len(gs.keys)} images)",
-                surface=gs.surface,
-                grid=True,
-                source_scale=gs.min_scale,
-            )
-            for gs in grid_specs
+        items: list[ReviewItem] = [
+            GridItem(keys=gs.keys, surface=gs.surface, source_scale=gs.min_scale) for gs in grid_specs
         ]
         random.shuffle(items)
         items.sort(key=lambda item: len(item.keys), reverse=True)
         # Each image left out of the grids (unloadable, or left unpacked) becomes a single image after them:
         # it follows the single-image rules, and _show_current loads it when it is shown, drawing a
         # placeholder only if that fails
-        items += [ReviewItem(keys=(key,), label=key, surface=None, grid=False) for key in left_out]
+        items += [SingleItem(key) for key in left_out]
         return items
 
     def _show_display_select(self):
@@ -475,34 +487,42 @@ class ReviewSession:
             return
         item = self._items[self._cursor]
 
-        surface = item.surface
-        if surface is None:
-            key = item.keys[0]
-            reason = detail = None  # reason: shown on the placeholder; detail: the error, for the log only
-            try:
-                surface = load_surface(self.store.image_bytes(key))
-            except StoreUnavailable as exc:
-                self._store_lost(exc)
-                return
-            except KeyError:
-                reason = detail = "image could not be fetched"
-            except Exception as exc:  # noqa: BLE001 - a read or decode failure is an unloadable image, not an outage
-                reason, detail = "image could not be read or decoded", f"{type(exc).__name__}: {exc}"
-            if reason is None:
-                self._unloadable.discard(key)
-            else:
-                log.warning("cannot load %s: %s", key, detail)
-                self._unloadable.add(key)
-                surface = _placeholder(key, reason)
+        match item:
+            case GridItem(surface=surface, source_scale=source_scale):
+                pass
+            case SingleItem(key=key):
+                try:
+                    surface = load_surface(self.store.image_bytes(key))
+                except StoreUnavailable as exc:
+                    self._store_lost(exc)
+                    return
+                except KeyError:
+                    surface = self._unloadable_placeholder(key, "image could not be fetched")
+                except Exception as exc:  # noqa: BLE001 - a read or decode failure is an unloadable image, not an outage
+                    surface = self._unloadable_placeholder(
+                        key, "image could not be read or decoded", f"{type(exc).__name__}: {exc}"
+                    )
+                else:
+                    self._unloadable.discard(key)
+                source_scale = 1.0
 
         status = self._item_status(item)
         info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
-        self._viewer.set_image(surface, item.label, status, info, item.source_scale)
+        self._viewer.set_image(surface, item.label, status, info, source_scale)
+
+    def _unloadable_placeholder(self, key: str, reason: str, detail: str | None = None) -> pg.Surface:
+        """Record `key` as unloadable and return its placeholder. `reason` is shown on the
+        placeholder; `detail` (the error, defaulting to `reason`) goes to the log only."""
+        log.warning("cannot load %s: %s", key, detail or reason)
+        self._unloadable.add(key)
+        return _placeholder(key, reason)
 
     def _item_status(self, item: ReviewItem) -> Status:
-        if item.grid:
-            return _grid_status(self._statuses, item.keys)
-        return self._statuses[item.keys[0]]
+        match item:
+            case GridItem(keys=keys):
+                return _grid_status(self._statuses, keys)
+            case SingleItem(key=key):
+                return self._statuses[key]
 
     def _navigate(self, direction: int, *, autoplay: bool = False):
         if not self._items:
@@ -529,7 +549,7 @@ class ReviewSession:
             log.warning("%s: %s", UNLOADABLE_CLEAN, ", ".join(k for k in item.keys if k in self._unloadable))
             self._viewer.set_info(UNLOADABLE_CLEAN)
             return
-        if item.grid and status == "CLEAN" and _grid_clean_refused(self._statuses, item.keys):
+        if isinstance(item, GridItem) and status == "CLEAN" and _grid_clean_refused(self._statuses, item.keys):
             log.warning("%s", GRID_HAS_DIRTY)
             self._viewer.set_info(GRID_HAS_DIRTY)
             return

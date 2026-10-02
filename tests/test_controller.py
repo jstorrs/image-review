@@ -20,8 +20,9 @@ from image_review.controller import (
     NO_TODO_MESSAGE,
     NOTHING_TO_UNDO,
     UNLOADABLE_CLEAN,
-    ReviewItem,
+    GridItem,
     ReviewSession,
+    SingleItem,
     UIState,
     _dwell_elapsed,
     next_batch,
@@ -179,8 +180,8 @@ class TestSession(SessionTestCase):
         self.addCleanup(self.store.close)
         s = ReviewSession(self.store, reviewer="tester", mode="grid")
         s._items = [
-            ReviewItem(keys=("batch_001/a.jpg",), label="grid (1 images)", surface=None, grid=True),
-            ReviewItem(keys=("batch_001/b.jpg", "batch_002/c.jpg"), label="grid (2 images)", surface=None, grid=True),
+            GridItem(keys=("batch_001/a.jpg",), surface=pg.Surface((1, 1)), source_scale=1.0),
+            GridItem(keys=("batch_001/b.jpg", "batch_002/c.jpg"), surface=pg.Surface((1, 1)), source_scale=1.0),
         ]
         s._cursor = 0
         s._mark("DIRTY")
@@ -204,7 +205,7 @@ class TestSession(SessionTestCase):
         self.finish_pass_one()
         s = ReviewSession(self.store, reviewer="tester", mode="grid")
         self.assertEqual(s._statuses["batch_001/a.jpg"], "FLAGGED")
-        s._items = [ReviewItem(keys=("batch_001/a.jpg",), label="grid (1 images)", surface=None, grid=True)]
+        s._items = [GridItem(keys=("batch_001/a.jpg",), surface=pg.Surface((1, 1)), source_scale=1.0)]
         s._cursor = 0
         self.assertEqual(s._item_status(s._items[0]), "DIRTY")
         self.assertEqual(s._todo_count, 0)
@@ -1045,6 +1046,7 @@ class TestScaleAndResize(EventLoopTestCase):
         s = self.reviewing("grid")
         viewer = s._viewer
         item = s._items[s._cursor]
+        assert isinstance(item, GridItem)
         w, h = s._grid_size()
         w4, h3 = fit_size(4000, 3000, w, h, True)
         self.assertEqual(item.source_scale, min(w4 / 4000, h3 / 3000))
@@ -1501,11 +1503,11 @@ class TestUnloadable(EventLoopTestCase):
 
     def test_grid_mode_has_single_placeholder_item(self):
         s = self.reviewing("grid")
-        grids = [item for item in s._items if item.grid]
+        grids = [item for item in s._items if isinstance(item, GridItem)]
         self.assertTrue(grids)
         self.assertNotIn(CORRUPT, {k for item in grids for k in item.keys})
         index = self.index_of(s, CORRUPT)
-        self.assertEqual(s._items[index], ReviewItem(keys=(CORRUPT,), label=CORRUPT, surface=None, grid=False))
+        self.assertEqual(s._items[index], SingleItem(CORRUPT))
         self.show(s, index)  # the placeholder is drawn only when the item is shown
         self.assertEqual(s._unloadable, {CORRUPT})
         self.assertEqual(s._viewer._name, CORRUPT)
@@ -1581,7 +1583,7 @@ class TestJpegHash(EventLoopTestCase):
         with self.assertLogs("image_review.controller", "WARNING") as logs:
             s = self.reviewing(mode)
             index = next(i for i, item in enumerate(s._items) if CORRUPT in item.keys)
-            self.assertEqual(s._items[index].keys, (CORRUPT,))  # never packed into a grid
+            self.assertEqual(s._items[index], SingleItem(CORRUPT))  # never packed into a grid
             s._cursor = index
             s._show_current()
         self.assertEqual(s._unloadable, {CORRUPT})
@@ -1631,8 +1633,8 @@ class TestLeftUnpacked(EventLoopTestCase):
             s = self.reviewing("grid")
         dropped = s._review_rows(s.batch)[0].key
         index = next(i for i, item in enumerate(s._items) if dropped in item.keys)
-        self.assertEqual(s._items[index], ReviewItem(keys=(dropped,), label=dropped, surface=None, grid=False))
-        self.assertNotIn(dropped, {k for item in s._items if item.grid for k in item.keys})
+        self.assertEqual(s._items[index], SingleItem(dropped))
+        self.assertNotIn(dropped, {k for item in s._items if isinstance(item, GridItem) for k in item.keys})
         self.assertNotIn(dropped, s._unloadable)
         s._cursor = index
         s._show_current()

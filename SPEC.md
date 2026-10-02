@@ -963,12 +963,16 @@ The session remembers whether the pass (`--pass`) and the batch (`--batch`)
 were given: `b` (see *Next Batch*) adopts the current pass only when the pass
 was not given, and never leaves a given batch.
 
-Every item is a `ReviewItem`, a frozen dataclass: `keys` (a tuple of manifest
-keys), `label` (shown in the status bar: the key, or
-"grid (N images)"), `surface` (a grid's composited surface, or `None` for a
-single image, loaded when displayed) and `grid` (a grid's status and CLEAN
-refusal follow the grid rules below, even for a one-image grid; the item for
-an image left out of the grids in grid mode is a single image, not a grid).
+Every item is a `ReviewItem`, the union of two frozen dataclasses, so a grid
+without its surface, or a single image with several keys, cannot be built:
+
+- `SingleItem(key)`: one image, loaded when displayed. Its `keys` is `(key,)`
+  and its `label` (shown in the status bar) is the key.
+- `GridItem(keys, surface, source_scale)`: a grid with its composited
+  surface and its smallest image scale. Its `label` is "grid (N images)". A
+  grid's status and CLEAN refusal follow the grid rules below, even for a
+  one-image grid; the item for an image left out of the grids in grid mode is
+  a `SingleItem`, not a grid.
 
 ### Status Snapshot
 
@@ -995,7 +999,7 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
 - `filter_rows()` over the manifest and snapshot for the current
   pass/batch/filter
 - Shuffle the resulting rows
-- Each row becomes a one-key `ReviewItem` with no surface; the image is fetched with
+- Each row becomes a `SingleItem`; the image is fetched with
   `store.image_bytes(key)` and decoded with `load_surface(bytes)` on display. An
   image that cannot be fetched or decoded is shown as a placeholder in its place
   (see *Unloadable Images*); the cursor stays on it
@@ -1022,12 +1026,12 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
   within a batch (so `m`, `s`, `m` packs once) and dropped by `b`, so a
   previous batch's canvases are not kept alive. The items below are rebuilt
   from the cached result on every build, including a fresh shuffle
-- Convert each returned `GridSpec` into a `ReviewItem` with its `surface`
-  and `keys`
+- Convert each returned `GridSpec` into a `GridItem` with its `keys`,
+  `surface` and `min_scale` (as `source_scale`)
 - Shuffle the grid items, then sort by image count (largest grids first)
 - Append one item per key `pack_into_grids()` left out of the grids
   (unloadable, or, should it ever happen, left unpacked):
-  `ReviewItem(keys=(key,), label=key, surface=None, grid=False)`. Like a
+  `SingleItem(key)`. Like a
   single-mode item it is loaded when shown, so a placeholder is drawn only
   then and only if loading fails, and it follows the single-image status rules,
   not the grid rules. No grid ever holds a key whose pixels it does not show
@@ -1084,7 +1088,7 @@ naming the key is logged, the key is added to the session's
 with a short reason ("image could not be fetched" or "image could not be read
 or decoded"; the error itself goes only to the log). Navigation, `n`, todo-only and autoplay treat it
 like any other item (autoplay does not stop at it), so the cursor always points
-at a real item. An item with no surface (every single-mode item, and the item
+at a real item. A `SingleItem` (every single-mode item, and the item
 for an image left out of the grids in grid mode) is loaded each time it is shown, so the
 key joins `_unloadable` before any verdict can count, and a key that loads
 again leaves it. Placeholders are never built up front.
@@ -1373,9 +1377,9 @@ burned-in PHI can be lost when an image is scaled down; at or above 100% it uses
 the normal font colour. In grid mode the percent is the smallest image's
 effective scale: `GridSpec.min_scale` (the smallest `fit_size` / header-size
 ratio among the images drawn, 1.0 if none was shrunk) is carried by
-`ReviewItem.source_scale` to `set_image(..., source_scale=1.0)`, and the
-percent is that times the canvas's display scale. A single image has
-`source_scale` 1.0.
+`GridItem.source_scale` to `set_image(..., source_scale=1.0)`, and the
+percent is that times the canvas's display scale. A `SingleItem` is
+shown with `source_scale` 1.0.
 
 **Font**: DejaVu Sans 36pt bold, dark gray (`Color(64,64,64)`). Bundled in
 the `fonts/` subdirectory for cross-platform consistency. The help screen
