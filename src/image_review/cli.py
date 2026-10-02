@@ -13,10 +13,21 @@ from typing import TYPE_CHECKING, get_args
 
 import click
 
-from .access import world_access_warning
-from .connection import parse_reviewer
+from .access import access_of, modes, world_access_warning
+from .connection import RemoteTarget, parse_reviewer
 from .signals import TERMINATION_SIGNALS, interrupt_on
-from .store import LOCK_NAME, LocalStore, ReviewStore, StatusFilter, WorkDirLocked
+from .store import (
+    LOCK_NAME,
+    LocalStore,
+    ReviewStore,
+    StatusFilter,
+    WorkDirLocked,
+    batch_summary,
+    format_export,
+    live_writer,
+    summary,
+    write_new_file,
+)
 
 if TYPE_CHECKING:
     from .server import ReviewServer
@@ -158,7 +169,6 @@ def open_store(
         if click.get_current_context().get_parameter_source("remote") is click.core.ParameterSource.ENVIRONMENT:
             raise click.UsageError("IMAGE_REVIEW_REMOTE is set; unset it to use --work-dir.")
         raise click.UsageError("--remote and --work-dir are mutually exclusive.")
-    from .connection import RemoteTarget
     from .remote import ApiMismatch, FingerprintMismatch, RemoteError, RemoteStore
     from .tunnel import TunnelError
 
@@ -527,8 +537,6 @@ def status(work_dir, remote, via, check):
 
     With --check, the exit status also says whether the review is finished: every image has a verdict.
     """
-    from .store import batch_summary, summary
-
     with open_store(work_dir, remote, via, read_only=True) as store:
         manifest = store.manifest()
         current = store.current_pass()
@@ -592,9 +600,6 @@ def export(work_dir, output, allow_live, remote):
     image exports as DIRTY. Ignored inputs (not images) are left out. image_ids are source paths and may hold PHI, so
     export runs only where the work directory is, never with --remote; $IMAGE_REVIEW_REMOTE is ignored.
     """
-    from .access import access_of, modes
-    from .store import format_export, live_writer, write_new_file
-
     if remote is not None:
         raise click.UsageError(
             "export does not work with --remote: image_ids stay on the server. Run export on the machine (cluster) "

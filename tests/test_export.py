@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from image_review import cli as cli_module
 from image_review import store as store_module
 from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADER
@@ -354,7 +355,7 @@ class TestExportLiveOrTorn(ExportTestCase):
         for args, code in (((), 1), (("--allow-live",), 0)):
             with self.subTest(args=args):
                 answers = iter([None, appeared])  # free at the start, held by the end
-                with mock.patch.object(store_module, "live_writer", side_effect=lambda _, a=answers: next(a)):
+                with mock.patch.object(cli_module, "live_writer", side_effect=lambda _, a=answers: next(a)):
                     result = self.export(*args)
                 self.assertEqual(result.exit_code, code, result.output)
                 self.assertIn("work directory is in use", result.output if code else result.stderr)
