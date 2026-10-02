@@ -11,7 +11,7 @@ import secrets
 import socket
 import time
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -538,27 +538,26 @@ def filter_rows(
     return [r for r in selected if statuses[r.key] in targets]
 
 
-def _zero_counts() -> dict[str, int]:
-    return {**dict.fromkeys(get_args(Status), 0), "total": 0}
+def _tally(statuses: Iterable[Status]) -> dict[str, int]:
+    """A count for each Status, plus "total"."""
+    counts = {**dict.fromkeys(get_args(Status), 0), "total": 0}
+    for status in statuses:
+        counts[status] += 1
+        counts["total"] += 1
+    return counts
 
 
 def batch_summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[str, dict[str, int]]:
     """Per batch: a count for each Status, plus "total"."""
-    batches: dict[str, dict[str, int]] = {}
+    by_batch: dict[str, list[Status]] = {}
     for row in rows:
-        counts = batches.setdefault(row.batch, _zero_counts())
-        counts[statuses[row.key]] += 1
-        counts["total"] += 1
-    return batches
+        by_batch.setdefault(row.batch, []).append(statuses[row.key])
+    return {batch: _tally(group) for batch, group in by_batch.items()}
 
 
 def summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[str, int]:
     """A count for each Status, plus "total"."""
-    totals = _zero_counts()
-    for bc in batch_summary(rows, statuses).values():
-        for k in totals:
-            totals[k] += bc[k]
-    return totals
+    return _tally(statuses[row.key] for row in rows)
 
 
 # What an export says about one source file. NOT_REVIEWED: preprocess failed to render it (or part of it), so nobody
