@@ -99,6 +99,7 @@ _ARCHIVE_MAGIC = (
     (b"\x28\xb5\x2f\xfd", "zstd"),
     (b"7z\xbc\xaf\x27\x1c", "7z"),
     (b"Rar!\x1a\x07", "rar"),
+    *((b"BZh%d" % level, "bzip2") for level in range(10)),  # `BZh` and an ASCII digit
 )
 _ARCHIVE_SUFFIXES = {
     ".gz": "gzip", ".tgz": "gzip", ".tar": "tar", ".7z": "7z", ".rar": "rar", ".bz2": "bzip2", ".xz": "xz", ".zst": "zstd",
@@ -488,6 +489,11 @@ def preprocess_raster(img: np.ndarray) -> np.ndarray:
     raise Unsupported(f"image with shape {img.shape}")
 
 
+def _has_preamble(head: bytes) -> bool:
+    """Whether the 128-byte preamble is followed by `DICM`; false for input too short to hold it."""
+    return head[_DICOM_MAGIC_OFFSET : _DICOM_MAGIC_OFFSET + len(_DICOM_MAGIC)] == _DICOM_MAGIC
+
+
 def read_dicom(data: bytes) -> pydicom.FileDataset:
     """Read DICOM with or without the preamble, `DICM` and file meta.
 
@@ -498,8 +504,7 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
     definition, so its transfer syntax is the encoding pydicom detected.
     """
     dcm = pydicom.dcmread(io.BytesIO(data), force=True)
-    has_preamble = data[_DICOM_MAGIC_OFFSET : _DICOM_MAGIC_OFFSET + len(_DICOM_MAGIC)] == _DICOM_MAGIC
-    if not has_preamble and _sop_class(dcm) is None and not _has_pixel_data(dcm):
+    if not _has_preamble(data) and _sop_class(dcm) is None and not _has_pixel_data(dcm):
         first = min([*dcm.file_meta.keys(), *dcm.keys()], default=None)
         if first is not None and first.group in (0x0002, 0x0008):
             raise InvalidDicomError("not DICOM (no preamble, no SOP Class UID and no pixel data)")
@@ -573,6 +578,10 @@ def _is_bare_dicom(head: bytes) -> bool:
     return head[4:6] in _DICOM_VRS or (implicit_length <= _BARE_DICOM_MAX_FIRST_LENGTH and implicit_length % 2 == 0)
 
 
+def _unsupported_archive(name: str) -> Rejected:
+    return Rejected("failed", f"unsupported: {name} archive")
+
+
 def classify(name: str, head: bytes) -> Content | Rejected:
     """Classify an input by its first `SNIFF_BYTES` bytes; `name` is its path (or ZIP entry name).
 
@@ -581,15 +590,13 @@ def classify(name: str, head: bytes) -> Content | Rejected:
     damaged file fails rather than being dropped), and a `.zip` or other archive
     name fails. Compressed archives (gzip, bzip2, xz, zstd, 7z, rar, tar) fail as unsupported.
     """
-    if head[_DICOM_MAGIC_OFFSET : _DICOM_MAGIC_OFFSET + len(_DICOM_MAGIC)] == _DICOM_MAGIC:
+    if _has_preamble(head):
         return "dicom"
     if head.startswith(_ZIP_MAGIC):
         return "zip"
     for magic, archive in _ARCHIVE_MAGIC:
         if head.startswith(magic):
-            return Rejected("failed", f"unsupported: {archive} archive")
-    if head.startswith(b"BZh") and head[3:4].isdigit():
-        return Rejected("failed", "unsupported: bzip2 archive")
+            return _unsupported_archive(archive)
     if _is_raster(head):
         return "raster"
     path = PurePosixPath(name)
@@ -603,7 +610,7 @@ def classify(name: str, head: bytes) -> Content | Rejected:
     if suffix in _RASTER_SUFFIXES:
         return "raster"
     if suffix in _ARCHIVE_SUFFIXES:  # tar's `ustar` is at offset 257, beyond the sniffed bytes
-        return Rejected("failed", f"unsupported: {_ARCHIVE_SUFFIXES[suffix]} archive")
+        return _unsupported_archive(_ARCHIVE_SUFFIXES[suffix])
     if suffix == ".zip":
         return Rejected("failed", "unrecognized content for a .zip file")
     return Rejected("ignored", "not an image (unrecognized content)")
