@@ -42,8 +42,11 @@ image-review review --mode grid
 # Pass 2: single review — inspect only the flagged (pass-1 DIRTY) images individually
 image-review review --mode single
 
-# Check progress
+# Check progress (--check: exit 1 until every image has a verdict)
 image-review status
+
+# Write the result: which source files are CLEAN and which DIRTY
+image-review export --output result.tsv
 ```
 
 The default work directory is `./review_work`; don't create work directories inside a git checkout (the repo's `.gitignore` excludes them as a safety net).
@@ -260,7 +263,7 @@ tunnel via a login node, e.g. `--via user@login.cluster`; it requires
 ### `image-review status`
 
 ```
-image-review status [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINATION]]
+image-review status [--check] [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINATION]]
 ```
 
 Prints overall and per-batch counts of CLEAN / DIRTY / UNREVIEWED / FLAGGED
@@ -279,6 +282,66 @@ If preprocess skipped any inputs it also prints
 `Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`;
 failed inputs were never shown, so they are not part of the counts above.
 `--remote` and `--via` work as for `review`.
+
+With `--check` the report is printed as usual and the exit status says whether
+the review is finished, i.e. every image has a verdict: 1 if any image is
+UNREVIEWED or any input `failed` to preprocess; 0 otherwise (ignored inputs do
+not count). FLAGGED images have a DIRTY verdict from an earlier pass, so they
+count as decided: re-review passes are optional. They still show in the report,
+so a second pass remains available. Without `--check`, `status` exits 0.
+
+### `image-review export`
+
+```
+image-review export [--work-dir DIR] [--output FILE] [--allow-live]
+```
+
+Writes the study's result to stdout, or to a new `FILE` with `--output`: one
+row per source file, which is CLEAN or DIRTY. The format is tab-separated
+UTF-8 with LF line endings and a header row, with no quoting. Export refuses
+(exit 1, naming the `image_id`) if any field (`image_id`, `reviewer`, `reason`,
+...) holds a control character (tab, CR, LF and the rest of C0, DEL, C1 such as
+U+0085), U+2028 or U+2029, or that starts with `"`, since readers could
+split or merge rows there. A `"` anywhere else is written as is.
+
+| Column | Description |
+|--------|-------------|
+| `image_id` | The source file's path, as in `manifest.tsv` / `skipped.tsv`; a file inside a ZIP is `<zip>::<entry>`, one row per entry |
+| `status` | `CLEAN`, `DIRTY`, `UNREVIEWED` (no verdict yet) or `NOT_REVIEWED` (preprocess could not render it, or its icon) |
+| `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. After an undo they are the undo's time and reviewer. `reviewer` is the reviewer's unverified claim |
+| `reason` | Why the row is not simply the main image's verdict: preprocess's error for a `NOT_REVIEWED` file, `icon DIRTY` / `icon UNREVIEWED` / `icon: <error>` for its icon, `main image missing` (an icon whose file is not in the manifest; the row is then at best `NOT_REVIEWED`); otherwise empty |
+
+- A DICOM's embedded icon (`<path>#icon` in the manifest) is folded into its
+  file's row: the row is CLEAN only if the image and its icon both are, else
+  DIRTY if either is, else NOT_REVIEWED, else UNREVIEWED.
+- Inputs that failed to preprocess (the `failed` rows of `skipped.tsv`) are
+  `NOT_REVIEWED`: nobody has looked at them, so treat them as possibly
+  containing PHI. This applies even if the manifest also lists them. `ignored`
+  inputs (not images) are left out.
+- A FLAGGED image (DIRTY in an earlier pass, not yet re-reviewed) is `DIRTY`.
+- Rows follow the manifest's order, then `skipped.tsv`'s, one per file.
+- Export covers only the files and entries it lists. It never vouches for a
+  ZIP or directory as a whole, because ignored members (a DICOMDIR, a PDF, ...)
+  are not listed.
+- `reviewer` values can start with `=`, `+`, `-` or `@`. Open the file as text
+  (e.g. import it as text columns), not by double-clicking it into a
+  spreadsheet that would read them as formulas.
+
+`image_id`s are source paths and may hold PHI, so export runs where the work
+directory is (e.g. on the cluster); it refuses `--remote` and ignores
+`$IMAGE_REVIEW_REMOTE`. It writes nothing in the work directory, and it
+refuses (exit 1) while a writer (`review` or `serve`) has the work directory
+open, since verdicts may still change. `--allow-live` exports anyway, with a
+warning. It always refuses a `review.tsv` whose last line was cut short by an
+interrupted write; the next verdict recorded with `review` drops that line.
+`--output` never overwrites an existing file. It creates the file in one step
+(written to a hidden `.FILE.<random>.tmp` beside it, then linked into place)
+with the work directory's file mode, and for a group work directory its group
+too (0660). If the group cannot be set, the file is made 0600 with a warning.
+The hidden file is removed on every exit except a hard kill (`kill -9`, a node
+crash), which can leave it behind: delete it, as it holds source paths. A
+writer that opens the work directory while export reads it also makes export
+refuse, unless `--allow-live`.
 
 ### `image-review serve`
 

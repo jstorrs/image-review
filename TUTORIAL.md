@@ -28,6 +28,9 @@ image-review review
 
 # 3. Check your progress
 image-review status
+
+# 4. Export the result
+image-review export --output result.tsv
 ```
 
 ## Step 1: Preprocess
@@ -435,6 +438,89 @@ could not be rendered, so they were never shown for review and are not in the
 counts above; check `skipped.tsv` in the work directory for which ones and
 why. "Ignored" inputs were not images (for example stray text files).
 
+### Checking from a script
+
+`--check` keeps the same report and sets the exit status: 1 while any image
+is UNREVIEWED (has no verdict yet) or any input failed to preprocess; 0 once
+every image has a verdict. It works with `--remote` too.
+
+```bash
+if image-review status --check --work-dir ./review_work > /dev/null; then
+    echo "review finished"
+fi
+```
+
+FLAGGED images already have a verdict (DIRTY, from an earlier pass), so they
+do not keep `--check` at 1: re-review passes are optional. They still show in
+the report as FLAGGED, so you can run a second pass on them whenever you want.
+
+## Step 4: Export
+
+The deliverable of a study is which source files are CLEAN and which are
+DIRTY. `export` writes it as TSV, one row per source file:
+
+```bash
+image-review export --work-dir ./review_work --output result.tsv
+image-review export --work-dir ./review_work > result.tsv   # or to stdout
+```
+
+```
+image_id                      status        pass_number  timestamp                         reviewer  reason
+/data/site_a.zip::001.dcm     CLEAN         1            2026-03-02T10:14:07.512+00:00     alice
+/data/site_a.zip::002.dcm     DIRTY         2            2026-03-03T09:01:44.020+00:00     bob
+/data/site_a.zip::003.dcm     DIRTY         1            2026-03-02T10:15:30.101+00:00     alice     icon DIRTY
+/data/site_a.zip::004.dcm     UNREVIEWED
+/data/site_b/broken.dcm       NOT_REVIEWED                                                           cannot decode pixel data
+```
+
+(Columns are aligned here for reading. The file is tab-separated UTF-8 with
+LF line endings and no quoting. Export refuses if any field holds
+a control character (tab, CR, LF and the rest of C0, DEL, C1 such as
+U+0085), U+2028 or U+2029, or that starts with `"`: such a value could not be read back
+as one cell.)
+
+- `status` is the file's latest verdict, `CLEAN` or `DIRTY`. An image that was
+  DIRTY in an earlier pass and not yet re-reviewed (FLAGGED) is exported as
+  `DIRTY`. `UNREVIEWED` files have no verdict yet.
+- A DICOM with an embedded icon was reviewed as two images. Its row is CLEAN
+  only if both were marked CLEAN. Otherwise it takes the worse status (DIRTY,
+  then NOT_REVIEWED, then UNREVIEWED), and `reason` names the icon's state
+  (`icon DIRTY`, or `icon: <error>` if the icon could not be rendered). An
+  icon whose file is not in the manifest is reported under that file, as
+  NOT_REVIEWED at best (`main image missing`).
+- `NOT_REVIEWED` rows are inputs that failed to preprocess (the `failed`
+  rows of `skipped.tsv`, with its `reason`). Nobody has looked at them, so
+  treat them as possibly containing PHI. Ignored inputs (not images) are left
+  out.
+- `pass_number`, `timestamp` and `reviewer` come from the latest verdict on
+  the file's main image and are empty without one. After an undo (`z`) they
+  are the undo's time and reviewer.
+- Each entry of a ZIP is its own row (`<zip>::<entry>`); rows follow the
+  manifest's order, then `skipped.tsv`'s.
+- Export covers only the files and entries it lists. It never vouches for a
+  ZIP or directory as a whole, because ignored members (a DICOMDIR, a PDF, ...)
+  are not listed.
+- `reviewer` is whatever name each reviewer gave, unverified, and can start
+  with `=`, `+`, `-` or `@` (one starting with `"` makes export refuse). Import the file into a spreadsheet as text
+  columns rather than opening it directly, so no value is taken as a formula.
+
+`image_id`s are the original source paths, which can contain PHI. So export
+runs where the work directory is: on the cluster, not over `--remote`. It
+refuses `--remote` and ignores `$IMAGE_REVIEW_REMOTE`.
+
+Export refuses while a `review` or `serve` has the work directory open, since
+verdicts may still change. Stop it first, or pass `--allow-live` to export
+anyway (with a warning). If a crash cut the last line of `review.tsv` short,
+export refuses until the next verdict is recorded with `review`, which drops
+that line. Re-check the last image you reviewed before the crash.
+
+`--output` creates a new file with the work directory's permissions: 0600
+private, or 0660 and the work directory's group. It refuses to overwrite an
+existing file, and the file appears only once it is complete. It is first
+written to a hidden `.result.tsv.<random>.tmp` beside it, which is removed on
+every exit except a hard kill (`kill -9`, a node crash); delete such a
+leftover, as it holds source paths.
+
 ## Reviewing on an HPC Cluster
 
 If the images live on a cluster, you can review them from your laptop
@@ -631,6 +717,9 @@ image-review review --mode single --work-dir ./phi_review
 
 # Final status
 image-review status --work-dir ./phi_review
+
+# The result, one row per source file
+image-review export --work-dir ./phi_review --output ./phi_review_result.tsv
 ```
 
 ## Work Directory Files

@@ -225,6 +225,7 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
       1. preprocess  — convert source DICOMs/images to JPG batches
       2. review      — interactively classify images as CLEAN or DIRTY
       3. status      — check review progress and counts
+      4. export      — write the result: one row per source image (on the machine holding the work dir)
 
     Diagnostics are logged to stderr as `time LEVEL module: message`.
     """
@@ -427,8 +428,18 @@ def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, 
 @work_dir_option
 @remote_option
 @via_option
-def status(work_dir, remote, via):
-    """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED / FLAGGED counts)."""
+@click.option(
+    "--check",
+    is_flag=True,
+    default=False,
+    help="Exit 1 if any image is UNREVIEWED (has no verdict) or any input failed to preprocess; else 0. "
+    "FLAGGED images have a DIRTY verdict, so they count as decided.",
+)
+def status(work_dir, remote, via, check):
+    """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED / FLAGGED counts).
+
+    With --check, the exit status also says whether the review is finished: every image has a verdict.
+    """
     from .store import batch_summary, summary
 
     with open_store(work_dir, remote, via, read_only=True) as store:
@@ -465,6 +476,69 @@ def status(work_dir, remote, via):
         print(
             f"Skipped during preprocess: {skipped.failed} failed, {skipped.ignored} ignored (see skipped.tsv in the work dir)"
         )
+
+    # Finished when every image has a verdict: FLAGGED is a DIRTY verdict from an earlier pass; re-review is optional.
+    if check and (counts["UNREVIEWED"] or (skipped is not None and skipped.failed)):
+        sys.exit(1)
+
+
+@cli.command()
+@work_dir_option
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Write to this new file, with the work directory's file mode and group; an existing file is never overwritten [default: stdout].",
+)
+@click.option(
+    "--allow-live",
+    is_flag=True,
+    default=False,
+    help="Export even while a writer (review or serve) has the work directory open; verdicts recorded later are missed.",
+)
+@click.option("--remote", default=None, hidden=True)  # declared only to refuse it; $IMAGE_REVIEW_REMOTE is not read
+def export(work_dir, output, allow_live, remote):
+    """Write the review result as TSV: image_id, status, pass_number, timestamp, reviewer, reason.
+
+    One row per source file (a ZIP entry counts as one): CLEAN, DIRTY, UNREVIEWED, or NOT_REVIEWED when
+    preprocess failed on it. A DICOM's icon is folded into its file's row, which is CLEAN only if both are. A FLAGGED
+    image exports as DIRTY. Ignored inputs (not images) are left out. image_ids are source paths and may hold PHI, so
+    export runs only where the work directory is, never with --remote; $IMAGE_REVIEW_REMOTE is ignored.
+    """
+    from .access import access_of, modes
+    from .store import format_export, live_writer, write_new_file
+
+    if remote is not None:
+        raise click.UsageError(
+            "export does not work with --remote: image_ids stay on the server. Run export on the machine (cluster) "
+            "holding the work directory, with --work-dir."
+        )
+    raw = work_dir if work_dir is not None else DEFAULT_WORK_DIR
+    path = Path(raw)
+    if not path.exists():
+        raise click.BadParameter(f"Path '{raw}' does not exist.", param_hint="'--work-dir'")
+    with interrupt_on(*TERMINATION_SIGNALS):  # a SIGTERM/SIGHUP unwinds like Ctrl-C, removing a half-written file
+        writer = live_writer(path)
+        _refuse_live(writer, allow_live)
+        with open_local_store(path, read_only=True) as store:
+            try:
+                text = format_export(store.export_rows())
+            except ValueError as e:
+                raise click.ClickException(str(e)) from e
+        if writer is None:  # one that opened the work directory while it was read may have changed verdicts
+            _refuse_live(live_writer(path), allow_live)
+        if output is None:
+            click.get_binary_stream("stdout").write(text.encode("utf-8"))
+            return
+        st = path.stat()
+        access = access_of(st.st_mode)
+        group = st.st_gid if access == "group" else None  # the study's group, wherever the file is created
+        try:
+            write_new_file(Path(output), modes(access).file_mode, group, text)
+        except FileExistsError:
+            raise click.ClickException(f"{output} already exists; not overwriting it.") from None
+        except OSError as e:
+            raise click.ClickException(f"Cannot write {output}: {e}") from e
 
 
 @cli.command()
@@ -527,6 +601,17 @@ def serve(work_dir, bind, port):
             server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def _refuse_live(writer: WorkDirLocked | None, allow_live: bool) -> None:
+    """Refuse to export while a writer holds the work directory, unless --allow-live (then warn)."""
+    if writer is None:
+        return
+    if not allow_live:
+        raise click.ClickException(
+            f"{writer}. Verdicts may still change; stop the writer and export again, or pass --allow-live."
+        )
+    log.warning("exporting while a writer may be recording verdicts (--allow-live): %s", writer)
 
 
 def _close_store_after_marks(server: "ReviewServer", store: LocalStore) -> None:

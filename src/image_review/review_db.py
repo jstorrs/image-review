@@ -363,6 +363,14 @@ class ReviewDB:
         self._append(decisions)  # on disk first, as in mark_many
         fold(self._rows, decisions)
 
+    def decisions(self) -> dict[str, Decision]:
+        """The latest decision per image_id (a copy; never a tombstone)."""
+        return dict(self._rows)
+
+    def has_torn_tail(self) -> bool:
+        """Whether review.tsv ended in an unfinished line when loaded (dropped by the next append)."""
+        return self._truncate is not None
+
     def get_status(self, image_id: str, current_pass: int) -> Status:
         row = self._rows.get(image_id)
         if not row:

@@ -80,7 +80,9 @@ propagation to the root logger; third-party loggers are left alone).
   lost its server, a server request failed with a 500. WARNING: an image that
   cannot be loaded or was left out of every grid, an input skipped by
   preprocess, a torn last line of `review.tsv`, a world-accessible work
-  directory, a refused verdict, a failed server connection. INFO: the server's
+  directory, a refused verdict, a failed server connection, `export --allow-live`
+  overriding a held lock, an `export --output` file that could not be given
+  the work directory's group. INFO: the server's
   request log. Nothing else is logged at INFO, so the default stays quiet
   outside `serve`.
 - **Never logged by the server**: access tokens, `Authorization` headers,
@@ -92,7 +94,7 @@ propagation to the root logger; third-party loggers are left alone).
   server records are escaped with Python's `unicode_escape`, so control
   characters cannot reach the terminal.
 - **Not diagnostics**: the CLI's own output stays plain `print`/`click.echo`:
-  the `preprocess` summary, `status` tables, `serve`'s connection-string
+  the `preprocess` summary, `status` tables, `export`'s TSV, `serve`'s connection-string
   instructions, the review session's start and "nothing to review" lines (all
   stdout), and error messages of failed commands (`Error: ...`, stderr, exit 1
   or 2).
@@ -394,7 +396,7 @@ store (and tunnel) is up, so ssh password/MFA prompts keep terminal focus.
 ### `image-review status`
 
 ```
-image-review status [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINATION]]
+image-review status [--check] [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINATION]]
 ```
 
 Same store selection as `review`, but a local store is opened read-only (no
@@ -415,6 +417,110 @@ versions) or has no rows. A malformed `skipped.tsv` (`ValueError`) is a
 `status` cannot count unloadable images (see *Unloadable Images*): they are
 only discovered when `review` tries to show them, and until marked DIRTY they
 count as UNREVIEWED.
+
+**Exit status**: 0, unless `--check` is given: then, after printing the same
+report, it exits 1 if any image is UNREVIEWED or `skipped.tsv` has any
+`failed` row (`ignored` rows do not count), else 0: a study is finished when
+every image has a verdict. FLAGGED is a DIRTY verdict from an earlier pass, so
+it counts as decided; re-review passes are optional, and FLAGGED images still
+show in the report, so a second pass remains available. It works the same over
+`--remote` (the counts come from `store.skipped()`). Errors
+(bad store, malformed `skipped.tsv`) exit 1 or 2 as without `--check`.
+
+### `image-review export`
+
+```
+image-review export [--work-dir DIR] [--output FILE] [--allow-live]
+```
+
+Writes the study's result: which source files are CLEAN and which DIRTY. Local
+only: the rows name `image_id`s (source paths, possibly PHI), which never leave
+the machine holding the work directory, so export runs there (e.g. on the
+cluster). `--remote` is declared only to be refused with a usage error (exit 2)
+saying so; it has no envvar, so `$IMAGE_REVIEW_REMOTE` is ignored and does not
+get in the way of `--work-dir`. There is no server endpoint for it. The whole
+command runs under `interrupt_on(*TERMINATION_SIGNALS)`, so SIGTERM/SIGHUP
+unwind like Ctrl-C and remove a half-written output.
+
+**Refusals** (`ClickException`, exit 1, nothing written):
+- `store.live_writer(work_dir)` finds `review.lock` held by a writer. The lock
+  is held unless it names a process of this machine and boot that no longer
+  exists (`is_stale`); an unreadable lock counts as held. The message is
+  `WorkDirLocked`'s. `--allow-live` overrides this one refusal only, and then
+  logs a WARNING (stderr). The check is made once, at the start.
+- A writer that took the lock while export read the work directory: when
+  there was none at the start, `live_writer` is checked again after
+  `export_rows()`, with the same `--allow-live` override.
+- `review.tsv` ends in a torn line (`ReviewDB.has_torn_tail()`). This is not
+  overridable. The torn line is dropped by a writer's next append, so the
+  message says to record a verdict with `review` (or through `serve`) and to
+  re-check the last image reviewed.
+- A malformed `skipped.tsv`.
+- A field (any column) containing a control character (Unicode category
+  `Cc`: C0 incl. tab, CR and LF, DEL, and C1 incl. U+0085) or U+2028/U+2029,
+  which covers every character `str.splitlines()` breaks at, or starting
+  with `"`, which CSV-aware readers (Python's `csv`, pandas, spreadsheet
+  import) take as the start of a quoted field (`format_export`'s `ValueError`,
+  naming the `image_id` with `repr` and the column).
+
+Then it opens a read-only `LocalStore` (no lock; nothing is written in the
+work directory) and calls its `export_rows()`. That applies the pure
+`store.export_rows` to the manifest entries, `ReviewDB.decisions()` and
+`load_skipped`.
+
+**Format** (`store.format_export`): UTF-8 text, the header line
+`image_id status pass_number timestamp reviewer reason`, then one line per row.
+Fields are joined with tabs and every line ends in LF. There is no quoting or
+escaping: fields are written exactly as stored (a `"` not at the start
+included), which the refusals above make unambiguous.
+
+| Column | Description |
+|--------|-------------|
+| `image_id` | The source file: a path, or `<zip>::<entry>` for a ZIP entry (each entry is its own row; a ZIP is not a file of the export). A DICOM's icon is never a row of its own |
+| `status` | The worst status of the file's parts (below): `DIRTY`, then `NOT_REVIEWED`, then `UNREVIEWED`, then `CLEAN` |
+| `pass_number`, `timestamp`, `reviewer` | From the latest decision on the main part (`X` itself), as recorded; empty when it has none (`UNREVIEWED`, `NOT_REVIEWED`, or no main part). After an undo they come from the undo row (its time and the undoing reviewer; the restored pass). `reviewer` is the client's unauthenticated claim, possibly empty in old rows; it is not sanitized, so it may begin with `=`, `+`, `-` or `@`, and the file must be read as text, not as spreadsheet formulas |
+| `reason` | `; `-joined notes, in this order: the main part's skip reason if it is `NOT_REVIEWED`; `main image missing` if there is no main part (it then counts as a `NOT_REVIEWED` part, so the row is never CLEAN); `icon: <skip reason>` if the icon is `NOT_REVIEWED`, else `icon <STATUS>` if the icon is not `CLEAN`. Empty otherwise |
+
+**Parts and folding.** Every distinct `image_id` of the manifest, and of the
+`failed` rows of `skipped.tsv`, is a part:
+- It is `NOT_REVIEWED` if `skipped.tsv` has any `failed` row for it, even if
+  the manifest lists it too. Repeated rows count once, with the first reason.
+- Otherwise its status is its latest decision's (CLEAN or DIRTY; a tombstone
+  leaves none), or `UNREVIEWED` without one.
+
+Status is not pass-aware: a DIRTY from an earlier pass that is FLAGGED in the
+current one is `DIRTY` (it still contains PHI as far as anyone has said).
+A part `X#icon` (`store.ICON_SUFFIX`, equal to `preprocess.ICON_SUFFIX`) is
+folded into the row of `X`. When there is no part `X` (e.g. a file literally
+named `scan.dcm#icon` whose `scan.dcm` was ignored), the row is still `X` and
+the missing main part counts as `NOT_REVIEWED` (`main image missing`), so it
+is never CLEAN. `ignored` rows (not images) are left out. Rows cover only the
+listed files and ZIP entries, never a ZIP or directory as a whole: its ignored
+members are not listed.
+
+Rows come in order of first appearance of their file: manifest order, then
+`skipped.tsv` order. Decisions for `image_id`s in neither file are left out.
+
+**Output.** Without `--output` the bytes go to stdout's binary stream.
+`--output FILE` is written by `store.write_new_file`:
+1. A unique hidden sibling (`.FILE.<random>.tmp`) is created with
+   `O_CREAT|O_EXCL` and mode 0600. For a group work directory it is then given
+   the work directory's group (`fchown(fd, -1, gid)`), so it is right even
+   outside the setgid work directory; if that fails, it stays 0600 and a
+   WARNING is logged. Only then is it `fchmod`ed to the work directory's
+   policy file mode (exactly, whatever the umask), and only then written and
+   fsynced, so it is never readable by a group it does not belong to.
+2. The sibling is hard-linked to `FILE`, so `FILE` appears complete or not at
+   all. If `FILE` already exists, export refuses (exit 1) and never
+   overwrites it.
+3. Where hard links are not supported (`EPERM`, `ENOTSUP`, `ENOSYS`), `FILE`
+   is created directly with `O_EXCL`, the same way (0600, group, mode, then
+   the text). A failed `link` after which `os.path.samefile(sibling, FILE)`
+   holds (NFS: the link was made but the reply was lost) counts as made.
+
+One `try`/`finally` around creation through the link removes the sibling on
+every exit, including Ctrl-C and SIGTERM/SIGHUP; a hard kill (SIGKILL, a node
+crash) can leave it behind, holding source paths, to be deleted by hand.
 
 ### `image-review serve`
 
@@ -488,7 +594,9 @@ Tab-separated, one row per input that produced no image.
 | `kind` | `failed` (an input that was not rendered; makes the CLI exit 1 unless `--allow-skipped`) or `ignored` (not an input: unrecognized content, AppleDouble, DICOMDIR, a ZIP without files, a symlink to an enclosing directory or to a directory inside a SOURCE, a non-regular file inside a directory) |
 | `reason` | `<ExceptionClass>: <message>`, `unsupported: ...` for inputs this tool does not render, or the `ignored` reason |
 
-It contains source paths, so it is as sensitive as `manifest.tsv`.
+It contains source paths, so it is as sensitive as `manifest.tsv`. `export`
+makes each `failed` `image_id` `NOT_REVIEWED` with its `reason` (folding an
+icon's into its file's row), and leaves `ignored` rows out.
 
 ### `review.lock`
 
@@ -603,6 +711,8 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
 | `StatusFilter` | `Literal["unreviewed", "clean", "all"]`: the `review --filter` vocabulary, parsed by the CLI's choice and taken by `filter_rows` and `ReviewSession` |
 | `ManifestRow` | Frozen dataclass: `key` (the `preprocessed_path`) and `batch` |
+| `SkippedRow` | Frozen dataclass: one `skipped.tsv` row, `image_id`, `kind` (`SkipKind`, `Literal["failed", "ignored"]`) and `reason` |
+| `ExportRow` | Frozen dataclass: one `export` row (a source file), `image_id`, `status` (`ExportStatus`, `Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]`), `pass_number` (`int \| None`), `timestamp`, `reviewer`, `reason` |
 | `StoreUnavailable` | Exception: the store cannot be reached (as opposed to a bad key or image) |
 
 ### Key versus `image_id`
@@ -647,8 +757,11 @@ once they are written (a failed undo can be retried). The stack is unbounded
 only: it starts empty and is lost when the store is closed or the process ends,
 so only marks made since the store was opened can be undone. `statuses` and `current_pass`
 delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
-`skipped.tsv` strictly (header `image_id`, `kind`, `reason`; `kind` is `failed`
-or `ignored`) and returns only the counts.
+`skipped.tsv` strictly with `load_skipped` (header `image_id`, `kind`, `reason`; `kind` is `failed`
+or `ignored`) and returns only the counts. `export_rows()` (not part of the
+`ReviewStore` Protocol: `image_id`s stay local) returns
+`store.export_rows(entries, ReviewDB.decisions(), load_skipped(...) or [])`;
+see *`image-review export`*.
 
 ### Pure functions
 
@@ -658,6 +771,14 @@ or `ignored`) and returns only the counts.
 | `summary(rows, statuses)` | Count of each `Status` (CLEAN/DIRTY/UNREVIEWED/FLAGGED) plus `total` |
 | `batch_summary(rows, statuses)` | The same per batch |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
+| `export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons folded in |
+| `format_export(rows) -> str` | The export as TSV text with its header; `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
+
+`load_skipped(work_dir)` parses `skipped.tsv` into `SkippedRow`s (`None` if
+absent; `ValueError` naming `file:line` if malformed). Two IO helpers serve
+`export` (see *`image-review export`*): `write_new_file(path, file_mode,
+group, text)` creates the `--output` file, and `live_writer(work_dir) ->
+WorkDirLocked | None` checks the work dir lock.
 
 ## Review Session (`controller.py`)
 
@@ -1134,6 +1255,8 @@ by hand.
 | `undo_many(changes, *, reviewer)` | Append the undo rows for one `mark_many` result in one append (see *Undo rows*); an `image_id` listed twice (keys sharing it) gets one row |
 | `migrate()` | Rewrite an old five-column file with the current header, once (see *`review.tsv`*); no-op otherwise |
 | `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*) |
+| `decisions() -> dict[str, Decision]` | A copy of the latest decision per `image_id` (never a tombstone), for `export` |
+| `has_torn_tail() -> bool` | Whether `review.tsv` ended in a torn line when loaded (not yet dropped by an append); `export` refuses then |
 | `current_pass(image_ids) -> int` | Auto-detect pass number |
 
 ### Pass Logic
@@ -1440,3 +1563,7 @@ Sessions are resumable: quitting mid-session saves all progress (with a
 remote store, progress is saved on the server at every mark). Re-running
 the same command shows only remaining unreviewed (pass 1) or flagged (pass 2+)
 images.
+
+When done, `export` (on the machine holding the work directory) writes the
+result, one row per source file; images still DIRTY (or FLAGGED) export as
+`DIRTY`, and inputs that failed to preprocess as `NOT_REVIEWED`.
