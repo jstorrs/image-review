@@ -313,17 +313,7 @@ class ReviewDB:
         by_image = {c.written.image_id: c for c in changes}  # an image_id given twice (keys sharing it) is undone once
         decisions = [
             replace(
-                c.previous,
-                timestamp=ts,
-                reviewer=reviewer,
-                mode="undo",
-                grid_size=len(by_image),
-                tool_version=tool_version,
-            )
-            if c.previous is not None
-            else replace(
-                c.written,
-                status=TOMBSTONE,
+                c.previous if c.previous is not None else replace(c.written, status=TOMBSTONE),
                 timestamp=ts,
                 reviewer=reviewer,
                 mode="undo",
