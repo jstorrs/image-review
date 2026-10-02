@@ -36,6 +36,7 @@ from image_review import cli as cli_module
 from image_review import preprocess as preprocess_module
 from image_review.cli import default_jobs
 from image_review.preprocess import (
+    BAD_NAME_REASON,
     COLLISION_REASON,
     SIDE_BY_SIDE_GAP,
     Candidate,
@@ -45,6 +46,7 @@ from image_review.preprocess import (
     Unsupported,
     WorkDirExists,
     WorkerCrashed,
+    _escape_name,
     _failed,
     classify,
     colliding_ids,
@@ -955,6 +957,92 @@ class ContentDiscoveryTest(unittest.TestCase):
             result.skipped, [Skipped(f"{archive.as_posix()}::inner.zip", "failed", "unsupported: nested zip")]
         )
 
+    def test_zip_entry_with_a_control_character_is_failed_and_exports(self):
+        archive = self.root / "scans.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("good.png", _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)))
+            zf.writestr("a\nb.png", _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)))
+            zf.writestr("c\td.txt", b"not an image")  # would be ignored, but its name cannot be exported
+        work = self.root / "work"
+        result = self.invoke(archive, work)
+        self.assertEqual(result.exit_code, 1, result.output)
+        a = archive.as_posix()
+        self.assertEqual([r["image_id"] for r in _read_tsv(work / "manifest.tsv")], [f"{a}::good.png"])
+        self.assertEqual(
+            self.skipped_rows(work),
+            [(f"{a}::a\\x0ab.png", "failed", BAD_NAME_REASON), (f"{a}::c\\x09d.txt", "failed", BAD_NAME_REASON)],
+        )
+        exported = invoke_cli("export", "--work-dir", str(work))
+        self.assertEqual(exported.exit_code, 0, exported.output)
+        self.assertIn(f"{a}::a\\x0ab.png\tNOT_REVIEWED\t", exported.stdout)
+
+    def test_file_whose_name_is_not_utf8_is_failed(self):
+        src = self.root / "src"
+        src.mkdir()
+        write_dicom(src / "a.dcm", _good_pixels())
+        bad = src / os.fsdecode(b"bad\xff.png")
+        try:
+            bad.write_bytes(_png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)))
+        except (OSError, UnicodeEncodeError):
+            self.skipTest("the file system refuses names that are not UTF-8")
+        work = self.root / "work"
+        result = self.invoke(src, work)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual([r["image_id"] for r in _read_tsv(work / "manifest.tsv")], [(src / "a.dcm").as_posix()])
+        self.assertEqual(self.skipped_rows(work), [(f"{src.as_posix()}/bad\\xff.png", "failed", BAD_NAME_REASON)])
+
+    def test_everything_under_a_badly_named_directory_is_failed(self):
+        src = self.root / "src"
+        bad = src / os.fsdecode(b"d\xff")
+        try:
+            bad.mkdir(parents=True)
+        except (OSError, UnicodeEncodeError):
+            self.skipTest("the file system refuses names that are not UTF-8")
+        (bad / "a.png").write_bytes(_png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)))
+        (bad / "notes.txt").write_text("not an image")  # would be ignored
+        work = self.root / "work"
+        result = self.invoke(src, work)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(_read_tsv(work / "manifest.tsv"), [])
+        d = f"{src.as_posix()}/d\\xff"
+        self.assertEqual(
+            self.skipped_rows(work),
+            [(f"{d}/a.png", "failed", BAD_NAME_REASON), (f"{d}/notes.txt", "failed", BAD_NAME_REASON)],
+        )
+        record = json.loads((work / "preprocess.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["sources"], [src.as_posix()])
+        with quiet():
+            run_preprocess([bad], self.root / "work2")
+        record = json.loads((self.root / "work2" / "preprocess.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["sources"], [d])
+
+    def test_symlinked_directory_reason_escapes_a_bad_target_name(self):
+        src = self.root / "src"
+        src.mkdir()
+        elsewhere = self.root / os.fsdecode(b"e\xff")
+        try:
+            elsewhere.mkdir()
+        except (OSError, UnicodeEncodeError):
+            self.skipTest("the file system refuses names that are not UTF-8")
+        (src / "linked_dir").symlink_to(elsewhere, target_is_directory=True)
+        work = self.root / "work"
+        self.invoke(src, work)
+        [(_, kind, reason)] = self.skipped_rows(work)
+        self.assertEqual(kind, "failed")
+        self.assertIn(f"pass its target {self.root.as_posix()}/e\\xff as a SOURCE", reason)
+
+
+class EscapeNameTest(unittest.TestCase):
+    def test_bad_characters_are_spelled_out_and_others_kept(self):
+        self.assertEqual(_escape_name(os.fsdecode(b"/s/a\xff.png")), "/s/a\\xff.png")
+        self.assertEqual(_escape_name("a\nb.png"), "a\\x0ab.png")
+        self.assertEqual(_escape_name("a\x7f\x85\u2028\u2029b"), "a\\x7f\\u0085\\u2028\\u2029b")
+        self.assertEqual(_escape_name("/s/\u00e9\u65e5 \\x.png"), "/s/\u00e9\u65e5 \\x.png")
+
+    def test_a_non_utf8_byte_and_a_c1_character_escape_differently(self):
+        raw_byte, c1 = os.fsdecode(b"a\x85b.png"), os.fsdecode(b"a\xc2\x85b.png")
+        self.assertEqual((_escape_name(raw_byte), _escape_name(c1)), ("a\\x85b.png", "a\\u0085b.png"))
+
 
 class RunErrorTest(unittest.TestCase):
     def setUp(self):
@@ -1477,6 +1565,9 @@ class RenderTest(unittest.TestCase):
     def test_failure_reason_has_no_memory_addresses(self):
         skipped = _failed("id", OSError("cannot identify image file <_io.BytesIO object at 0x7f3a2c1b9e40>"))
         self.assertEqual(skipped.reason, "OSError: cannot identify image file <data>")
+
+    def test_reasons_drop_surrogates_and_line_separators(self):
+        self.assertEqual(_failed("id", ValueError("a\udcffb\u2028\x85c")).reason, "ValueError: a b c")
 
     def test_dicom_reasons_are_single_line_and_tolerate_multivalued_sop_class(self):
         ds = pydicom.dcmread(io.BytesIO(self.dicom_bytes(_good_pixels())))

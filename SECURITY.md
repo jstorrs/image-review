@@ -172,7 +172,12 @@ world-readable.
   directory (unless `--allow-live`, which warns), refuses a `review.tsv` whose
   last line was cut short, and refuses any field holding a control character,
   U+2028/U+2029, or starting with `"`, so a reader cannot be made to split or
-  merge rows. It never overwrites an existing file. `reviewer` values can start
+  merge rows. Preprocess records an input whose name is not UTF-8 or holds
+  such a character as a `failed` row under an escaped id and cleans such
+  characters out of reasons, so a work dir made by this version never trips
+  this refusal through an image_id or reason (a reviewer name starting with `"`,
+  or a work dir from an earlier version, still can). `export` never overwrites
+  an existing file. `reviewer` values can start
   with `=`, `+`, `-` or `@`: open the result as text, not by double-clicking it
   into a spreadsheet.
 - **Worst-of rule.** A file's exported status is the worst of its parts (the

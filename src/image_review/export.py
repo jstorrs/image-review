@@ -104,6 +104,11 @@ def export_rows(
     return [_fold(f, parts.get(f), parts.get(f + ICON_SUFFIX), hashes.get(f, "")) for f in files]
 
 
+def has_unsafe_char(text: str) -> bool:
+    """Whether `text` holds a control character (C0 incl. tab, CR and LF, DEL, or C1 incl. U+0085) or U+2028/U+2029."""
+    return any(c in _LINE_SEPARATORS or unicodedata.category(c) == "Cc" for c in text)
+
+
 def format_export(rows: list[ExportRow]) -> str:
     """The export as TSV text: EXPORT_HEADER, then one line per row; tab-separated, LF line endings, no quoting.
 
@@ -116,7 +121,7 @@ def format_export(rows: list[ExportRow]) -> str:
         fields = [r.image_id, r.status, "" if r.pass_number is None else str(r.pass_number), r.timestamp]
         fields += [r.reviewer, r.reason, r.source_sha256]
         for name, value in zip(EXPORT_HEADER, fields, strict=True):
-            if value.startswith('"') or any(c in _LINE_SEPARATORS or unicodedata.category(c) == "Cc" for c in value):
+            if value.startswith('"') or has_unsafe_char(value):
                 raise ValueError(
                     f"cannot export {r.image_id!r}: its {name} contains a control character or line separator, or "
                     'starts with ", which this unquoted TSV cannot hold'

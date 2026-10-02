@@ -72,6 +72,11 @@ if you share work directories with other people.
   'image-review[<extra>]'`. Without `codecs`, `preprocess` lists compressed
   DICOMs that pydicom cannot decode by itself or through Pillow (e.g. JPEG
   Lossless, JPEG-LS) as failed.
+- **A badly named input fails even if it would have been ignored.** An
+  AppleDouble file, a non-image or an empty ZIP whose name (or a directory
+  above it) is not UTF-8 or holds a control character or U+2028/U+2029 is now
+  `failed`, so `preprocess` exits 1 unless `--allow-skipped`. Rename it or
+  remove it.
 - **Dependencies have minimum versions** (see Requirements below).
   `cryptography`, `scipy`, `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`
   are new.
@@ -175,6 +180,14 @@ it is reported as "too old to report its API version".
   so `c` could mark an image nobody saw. Now only the bars are painted, and the
   dwell starts once the item's pixels are on screen. Hiding the image this way
   after it appeared restarts the dwell.
+- **Names that are not UTF-8 or hold a control character are failed inputs.**
+  A file whose name is not valid UTF-8 used to crash `preprocess` after every
+  image was rendered, losing the run; a name holding a newline, tab, other
+  control character or U+2028/U+2029 was reviewed but then made `export`
+  refuse the whole study. Such an input (a file, a ZIP entry, or everything
+  under a directory or ZIP so named) is now a `failed` row in `skipped.tsv`
+  under its escaped name: a non-UTF-8 byte or ASCII control as `\xNN`, any
+  other as `\uNNNN`. Rename it and preprocess again.
 
 ### Requirements
 

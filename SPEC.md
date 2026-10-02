@@ -254,9 +254,24 @@ staging directory as `exclude`; nothing under them is ingested (resolved
 paths compared), so a work dir inside a source (e.g. `preprocess .` with the
 default `./review_work`) never re-ingests its own output.
 
+Every image_id is minted in discovery and checked once as `discover` yields
+it: an input whose name (any part of its id: the file path, or a ZIP's path
+and entry name) is not valid UTF-8 (a byte the file system name decodes only
+as a surrogate) or holds a control character (category `Cc`, including tab,
+CR, LF and U+0085) or U+2028/U+2029 becomes a `failed` row, whatever it would
+otherwise have been (even `ignored`), with reason `name is not UTF-8 or holds a
+control character or line separator; rename it`. Its image_id is the escaped
+name: a non-UTF-8 byte (0x80-0xFF) or an ASCII control (below 0x80) as `\xNN`,
+any other such character (C1 controls, U+2028/U+2029) as `\uNNNN`, so a raw
+byte and a character never share a spelling; every other character, including
+`\`, is kept, so ids of other inputs are unchanged. Such an id cannot be told from a real name spelling
+the same escape; if the two meet, `export` reports that id `NOT_REVIEWED`
+(a `failed` row wins), never `CLEAN`. So `manifest.tsv` and `skipped.tsv` always hold valid UTF-8
+that `export` accepts, and the run never stops on a name.
+
 | Source type | Behavior |
 |-------------|----------|
-| Directory | One `os.walk(followlinks=False)`, directory and file names sorted at each level, top-down (a directory's files before its subdirectories). Every file is classified; a ZIP file yields its entries. Symlinked files are read; a dangling symlink is `failed`. A symlinked directory is never entered (it could lead out of the source, e.g. `up -> ..` or a link to `/`); by its resolved target it is: inside `exclude` → skipped silently; the link's own directory or an ancestor of it (so the source root and its ancestors) → `ignored`, `symlink to an enclosing directory`; inside or equal to a directory given as a SOURCE in this run (including the one being walked) → `ignored`, `symlinked directory already included via SOURCE <path>`; anything else → `failed`, `symlinked directory not followed; pass its target <resolved path> as a SOURCE`. A non-regular file (FIFO, socket, device) is `ignored` (`not a regular file`). An unreadable directory (including the source itself) is one `failed` row for that directory's path |
+| Directory | One `os.walk(followlinks=False)`, directory and file names sorted at each level, top-down (a directory's files before its subdirectories). Every file is classified; a ZIP file yields its entries. Symlinked files are read; a dangling symlink is `failed`. A symlinked directory is never entered (it could lead out of the source, e.g. `up -> ..` or a link to `/`); by its resolved target it is: inside `exclude` → skipped silently; the link's own directory or an ancestor of it (so the source root and its ancestors) → `ignored`, `symlink to an enclosing directory`; inside or equal to a directory given as a SOURCE in this run (including the one being walked) → `ignored`, `symlinked directory already included via SOURCE <path>`; anything else → `failed`, `symlinked directory not followed; pass its target <resolved path> as a SOURCE` (both paths escaped like an image_id, see above). A non-regular file (FIFO, socket, device) is `ignored` (`not a regular file`). An unreadable directory (including the source itself) is one `failed` row for that directory's path |
 | ZIP (by content, wherever found) | Every non-directory entry from `infolist()`, classified by its first bytes. A ZIP entry → `failed`, `unsupported: nested zip`. An entry that cannot be read (encrypted, unknown compression) → `failed`. An archive that cannot be opened → one `failed` row for the archive path. An archive with no file entries (empty, or directories only) → one `ignored` row for the archive path, `zip contains no files`. Office Open XML, ODF and EPUB files are ZIPs: their embedded images are reviewed, their XML parts are `ignored`, and embedded workbooks or packages are nested ZIPs (`failed`) |
 | Single file | Classified like a file in a directory, except that a file that would be `ignored` is `failed` with the same reason (it was named explicitly, e.g. `notes.txt`, a FIFO); AppleDouble stays `ignored`. Rows from inside a named ZIP are unchanged |
 
@@ -412,10 +427,12 @@ unused bits of PixelData are not drawn.
 rendering or JPEG-encoding one input (e.g. an image wider than libjpeg's
 65500-pixel limit) becomes a `failed` row in `skipped.tsv` with reason
 `<ExceptionClass>: <message>` (or the `unsupported: ...` message), with tabs
-and other control characters replaced by spaces and object reprs such as `<_io.BytesIO object at 0x...>` replaced by `<data>` (so `skipped.tsv` is reproducible); a warning is also logged. A render that
+and runs of other control characters, U+2028/U+2029 and non-UTF-8 bytes (surrogates) replaced by one space, and object reprs such as `<_io.BytesIO object at 0x...>` replaced by `<data>` (so `skipped.tsv` is reproducible); a warning is also logged. A render that
 yields no image becomes a `failed` row with reason `rendered no images`. A
 source that cannot be opened at all (corrupt ZIP, unreadable directory at any
-depth) becomes one `failed` row for its path. Content that is not an input
+depth) becomes one `failed` row for its path. An input whose name is not
+UTF-8 or holds a control character or line separator becomes a `failed` row
+under its escaped name (see *Source loading*). Content that is not an input
 (see *Source loading*) becomes an `ignored` row, without a logged warning.
 Only `failed` rows affect the exit status. Errors writing to the work
 directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`,
@@ -713,7 +730,7 @@ like the other files. One JSON object recording how the work directory was made:
 |-----|-------------|
 | `tool_version` | The image-review package version (`"unknown"` if not installed) |
 | `created` | UTC time the run finished, ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) |
-| `sources` | The SOURCES, as resolved absolute paths, in the order given |
+| `sources` | The SOURCES, as resolved absolute paths, in the order given; a path that is not UTF-8 or holds a control character or line separator is escaped like an image_id (see *Source loading*) |
 | `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `access`, `jobs` (recorded only: the output does not depend on it) |
 | `libraries` | Versions of `pydicom`, `numpy`, `scikit-image`, `Pillow`, `matplotlib`, plus `gdcm`, `pylibjpeg`, `openjpeg` when importable |
 | `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored` |
@@ -730,7 +747,7 @@ Tab-separated UTF-8 with `\r\n` line endings, one row per input that produced no
 
 | Column | Description |
 |--------|-------------|
-| `image_id` | Source identifier, in the same form as `manifest.tsv` (`{path}#icon` for an icon image that failed to render; or the source path, if a whole source could not be opened) |
+| `image_id` | Source identifier, in the same form as `manifest.tsv` (`{path}#icon` for an icon image that failed to render; or the source path, if a whole source could not be opened; or, for a name that is not UTF-8 or holds a control character or line separator, the name escaped as `\xNN` for a non-UTF-8 byte or ASCII control and `\uNNNN` for any other, see *Source loading*) |
 | `kind` | `failed` (an input that was not rendered; makes the CLI exit 1 unless `--allow-skipped`) or `ignored` (not an input: unrecognized content, AppleDouble, DICOMDIR, a ZIP without files, a symlink to an enclosing directory or to a directory inside a SOURCE, a non-regular file inside a directory) |
 | `reason` | `<ExceptionClass>: <message>`, `unsupported: ...` for inputs this tool does not render, or the `ignored` reason |
 

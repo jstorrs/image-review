@@ -196,7 +196,11 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
 or `.zip` whose content is not one, a `.tar.gz` or other non-ZIP archive, an
 `unsupported:` multi-frame DICOM, an unreadable subdirectory, a
 symlinked directory outside the sources, a file named on the command line
-that is not an image, an input whose image id collides with another's) or
+that is not an image, an input whose image id collides with another's, a
+file or ZIP entry whose name, or a directory above it, is not UTF-8 or holds a
+control character such as a newline or U+2028/U+2029, even one that would
+otherwise be ignored; it is listed under an escaped name like `a\x0ab.png` or
+`a\u2028b.png`: rename it) or
 `ignored` (not an image: unrecognized content, macOS AppleDouble files, a
 DICOMDIR index, an empty ZIP). The run finishes with a summary line (`Found N
 inputs: wrote K images in B batches; S skipped (F failed, I ignored; see

@@ -15,6 +15,7 @@ from unittest import mock
 from image_review import atomic as atomic_module
 from image_review import cli as cli_module
 from image_review import lock as lock_module
+from image_review.export import has_unsafe_char
 from image_review.lock import boot_id, this_process
 from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADER
@@ -223,6 +224,16 @@ class TestExportRows(ExportTestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("cannot export '/src/a.dcm': its reviewer", result.output)
         self.assertEqual(result.stdout, "")
+
+
+class TestHasUnsafeChar(unittest.TestCase):
+    def test_control_characters_and_line_separators(self):
+        for text in ("a\tb", "a\nb", "\r", "\x00", "\x0b", "\x7f", "\x85", "\x9f", "\u2028", "\u2029"):
+            with self.subTest(text=text):
+                self.assertTrue(has_unsafe_char(text))
+        for text in ("", "/src/a b.dcm", '"q', "\\x0a", "\u00e9\u65e5", "\u00a0", "\u200b"):
+            with self.subTest(text=text):
+                self.assertFalse(has_unsafe_char(text))
 
 
 class TestExportCommand(ExportTestCase):

@@ -10,6 +10,7 @@ import re
 import shutil
 import signal
 import stat
+import unicodedata
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
@@ -18,6 +19,7 @@ from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
+from itertools import groupby
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from zipfile import ZipFile
@@ -41,7 +43,7 @@ from tqdm import tqdm
 
 from .access import MANIFEST_NAME, Access, Modes, modes
 from .connection import package_version
-from .export import ICON_SUFFIX
+from .export import ICON_SUFFIX, has_unsafe_char
 from .review_db import format_tsv
 from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind
 
@@ -111,6 +113,7 @@ _PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
 PROVENANCE_NAME = "preprocess.json"
 PENDING_NAME = ".pending"  # staging subdirectory holding JPGs until their image_ids are known not to collide
 COLLISION_REASON = "image_id collides with another input (rename one of them)"
+BAD_NAME_REASON = "name is not UTF-8 or holds a control character or line separator; rename it"
 _LIBRARIES = ("pydicom", "numpy", "scikit-image", "Pillow", "matplotlib")  # distribution names
 # Optional pixel-data codecs, recorded when importable: module name -> distribution name
 _CODEC_DISTRIBUTIONS = {"gdcm": "python-gdcm", "pylibjpeg": "pylibjpeg", "openjpeg": "pylibjpeg-openjpeg"}
@@ -613,10 +616,38 @@ def classify(name: str, head: bytes) -> Content | Rejected:
     return Rejected("ignored", "not an image (unrecognized content)")
 
 
+def _bad_char(c: str) -> bool:
+    """A character skipped.tsv cannot hold: a surrogate (from a name that is not UTF-8) or one export refuses."""
+    return unicodedata.category(c) == "Cs" or has_unsafe_char(c)
+
+
+def _escape_name(text: str) -> str:
+    """`text` with each bad character spelled out: a surrogate from a non-UTF-8 byte as that byte (`\\xff`), an
+    ASCII control as `\\xNN`, any other (C1, U+2028/U+2029, another surrogate) as `\\uNNNN`, so no two differ only
+    in spelling a byte that is on disk and one that is not."""
+
+    def escape(c: str) -> str:
+        code = ord(c)
+        if 0xDC80 <= code <= 0xDCFF:  # os.fsdecode's surrogateescape for the byte code - 0xDC00
+            return f"\\x{code - 0xDC00:02x}"
+        if not _bad_char(c):
+            return c
+        return f"\\x{code:02x}" if code < 0x80 else f"\\u{code:04x}"
+
+    return "".join(map(escape, text))
+
+
+def _checked_name(item: Candidate | Skipped) -> Candidate | Skipped:
+    """`item`, or a failed row under its escaped id if that id could not be written to skipped.tsv or exported."""
+    if any(map(_bad_char, item.image_id)):
+        return Skipped(_escape_name(item.image_id), "failed", BAD_NAME_REASON)
+    return item
+
+
 def _clean_reason(reason: str) -> str:
-    """One line, and reproducible: control characters become spaces, object reprs become `<data>`."""
+    """One line, and reproducible: runs of bad characters (see `_bad_char`) become a space, object reprs `<data>`."""
     reason = re.sub(r"<[^<>]* object at 0x[0-9a-fA-F]+>", "<data>", reason)
-    return re.sub(r"[\x00-\x1f\x7f]+", " ", reason).strip()
+    return "".join(" " if bad else "".join(run) for bad, run in groupby(reason, _bad_char)).strip()
 
 
 def _failed(image_id: str, exc: Exception) -> Skipped:
@@ -696,12 +727,16 @@ def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]
     for source in source_dirs:
         if target == source or source in target.parents:
             return Skipped(
-                link.as_posix(), "ignored", _clean_reason(f"symlinked directory already included via SOURCE {source}")
+                link.as_posix(),
+                "ignored",
+                _clean_reason(f"symlinked directory already included via SOURCE {_escape_name(source.as_posix())}"),
             )
     return Skipped(
         link.as_posix(),
         "failed",
-        _clean_reason(f"symlinked directory not followed; pass its target {target} as a SOURCE"),
+        _clean_reason(
+            f"symlinked directory not followed; pass its target {_escape_name(target.as_posix())} as a SOURCE"
+        ),
     )
 
 
@@ -741,7 +776,9 @@ def discover(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> Ite
         items = (
             _discover_directory(source, exclude, source_dirs) if source.is_dir() else _discover_file(source, named=True)
         )
-        yield from tqdm(items, desc=source.name, position=1, leave=False, unit="input")
+        # Every image_id is minted in discovery, and later ones (`#icon`, collision rows) derive from these.
+        for item in tqdm(items, desc=source.name, position=1, leave=False, unit="input"):
+            yield _checked_name(item)
 
 
 # ---------------------------------------------------------------- processing and writing (IO)
@@ -991,12 +1028,13 @@ def provenance(
     tool_version: str,
     libraries: dict[str, str],
 ) -> dict[str, Any]:
-    """The content of preprocess.json: how this work dir was made. Sources are absolute, resolved paths."""
+    """The content of preprocess.json: how this work dir was made. Sources are absolute, resolved paths, escaped like
+    a bad image_id (`_escape_name`)."""
     failed = sum(s.kind == "failed" for s in result.skipped)
     return {
         "tool_version": tool_version,
         "created": created.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "sources": [s.resolve().as_posix() for s in sources],
+        "sources": [_escape_name(s.resolve().as_posix()) for s in sources],
         "parameters": {
             "batch_size": batch_size,
             "colormap": colormap,
