@@ -319,11 +319,8 @@ def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray | None
     img = np.zeros_like(img) if constant else _compress_tails(img)
     if overlay is not None:
         img[overlay] = 1.0
-    if constant:
-        return _crop(img)
     img = _crop(img)
-    img = ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE)
-    return _crop(img)
+    return img if constant else _crop(ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE))
 
 
 def _decode_pixels(dcm: pydicom.FileDataset) -> np.ndarray:
