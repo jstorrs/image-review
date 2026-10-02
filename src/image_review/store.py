@@ -321,10 +321,13 @@ def filter_rows(
     "unreviewed" selects the todo statuses (UNREVIEWED and FLAGGED), "clean" selects CLEAN, "all" everything.
     """
     selected = [r for r in rows if not batch or r.batch == batch]
-    if status_filter == "all":
-        return selected
-    targets: frozenset[Status] = frozenset({"CLEAN"}) if status_filter == "clean" else TODO_STATUSES
-    return [r for r in selected if statuses[r.key] in targets]
+    match status_filter:
+        case "all":
+            return selected
+        case "clean":
+            return [r for r in selected if statuses[r.key] == "CLEAN"]
+        case "unreviewed":
+            return [r for r in selected if statuses[r.key] in TODO_STATUSES]
 
 
 def _tally(statuses: Iterable[Status]) -> dict[str, int]:
