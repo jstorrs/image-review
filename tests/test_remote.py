@@ -51,17 +51,10 @@ class RemoteTestCase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.work_dir = Path(tmp.name)
         make_work_dir(self.work_dir, hashed=self.HASHED)
-        self.server, self.target, stop = start_server(self.work_dir)
-        self.stopped = False
+        self.server, self.target, self.stop_server = start_server(self.work_dir)
         self.addCleanup(self.stop_server)
-        self._stop = stop
         self.store = RemoteStore(self.target)
         self.addCleanup(self.store.close)
-
-    def stop_server(self):
-        if not self.stopped:
-            self.stopped = True
-            self._stop()
 
     def local_copy(self) -> LocalStore:
         return LocalStore(self.work_dir, read_only=True)  # the server holds the lock

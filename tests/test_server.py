@@ -12,7 +12,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -22,7 +21,7 @@ from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, RemoteTarget
 from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
 from image_review.store import LocalStore, load_manifest
-from tests.fixtures import ROWS, invoke_cli, make_work_dir
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server
 
 FP = "a" * 64
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
@@ -62,14 +61,8 @@ class ServerTestCase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.work_dir = Path(tmp.name)
         make_work_dir(self.work_dir, hashed=self.HASHED)
-        store = LocalStore(self.work_dir)
-        self.addCleanup(store.close)
-        self.server, self.target = make_server(store, "127.0.0.1", 0)
-        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
-        thread.start()
-        self.addCleanup(thread.join)
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
+        self.server, self.target, stop = start_server(self.work_dir)
+        self.addCleanup(stop)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
