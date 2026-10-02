@@ -1545,7 +1545,7 @@ class TestUnloadable(EventLoopTestCase):
         rows = [row for row in self.store.manifest() if row.batch == "batch_001"]
         grids, unloadable = pack_into_grids(rows, self.store, 400, 300)
         self.assertEqual(list(unloadable), [CORRUPT])
-        self.assertEqual([gs.keys for gs in grids], [["batch_001/b.jpg"]])
+        self.assertEqual([gs.keys for gs in grids], [("batch_001/b.jpg",)])
         missing = [*rows, ManifestRow(key="batch_009/missing.jpg", batch="batch_009")]
         _, unloadable = pack_into_grids(missing, self.store, 400, 300)
         self.assertEqual(list(unloadable), [CORRUPT, "batch_009/missing.jpg"])
@@ -1617,7 +1617,7 @@ class TestJpegHash(EventLoopTestCase):
         rows = [row for row in self.store.manifest() if row.batch == "batch_001"]
         grids, left_out = pack_into_grids(rows, self.store, 400, 300)
         self.assertEqual(left_out, [CORRUPT])
-        self.assertEqual([gs.keys for gs in grids], [["batch_001/b.jpg"]])
+        self.assertEqual([gs.keys for gs in grids], [("batch_001/b.jpg",)])
 
     def test_truncated_with_eoi_is_a_placeholder(self):
         cut = self.truncate_keeping_eoi()

@@ -1293,12 +1293,12 @@ only continues (A, as Space) or quits (Start).
 
 ## Grid Packer (`grid_packer.py`)
 
-### `GridSpec` Dataclass
+### `GridSpec` Dataclass (frozen)
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `surface` | `pg.Surface` | Composited grid image, ready for display |
-| `keys` | `list[str]` | Keys (preprocessed paths) of the images drawn in this grid |
+| `keys` | `tuple[str, ...]` | Keys (preprocessed paths) of the images drawn in this grid |
 | `min_scale` | `float` | Smallest `fit_size` / header-size ratio among the images drawn (1.0 if none was shrunk) |
 
 ### `pack_into_grids(items, store, grid_w, grid_h, *, rotation="auto", on_progress=None) -> tuple[list[GridSpec], list[str]]`

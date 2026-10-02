@@ -68,7 +68,7 @@ class TestPackShrinksOversize(unittest.TestCase):
             self.assertEqual(im.size, (100, 60))
         grids, unloadable = pack_into_grids(self.store.manifest()[1:], self.store, 1920, 1030)
         self.assertEqual(unloadable, ["big/b.jpg"])
-        self.assertEqual([gs.keys for gs in grids], [["big/c.jpg"]])
+        self.assertEqual([gs.keys for gs in grids], [("big/c.jpg",)])
         grids, unloadable = pack_into_grids(self.store.manifest()[1:2], self.store, 1920, 1030)
         self.assertEqual((grids, unloadable), ([], ["big/b.jpg"]))  # a bin left with no keys is dropped
 

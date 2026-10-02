@@ -294,7 +294,7 @@ class ReviewSession:
 
         items = [
             ReviewItem(
-                keys=tuple(gs.keys),
+                keys=gs.keys,
                 label=f"grid ({len(gs.keys)} images)",
                 surface=gs.surface,
                 grid=True,

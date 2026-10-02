@@ -1,7 +1,7 @@
 import io
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
 import pygame as pg
@@ -17,11 +17,11 @@ log = logging.getLogger(__name__)
 Rotation = Literal["auto", "always", "never"]
 
 
-@dataclass
+@dataclass(frozen=True)
 class GridSpec:
     surface: pg.Surface
-    keys: list[str] = field(default_factory=list)
-    min_scale: float = 1.0  # the smallest fit_size / source size ratio among the images drawn
+    keys: tuple[str, ...]
+    min_scale: float  # the smallest fit_size / source size ratio among the images drawn
 
 
 class PlacedRect(NamedTuple):
@@ -103,7 +103,7 @@ def _composite_bin(
             keys.append(key)
             min_scale = min(min_scale, target[0] / sizes[rect_id][0], target[1] / sizes[rect_id][1])
         on_done()
-    return GridSpec(surface=canvas, keys=keys, min_scale=min_scale), failed
+    return GridSpec(surface=canvas, keys=tuple(keys), min_scale=min_scale), failed
 
 
 def pack_into_grids(
