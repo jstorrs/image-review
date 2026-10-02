@@ -1117,7 +1117,7 @@ The session runs a pygame event loop processing:
 | `u` key | Toggle todo-only navigation |
 | `s` key | Switch to single mode |
 | `m` key | Switch to grid mode (the `--rotate` policy, default `auto`) |
-| `M` key (shift+m) | Switch to grid mode (`never` rotate) |
+| `M` key (shift+m) | Switch to grid mode (`never` rotate); Shift is read from the key event, not the live keyboard |
 | `h` key | Show help/splash screen |
 | A button | On the splash/help, display-select and end-of-list screens: continue, as Space |
 | `q` / Escape / Start button | Quit (Start in every state, including `DISCONNECTED`) |

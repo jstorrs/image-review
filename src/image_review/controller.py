@@ -588,10 +588,10 @@ class ReviewSession:
         else:
             self._show_current()
 
-    def _handle_mode_key(self, key) -> bool:
+    def _handle_mode_key(self, key: int, mod: int) -> bool:
         """Switch mode on m (shift+m: no rotation) or s. Returns whether `key` was one of them."""
         match key:
-            case pg.K_m if pg.key.get_mods() & pg.KMOD_SHIFT:
+            case pg.K_m if mod & pg.KMOD_SHIFT:
                 self._switch_to_grid("never")
             case pg.K_m:
                 self._switch_to_grid(self._default_rotation)
@@ -740,7 +740,7 @@ class ReviewSession:
             case pg.KEYDOWN:
                 if event.key in (pg.K_ESCAPE, pg.K_q):
                     return True
-                if self._ui_state == UIState.DISCONNECTED or self._handle_mode_key(event.key):
+                if self._ui_state == UIState.DISCONNECTED or self._handle_mode_key(event.key, event.mod):
                     return False
                 match self._ui_state:
                     case UIState.END_MESSAGE:

@@ -295,8 +295,8 @@ class TestSession(SessionTestCase):
         self.check_undo_makes_item_todo_again("all")
 
 
-def key(k: int) -> pg.event.Event:
-    return pg.event.Event(pg.KEYDOWN, key=k, mod=0)
+def key(k: int, mod: int = 0) -> pg.event.Event:
+    return pg.event.Event(pg.KEYDOWN, key=k, mod=mod)
 
 
 def button(b: int) -> pg.event.Event:
@@ -469,6 +469,18 @@ class TestEventLoop(EventLoopTestCase):
             s.handle_events([key(pg.K_m)])
         self.assertEqual(s._items, [])
         self.assert_message_stays(s, UIState.DISCONNECTED)
+
+    def test_shift_m_reads_shift_from_the_key_event(self):
+        s = self.reviewing()
+        with mock.patch.object(pg.key, "get_mods", return_value=0):  # Shift already released
+            s.handle_events([key(pg.K_m, mod=pg.KMOD_LSHIFT)])
+        self.assertEqual((s.mode, s.rotation), ("grid", "never"))
+
+    def test_plain_m_ignores_live_shift_state(self):
+        s = self.reviewing()
+        with mock.patch.object(pg.key, "get_mods", return_value=pg.KMOD_SHIFT):  # Shift pressed later
+            s.handle_events([key(pg.K_m)])
+        self.assertEqual((s.mode, s.rotation), ("grid", s._default_rotation))
 
     def test_stale_advance_after_mode_switch_is_ignored(self):
         s = self.reviewing()

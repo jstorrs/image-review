@@ -154,6 +154,10 @@ it is reported as "too old to report its API version".
 
 - **Left from the end screen in todo-only mode goes to the last todo item.** It
   used to skip that item when it was left unmarked.
+- **`M` (shift+m) uses the Shift state of the key press itself.** It used to
+  read the live keyboard, so releasing Shift before the press was handled
+  (for example after a slow remote fetch) opened grid mode with the wrong
+  rotation.
 
 ### Requirements
 
