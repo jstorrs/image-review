@@ -6,16 +6,34 @@ The workflow has three phases: **preprocess**, **review**, and **status**.
 ## Installation
 
 ```bash
-pip install -e .
+pip install -e '.[all]'
 ```
 
-This installs the `image-review` command and the codecs that decode compressed
-DICOMs (`python-gdcm`, `pylibjpeg`, `pylibjpeg-openjpeg`; wheels for CPython
-3.12/3.13 on Linux x86_64/aarch64, macOS and Windows). A DICOM that still
-cannot be decoded (e.g. 12-bit JPEG Extended) is listed in `skipped.tsv` as
-`cannot decode <transfer syntax>: ...`. `--via` (HPC tunnelling, below)
-also needs an OpenSSH client on the machine you run it on (built into macOS,
-Linux and Windows 10+).
+This installs the `image-review` command with every optional part: the
+`preprocess` extra, the `codecs` extra that decodes compressed DICOMs
+(`python-gdcm`, `pylibjpeg`, `pylibjpeg-openjpeg`; wheels for CPython
+3.12/3.13 on Linux x86_64/aarch64, macOS and Windows) and the `viewer` extra
+for `review`. From a wheel or package index, `pip install 'image-review[all]'`.
+
+Each machine can instead install only what its commands need:
+
+| Install | For |
+|---|---|
+| `pip install -e .` (core) | `serve`, `status`, `export` (e.g. a cluster node that only serves) |
+| `pip install -e '.[preprocess,codecs]'` | `preprocess` (on the cluster) |
+| `pip install -e '.[viewer]'` | `review`, including `review --remote` (on your laptop) |
+
+A command whose extra is missing stops with
+`this command needs the <extra> extra: pip install 'image-review[<extra>]'`.
+`preprocess` without the `codecs` extra still runs, but compressed DICOMs that
+pydicom cannot decode by itself or through Pillow (e.g. JPEG Lossless, JPEG-LS)
+are listed in `skipped.tsv` as failed; install the codecs wherever you
+preprocess DICOMs.
+
+A DICOM that still cannot be decoded (e.g. 12-bit JPEG Extended) is listed in
+`skipped.tsv` as `cannot decode <transfer syntax>: ...`. `--via` (HPC
+tunnelling, below) also needs an OpenSSH client on the machine you run it on
+(built into macOS, Linux and Windows 10+).
 
 ## Quick Start
 
@@ -551,6 +569,10 @@ If the images live on a cluster, you can review them from your laptop
 without copying them off. `image-review serve` runs on a compute node and
 serves the preprocessed work directory over HTTPS; `image-review review
 --remote` on your laptop is the viewer.
+
+Install `[preprocess,codecs]` on the cluster (core alone is enough where you
+only run `serve`, `status` and `export`) and `[viewer]` on your laptop; see
+[Installation](#installation). Use the same image-review version on both.
 
 ### 1. Preprocess on the cluster
 

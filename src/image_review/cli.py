@@ -28,6 +28,30 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 log = logging.getLogger(f"{PACKAGE_LOGGER}.cli")  # not __name__: that is "__main__" under `python -m`
 
+# The top-level modules each optional extra (pyproject.toml) provides and the commands import; the core
+# dependencies (click, cryptography) are always there. The codecs extra is loaded by pydicom only when needed.
+EXTRA_MODULES: dict[str, frozenset[str]] = {
+    "preprocess": frozenset({"matplotlib", "numpy", "pydicom", "PIL", "skimage", "scipy", "tqdm"}),
+    "viewer": frozenset({"pygame", "PIL", "rectpack"}),
+}
+
+
+@contextlib.contextmanager
+def requires_extra(extra: str) -> Iterator[None]:
+    """Turn a missing module of `extra`, imported in the block, into a ClickException naming the install command.
+
+    Only a ModuleNotFoundError for one of the extra's own top-level modules is translated; any other import failure
+    (one of our modules, a broken install, a missing transitive dependency) propagates unchanged.
+    """
+    try:
+        yield
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").partition(".")[0] not in EXTRA_MODULES[extra]:
+            raise
+        raise click.ClickException(
+            f"this command needs the {extra} extra: pip install 'image-review[{extra}]'"
+        ) from exc
+
 
 class LogFormatter(logging.Formatter):
     """LOG_FORMAT with asctime as strict ISO 8601 local time, e.g. 2026-10-01T14:03:07+02:00."""
@@ -249,7 +273,8 @@ def _shared_with(work_dir: Path) -> str:
 
 
 def _known_colormap(ctx: click.Context, param: click.Parameter, value: str) -> str:
-    import matplotlib
+    with requires_extra("preprocess"):  # the first preprocess import: callbacks run before the command
+        import matplotlib
 
     if value not in matplotlib.colormaps:
         raise click.BadParameter(f"unknown colormap {value!r}; see matplotlib.colormaps for valid names")
@@ -351,10 +376,12 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, j
     either manifest.tsv or skipped.tsv (as failed, or ignored when it is not an
     image). Exits 1 if any input failed, unless --allow-skipped is given.
     """
-    from .preprocess import WorkDirExists, WorkerCrashed, run_preprocess
+    with requires_extra("preprocess"):
+        from tqdm.contrib.logging import logging_redirect_tqdm
+
+        from .preprocess import WorkDirExists, WorkerCrashed, run_preprocess
 
     source_paths = [Path(s).resolve() for s in sources]
-    from tqdm.contrib.logging import logging_redirect_tqdm
 
     try:
         with (
@@ -458,9 +485,10 @@ def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, 
       Space       — toggle autoplay
       q           — quit
     """
-    import pygame as pg
+    with requires_extra("viewer"):
+        import pygame as pg
 
-    from .controller import ReviewSession
+        from .controller import ReviewSession
 
     hangup = (signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ()  # terminal or ssh session dropped
     with interrupt_on(*hangup), open_store(work_dir, remote, via) as store:

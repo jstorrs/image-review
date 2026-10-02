@@ -14,8 +14,26 @@ Provides a three-phase workflow:
 Requires Python >= 3.12.
 
 ```bash
-pip install .
+pip install '.[all]'          # everything: preprocess, codecs and the viewer
 ```
+
+From a source checkout as above; from a wheel or package index the same extras apply, e.g.
+`pip install 'image-review[all]'`.
+
+The dependencies are split into extras, so each machine installs only what its
+commands need:
+
+| Install | Commands | Adds |
+|---|---|---|
+| `pip install .` (core) | `serve`, `status`, `export`, `--help` | click, cryptography |
+| `pip install '.[viewer]'` | `review` (local or `--remote`) | pygame-ce, Pillow, rectpack |
+| `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
+
+On a cluster with a laptop viewer (see [Reviewing on an HPC
+cluster](#reviewing-on-an-hpc-cluster)), install `[preprocess,codecs]` where
+you preprocess, core alone where you only `serve`, and `[viewer]` on the
+laptop. A command whose extra is missing exits 1 with
+`this command needs the <extra> extra: pip install 'image-review[<extra>]'`.
 
 Minimum dependency versions (declared in `pyproject.toml`, checked by running
 the test suite on CPython 3.12): click >= 8.2, matplotlib >= 3.7.3,
@@ -27,15 +45,20 @@ pylibjpeg >= 2.0, pylibjpeg-openjpeg >= 2.0, and rectpack pinned at 0.2.2
 [CHANGELOG.md](CHANGELOG.md) for what changed between releases.
 
 Compressed DICOMs (JPEG, JPEG Lossless, JPEG-LS, JPEG 2000, HTJ2K, RLE) are
-decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`, installed
-with the package. Wheels exist for CPython 3.12 and 3.13 on Linux (x86_64 and
+decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`, the `codecs`
+extra. Wheels exist for CPython 3.12 and 3.13 on Linux (x86_64 and
 aarch64), macOS (Intel and Apple silicon) and Windows (x86_64); on other
 platforms `python-gdcm` has no wheel and installation may fail.
-12-bit JPEG Extended files cannot be decoded (the only decoder is
-GPL-licensed and is not used) and are listed in `skipped.tsv` as
+`preprocess` runs without the codecs, but then only what pydicom decodes by
+itself or through Pillow (e.g. RLE, JPEG 2000) renders; other compressed DICOMs
+(e.g. JPEG Lossless, JPEG-LS) are listed in `skipped.tsv` as failed,
+`cannot decode <transfer syntax>: ...`. Install the codecs wherever you
+preprocess DICOMs.
+12-bit JPEG Extended files cannot be decoded even with them (the only decoder
+is GPL-licensed and is not used) and are listed in `skipped.tsv` as
 `cannot decode JPEG Extended (Process 2 and 4): ...`.
 
-`cryptography` is a dependency (used by `serve` for its TLS certificate).
+`cryptography` is a core dependency (used by `serve` for its TLS certificate).
 `review --via` and `status --via` need an OpenSSH client on the machine you
 run them on (built into macOS, Linux and Windows 10+).
 
@@ -402,7 +425,10 @@ Each start generates a new token and certificate.
 ## Reviewing on an HPC cluster
 
 Review images where they are, without copying them off the cluster. The
-server runs on a compute node and the viewer on your laptop.
+server runs on a compute node and the viewer on your laptop. Install
+`[preprocess,codecs]` on the cluster (core alone is enough for a node that only
+runs `serve`, `status` and `export`) and `[viewer]` on the laptop; see
+[Installation](#installation).
 
 ```bash
 # On the cluster: get an interactive compute node and serve the work dir
@@ -441,13 +467,15 @@ with `--batch`, which keeps you in that batch).
 
 ## Running the tests
 
-From the repository root:
+The tests need every extra. From the repository root, install them with the lint and type-check tools, then run
+the tests:
 
 ```
+pip install -e ".[dev]"
 python -m unittest discover
 ```
 
-Lint and type-check (install the tools with `pip install -e ".[dev]"`):
+Lint and type-check:
 
 ```
 ruff check src tests

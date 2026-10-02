@@ -55,6 +55,15 @@ if you share work directories with other people.
 - **Malformed `review.tsv` or `manifest.tsv` stops the tool.** It reports
   "Cannot read work directory: ..." naming the file and line. Bad rows are no
   longer skipped and then silently dropped on the next save.
+- **A plain `pip install image-review` no longer installs the viewer or
+  preprocess dependencies.** It installs only click and cryptography, enough
+  for `serve`, `status` and `export`. Use `pip install 'image-review[all]'`
+  for everything, or per machine: `[preprocess,codecs]` where you preprocess,
+  `[viewer]` where you `review`. A command whose extra is missing exits 1
+  with `this command needs the <extra> extra: pip install
+  'image-review[<extra>]'`. Without `codecs`, `preprocess` lists compressed
+  DICOMs that pydicom cannot decode by itself or through Pillow (e.g. JPEG
+  Lossless, JPEG-LS) as failed.
 - **Dependencies have minimum versions** (see Requirements below).
   `cryptography`, `scipy`, `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`
   are new.
@@ -144,19 +153,18 @@ it is reported as "too old to report its API version".
 ### Requirements
 
 Python >= 3.12. Minimum dependency versions, checked by running the test suite
-on CPython 3.12 from wheels:
+on CPython 3.12 from wheels, by extra:
 
-- click >= 8.2
-- matplotlib >= 3.7.3
-- numpy >= 1.26
-- pydicom >= 3.0
-- Pillow >= 10.3, excluding 11.x. Pillow 11 misdecodes a multi-frame MPO.
-- scikit-image >= 0.22
-- scipy >= 1.11.2
-- rectpack == 0.2.2
-- tqdm >= 4.60
-- pygame-ce >= 2.3.1
-- cryptography >= 41
-- python-gdcm >= 3.0.25
-- pylibjpeg >= 2.0
-- pylibjpeg-openjpeg >= 2.0
+- core: click >= 8.2, cryptography >= 41
+- `preprocess`:
+  - matplotlib >= 3.7.3
+  - numpy >= 1.26
+  - pydicom >= 3.0
+  - Pillow >= 10.3, excluding 11.x. Pillow 11 misdecodes a multi-frame MPO.
+  - scikit-image >= 0.22
+  - scipy >= 1.11.2
+  - tqdm >= 4.60
+- `codecs`: python-gdcm >= 3.0.25, pylibjpeg >= 2.0, pylibjpeg-openjpeg >= 2.0
+- `viewer`: pygame-ce >= 2.3.1, Pillow (as above), rectpack == 0.2.2
+- `all`: `preprocess`, `codecs` and `viewer`; `dev`: `all` plus the lint,
+  type-check and coverage tools

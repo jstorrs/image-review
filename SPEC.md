@@ -10,20 +10,39 @@ interactively in a fullscreen viewer, and report **status** on review progress.
 ## Requirements
 
 - Python >= 3.12
-- Dependencies, with the minimums declared in `pyproject.toml`: click >= 8.2,
-  matplotlib >= 3.7.3, numpy >= 1.26, pydicom >= 3.0, Pillow >= 10.3 except
-  11.x (11.x misdecodes an MPO frame whose mode differs from the one before),
-  scikit-image >= 0.22, scipy >= 1.11.2, rectpack == 0.2.2 (unmaintained;
-  pinned because grid packing depends on its exact behaviour), tqdm >= 4.60
-  (`tqdm.contrib.logging`), pygame-ce >= 2.3.1, cryptography >= 41, and the
-  DICOM codecs python-gdcm >= 3.0.25 (JPEG baseline/extended/lossless,
-  JPEG-LS, JPEG 2000, RLE; older releases decode a corrupt JPEG 2000
-  codestream without an error) and pylibjpeg >= 2.0 + pylibjpeg-openjpeg >= 2.0
-  (JPEG 2000, HTJ2K). Most minimums are the oldest release with a CPython 3.12
+- Dependencies, with the minimums declared in `pyproject.toml`, grouped by
+  what needs them:
+  - core (always installed; enough for `serve`, `status`, `export` and every
+    `--help`): click >= 8.2, cryptography >= 41 (`serve`'s TLS certificate);
+  - extra `preprocess`: matplotlib >= 3.7.3, numpy >= 1.26, pydicom >= 3.0,
+    Pillow >= 10.3 except 11.x (11.x misdecodes an MPO frame whose mode
+    differs from the one before), scikit-image >= 0.22, scipy >= 1.11.2,
+    tqdm >= 4.60 (`tqdm.contrib.logging`);
+  - extra `codecs`: the DICOM codecs python-gdcm >= 3.0.25 (JPEG
+    baseline/extended/lossless, JPEG-LS, JPEG 2000, RLE; older releases decode
+    a corrupt JPEG 2000 codestream without an error) and pylibjpeg >= 2.0 +
+    pylibjpeg-openjpeg >= 2.0 (JPEG 2000, HTJ2K). Kept separate from
+    `preprocess`: without it, pydicom decodes only what it can by itself or
+    through Pillow (e.g. RLE, JPEG 2000), and any other compressed DICOM (e.g.
+    JPEG Lossless, JPEG-LS) is `failed` with `cannot decode <transfer syntax
+    name>: ...` (see the DICOM preprocessing pipeline, step 0);
+  - extra `viewer` (`review`, local or `--remote`): pygame-ce >= 2.3.1,
+    Pillow (as above), rectpack == 0.2.2 (unmaintained; pinned because grid
+    packing depends on its exact behaviour);
+  - extra `all` = `preprocess`, `codecs` and `viewer`; extra `dev` = `all`
+    plus ruff, mypy, types-tqdm and coverage (the tests need every extra).
+
+  Most minimums are the oldest release with a CPython 3.12
   wheel; each was checked by running the test suite on CPython 3.12. click
   8.2 is needed only by the tests (`CliRunner` with separate stderr).
   `pylibjpeg-libjpeg` is deliberately not used (GPL-3), so 12-bit JPEG
   Extended (Process 4) and JPEG-LS with 6- or 7-bit samples cannot be decoded
+- The CLI imports an extra's modules only in the command that needs them
+  (`cli.requires_extra`). A command whose extra is missing exits 1 with
+  `this command needs the <extra> extra: pip install 'image-review[<extra>]'`;
+  only a `ModuleNotFoundError` naming one of that extra's own top-level
+  modules is translated, so any other import failure (one of image-review's
+  modules, a broken install) surfaces unchanged
 - `review --via` / `status --via` additionally need an OpenSSH client (`ssh`)
   on the client machine
 
