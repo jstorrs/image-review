@@ -657,6 +657,25 @@ class TestEventLoop(EventLoopTestCase):
         self.assertFalse(s.handle_events([key(pg.K_q), key(pg.K_c)]))
         self.mark.assert_not_called()
 
+    def test_quit_and_mode_keys_work_on_every_screen(self):
+        screens = {
+            "splash": lambda s: s.handle_events([key(pg.K_h)]),
+            "display_select": lambda s: s.handle_events([key(pg.K_w)]),
+            "reviewing": lambda s: None,
+        }
+        for name, enter in screens.items():
+            for quit_key in (pg.K_q, pg.K_ESCAPE):
+                with self.subTest(screen=name, quit_key=quit_key):
+                    s = self.reviewing()
+                    enter(s)
+                    self.assertFalse(s.handle_events([key(quit_key)]))
+            for mode_key, mode in ((pg.K_m, "grid"), (pg.K_s, "single")):
+                with self.subTest(screen=name, mode_key=mode_key):
+                    s = self.reviewing("single" if mode == "grid" else "grid")
+                    enter(s)
+                    s.handle_events([key(mode_key)])
+                    self.assertEqual((s.mode, s._ui_state), (mode, UIState.REVIEWING))
+
     def test_undo_restores_status_cursor_and_dwell(self):
         s = self.reviewing()
         item_key = s._items[0].keys[0]

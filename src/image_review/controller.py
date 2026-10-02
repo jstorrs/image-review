@@ -603,27 +603,28 @@ class ReviewSession:
         else:
             self._show_current()
 
-    def _handle_splash_key(self, key) -> bool:
-        """Handle key press while splash is shown. Returns True to quit."""
-        if key in (pg.K_ESCAPE, pg.K_q):
-            return True
+    def _handle_mode_key(self, key) -> bool:
+        """Switch mode on m (shift+m: no rotation) or s. Returns whether `key` was one of them."""
+        match key:
+            case pg.K_m if pg.key.get_mods() & pg.KMOD_SHIFT:
+                self._switch_to_grid("never")
+            case pg.K_m:
+                self._switch_to_grid(self._default_rotation)
+            case pg.K_s:
+                self._switch_to_single()
+            case _:
+                return False
+        return True
+
+    def _handle_splash_key(self, key):
+        """Handle key press while splash is shown."""
         if key in (pg.K_SPACE, pg.K_h):
             self._resume()
-        elif key == pg.K_m:
-            if pg.key.get_mods() & pg.KMOD_SHIFT:
-                self._switch_to_grid("never")
-            else:
-                self._switch_to_grid(self._default_rotation)
-        elif key == pg.K_s:
-            self._switch_to_single()
         elif key == pg.K_f:
             pg.display.toggle_fullscreen()
-        return False
 
-    def _handle_display_select_key(self, key) -> bool:
-        """Handle key press on the display-select screen. Returns True to quit."""
-        if key in (pg.K_ESCAPE, pg.K_q):
-            return True
+    def _handle_display_select_key(self, key):
+        """Handle key press on the display-select screen."""
         if pg.K_1 <= key <= pg.K_9:
             if self._viewer.switch_display(key - pg.K_1):
                 self._show_display_select()
@@ -632,21 +633,11 @@ class ReviewSession:
                 self._restart_in_mode("grid")
             else:
                 self._resume()
-        elif key == pg.K_m:
-            if pg.key.get_mods() & pg.KMOD_SHIFT:
-                self._switch_to_grid("never")
-            else:
-                self._switch_to_grid(self._default_rotation)
-        elif key == pg.K_s:
-            self._switch_to_single()
         elif key == pg.K_f:
             pg.display.toggle_fullscreen()
-        return False
 
-    def _handle_end_key(self, key) -> bool:
-        """Handle key press at end-of-list screen. Returns True to quit."""
-        if key in (pg.K_ESCAPE, pg.K_q):
-            return True
+    def _handle_end_key(self, key):
+        """Handle key press at end-of-list screen."""
         direction = None
         if key in (pg.K_RIGHT, pg.K_SPACE):
             direction = 1
@@ -658,26 +649,16 @@ class ReviewSession:
             if not self._seek(start, direction, todo_only=self._todo_only, wrap=True):
                 self._ui_state = UIState.END_MESSAGE
                 self._viewer.show_message(self._no_todo_message())
-        elif key == pg.K_m:
-            if pg.key.get_mods() & pg.KMOD_SHIFT:
-                self._switch_to_grid("never")
-            else:
-                self._switch_to_grid(self._default_rotation)
-        elif key == pg.K_s:
-            self._switch_to_single()
         elif key == pg.K_z:
             self._undo()
         elif key == pg.K_b:
             self._next_batch()
-        return False
 
-    def _handle_review_key(self, key, now: int) -> bool:
-        """Handle key press during review. Returns True to quit."""
+    def _handle_review_key(self, key, now: int):
+        """Handle key press during review."""
         if key != pg.K_SPACE:  # Space toggles autoplay below; any other key stops it
             self._stop_autoplay()
         match key:
-            case pg.K_ESCAPE | pg.K_q:
-                return True
             case pg.K_c:
                 self._verdict_input("CLEAN", now)
             case pg.K_d:
@@ -692,15 +673,7 @@ class ReviewSession:
                     self._stop_autoplay()
                 else:
                     self.next_image(autoplay=True)
-            case pg.K_m:
-                if pg.key.get_mods() & pg.KMOD_SHIFT:
-                    self._switch_to_grid("never")
-                else:
-                    self._switch_to_grid(self._default_rotation)
-            case pg.K_s:
-                self._switch_to_single()
             case pg.K_n:
-                self._stop_autoplay()
                 self._cancel_advance()
                 if not self.next_todo():  # stay on this item: the reviewer is mid-review
                     self._notify(NO_TODO_MESSAGE)
@@ -718,7 +691,6 @@ class ReviewSession:
             case pg.K_RIGHT:
                 self._cancel_advance()
                 self.next_image()
-        return False
 
     def _handle_button(self, button: int, now: int) -> bool:
         """Handle a gamepad button, numbered by SDL's standard layout. Returns True to quit."""
@@ -726,11 +698,11 @@ class ReviewSession:
             return True
         match self._ui_state:
             case UIState.SPLASH if button == pg.CONTROLLER_BUTTON_A:
-                return self._handle_splash_key(pg.K_SPACE)
+                self._handle_splash_key(pg.K_SPACE)
             case UIState.DISPLAY_SELECT if button == pg.CONTROLLER_BUTTON_A:
-                return self._handle_display_select_key(pg.K_SPACE)
+                self._handle_display_select_key(pg.K_SPACE)
             case UIState.END_MESSAGE if button == pg.CONTROLLER_BUTTON_A:
-                return self._handle_end_key(pg.K_SPACE)
+                self._handle_end_key(pg.K_SPACE)
             case UIState.REVIEWING:
                 self._stop_autoplay()  # no button toggles autoplay, so every button stops it
                 match button:
@@ -783,17 +755,19 @@ class ReviewSession:
             case pg.CONTROLLERBUTTONDOWN:
                 return self._handle_button(event.button, now)
             case pg.KEYDOWN:
+                if event.key in (pg.K_ESCAPE, pg.K_q):
+                    return True
+                if self._ui_state == UIState.DISCONNECTED or self._handle_mode_key(event.key):
+                    return False
                 match self._ui_state:
-                    case UIState.DISCONNECTED:
-                        return event.key in (pg.K_ESCAPE, pg.K_q)
                     case UIState.END_MESSAGE:
-                        return self._handle_end_key(event.key)
+                        self._handle_end_key(event.key)
                     case UIState.SPLASH:
-                        return self._handle_splash_key(event.key)
+                        self._handle_splash_key(event.key)
                     case UIState.DISPLAY_SELECT:
-                        return self._handle_display_select_key(event.key)
+                        self._handle_display_select_key(event.key)
                     case UIState.REVIEWING:
-                        return self._handle_review_key(event.key, now)
+                        self._handle_review_key(event.key, now)
             case pg.WINDOWRESIZED:
                 self._viewer.resize()
                 self._dirty = True
