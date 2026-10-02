@@ -10,7 +10,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 # SIGHUP does not exist on Windows
-TERMINATION_SIGNALS = (signal.SIGTERM, *((signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ()))
+HANGUP_SIGNALS = (signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ()
+TERMINATION_SIGNALS = (signal.SIGTERM, *HANGUP_SIGNALS)
 
 
 def _raise_interrupt(signum, frame):

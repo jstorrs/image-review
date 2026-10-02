@@ -5,7 +5,6 @@ import getpass
 import logging
 import math
 import os
-import signal
 import socket
 import sys
 from collections.abc import Iterator
@@ -19,7 +18,7 @@ from .atomic import write_new_file
 from .connection import RemoteTarget, parse_reviewer
 from .export import format_export
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
-from .signals import TERMINATION_SIGNALS, interrupt_on
+from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on
 from .store import LocalStore, ReviewStore, StatusFilter, batch_summary, summary
 
 if TYPE_CHECKING:
@@ -514,8 +513,7 @@ def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, 
 
         from .controller import ReviewSession
 
-    hangup = (signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ()  # terminal or ssh session dropped
-    with interrupt_on(*hangup), open_store(work_dir, remote, via) as store:
+    with interrupt_on(*HANGUP_SIGNALS), open_store(work_dir, remote, via) as store:  # terminal or ssh session dropped
         if batch is not None and (problem := unknown_batch_message(batch, {row.batch for row in store.manifest()})):
             raise click.BadParameter(problem, param_hint="'--batch'")
         # after the store: SDL must not steal terminal focus during ssh password/MFA prompts
