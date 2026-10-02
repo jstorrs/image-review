@@ -11,6 +11,8 @@ _FONTS_DIR = Path(__file__).parent / "fonts"
 
 PLACEHOLDER_SIZE = (1280, 720)
 
+BACKGROUND = pg.Color(64, 64, 64)
+
 
 @cache
 def _placeholder_font_bytes() -> bytes:
@@ -57,12 +59,7 @@ class ImageViewer:
 
     def __init__(self):
         sizes = pg.display.get_desktop_sizes()
-        best = max(range(len(sizes)), key=lambda i: sizes[i][0] * sizes[i][1])
-        self._display_index = best
-        w, h = sizes[best]
-        self.screen = pg.display.set_mode((w, h), pg.NOFRAME | pg.RESIZABLE, display=best)
-        pg.display.toggle_fullscreen()
-        pg.mouse.set_visible(False)
+        self._open_window(max(range(len(sizes)), key=lambda i: sizes[i][0] * sizes[i][1]))
         self.font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSans.ttf"), 36)
         self.font.fgcolor = pg.Color(64, 64, 64)
         self.font.strong = True
@@ -98,13 +95,24 @@ class ImageViewer:
         sizes = pg.display.get_desktop_sizes()
         if display_index < 0 or display_index >= len(sizes) or display_index == self._display_index:
             return False
-        self._display_index = display_index
-        w, h = sizes[display_index]
-        self.screen = pg.display.set_mode((w, h), pg.NOFRAME | pg.RESIZABLE, display=display_index)
-        pg.display.toggle_fullscreen()
-        pg.mouse.set_visible(False)
+        self._open_window(display_index)
         self.resize()
         return True
+
+    def _open_window(self, index: int) -> None:
+        """Open the borderless full-screen window on display `index` and hide the mouse."""
+        self._display_index = index
+        w, h = pg.display.get_desktop_sizes()[index]
+        pg.display.set_mode((w, h), pg.NOFRAME | pg.RESIZABLE, display=index)
+        pg.display.toggle_fullscreen()
+        pg.mouse.set_visible(False)
+
+    @property
+    def screen(self) -> pg.Surface:
+        """The window surface, fetched fresh each time: a resize may replace it."""
+        surface = pg.display.get_surface()
+        assert surface is not None  # __init__ opened the window
+        return surface
 
     def display_lines(self) -> list[str]:
         """Return lines describing available displays for the selection overlay."""
@@ -136,7 +144,6 @@ class ImageViewer:
         self._dirty = True
         if self._image is None:
             return
-        self.screen = pg.display.get_surface()  # a resize may have replaced the window surface
         screen_w, screen_h = self.screen.get_size()
         content_height = screen_h - self.border
         if content_height <= 0:
@@ -160,9 +167,8 @@ class ImageViewer:
         return True
 
     def refresh(self) -> None:
-        self.screen = pg.display.get_surface()
         screen_w, screen_h = self.screen.get_size()
-        self.screen.fill(pg.Color(64, 64, 64))
+        self.screen.fill(BACKGROUND)
         bar_color = self.STATUS_COLORS[self._status]
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
         # The word, not only the bar colour, says the status (colour alone fails colour-blind reviewers)
@@ -224,9 +230,8 @@ class ImageViewer:
     ]
 
     def show_splash(self, lines: list[str], footer: str | list[str] = "Press [space] to continue") -> None:
-        self.screen = pg.display.get_surface()
         screen_w, screen_h = self.screen.get_size()
-        self.screen.fill(pg.Color(64, 64, 64))
+        self.screen.fill(BACKGROUND)
         splash_font = self._splash_font
         line_height = splash_font.get_sized_height() + 6
         footer_lines = [footer] if isinstance(footer, str) else footer
@@ -246,9 +251,8 @@ class ImageViewer:
         pg.display.flip()
 
     def show_message(self, text: str) -> None:
-        self.screen = pg.display.get_surface()
         screen_w, screen_h = self.screen.get_size()
-        self.screen.fill(pg.Color(64, 64, 64))
+        self.screen.fill(BACKGROUND)
         bbox = self.font.get_rect(text)
         self.font.render_to(
             self.screen,

@@ -777,9 +777,7 @@ class ReviewSession:
 
     def _grid_size(self) -> tuple[int, int]:
         """The size grids are packed for: the window less the status bar."""
-        surface = pg.display.get_surface()
-        assert surface is not None  # the viewer opened the window
-        w, h = surface.get_size()
+        w, h = self._viewer.screen.get_size()
         return w, h - self._viewer.border
 
     def _rebuild_grids_for_resize(self):
