@@ -30,6 +30,13 @@ ADVANCE_EVENT = pg.USEREVENT + 2
 MIN_DWELL_MS = 200
 # Input events dropped after a blocking step (grid build, mode restart).
 VERDICT_INPUT_EVENTS = (pg.KEYDOWN, pg.CONTROLLERBUTTONDOWN)
+# Gamepad buttons that act during review, as the key each one presses: one code path for both.
+REVIEW_BUTTON_KEYS = {
+    pg.CONTROLLER_BUTTON_B: pg.K_c,
+    pg.CONTROLLER_BUTTON_Y: pg.K_d,
+    pg.CONTROLLER_BUTTON_DPAD_LEFT: pg.K_LEFT,
+    pg.CONTROLLER_BUTTON_DPAD_RIGHT: pg.K_RIGHT,
+}
 
 
 def _dwell_elapsed(shown_at: int | None, now: int) -> bool:
@@ -683,27 +690,25 @@ class ReviewSession:
         """Handle a gamepad button, numbered by SDL's standard layout. Returns True to quit."""
         if button == pg.CONTROLLER_BUTTON_START:
             return True
-        match self._ui_state:
-            case UIState.SPLASH if button == pg.CONTROLLER_BUTTON_A:
-                self._handle_splash_key(pg.K_SPACE)
-            case UIState.DISPLAY_SELECT if button == pg.CONTROLLER_BUTTON_A:
-                self._handle_display_select_key(pg.K_SPACE)
-            case UIState.END_MESSAGE if button == pg.CONTROLLER_BUTTON_A:
-                self._handle_end_key(pg.K_SPACE)
-            case UIState.REVIEWING:
-                self._stop_autoplay()  # no button toggles autoplay, so every button stops it
-                match button:
-                    case pg.CONTROLLER_BUTTON_B:
-                        self._verdict_input("CLEAN", now)
-                    case pg.CONTROLLER_BUTTON_Y:
-                        self._verdict_input("DIRTY", now)
-                    case pg.CONTROLLER_BUTTON_DPAD_LEFT:
-                        self._cancel_advance()
-                        self.prev_image()
-                    case pg.CONTROLLER_BUTTON_DPAD_RIGHT:
-                        self._cancel_advance()
-                        self.next_image()
+        if self._ui_state == UIState.REVIEWING:
+            self._stop_autoplay()  # no button toggles autoplay, so every button stops it
+            if button in REVIEW_BUTTON_KEYS:
+                self._handle_review_key(REVIEW_BUTTON_KEYS[button], now)
+        elif button == pg.CONTROLLER_BUTTON_A:  # continue, as Space
+            self._handle_screen_key(pg.K_SPACE, now)
         return False
+
+    def _handle_screen_key(self, key: int, now: int):
+        """Dispatch a key to the current screen's handler. DISCONNECTED takes no keys."""
+        match self._ui_state:
+            case UIState.END_MESSAGE:
+                self._handle_end_key(key)
+            case UIState.SPLASH:
+                self._handle_splash_key(key)
+            case UIState.DISPLAY_SELECT:
+                self._handle_display_select_key(key)
+            case UIState.REVIEWING:
+                self._handle_review_key(key, now)
 
     def run(self):
         if not self._items:
@@ -746,15 +751,7 @@ class ReviewSession:
                     return True
                 if self._ui_state == UIState.DISCONNECTED or self._handle_mode_key(event.key, event.mod):
                     return False
-                match self._ui_state:
-                    case UIState.END_MESSAGE:
-                        self._handle_end_key(event.key)
-                    case UIState.SPLASH:
-                        self._handle_splash_key(event.key)
-                    case UIState.DISPLAY_SELECT:
-                        self._handle_display_select_key(event.key)
-                    case UIState.REVIEWING:
-                        self._handle_review_key(event.key, now)
+                self._handle_screen_key(event.key, now)
             case pg.WINDOWRESIZED:
                 self._viewer.resize()  # grid mode repacks on the next tick if the size changed
             case x if x == AUTOPLAY_EVENT:
