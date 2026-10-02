@@ -45,6 +45,7 @@ from .access import MANIFEST_NAME, Access, Modes, modes
 from .connection import package_version
 from .export import ICON_SUFFIX, has_unsafe_char
 from .review_db import format_tsv
+from .status import ImageId
 from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind, SkippedRow
 
 log = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ class Rejected:
 class Candidate:
     """One discovered input, with its raw bytes (no decoding happens in discovery)."""
 
-    image_id: str
+    image_id: ImageId
     kind: Kind
     data: bytes = field(repr=False)
 
@@ -149,7 +150,7 @@ class Candidate:
 class Rendered:
     """One output image: (H, W, 3) uint8 RGB."""
 
-    image_id: str
+    image_id: ImageId
     rgb: np.ndarray
 
 
@@ -157,7 +158,7 @@ class Rendered:
 class Encoded:
     """One output image as JPEG bytes, with the SHA-256 of the source file (or ZIP entry) it came from."""
 
-    image_id: str
+    image_id: ImageId
     jpeg: bytes
     source_sha256: str
 
@@ -166,7 +167,7 @@ class Encoded:
 class Staged:
     """An encoded image saved under a provisional name until it is known not to collide."""
 
-    image_id: str
+    image_id: ImageId
     path: Path
     source_sha256: str
     jpeg_sha256: str
@@ -500,12 +501,12 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
     return dcm
 
 
-def _render_icon(dcm: pydicom.FileDataset, image_id: str, colormap: str) -> Rendered | SkippedRow | None:
+def _render_icon(dcm: pydicom.FileDataset, image_id: ImageId, colormap: str) -> Rendered | SkippedRow | None:
     """The embedded IconImageSequence thumbnail (item 0) as its own row, or None when there is none."""
     icons = dcm.get("IconImageSequence")
     if not icons:
         return None
-    icon_id = f"{image_id}{ICON_SUFFIX}"
+    icon_id = ImageId(f"{image_id}{ICON_SUFFIX}")
     try:
         icon = icons[0]
         # icon pixels are always uncompressed, in the byte order of the enclosing dataset
@@ -518,7 +519,7 @@ def _render_icon(dcm: pydicom.FileDataset, image_id: str, colormap: str) -> Rend
 
 
 def render(
-    kind: Kind, image_id: str, data: bytes, colormap: str
+    kind: Kind, image_id: ImageId, data: bytes, colormap: str
 ) -> tuple[Rendered, *tuple[Rendered | SkippedRow, ...]]:
     """Render one input: its image, plus (DICOM) an `{image_id}#icon` row for an embedded icon image.
 
@@ -624,7 +625,7 @@ def _escape_name(text: str) -> str:
 def _checked_name(item: Candidate | SkippedRow) -> Candidate | SkippedRow:
     """`item`, or a failed row under its escaped id if that id could not be written to skipped.tsv or exported."""
     if any(map(_bad_char, item.image_id)):
-        return SkippedRow(_escape_name(item.image_id), "failed", BAD_NAME_REASON)
+        return SkippedRow(ImageId(_escape_name(item.image_id)), "failed", BAD_NAME_REASON)
     return item
 
 
@@ -634,12 +635,12 @@ def _clean_reason(reason: str) -> str:
     return "".join(" " if bad else "".join(run) for bad, run in groupby(reason, _bad_char)).strip()
 
 
-def _failed(image_id: str, exc: Exception) -> SkippedRow:
+def _failed(image_id: ImageId, exc: Exception) -> SkippedRow:
     reason = str(exc) if isinstance(exc, Unsupported | DecodeError) else f"{type(exc).__name__}: {exc}"
     return SkippedRow(image_id, "failed", _clean_reason(reason))
 
 
-def _candidate(image_id: str, kind: Kind, read: Callable[[], bytes]) -> Candidate | SkippedRow:
+def _candidate(image_id: ImageId, kind: Kind, read: Callable[[], bytes]) -> Candidate | SkippedRow:
     """The input with the bytes `read` returns, or a failed row if they cannot be read."""
     try:
         return Candidate(image_id, kind, read())
@@ -648,10 +649,11 @@ def _candidate(image_id: str, kind: Kind, read: Callable[[], bytes]) -> Candidat
 
 
 def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
+    zip_id = ImageId(path.as_posix())
     try:
         zf = ZipFile(path)
     except Exception as exc:  # noqa: BLE001 - any failure to open the archive is recorded as a skip
-        yield _failed(path.as_posix(), exc)
+        yield _failed(zip_id, exc)
         return
     with zf:
         # Repeated names are distinct entries: read each by its ZipInfo and give
@@ -659,12 +661,12 @@ def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
         # clash with the second `a.png`; `colliding_ids` catches that after rendering.
         files = [info for info in zf.infolist() if not info.is_dir()]
         if not files:
-            yield SkippedRow(path.as_posix(), "ignored", "zip contains no files")
+            yield SkippedRow(zip_id, "ignored", "zip contains no files")
         seen: Counter[str] = Counter()
         for info in files:
             seen[info.filename] += 1
             nth = seen[info.filename]
-            image_id = f"{path.as_posix()}::{info.filename}" + (f"#{nth}" if nth > 1 else "")
+            image_id = ImageId(f"{zip_id}::{info.filename}" + (f"#{nth}" if nth > 1 else ""))
             try:
                 with zf.open(info) as f:
                     head = f.read(SNIFF_BYTES)
@@ -686,7 +688,7 @@ def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | Skip
     A file `named` as a source was asked for explicitly, so a file that would be
     ignored fails instead (macOS metadata stays ignored).
     """
-    image_id = path.as_posix()
+    image_id = ImageId(path.as_posix())
     try:
         if stat.S_ISREG(path.stat().st_mode):  # follows symlinks; a FIFO would block the read
             with open(path, "rb") as f:
@@ -713,18 +715,19 @@ def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]
     `target` is the resolved link. An enclosing directory is the link's own
     directory or any ancestor of it (so the source root and its ancestors).
     """
+    link_id = ImageId(link.as_posix())
     link_dir = link.parent.resolve()
     if target == link_dir or target in link_dir.parents:
-        return SkippedRow(link.as_posix(), "ignored", "symlink to an enclosing directory")
+        return SkippedRow(link_id, "ignored", "symlink to an enclosing directory")
     for source in source_dirs:
         if target == source or source in target.parents:
             return SkippedRow(
-                link.as_posix(),
+                link_id,
                 "ignored",
                 _clean_reason(f"symlinked directory already included via SOURCE {_escape_name(source.as_posix())}"),
             )
     return SkippedRow(
-        link.as_posix(),
+        link_id,
         "failed",
         _clean_reason(
             f"symlinked directory not followed; pass its target {_escape_name(target.as_posix())} as a SOURCE"
@@ -742,7 +745,7 @@ def _discover_directory(
     """
     errors: list[OSError] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=errors.append):
-        yield from (_failed(Path(e.filename).as_posix(), e) for e in errors)
+        yield from (_failed(ImageId(Path(e.filename).as_posix()), e) for e in errors)
         errors.clear()
         here = Path(dirpath)
         entered = []
@@ -758,7 +761,7 @@ def _discover_directory(
         dirnames[:] = entered
         for name in sorted(filenames):
             yield from _discover_file(here / name)
-    yield from (_failed(Path(e.filename).as_posix(), e) for e in errors)
+    yield from (_failed(ImageId(Path(e.filename).as_posix()), e) for e in errors)
 
 
 def discover(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> Iterator[Candidate | SkippedRow]:
@@ -783,7 +786,7 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def render_and_encode(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Encoded | SkippedRow]:
+def render_and_encode(kind: Kind, image_id: ImageId, data: bytes, colormap: str) -> list[Encoded | SkippedRow]:
     """Hash, render and JPEG-encode one input's bytes into its output rows: encoded images and skipped parts.
 
     Pure, and the unit of work sent to pool workers (so it and its arguments pickle). Every image rendered
@@ -808,7 +811,7 @@ def _process(candidate: Candidate, colormap: str) -> list[Encoded | SkippedRow]:
     return render_and_encode(candidate.kind, candidate.image_id, candidate.data, colormap)
 
 
-Outcome = tuple[str, list[Encoded | SkippedRow]]  # (input image_id, its output rows)
+Outcome = tuple[ImageId, list[Encoded | SkippedRow]]  # (input image_id, its output rows)
 
 
 def _outcomes_serial(items: Iterable[Candidate | SkippedRow], colormap: str) -> Iterator[Outcome]:
@@ -825,7 +828,7 @@ def _outcomes_pooled(
     A dead worker breaks the pool and every input in flight with it, so the run fails (`WorkerCrashed`) rather
     than retrying in this process, where the same input could take the whole run down without a message.
     """
-    queue: deque[tuple[str, Future[list[Encoded | SkippedRow]] | list[Encoded | SkippedRow]]] = deque()
+    queue: deque[tuple[ImageId, Future[list[Encoded | SkippedRow]] | list[Encoded | SkippedRow]]] = deque()
     in_flight = 0
 
     def start(item: Candidate | SkippedRow) -> Future[list[Encoded | SkippedRow]] | list[Encoded | SkippedRow]:
@@ -1133,7 +1136,7 @@ def run_preprocess(
     return result
 
 
-def colliding_ids(images: Iterable[tuple[str, str, str]]) -> frozenset[str]:
+def colliding_ids(images: Iterable[tuple[ImageId, str, str]]) -> frozenset[ImageId]:
     """The image_ids, among `(image_id, source_sha256, jpeg_sha256)` triples, naming more than one distinct
     `(source_sha256, jpeg_sha256)` pair.
 
@@ -1142,7 +1145,7 @@ def colliding_ids(images: Iterable[tuple[str, str, str]]) -> frozenset[str]:
     two different sources that render the same JPG collide too. The same source
     reached twice (through overlapping SOURCEs) has the same pair: not a collision.
     """
-    pairs: dict[str, set[tuple[str, str]]] = {}
+    pairs: dict[ImageId, set[tuple[str, str]]] = {}
     for image_id, source_sha256, jpeg_sha256 in images:
         pairs.setdefault(image_id, set()).add((source_sha256, jpeg_sha256))
     return frozenset(image_id for image_id, found in pairs.items() if len(found) > 1)
@@ -1156,14 +1159,14 @@ def _stage(
     colormap: str,
     policy: Modes,
     jobs: int,
-) -> list[tuple[str, list[Staged | SkippedRow]]]:
+) -> list[tuple[ImageId, list[Staged | SkippedRow]]]:
     """Discover and render every input, writing its JPGs into `pending`.
 
     Returns `(input image_id, its output rows)` in discovery order.
     Inputs are rendered by `jobs` worker processes, or in this one for 1; either way this process writes
     every file, in discovery order.
     """
-    inputs: list[tuple[str, list[Staged | SkippedRow]]] = []
+    inputs: list[tuple[ImageId, list[Staged | SkippedRow]]] = []
     staged = 0
 
     items = discover(sources, exclude)
@@ -1190,7 +1193,7 @@ def _stage(
 
 
 def _place(
-    inputs: list[tuple[str, list[Staged | SkippedRow]]],
+    inputs: list[tuple[ImageId, list[Staged | SkippedRow]]],
     *,
     staging: Path,
     batch_size: int,

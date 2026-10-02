@@ -12,7 +12,7 @@ from .access import MANIFEST_NAME
 from .export import ExportRow, export_rows
 from .lock import LockHolder, acquire_lock, release_lock
 from .review_db import Change, ReviewDB, decode_utf8
-from .status import TODO_STATUSES, Key, MarkMode, Status, Verdict
+from .status import TODO_STATUSES, ImageId, Key, MarkMode, Status, Verdict
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class ManifestRow:
 class ManifestEntry:
     batch: str
     key: Key  # preprocessed_path
-    image_id: str  # original source path; stays server-side
+    image_id: ImageId  # original source path; stays server-side
     # SHA-256 (64 lowercase hex) of the source file or ZIP entry, shared by X and X#icon; None in a 3-column manifest.
     # Derived from PHI content: stays server-side like image_id.
     source_sha256: str | None = None
@@ -150,7 +150,7 @@ def load_manifest(work_dir: Path) -> list[ManifestEntry]:
                 f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})"
             )
         key_lines[key] = line
-        entries.append(ManifestEntry(batch, Key(key), image_id, source_sha256, jpeg_sha256))
+        entries.append(ManifestEntry(batch, Key(key), ImageId(image_id), source_sha256, jpeg_sha256))
     return entries
 
 
@@ -173,7 +173,7 @@ SkipKind = Literal["failed", "ignored"]
 class SkippedRow:
     """One row of skipped.tsv: an input preprocess left out of the manifest. image_id is a source path, as in the manifest."""
 
-    image_id: str
+    image_id: ImageId
     kind: SkipKind
     reason: str
 
@@ -191,7 +191,7 @@ def load_skipped(work_dir: Path) -> list[SkippedRow] | None:
         if len(fields) != len(SKIPPED_HEADER) or fields[1] not in get_args(SkipKind):
             raise ValueError(f"{path}:{reader.line_num}: expected image_id, kind (failed or ignored), reason")
         image_id, kind, reason = fields
-        rows.append(SkippedRow(image_id, kind, reason))  # type: ignore[arg-type]  # kind checked above
+        rows.append(SkippedRow(ImageId(image_id), kind, reason))  # type: ignore[arg-type]  # kind checked above
     return rows
 
 
@@ -217,7 +217,7 @@ class LocalStore:
         self._entries = entries
         self._rows = [ManifestRow(key=e.key, batch=e.batch) for e in entries]
         self._by_key: dict[Key, ManifestEntry] = {e.key: e for e in entries}
-        self._keys_by_image_id: dict[str, list[Key]] = {}
+        self._keys_by_image_id: dict[ImageId, list[Key]] = {}
         for key, e in self._by_key.items():
             self._keys_by_image_id.setdefault(e.image_id, []).append(key)
         # Lock before loading review.tsv, so the state loaded is not one another writer is about to overwrite.
@@ -266,7 +266,7 @@ class LocalStore:
             state = "opened read-only" if self.read_only else "closed"
             raise PermissionError(f"store for {self.work_dir} was {state}; cannot record verdicts")
 
-    def _affected(self, image_ids: list[str], pass_number: int) -> dict[Key, Status]:
+    def _affected(self, image_ids: list[ImageId], pass_number: int) -> dict[Key, Status]:
         """The status of every key of these image_ids, in their order."""
         return {
             k: self._db.get_status(iid, pass_number)

@@ -14,7 +14,7 @@ from typing import Literal, get_args
 
 from .access import policy_of_dir
 from .connection import package_version, parse_reviewer
-from .status import TODO_STATUSES, MarkMode, Status, Verdict
+from .status import TODO_STATUSES, ImageId, MarkMode, Status, Verdict
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ TOMBSTONE: RowStatus = "UNREVIEWED"
 
 @dataclass(frozen=True)
 class Decision:
-    image_id: str
+    image_id: ImageId
     batch: str
     status: RowStatus  # TOMBSTONE only in an undo row; latest() drops such an image_id
     pass_number: int
@@ -78,7 +78,7 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) 
         if grid_size < 1:
             raise ValueError(f"{where}: grid_size must be at least 1, got {grid_size}")
     # status and mode checked above
-    return Decision(image_id, batch, status, pass_number, timestamp, reviewer, mode, grid_size, tool_version)  # type: ignore[arg-type]
+    return Decision(ImageId(image_id), batch, status, pass_number, timestamp, reviewer, mode, grid_size, tool_version)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -131,7 +131,7 @@ def parse_log(path: Path, data: bytes) -> tuple[list[Decision], bool]:
     return decisions, header == LEGACY_HEADER
 
 
-def fold(rows: dict[str, Decision], decisions: Iterable[Decision]) -> None:
+def fold(rows: dict[ImageId, Decision], decisions: Iterable[Decision]) -> None:
     """Apply decisions, in order, to rows (the last decision per image_id): a tombstone removes its image_id."""
     for d in decisions:
         if d.status == TOMBSTONE:
@@ -140,9 +140,9 @@ def fold(rows: dict[str, Decision], decisions: Iterable[Decision]) -> None:
             rows[d.image_id] = d
 
 
-def latest(decisions: Iterable[Decision]) -> dict[str, Decision]:
+def latest(decisions: Iterable[Decision]) -> dict[ImageId, Decision]:
     """The last decision per image_id; an image_id whose last row is a tombstone has none."""
-    rows: dict[str, Decision] = {}
+    rows: dict[ImageId, Decision] = {}
     fold(rows, decisions)
     return rows
 
@@ -159,7 +159,7 @@ class ReviewDB:
     def __init__(self, work_dir: Path):
         self.work_dir = work_dir
         self.review_path = work_dir / "review.tsv"
-        self._rows: dict[str, Decision] = {}  # keyed by image_id; last row wins (see latest(): never a tombstone)
+        self._rows: dict[ImageId, Decision] = {}  # keyed by image_id; last row wins (see latest(): never a tombstone)
         self._truncate: PendingTruncate | None = None  # a torn tail to drop before the next append
         self._legacy: LegacyLog | None = None  # an old-header file; appends refuse until migrate()
         if self.review_path.exists():
@@ -272,7 +272,7 @@ class ReviewDB:
         self._truncate = None
 
     def mark_many(
-        self, targets: list[tuple[str, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+        self, targets: list[tuple[ImageId, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
     ) -> list[Change]:
         """Record one verdict on every (image_id, batch) in targets; grid_size is len(targets).
 
@@ -327,7 +327,7 @@ class ReviewDB:
         self._append(decisions)  # on disk first, as in mark_many
         fold(self._rows, decisions)
 
-    def decisions(self) -> dict[str, Decision]:
+    def decisions(self) -> dict[ImageId, Decision]:
         """The latest decision per image_id (a copy; never a tombstone).
 
         ValueError if review.tsv ended in an unfinished line when loaded (the next append drops it): the last verdict
@@ -341,7 +341,7 @@ class ReviewDB:
             )
         return dict(self._rows)
 
-    def get_status(self, image_id: str, current_pass: int) -> Status:
+    def get_status(self, image_id: ImageId, current_pass: int) -> Status:
         row = self._rows.get(image_id)
         if not row:
             return "UNREVIEWED"
@@ -349,7 +349,7 @@ class ReviewDB:
             return row.status  # this pass or a later one, as recorded; CLEAN holds across passes
         return "FLAGGED"  # DIRTY in an earlier pass; needs re-review in this one
 
-    def current_pass(self, image_ids: Iterable[str]) -> int:
+    def current_pass(self, image_ids: Iterable[ImageId]) -> int:
         """Auto-detect the current pass number.
 
         If any manifest image has no row in _rows, we're on pass 1.

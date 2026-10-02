@@ -920,11 +920,12 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 
 ### Types
 
-`Key`, `Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode` and `Rotation`) are defined in `status.py`.
+`Key`, `ImageId`, `Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode` and `Rotation`) are defined in `status.py`.
 
 | Name | Description |
 |------|-------------|
 | `Key` | `NewType("Key", str)`: a manifest key, the `preprocessed_path` (see *Key versus `image_id`*). A string becomes a `Key` only where it is parsed (`load_manifest`, the client's `parse_manifest` and `parse_statuses`, the server's `parse_mark` and `/image` check), so the type checker keeps keys and source paths apart |
+| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the `#icon` and escaped bad-name ids derived there), `parse_decision`, `load_manifest`, `load_skipped`, and `export_rows` (a file's id with `#icon` removed). Server, client and controller never see one |
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |

@@ -7,6 +7,8 @@ import unicodedata
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, NewType
 
+from .status import ImageId
+
 if TYPE_CHECKING:
     from .review_db import Decision
     from .store import ManifestEntry, SkipKind, SkippedRow
@@ -27,7 +29,7 @@ _LINE_SEPARATORS = frozenset("\u2028\u2029")
 
 @dataclass(frozen=True)
 class ExportRow:
-    image_id: str  # a source file, or a ZIP entry (`<zip>::<name>`)
+    image_id: ImageId  # a source file, or a ZIP entry (`<zip>::<name>`)
     status: ExportStatus
     pass_number: int | None  # from the main image's latest decision; None, and timestamp and reviewer "", without one
     timestamp: str
@@ -49,9 +51,9 @@ class _Part:
     reason: str  # the skip reason, for NOT_REVIEWED
 
 
-def _first_reasons(skipped: list[SkippedRow], kind: SkipKind) -> dict[str, str]:
+def _first_reasons(skipped: list[SkippedRow], kind: SkipKind) -> dict[ImageId, str]:
     """The first reason per image_id among the skipped rows of `kind`, in skipped.tsv order."""
-    reasons: dict[str, str] = {}
+    reasons: dict[ImageId, str] = {}
     for row in skipped:
         if row.kind == kind:
             reasons.setdefault(row.image_id, row.reason)
@@ -59,12 +61,15 @@ def _first_reasons(skipped: list[SkippedRow], kind: SkipKind) -> dict[str, str]:
 
 
 def _parts(
-    entries: list[ManifestEntry], decisions: dict[str, Decision], failed: dict[str, str], ignored: dict[str, str]
-) -> dict[str, _Part]:
+    entries: list[ManifestEntry],
+    decisions: dict[ImageId, Decision],
+    failed: dict[ImageId, str],
+    ignored: dict[ImageId, str],
+) -> dict[ImageId, _Part]:
     """Each manifest or failed image_id once, manifest order then failed order. A `failed` row makes it NOT_REVIEWED
     (with its reason), even if the manifest has it too; so does an `ignored` row for a manifest image_id (the two
     disagree, so nobody can vouch for it)."""
-    parts: dict[str, _Part] = {}
+    parts: dict[ImageId, _Part] = {}
     for image_id in dict.fromkeys([*(e.image_id for e in entries), *failed]):
         decision = decisions.get(image_id)
         if image_id in failed:
@@ -81,7 +86,7 @@ def _parts(
 _MAIN_MISSING = _Part("NOT_REVIEWED", None, "main image missing")  # an icon without its file: never CLEAN
 
 
-def _main(f: str, parts: dict[str, _Part], ignored: dict[str, str]) -> _Part:
+def _main(f: ImageId, parts: dict[ImageId, _Part], ignored: dict[ImageId, str]) -> _Part:
     """File `f`'s main part: its own part; else NOT_REVIEWED with its `ignored` reason; else `_MAIN_MISSING`."""
     if f in parts:
         return parts[f]
@@ -90,7 +95,7 @@ def _main(f: str, parts: dict[str, _Part], ignored: dict[str, str]) -> _Part:
     return _MAIN_MISSING
 
 
-def _fold(image_id: str, main: _Part, icon: _Part | None, source_sha256: str) -> ExportRow:
+def _fold(image_id: ImageId, main: _Part, icon: _Part | None, source_sha256: str) -> ExportRow:
     """One file's row: the worst status of its main image and its icon; pass, timestamp and reviewer from the main
     image's decision."""
     status = max((p.status for p in (main, icon) if p is not None), key=_SEVERITY.__getitem__)
@@ -108,7 +113,7 @@ def _fold(image_id: str, main: _Part, icon: _Part | None, source_sha256: str) ->
 
 
 def export_rows(
-    entries: list[ManifestEntry], decisions: dict[str, Decision], skipped: list[SkippedRow]
+    entries: list[ManifestEntry], decisions: dict[ImageId, Decision], skipped: list[SkippedRow]
 ) -> list[ExportRow]:
     """One row per source file (a ZIP entry counts as one), in order of first appearance: manifest, then the
     `failed` rows of skipped.tsv, then the `ignored` rows (inputs that are not images) that no earlier row covers.
@@ -131,12 +136,12 @@ def export_rows(
     failed = _first_reasons(skipped, "failed")
     ignored = _first_reasons(skipped, "ignored")
     parts = _parts(entries, decisions, failed, ignored)
-    hashes: dict[str, str] = {}
+    hashes: dict[ImageId, str] = {}
     for e in entries:
         if e.source_sha256 is not None:
-            hashes.setdefault(e.image_id.removesuffix(ICON_SUFFIX), e.source_sha256)
-    files = dict.fromkeys(image_id.removesuffix(ICON_SUFFIX) for image_id in parts)
-    rows = [_fold(f, _main(f, parts, ignored), parts.get(f + ICON_SUFFIX), hashes.get(f, "")) for f in files]
+            hashes.setdefault(ImageId(e.image_id.removesuffix(ICON_SUFFIX)), e.source_sha256)
+    files = dict.fromkeys(ImageId(image_id.removesuffix(ICON_SUFFIX)) for image_id in parts)
+    rows = [_fold(f, _main(f, parts, ignored), parts.get(ImageId(f + ICON_SUFFIX)), hashes.get(f, "")) for f in files]
     covered = parts.keys() | files.keys()
     rows += [ExportRow(i, "IGNORED", None, "", "", r, "") for i, r in ignored.items() if i not in covered]
     return rows
