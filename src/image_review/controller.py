@@ -214,9 +214,10 @@ class ReviewSession:
     def _held_back_count(self, batch: str | None) -> int:
         """Todo rows (see _key_todo) of `batch` (None: every batch) the status filter selects that the
         current mode leaves out (grid mode: DIRTY and FLAGGED)."""
-        shown = {row.key for row in self._review_rows(batch)}
+        if self.mode != "grid":
+            return 0
         selected = filter_rows(self.manifest, self._statuses, self.status_filter, batch)
-        return sum(1 for row in selected if row.key not in shown and self._key_todo(row.key))
+        return sum(1 for row in selected if self._statuses[row.key] not in GRID_ELIGIBLE and self._key_todo(row.key))
 
     def _held_back_message(self, batch: str | None, *, in_session: bool) -> str | None:
         """Names the todo rows of `batch` that grid mode leaves out, or None when there are none. In the
