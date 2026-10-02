@@ -154,10 +154,7 @@ class ReviewSession:
         self.manifest = store.manifest()
 
         self._explicit_pass = pass_number is not None  # --pass: b keeps it rather than re-reading the current pass
-        if pass_number is None:
-            self.pass_number = store.current_pass()
-        else:
-            self.pass_number = pass_number
+        self.pass_number = store.current_pass() if pass_number is None else pass_number
         self._statuses = store.statuses(self.pass_number)
 
         self.autoplay = False
@@ -331,20 +328,19 @@ class ReviewSession:
             "[f] toggle fullscreen",
         ]
         self._viewer.show_splash(
-            [self._info_line(len(self._items))],
+            [self._info_line()],
             footer=footer_lines,
         )
         self._ui_state = UIState.SPLASH
 
-    def _info_line(self, n_items: int | None = None) -> str:
+    def _info_line(self) -> str:
         parts = [f"{self.batch} pass {self.pass_number}"] if self.batch else [f"pass {self.pass_number}"]
         batches = self._batches()
         if self.batch in batches:
             parts.append(f"batch {batches.index(self.batch) + 1}/{len(batches)}")
         if self.status_filter != "unreviewed":
             parts.append(f"filter: {self.status_filter}")
-        if n_items is not None:
-            parts.append(f"{n_items} images")
+        parts.append(f"{len(self._items)} images")
         parts.append(f"{self.mode} image review")
         return " - ".join(parts)
 
