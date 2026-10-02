@@ -8,7 +8,6 @@ import os
 import stat
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,7 +17,7 @@ from image_review import store as store_module
 from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADER
 from image_review.store import LocalStore, boot_id, this_process
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server, temp_dir
 
 KEYS = [key for _, key, _ in ROWS]
 MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id", "source_sha256", "jpeg_sha256"]
@@ -112,9 +111,7 @@ def dead_pid() -> int:
 
 class ExportTestCase(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        self.root = temp_dir(self)
         self.work = self.root / "work"
         self.work.mkdir(mode=0o700)
         write_tsv(self.work / "manifest.tsv", MANIFEST_HEADER, MANIFEST_WITH_HASHES)
@@ -399,9 +396,7 @@ class TestExportLiveOrTorn(ExportTestCase):
 
 class TestStatusCheck(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.work = Path(tmp.name)
+        self.work = temp_dir(self)
         make_work_dir(self.work)
 
     def check(self, *args):

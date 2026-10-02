@@ -54,7 +54,7 @@ from image_review.preprocess import (
     run_preprocess,
 )
 from image_review.signals import TERMINATION_SIGNALS, interrupt_on
-from tests.fixtures import add_overlay, invoke_cli, write_dicom
+from tests.fixtures import add_overlay, invoke_cli, temp_dir, write_dicom
 
 RNG = np.random.default_rng(0)
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -121,9 +121,7 @@ def make_mixed_source(root: Path) -> dict[str, Path]:
 
 class MixedSourceTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
         self.paths = make_mixed_source(self.root)
         self.sources = [self.root / "src", self.paths["corrupt_zip"]]
 
@@ -279,9 +277,7 @@ class CollisionTest(unittest.TestCase):
     """An image_id naming two different images would share one verdict: every input involved fails instead."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
         self.src = self.root / "src"
         self.src.mkdir()
         self.work = self.root / "work"
@@ -449,9 +445,7 @@ class ProvenanceTest(unittest.TestCase):
     """preprocess.json records how the work dir was made; manifest.tsv records source and JPG hashes."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
         self.src = self.root / "src"
         self.src.mkdir()
         _dicom_with_icon(self.src / "icon.dcm")
@@ -611,9 +605,7 @@ class ClassifyTest(unittest.TestCase):
 
 class ContentDiscoveryTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
 
     def invoke(self, source: Path, work: Path, *args):
         with quiet():
@@ -930,9 +922,7 @@ class ContentDiscoveryTest(unittest.TestCase):
 
 class RunErrorTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
 
     def test_jpeg_encoding_failure_skips_only_that_input(self):
         src = self.root / "src"
@@ -982,9 +972,7 @@ class RunErrorTest(unittest.TestCase):
 
 class StagingTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
         self.src = self.root / "src"
         self.src.mkdir()
         write_dicom(self.src / "a.dcm", _good_pixels())
@@ -1493,9 +1481,7 @@ class RenderTest(unittest.TestCase):
 
 class PreprocessCliTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
         make_mixed_source(self.root)
 
     def invoke(self, *args, source: str = "src"):
@@ -1571,12 +1557,11 @@ class PreprocessCliTest(unittest.TestCase):
 
 class DefaultJobsTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.cgroups = Path(tmp.name) / "cgroup"  # a fake cgroup v2 mount
+        tmp = temp_dir(self)
+        self.cgroups = tmp / "cgroup"  # a fake cgroup v2 mount
         self.cgroups.mkdir()
         self.cpu_max = self.cgroups / "cpu.max"  # missing until a test writes it
-        self.proc_cgroup = Path(tmp.name) / "proc-self-cgroup"
+        self.proc_cgroup = tmp / "proc-self-cgroup"
         self.proc_cgroup.write_text("0::/\n")  # as in a container: the namespace root
         for patch in (
             mock.patch.dict(os.environ),
@@ -1786,9 +1771,7 @@ class ParallelTest(unittest.TestCase):
         cls.pool_calls = pool.call_args_list
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = Path(tmp.name).resolve()
+        self.tmp = temp_dir(self).resolve()
 
     def test_output_is_identical_to_jobs_1(self):
         self.assertEqual(self.serial.found, 17)

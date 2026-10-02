@@ -26,16 +26,14 @@ from image_review.store import (
     WorkDirLocked,
     boot_id,
 )
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, temp_dir
 
 THIS_BOOT = boot_id()
 
 
 class LockTestCase(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.work_dir = Path(self._tmp.name)
+        self.work_dir = temp_dir(self)
         make_work_dir(self.work_dir)
         self.lock_path = self.work_dir / LOCK_NAME
 

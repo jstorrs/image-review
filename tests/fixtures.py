@@ -146,11 +146,16 @@ def mark(
     return store.mark(keys, status, pass_number, reviewer=reviewer, mode=mode)
 
 
+def temp_dir(testcase: unittest.TestCase) -> Path:
+    """A fresh temporary directory, removed when `testcase` finishes."""
+    tmp = tempfile.TemporaryDirectory()
+    testcase.addCleanup(tmp.cleanup)
+    return Path(tmp.name)
+
+
 class StoreTestCase(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.work_dir = Path(self._tmp.name)
+        self.work_dir = temp_dir(self)
         self.make_work_dir()
         self.store = LocalStore(self.work_dir)
         self.addCleanup(self.store.close)

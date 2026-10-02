@@ -33,7 +33,7 @@ from image_review.store import (
     summary,
 )
 from image_review.util import load_surface
-from tests.fixtures import ROWS, StoreTestCase, _jpeg_bytes, make_work_dir, mark
+from tests.fixtures import ROWS, StoreTestCase, _jpeg_bytes, make_work_dir, mark, temp_dir
 
 
 def _skimage_reference(buf: bytes) -> np.ndarray:
@@ -213,9 +213,7 @@ class TestStrictLoading(unittest.TestCase):
     GOOD_TS = "2026-01-01T00:00:00+00:00"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.work_dir = Path(self._tmp.name)
+        self.work_dir = temp_dir(self)
         make_work_dir(self.work_dir)
 
     def write_review(self, *lines: str) -> None:
@@ -392,9 +390,7 @@ class TestReviewLog(unittest.TestCase):
     HEADER_LINE = b"image_id\tbatch\tstatus\tpass_number\ttimestamp\treviewer\tmode\tgrid_size\ttool_version\r\n"
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.work_dir = Path(self._tmp.name)
+        self.work_dir = temp_dir(self)
         os.chmod(self.work_dir, 0o700)
         self.path = self.work_dir / "review.tsv"
 
@@ -645,9 +641,7 @@ class TestMigration(unittest.TestCase):
     )
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.work_dir = Path(self._tmp.name)
+        self.work_dir = temp_dir(self)
         make_work_dir(self.work_dir)
         os.chmod(self.work_dir, 0o2770)  # group policy: the migrated file must be 0660, not mkstemp's 0600
         self.path = self.work_dir / "review.tsv"

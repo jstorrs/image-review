@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from image_review.cli import PACKAGE_LOGGER
-from tests.fixtures import invoke_cli, make_work_dir
+from tests.fixtures import invoke_cli, make_work_dir, temp_dir
 
 LINE = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d %s image_review\.cli: %s"
 
@@ -21,9 +21,7 @@ def _emit_one_per_level(work_dir: Path) -> None:
 
 class LevelFlagsTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.work = Path(tmp.name)
+        self.work = temp_dir(self)
         make_work_dir(self.work)
         self.work.chmod(0o700)
 

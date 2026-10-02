@@ -6,16 +6,14 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
-from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 from image_review.tunnel import TunnelError, parse_via, ssh_tunnel
-from tests.fixtures import invoke_cli, make_work_dir, start_server
+from tests.fixtures import invoke_cli, make_work_dir, start_server, temp_dir
 
 FAKE_SSH = f"""#!{sys.executable}
 import json, os, signal, socket, sys, threading
@@ -99,9 +97,7 @@ def pid_alive(pid: int) -> bool:
 @unittest.skipIf(sys.platform == "win32", "fake ssh needs POSIX")
 class FakeSshTestCase(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = Path(tmp.name)
+        self.tmp = temp_dir(self)
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
         ssh = bin_dir / "ssh"

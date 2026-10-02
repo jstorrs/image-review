@@ -23,7 +23,7 @@ from image_review.access import (
 from image_review.preprocess import run_preprocess
 from image_review.review_db import ReviewDB
 from image_review.server import ReviewServer
-from tests.fixtures import invoke_cli, make_work_dir, write_dicom
+from tests.fixtures import invoke_cli, make_work_dir, temp_dir, write_dicom
 
 ENV = {"SLURM_CPUS_PER_TASK": "1"}
 
@@ -79,9 +79,7 @@ class ModesTest(unittest.TestCase):
 
 class PreprocessAccessTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
         os.chmod(self.root, 0o755)  # a permissive parent must not leak into the work dir
         self.src = _src(self.root)
 
@@ -167,9 +165,7 @@ class PreprocessAccessTest(unittest.TestCase):
 
 class CliAccessTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name).resolve()
+        self.root = temp_dir(self).resolve()
         self.src = _src(self.root)
 
     def invoke(self, *args, env=None):
@@ -234,9 +230,7 @@ class ReviewDbModeTest(unittest.TestCase):
 
 class WarningTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.work = Path(tmp.name) / "work"
+        self.work = temp_dir(self) / "work"
         self.work.mkdir()
         make_work_dir(self.work)
 

@@ -2,10 +2,8 @@ import csv
 import gc
 import io
 import os
-import tempfile
 import unittest
 import weakref
-from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -17,7 +15,7 @@ from image_review import grid_packer as grid_packer_module
 from image_review.grid_packer import PlacedRect, fit_size, pack_into_grids
 from image_review.store import LocalStore
 from image_review.util import load_surface
-from tests.fixtures import dropping_packer
+from tests.fixtures import dropping_packer, temp_dir
 
 
 class TestPackShrinksOversize(unittest.TestCase):
@@ -28,9 +26,7 @@ class TestPackShrinksOversize(unittest.TestCase):
         self, sizes: dict[str, tuple[int, int]], colours: dict[str, tuple[int, int, int]] | None = None
     ) -> LocalStore:
         """A store over solid JPGs of the given sizes (grey unless `colours` names one), one batch per directory."""
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = self.root = Path(tmp.name)
+        root = self.root = temp_dir(self)
         rows = []
         for name, size in sizes.items():
             (root / name).parent.mkdir(exist_ok=True)

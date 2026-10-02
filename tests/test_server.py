@@ -21,7 +21,7 @@ from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, RemoteTarget
 from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
 from image_review.store import LocalStore, load_manifest
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server, temp_dir
 
 FP = "a" * 64
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
@@ -29,10 +29,9 @@ SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
 
 class MakeServerChecksTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        make_work_dir(Path(tmp.name))
-        self.store = LocalStore(Path(tmp.name))
+        work_dir = temp_dir(self)
+        make_work_dir(work_dir)
+        self.store = LocalStore(work_dir)
         self.addCleanup(self.store.close)
 
     def assert_refused(self, host: str, message: str, *, binds: bool):
@@ -57,9 +56,7 @@ class ServerTestCase(unittest.TestCase):
     HASHED = False  # manifest.tsv with the hash columns
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.work_dir = Path(tmp.name)
+        self.work_dir = temp_dir(self)
         make_work_dir(self.work_dir, hashed=self.HASHED)
         self.server, self.target, stop = start_server(self.work_dir)
         self.addCleanup(stop)
@@ -314,9 +311,7 @@ class TestNoKeyFilesLeft(unittest.TestCase):
 
 class TestServeCommand(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        root = Path(self._tmp.name)
+        root = temp_dir(self)
         self.work = root / "work"
         self.work.mkdir()
         make_work_dir(self.work)

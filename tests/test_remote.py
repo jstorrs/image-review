@@ -32,7 +32,7 @@ from image_review.remote import (
 )
 from image_review.server import Reply, ReviewHandler
 from image_review.store import LocalStore, ManifestRow, SkippedCounts, StoreUnavailable
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server, temp_dir
 
 KEYS = [key for _, key, _ in ROWS]
 
@@ -47,9 +47,7 @@ class RemoteTestCase(unittest.TestCase):
     HASHED = False  # manifest.tsv with the hash columns
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.work_dir = Path(tmp.name)
+        self.work_dir = temp_dir(self)
         make_work_dir(self.work_dir, hashed=self.HASHED)
         self.server, self.target, self.stop_server = start_server(self.work_dir)
         self.addCleanup(self.stop_server)
