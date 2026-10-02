@@ -175,12 +175,7 @@ class ReviewSession:
         if self.batch is None:
             self.batch = self._auto_select_batch()
 
-        if mode == "grid":
-            self._viewer.show_message("Computing grids...")
-            self._init_grid_mode()
-            pg.event.clear(VERDICT_INPUT_EVENTS)
-        else:
-            self._init_single_mode()
+        self._build_items()
 
     def _store_lost(self, exc: StoreUnavailable):
         self._stop_timers()
@@ -251,17 +246,32 @@ class ReviewSession:
         """Whether `batch` has rows the current mode may show that are todo (see _key_todo)."""
         return any(self._key_todo(row.key) for row in self._review_rows(batch))
 
-    def _init_single_mode(self):
+    def _single_items(self) -> list[ReviewItem]:
         rows = self._review_rows(self.batch)
         random.shuffle(rows)
-        self._items = [ReviewItem(keys=(row.key,), label=row.key, surface=None, grid=False) for row in rows]
+        return [ReviewItem(keys=(row.key,), label=row.key, surface=None, grid=False) for row in rows]
+
+    def _build_items(self):
+        """Build the items for the current mode and batch, then drop verdict input queued while blocked."""
+        try:
+            if self.mode == "grid":
+                self._viewer.show_message("Computing grids...")
+                self._items = self._grid_items()
+            else:
+                self._items = self._single_items()
+        finally:
+            pg.event.clear(VERDICT_INPUT_EVENTS)  # pressed while blocked, before anything new was shown
+
+    def _show_end(self, text: str):
+        self._ui_state = UIState.END_MESSAGE
+        self._viewer.show_message(text)
 
     def _show_grid_progress(self, done: int, total: int) -> None:
         if done % 25 == 0 or done == total:
             self._viewer.show_message(f"Computing grids... {done}/{total}")  # also flips the display
             pg.event.pump()  # keeps the OS from flagging the window; leaves queued key events alone
 
-    def _init_grid_mode(self):
+    def _grid_items(self) -> list[ReviewItem]:
         grid_w, grid_h = self._grid_size()
 
         review_rows = self._review_rows(self.batch)
@@ -292,7 +302,7 @@ class ReviewSession:
         # it follows the single-image rules, and _show_current loads it when it is shown, drawing a
         # placeholder only if that fails
         items += [ReviewItem(keys=(key,), label=key, surface=None, grid=False) for key in left_out]
-        self._items = items
+        return items
 
     def _show_display_select(self):
         self._stop_timers()
@@ -342,23 +352,14 @@ class ReviewSession:
         try:
             if refetch_statuses:
                 self._statuses = self.store.statuses(self.pass_number)
-            if new_mode == "grid":
-                self._viewer.show_message("Computing grids...")
-                self._init_grid_mode()
-            else:
-                self._init_single_mode()
+            self._build_items()
         except StoreUnavailable as exc:
             self._items = []  # half-switched state: nothing consistent to show
             self._store_lost(exc)
             return
-        finally:
-            pg.event.clear(VERDICT_INPUT_EVENTS)  # pressed while blocked, before anything new was shown
 
         if not self._items:
-            self._viewer.show_message(
-                self._held_back_message(self.batch, in_session=True) or f"No items for {new_mode} mode"
-            )
-            self._ui_state = UIState.END_MESSAGE
+            self._show_end(self._held_back_message(self.batch, in_session=True) or f"No items for {new_mode} mode")
             return
 
         self._ui_state = UIState.REVIEWING
@@ -392,11 +393,10 @@ class ReviewSession:
             # The items may belong to a pass that has ended: drop them, so only quitting (or a mode switch) remains
             self._items = []
             self._undoable = 0
-            self._ui_state = UIState.END_MESSAGE
             message = self._held_back_message(self.batch if self._explicit_batch else None, in_session=True)
             if message:  # so s opens the first batch with images grid mode left out
                 self.batch = next_batch(batches, None, lambda b: self._held_back_count(b) > 0, wrap=False)
-            self._viewer.show_message(message or self._all_done_message(old_pass, current_pass))
+            self._show_end(message or self._all_done_message(old_pass, current_pass))
             return
         self.batch = batch
         self._restart_in_mode(self.mode, refetch_statuses=False)
@@ -508,10 +508,7 @@ class ReviewSession:
 
         if not self._seek(self._cursor, direction, todo_only=self._todo_only, wrap=False):
             self._stop_autoplay()
-            self._ui_state = UIState.END_MESSAGE
-            self._viewer.show_message(
-                self._no_todo_message() if self._todo_only else self._end_message(END_OF_LIST_MESSAGE)
-            )
+            self._show_end(self._no_todo_message() if self._todo_only else self._end_message(END_OF_LIST_MESSAGE))
         elif self._ui_state == UIState.REVIEWING and direction == 1 and (autoplay or self.autoplay):
             self.autoplay = True
             pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
@@ -644,8 +641,7 @@ class ReviewSession:
             self._ui_state = UIState.REVIEWING
             start = -1 if direction == 1 else len(self._items)
             if not self._seek(start, direction, todo_only=self._todo_only, wrap=True):
-                self._ui_state = UIState.END_MESSAGE
-                self._viewer.show_message(self._no_todo_message())
+                self._show_end(self._no_todo_message())
         elif key == pg.K_z:
             self._undo()
         elif key == pg.K_b:
@@ -806,18 +802,14 @@ class ReviewSession:
         self._stop_timers()
         self._undoable = 0  # a repack drops grids marked DIRTY, so z could no longer show what it undoes
         current = self._items[self._cursor].keys[0] if self._cursor >= 0 else None
-        self._viewer.show_message("Computing grids...")
         try:
-            self._init_grid_mode()
+            self._build_items()
         except StoreUnavailable as exc:
             self._items = []
             self._store_lost(exc)
             return
-        finally:
-            pg.event.clear(VERDICT_INPUT_EVENTS)
         if not self._items:  # everything left was marked meanwhile (or is held back): as _restart_in_mode
-            self._ui_state = UIState.END_MESSAGE
-            self._viewer.show_message(
+            self._show_end(
                 self._held_back_message(self.batch, in_session=True) or self._end_message(END_OF_LIST_MESSAGE)
             )
             return
