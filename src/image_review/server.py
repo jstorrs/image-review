@@ -253,38 +253,40 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if not has_body and not all(v.strip() == "0" for v in self.headers.get_all("Content-Length", [])):
             raise BadRequest("unexpected request body")
         store, lock = self.server.store, self.server.store_lock
-        if method == "GET" and url.path == "/version":
-            return json_reply({"api": API_VERSION, "version": package_version()})
-        if method == "GET" and url.path == "/manifest":
-            with lock:
-                rows = store.manifest()
-            return json_reply([{"key": r.key, "batch": r.batch} for r in rows])
-        if method == "GET" and url.path == "/image":
-            return self._image(query)
-        if method == "GET" and url.path == "/statuses":
-            pass_number = parse_pass(query.get("pass", [None])[0])
-            with lock:
-                statuses = store.statuses(pass_number)
-            return json_reply(statuses)
-        if method == "GET" and url.path == "/current_pass":
-            with lock:
-                current = store.current_pass()
-            return json_reply({"pass": current})
-        if method == "GET" and url.path == "/skipped":
-            with lock:
-                skipped = store.skipped()
-            return json_reply(None if skipped is None else {"failed": skipped.failed, "ignored": skipped.ignored})
-        if has_body and url.path == "/mark":
-            req = parse_mark(self._read_body(), self.server.known_keys)
-            with lock:
-                changed = store.mark(req.keys, req.status, req.pass_number, reviewer=req.reviewer, mode=req.mode)
-            return json_reply(changed)
-        if has_body and url.path == "/undo":
-            undo = parse_undo(self._read_body())
-            with lock:
-                changed = store.undo(undo.pass_number, reviewer=undo.reviewer)
-            return json_reply(changed)  # keys only, like /mark
-        return Reply(404, close=True)
+        match (method, url.path):
+            case ("GET", "/version"):
+                return json_reply({"api": API_VERSION, "version": package_version()})
+            case ("GET", "/manifest"):
+                with lock:
+                    rows = store.manifest()
+                return json_reply([{"key": r.key, "batch": r.batch} for r in rows])
+            case ("GET", "/image"):
+                return self._image(query)
+            case ("GET", "/statuses"):
+                pass_number = parse_pass(query.get("pass", [None])[0])
+                with lock:
+                    statuses = store.statuses(pass_number)
+                return json_reply(statuses)
+            case ("GET", "/current_pass"):
+                with lock:
+                    current = store.current_pass()
+                return json_reply({"pass": current})
+            case ("GET", "/skipped"):
+                with lock:
+                    skipped = store.skipped()
+                return json_reply(None if skipped is None else {"failed": skipped.failed, "ignored": skipped.ignored})
+            case ("POST", "/mark"):
+                req = parse_mark(self._read_body(), self.server.known_keys)
+                with lock:
+                    changed = store.mark(req.keys, req.status, req.pass_number, reviewer=req.reviewer, mode=req.mode)
+                return json_reply(changed)
+            case ("POST", "/undo"):
+                undo = parse_undo(self._read_body())
+                with lock:
+                    changed = store.undo(undo.pass_number, reviewer=undo.reviewer)
+                return json_reply(changed)  # keys only, like /mark
+            case _:
+                return Reply(404, close=True)
 
     def _image(self, query: dict[str, list[str]]) -> Reply:
         keys = query.get("key", [])
