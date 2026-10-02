@@ -128,15 +128,15 @@ world-readable.
     in `slurm-*.out` (by default beside where you submitted). Keep job output
     inside the work directory or another private location with
     `#SBATCH --output`;
-  - export files, whose `image_id` column is the source path and whose
-    `source_sha256` is derived from file content.
+  - export files (the allowlist and the report), whose `image_id` column is
+    the source path and whose `source_sha256` is derived from file content.
 - **Hidden temporary files.** Each is removed on every exit except a hard
   kill (`kill -9`, a node crash), which can leave it behind. Delete any you
   find, since they hold the same data:
   - `.NAME.partial`: `preprocess`'s staging directory next to the work
     directory (the next run tells you about it);
-  - `.<file>.<random>.tmp`: the temporary file `export --output` writes beside
-    its target;
+  - `.<file>.<random>.tmp`: the temporary file `export --output` or
+    `--report` writes beside its target;
   - `.review.tsv.*.tmp`: left by an interrupted `review.tsv` upgrade, inside
     the work directory; the tool ignores it.
 - **git.** The repository's `.gitignore` excludes the usual work-directory
@@ -147,9 +147,13 @@ world-readable.
   home directory shared between login and compute nodes (relevant to
   `~/.image-review/`). Put work directories where your site's data policy
   allows PHI.
-- **Export files** follow the work directory's file mode and, for a group work
-  directory, its group (0600 if the group cannot be set, with a warning).
-  `export` refuses `--remote` so that source paths never travel.
+- **Export files** (`--output`, `--report`) follow the work directory's file
+  mode and, for a group work directory, its group (0600 if the group cannot be
+  set, with a warning). Neither overwrites an existing file, and they may not
+  name the same file. Both are built and checked before either is written,
+  and the report is written first, so a failed second write leaves only a
+  report, which releases nothing. `export` refuses `--remote`
+  so that source paths never travel.
 
 ## Integrity
 
@@ -176,25 +180,32 @@ world-readable.
   such a character as a `failed` row under an escaped id and cleans such
   characters out of reasons, so a work dir made by this version never trips
   this refusal through an image_id or reason (a reviewer name starting with `"`,
-  or a work dir from an earlier version, still can). `export` never overwrites
+  or a work dir from an earlier version, still can). The check covers the
+  report's rows too, even without `--report`. `export` never overwrites
   an existing file. `reviewer` values can start
   with `=`, `+`, `-` or `@`: open the result as text, not by double-clicking it
   into a spreadsheet.
-- **Worst-of rule.** A file's exported status is the worst of its parts (the
-  image and its embedded icon): `DIRTY`, then `NOT_REVIEWED`, then
-  `UNREVIEWED`, then `CLEAN`. It is `CLEAN` only if every part is. Inputs that
-  failed to preprocess are `NOT_REVIEWED`, and inputs that were not images
-  (a PDF, a Word file, ...) are `IGNORED`: nobody has looked at them, so treat
-  them as possibly containing PHI. A FLAGGED image (DIRTY in an earlier pass,
-  not yet re-reviewed) exports as `DIRTY`.
+- **Allowlist (default deny).** `export`'s main output lists only the files
+  that may be released, each by path and source SHA-256; release a file only
+  if both match, and deny everything not listed. A file is listed only if its
+  status is `CLEAN`, the manifest has its hash, and no file that is not
+  `CLEAN` has the same hash (identical bytes cannot be both clean and dirty).
+  A file's status is the worst of its parts (the image and its embedded icon):
+  `DIRTY`, then `NOT_REVIEWED`, then `UNREVIEWED`, then `CLEAN`; it is `CLEAN`
+  only if every part is. A FLAGGED image (DIRTY in an earlier pass, not yet
+  re-reviewed) is `DIRTY`. So these are never listed: inputs that failed to
+  preprocess (`NOT_REVIEWED`), inputs that were not images (a DICOMDIR, a PDF,
+  ...: `IGNORED`), files whose name preprocess recorded under an escaped id
+  (which never matches the real name), CLEAN files of a work directory
+  without hashes, a file changed since preprocess (its hash no longer
+  matches), and a ZIP or directory as a whole (only its entries are listed).
+  Everything else goes to the optional `--report`, for audit and follow-up;
+  it must never be used to choose what to release (e.g. "everything not
+  DIRTY").
 - **DIRTY-only placeholders.** The viewer shows an image that cannot be
   fetched, read or verified as a placeholder that accepts DIRTY but refuses
   CLEAN, so an image nobody could see is not cleared by the viewer (see the
   limit above).
-- **What export does not vouch for.** It covers only the files and ZIP
-  entries it lists, never a ZIP or directory as a whole. Ignored inputs (a
-  DICOMDIR, a PDF, ...) are listed as `IGNORED`, never `CLEAN`: treat them as
-  possibly containing PHI.
 
 ## Reporting a vulnerability
 

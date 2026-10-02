@@ -2,7 +2,7 @@
 
 ## 0.3.0
 
-Remote review over HTTPS, an export of the final result, an audit trail in
+Remote review over HTTPS, an allowlist export of the files that may be released, an audit trail in
 `review.tsv`, undo, and a much stricter `preprocess`. Read **Upgrading** first
 if you share work directories with other people.
 
@@ -77,6 +77,10 @@ if you share work directories with other people.
   above it) is not UTF-8 or holds a control character or U+2028/U+2029 is now
   `failed`, so `preprocess` exits 1 unless `--allow-skipped`. Rename it or
   remove it.
+- **A 0.2.0 work directory exports an empty allowlist.** Its manifest has no
+  `source_sha256`, and `export` never allowlists a file without one (its CLEAN
+  files are in `--report`, marked as not allowlisted). To release files,
+  preprocess again into a new work directory and redo the verdicts.
 - **Dependencies have minimum versions** (see Requirements below).
   `cryptography`, `scipy`, `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`
   are new.
@@ -86,10 +90,17 @@ if you share work directories with other people.
 - New commands:
   - `serve` serves a work directory over HTTPS, with a self-signed
     certificate and a bearer token in an `ir://` connection string.
-  - `export` writes the result as TSV, with one row per source file
-    (CLEAN, DIRTY, UNREVIEWED, NOT_REVIEWED or IGNORED). It has `--output FILE`, which
-    never overwrites. It refuses while a writer holds the work directory
-    unless `--allow-live` is given.
+  - `export` writes an allowlist (default deny) as TSV: only the source
+    files that may be released, each by path and source SHA-256, so a file is
+    released only if both match. A file is listed only if it was reviewed
+    CLEAN (its icon too), the manifest has its hash, and no file that is not
+    CLEAN has the same recorded hash (`source_sha256`). CLEAN files of a work directory without
+    hashes (made by an older version) are never allowlisted. `--report FILE`
+    writes every other file, with its status (DIRTY, UNREVIEWED,
+    NOT_REVIEWED, IGNORED, or CLEAN not allowlisted) and reason, for audit
+    and follow-up only. The allowlist goes to stdout or `--output FILE`; the
+    report is written first; neither overwrites. It refuses while a writer
+    holds the work directory unless `--allow-live` is given.
 - Global `-v`/`--verbose` (debug) and `-q`/`--quiet` (warnings and errors
   only) options. They go before the command.
 - New `preprocess` options:
@@ -191,7 +202,8 @@ it is reported as "too old to report its API version".
 - **`export` lists ignored inputs.** It used to leave out the `ignored` rows
   of `skipped.tsv`, so an input that was not an image (a PDF, a Word file, a
   DICOMDIR, ...) was never mentioned and nobody followed it up. Each is now a
-  row with status `IGNORED` after all other rows, never CLEAN. A work
+  row of the report with status `IGNORED` after all other rows, never
+  allowlisted. A work
   directory made by a 0.3.0 pre-release may hold an ignored name with a
   control character or U+2028/U+2029, which now makes `export` refuse;
   preprocess again into a new work directory (its verdicts must be redone).

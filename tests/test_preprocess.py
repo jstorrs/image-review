@@ -976,9 +976,11 @@ class ContentDiscoveryTest(unittest.TestCase):
             self.skipped_rows(work),
             [(f"{a}::a\\x0ab.png", "failed", BAD_NAME_REASON), (f"{a}::c\\x09d.txt", "failed", BAD_NAME_REASON)],
         )
-        exported = invoke_cli("export", "--work-dir", str(work))
+        report = self.root / "report.tsv"
+        exported = invoke_cli("export", "--work-dir", str(work), "--report", str(report))
         self.assertEqual(exported.exit_code, 0, exported.output)
-        self.assertIn(f"{a}::a\\x0ab.png\tNOT_REVIEWED\t", exported.stdout)
+        self.assertNotIn("\\x0a", exported.stdout)  # never allowlisted
+        self.assertIn(f"{a}::a\\x0ab.png\tNOT_REVIEWED\t", report.read_text())
 
     def test_file_whose_name_is_not_utf8_is_failed(self):
         src = self.root / "src"

@@ -54,7 +54,7 @@ preprocess.py       DICOM/image loading and normalization
 status.py           Status, Verdict, MarkMode, Rotation, TODO_STATUSES vocabulary (stdlib only)
 store.py            ReviewStore Protocol, LocalStore, pure filter/summary functions
 lock.py             The work directory's review.lock: acquire, release, live_writer (stdlib only)
-export.py           Export rows and their TSV format: export_rows, format_export (stdlib only)
+export.py           Export rows, the allowlist split and their TSV formats: export_rows, split_allowlist, format_allowlist, format_report (stdlib only)
 atomic.py           write_new_file: create a file atomically, never overwriting (stdlib only)
 server.py           HTTPS + bearer-token server exposing a ReviewStore
 connection.py       RemoteTarget: the ir:// connection string; API_VERSION, package_version, parse_reviewer
@@ -113,10 +113,11 @@ propagation to the root logger; third-party loggers are left alone).
   cannot be loaded or was left out of every grid, an input skipped by
   preprocess, a torn last line of `review.tsv`, a world-accessible work
   directory, a refused verdict, a failed server connection, `export --allow-live`
-  overriding a held lock, an `export --output` file that could not be given
+  overriding a held lock, an `export --output` or `--report` file that could not be given
   the work directory's group. INFO: the server's
-  request log. Nothing else is logged at INFO, so the default stays quiet
-  outside `serve`.
+  request log, and `export`'s one-line count of allowlisted and reported
+  files. Nothing else is logged at INFO, so the default stays quiet
+  outside `serve` and `export`.
 - **Never logged by the server**: access tokens, `Authorization` headers,
   query strings, image keys, `image_id`s and source paths, request bodies, and
   the messages of exceptions raised while serving (only their class names).
@@ -126,7 +127,7 @@ propagation to the root logger; third-party loggers are left alone).
   server records are escaped with Python's `unicode_escape`, so control
   characters cannot reach the terminal.
 - **Not diagnostics**: the CLI's own output stays plain `print`/`click.echo`:
-  the `preprocess` summary, `status` tables, `export`'s TSV, `serve`'s connection-string
+  the `preprocess` summary, `status` tables, `export`'s allowlist TSV, `serve`'s connection-string
   instructions, the review session's start and "nothing to review" lines (all
   stdout), and error messages of failed commands (`Error: ...`, stderr, exit 1
   or 2).
@@ -542,10 +543,16 @@ show in the report, so a second pass remains available. It works the same over
 ### `image-review export`
 
 ```
-image-review export [--work-dir DIR] [--output FILE] [--allow-live]
+image-review export [--work-dir DIR] [--output FILE] [--report FILE] [--allow-live]
 ```
 
-Writes the study's result: which source files are CLEAN and which DIRTY. Local
+Writes the study's result as an **allowlist** with default deny: the source
+files that may be released, each keyed by its path (`image_id`) and its
+`source_sha256`. A file is released only if both match a row; anything not
+listed (DIRTY, unreviewed, failed, ignored, a ZIP as a whole, a file whose
+bytes changed) is denied. Every other file goes to an optional **report**
+(`--report FILE`), for audit and follow-up; it must never be used to choose
+what to release (e.g. "everything not DIRTY"). Local
 only: the rows name `image_id`s (source paths, possibly PHI), which never leave
 the machine holding the work directory, so export runs there (e.g. on the
 cluster). `--remote` is declared only to be refused with a usage error (exit 2)
@@ -553,6 +560,9 @@ saying so; it has no envvar, so `$IMAGE_REVIEW_REMOTE` is ignored and does not
 get in the way of `--work-dir`. There is no server endpoint for it. The whole
 command runs under `interrupt_on(*TERMINATION_SIGNALS)`, so SIGTERM/SIGHUP
 unwind like Ctrl-C and remove a half-written output.
+
+`--report` and `--output` naming the same file (compared after
+`os.path.realpath`) is a usage error (exit 2), checked before anything is read.
 
 **Refusals** (`ClickException`, exit 1, nothing written):
 - `lock.live_writer(work_dir)` finds `review.lock` held by a writer. The lock
@@ -568,31 +578,58 @@ unwind like Ctrl-C and remove a half-written output.
   message says to record a verdict with `review` (or through `serve`) and to
   re-check the last image reviewed.
 - A malformed `skipped.tsv`.
-- A field (any column) containing a control character (Unicode category
+- A field (any column of the allowlist or the report, even without
+  `--report`, so one unsafe field anywhere refuses the whole export)
+  containing a control character (Unicode category
   `Cc`: C0 incl. tab, CR and LF, DEL, and C1 incl. U+0085) or U+2028/U+2029,
   which covers every character `str.splitlines()` breaks at, or starting
   with `"`, which CSV-aware readers (Python's `csv`, pandas, spreadsheet
-  import) take as the start of a quoted field (`format_export`'s `ValueError`,
-  naming the `image_id` with `repr` and the column).
+  import) take as the start of a quoted field (`format_allowlist`'s or
+  `format_report`'s `ValueError`, naming the `image_id` with `repr` and the
+  column).
+- `--output FILE` or `--report FILE` already exists (`os.path.lexists`, so a
+  dangling symlink counts), checked before either is written, so no new report
+  is left beside a stale allowlist. `write_new_file`'s `O_EXCL` still refuses
+  one created after the check.
 
 Then it opens a read-only `LocalStore` (no lock; nothing is written in the
 work directory) and calls its `export_rows()`. That applies the pure
 `export.export_rows` to the manifest entries, `ReviewDB.decisions()` and
-`load_skipped`.
+`load_skipped`, giving one row per source file (below), which
+`export.split_allowlist` splits into the allowlist and the report.
 
-**Format** (`export.format_export`): UTF-8 text, the header line
-`image_id status pass_number timestamp reviewer reason source_sha256`, then one line per row.
-Fields are joined with tabs and every line ends in LF. There is no quoting or
-escaping: fields are written exactly as stored (a `"` not at the start
-included), which the refusals above make unambiguous.
+**Split** (`export.split_allowlist(rows) -> (allowed, report)`): each list
+keeps the rows' order, and every row lands in exactly one. A row is allowed
+only if all of these hold:
+- its status is `CLEAN` (so every part of the file, icon included, is CLEAN);
+- it has a `source_sha256` (a manifest from before the hash columns has none);
+- no row that is not `CLEAN` has the same `source_sha256`: identical bytes
+  cannot be both clean and dirty, so all copies are denied.
+
+Every other row goes to the report unchanged, except that a denied `CLEAN`
+row stays `CLEAN` and gets `not allowlisted: no source_sha256 (work directory
+from an older version)` or `not allowlisted: same content as a file that is
+not CLEAN` added to its `reason` (after any existing note, `; `-joined). So
+CLEAN files of a work directory without hashes are never allowlisted.
+
+**Formats** (`export.format_allowlist`, `export.format_report`): UTF-8 text,
+a header line, then one line per row. Fields are joined with tabs and every
+line ends in LF. There is no quoting or escaping: fields are written exactly
+as stored (a `"` not at the start included), which the refusals above make
+unambiguous. The allowlist's header is
+`source_sha256 image_id pass_number timestamp reviewer` (`ALLOWLIST_HEADER`);
+the report's is
+`image_id status pass_number timestamp reviewer reason source_sha256`
+(`REPORT_HEADER`). The columns mean the same in both (the allowlist's rows are
+all `CLEAN`, with an empty `reason`):
 
 | Column | Description |
 |--------|-------------|
 | `image_id` | The source file: a path, or `<zip>::<entry>` for a ZIP entry (each entry is its own row; a ZIP that opened and has entries is not a file of the export, but one that cannot be opened or has no file entries gets one row under its own path, from its `skipped.tsv` row). A DICOM's icon is never a row of its own (an `ignored` input whose path ends in `#icon` and that is not a part is a file, see *Ignored inputs*) |
 | `status` | The worst status of the file's parts (below): `DIRTY`, then `NOT_REVIEWED`, then `UNREVIEWED`, then `CLEAN`; or `IGNORED` for an `ignored` input with no parts (below), which nobody looked at |
 | `pass_number`, `timestamp`, `reviewer` | From the latest decision on the main part (`X` itself), as recorded; empty when it has none (`UNREVIEWED`, `NOT_REVIEWED`, `IGNORED`, or no main part). After an undo they come from the undo row (its time and the undoing reviewer; the restored pass). `reviewer` is the client's unauthenticated claim, possibly empty in old rows; it is not sanitized, so it may begin with `=`, `+`, `-` or `@`, and the file must be read as text, not as spreadsheet formulas |
-| `reason` | `; `-joined notes, in this order: the main part's skip reason if it is `NOT_REVIEWED`; `main image missing` if there is no main part and `X` was not ignored (it then counts as a `NOT_REVIEWED` part, so the row is never CLEAN; an ignored `X` gives its ignored reason instead); `icon: <skip reason>` if the icon is `NOT_REVIEWED`, else `icon <STATUS>` if the icon is not `CLEAN`. For an `IGNORED` row, its `ignored` reason. Empty otherwise |
-| `source_sha256` | The SHA-256 of the source file (or ZIP entry) recorded in the manifest for `X` or `X#icon` (they share it), for matching rows to files downstream. Empty when the manifest has none: a file that never rendered (only in `skipped.tsv`, so always for `IGNORED`), or a manifest from before the hash columns. It is derived from PHI content and, like `image_id`, appears only in this local file, never over the wire |
+| `reason` | `; `-joined notes, in this order: the main part's skip reason if it is `NOT_REVIEWED`; `main image missing` if there is no main part and `X` was not ignored (it then counts as a `NOT_REVIEWED` part, so the row is never CLEAN; an ignored `X` gives its ignored reason instead); `icon: <skip reason>` if the icon is `NOT_REVIEWED`, else `icon <STATUS>` if the icon is not `CLEAN`. For an `IGNORED` row, its `ignored` reason. For a `CLEAN` row denied by the split, then its `not allowlisted: ...` note. Empty otherwise (always, in the allowlist) |
+| `source_sha256` | The SHA-256 of the source file (or ZIP entry) recorded in the manifest for `X` or `X#icon` (they share it); a file is released only if its own SHA-256 matches its allowlist row. Empty (so never allowlisted) when the manifest has none: a file that never rendered (only in `skipped.tsv`, so always for `IGNORED`), or a manifest from before the hash columns. It is derived from PHI content and, like `image_id`, appears only in these local files, never over the wire |
 
 **Parts and folding.** Every distinct `image_id` of the manifest, and of the
 `failed` rows of `skipped.tsv`, is a part:
@@ -632,8 +669,14 @@ Rows come in order of first appearance of their file: manifest order, then
 `skipped.tsv` order of `failed` rows, then `skipped.tsv` order of `IGNORED`
 rows. Decisions for `image_id`s in neither file are left out.
 
-**Output.** Without `--output` the bytes go to stdout's binary stream.
-`--output FILE` is written by `atomic.write_new_file` (the same helper as
+**Output.** Both texts are built and checked before anything is written. The
+report (with `--report`) is written first, then the allowlist, so a failed
+second write leaves only a report, which releases nothing. Without `--output`
+the allowlist's bytes go to stdout's binary stream. Then one INFO line goes to
+stderr: `N files allowlisted; M in the report (d DIRTY, u UNREVIEWED, n
+NOT_REVIEWED, i IGNORED, c CLEAN not allowlisted)`, one count per
+`ExportStatus` (taken from the `Literal`, so none is left out), CLEAN last. `--report FILE` and
+`--output FILE` are each written by `atomic.write_new_file` (the same helper as
 `review.lock`; see *Concurrency limits*):
 1. A unique hidden sibling (`.FILE.<random>.tmp`) is created with
    `O_CREAT|O_EXCL` and mode 0600. For a group work directory it is then given
@@ -949,12 +992,14 @@ see *`image-review export`*.
 | `batch_summary(rows, statuses)` | The same per batch |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
 | `export.export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons folded in |
-| `export.format_export(rows) -> str` | The export as TSV text with its header; `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
+| `export.split_allowlist(rows) -> tuple[list[AllowedRow], list[ExportRow]]` | (allowed, report) in input order, every row in exactly one: allowed only if `CLEAN`, with a `source_sha256` that no row that is not `CLEAN` shares; a denied `CLEAN` row's `reason` says why |
+| `export.format_allowlist(rows: list[AllowedRow]) -> str` | The allowlist as TSV text with `ALLOWLIST_HEADER` (`AllowedRow` is a `NewType` over `ExportRow` that only `split_allowlist` makes, so passing the report's rows is a type error); `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
+| `export.format_report(rows) -> str` | The report as TSV text with `REPORT_HEADER`; the same `ValueError` |
 
 `load_skipped(work_dir)` parses `skipped.tsv` into `SkippedRow`s (`None` if
 absent; `ValueError` naming `file:line` if malformed). Two IO helpers serve
 `export` (see *`image-review export`*): `atomic.write_new_file(path, file_mode,
-group, text)` creates the `--output` file, and `lock.live_writer(work_dir) ->
+group, text)` creates the `--output` and `--report` files, and `lock.live_writer(work_dir) ->
 WorkDirLocked | None` checks the work dir lock.
 
 ## Review Session (`controller.py`)
@@ -1763,6 +1808,7 @@ the same command shows only remaining unreviewed (pass 1) or flagged (pass 2+)
 images.
 
 When done, `export` (on the machine holding the work directory) writes the
-result, one row per source file; images still DIRTY (or FLAGGED) export as
-`DIRTY`, inputs that failed to preprocess as `NOT_REVIEWED`, and inputs that
-were not images as `IGNORED`.
+allowlist: only the source files reviewed CLEAN, by path and SHA-256; anything
+not listed must not be released. `--report` lists the rest: images still DIRTY
+(or FLAGGED) as `DIRTY`, inputs that failed to preprocess as `NOT_REVIEWED`,
+and inputs that were not images as `IGNORED`.

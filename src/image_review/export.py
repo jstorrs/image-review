@@ -1,10 +1,11 @@
-"""Export rows: one per source file, folded from the manifest, skipped.tsv and decisions (stdlib only)."""
+"""Export rows: one per source file, folded from the manifest, skipped.tsv and decisions; split into the allowlist of
+releasable files and the report of the rest (stdlib only)."""
 
 from __future__ import annotations
 
 import unicodedata
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Literal, NewType
 
 if TYPE_CHECKING:
     from .review_db import Decision
@@ -13,7 +14,8 @@ if TYPE_CHECKING:
 # What an export says about one source file. NOT_REVIEWED: preprocess failed to render it (or part of it), so nobody
 # saw that part. IGNORED: preprocess did not take it for an image (e.g. a PDF), so nobody looked at it at all.
 ExportStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED", "IGNORED"]
-EXPORT_HEADER = ["image_id", "status", "pass_number", "timestamp", "reviewer", "reason", "source_sha256"]
+ALLOWLIST_HEADER = ["source_sha256", "image_id", "pass_number", "timestamp", "reviewer"]
+REPORT_HEADER = ["image_id", "status", "pass_number", "timestamp", "reviewer", "reason", "source_sha256"]
 ICON_SUFFIX = "#icon"  # a DICOM's embedded icon image
 # A part's status: never IGNORED, since an ignored input that is not a part gets a row of its own, never folded.
 _PartStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]
@@ -32,6 +34,10 @@ class ExportRow:
     reviewer: str
     reason: str  # why the row is not simply its main image's verdict (skip reasons, the icon's state); often ""
     source_sha256: str  # the source file's SHA-256 from the manifest; "" when it has none (legacy, or never rendered)
+
+
+# A row split_allowlist allowed: only it may be formatted as the allowlist.
+AllowedRow = NewType("AllowedRow", ExportRow)
 
 
 @dataclass(frozen=True)
@@ -141,22 +147,66 @@ def has_unsafe_char(text: str) -> bool:
     return any(c in _LINE_SEPARATORS or unicodedata.category(c) == "Cc" for c in text)
 
 
-def format_export(rows: list[ExportRow]) -> str:
-    """The export as TSV text: EXPORT_HEADER, then one line per row; tab-separated, LF line endings, no quoting.
+def split_allowlist(rows: list[ExportRow]) -> tuple[list[AllowedRow], list[ExportRow]]:
+    """(allowed, report), each in input order; every row lands in exactly one. A row is allowed only if it is CLEAN,
+    has a source_sha256, and no row that is not CLEAN has the same source_sha256 (identical bytes cannot be both clean
+    and not). A CLEAN row that is denied goes to the report, still CLEAN, with the reason it was not allowlisted."""
+    unsafe_hashes = {r.source_sha256 for r in rows if r.status != "CLEAN" and r.source_sha256}
+    allowed: list[AllowedRow] = []
+    report: list[ExportRow] = []
+    for r in rows:
+        if r.status != "CLEAN":
+            report.append(r)
+        elif not r.source_sha256:
+            report.append(_denied(r, "no source_sha256 (work directory from an older version)"))
+        elif r.source_sha256 in unsafe_hashes:
+            report.append(_denied(r, "same content as a file that is not CLEAN"))
+        else:
+            allowed.append(AllowedRow(r))
+    return allowed, report
+
+
+def _denied(row: ExportRow, why: str) -> ExportRow:
+    """`row` with `not allowlisted: <why>` added to its reason."""
+    return replace(row, reason="; ".join(n for n in (row.reason, f"not allowlisted: {why}") if n))
+
+
+def _pass(row: ExportRow) -> str:
+    return "" if row.pass_number is None else str(row.pass_number)
+
+
+def format_allowlist(rows: list[AllowedRow]) -> str:
+    """The allowlist as TSV text: ALLOWLIST_HEADER, then one line per row (see `_format_tsv`)."""
+    return _format_tsv(
+        ALLOWLIST_HEADER, [(r.image_id, [r.source_sha256, r.image_id, _pass(r), r.timestamp, r.reviewer]) for r in rows]
+    )
+
+
+def format_report(rows: list[ExportRow]) -> str:
+    """The report as TSV text: REPORT_HEADER, then one line per row (see `_format_tsv`)."""
+    return _format_tsv(
+        REPORT_HEADER,
+        [
+            (r.image_id, [r.image_id, r.status, _pass(r), r.timestamp, r.reviewer, r.reason, r.source_sha256])
+            for r in rows
+        ],
+    )
+
+
+def _format_tsv(header: list[str], lines: list[tuple[str, list[str]]]) -> str:
+    """`header`, then each (image_id, fields) line; tab-separated, LF line endings, no quoting.
 
     ValueError, naming the image_id, if a field could not be read back unambiguously: it holds a control character
     (C0 incl. tab, CR and LF, DEL, or C1 incl. U+0085) or U+2028/U+2029, or it starts with `"` (which CSV-aware
     readers take as the start of a quoted field).
     """
-    lines = ["\t".join(EXPORT_HEADER)]
-    for r in rows:
-        fields = [r.image_id, r.status, "" if r.pass_number is None else str(r.pass_number), r.timestamp]
-        fields += [r.reviewer, r.reason, r.source_sha256]
-        for name, value in zip(EXPORT_HEADER, fields, strict=True):
+    out = ["\t".join(header)]
+    for image_id, fields in lines:
+        for name, value in zip(header, fields, strict=True):
             if value.startswith('"') or has_unsafe_char(value):
                 raise ValueError(
-                    f"cannot export {r.image_id!r}: its {name} contains a control character or line separator, or "
+                    f"cannot export {image_id!r}: its {name} contains a control character or line separator, or "
                     'starts with ", which this unquoted TSV cannot hold'
                 )
-        lines.append("\t".join(fields))
-    return "".join(f"{line}\n" for line in lines)
+        out.append("\t".join(fields))
+    return "".join(f"{line}\n" for line in out)

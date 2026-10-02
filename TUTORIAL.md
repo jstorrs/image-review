@@ -50,8 +50,8 @@ image-review review
 # 3. Check your progress
 image-review status
 
-# 4. Export the result
-image-review export --output result.tsv
+# 4. Export the allowlist of files that may be released (and a report of the rest)
+image-review export --output allowlist.tsv --report report.tsv
 ```
 
 ## Step 1: Preprocess
@@ -494,17 +494,26 @@ the report as FLAGGED, so you can run a second pass on them whenever you want.
 
 ## Step 4: Export
 
-The deliverable of a study is which source files are CLEAN and which are
-DIRTY. `export` writes it as TSV, one row per source file:
+The deliverable of a study is the list of source files that may be released.
+`export` writes it as an **allowlist**: only the files reviewed CLEAN, each
+with its path and SHA-256. Everything else is denied by default.
 
 ```bash
-image-review export --work-dir ./review_work --output result.tsv
-image-review export --work-dir ./review_work > result.tsv   # or to stdout
+image-review export --work-dir ./review_work --output allowlist.tsv --report report.tsv
+image-review export --work-dir ./review_work --output allowlist.tsv   # the allowlist alone, without a report
 ```
+
+`allowlist.tsv`:
+
+```
+source_sha256  image_id                      pass_number  timestamp                         reviewer
+3f1c...e09a    /data/site_a.zip::001.dcm     1            2026-03-02T10:14:07.512+00:00     alice
+```
+
+`report.tsv`, everything else:
 
 ```
 image_id                      status        pass_number  timestamp                         reviewer  reason                    source_sha256
-/data/site_a.zip::001.dcm     CLEAN         1            2026-03-02T10:14:07.512+00:00     alice                               3f1c...e09a
 /data/site_a.zip::002.dcm     DIRTY         2            2026-03-03T09:01:44.020+00:00     bob                                 a27b...51c4
 /data/site_a.zip::003.dcm     DIRTY         1            2026-03-02T10:15:30.101+00:00     alice     icon DIRTY                0d9e...7f30
 /data/site_a.zip::004.dcm     UNREVIEWED                                                                                   c6b2...18de
@@ -514,17 +523,32 @@ image_id                      status        pass_number  timestamp              
 
 (Hashes shortened here; each is 64 hex characters.)
 
-(Columns are aligned here for reading. The file is tab-separated UTF-8 with
-LF line endings and no quoting. Export refuses if any field holds
-a control character (tab, CR, LF and the rest of C0, DEL, C1 such as
-U+0085), U+2028 or U+2029, or that starts with `"`: such a value could not be read back
-as one cell.)
+(Columns are aligned here for reading. Both files are tab-separated UTF-8
+with LF line endings and no quoting. Export refuses, writing nothing, if any
+field of either file holds a control character (tab, CR, LF and the rest of
+C0, DEL, C1 such as U+0085), U+2028 or U+2029, or starts with `"`: such a
+value could not be read back as one cell. That holds even without
+`--report`.)
 
-- `status` is the file's latest verdict, `CLEAN` or `DIRTY`. An image that was
-  DIRTY in an earlier pass and not yet re-reviewed (FLAGGED) is exported as
-  `DIRTY`. `UNREVIEWED` files have no verdict yet.
-- A DICOM with an embedded icon was reviewed as two images. Its row is CLEAN
-  only if both were marked CLEAN. Otherwise it takes the worse status (DIRTY,
+**Release a file only if both its path and its SHA-256 match a row of the
+allowlist.** Anything not listed is denied: DIRTY, unreviewed, failed and
+ignored files, a file whose bytes have changed, and a ZIP container as a whole
+(its entries are listed one by one, as `<zip>::<entry>`). The report is for
+audit and follow-up, e.g. what is left to review; never use it to choose what
+to release (for example "everything that is not DIRTY").
+
+- A file is allowlisted only if its status is CLEAN, the manifest has its
+  SHA-256, and no file that is not CLEAN has the same recorded hash
+  (`source_sha256`; identical bytes
+  cannot be both clean and dirty, so all copies are denied). A CLEAN file
+  that was not allowlisted is in the report as CLEAN, with `not allowlisted:
+  ...` in `reason`. In a work directory made by a version before the hash
+  columns, no file has a hash, so nothing is allowlisted.
+- `status` (report) is the file's latest verdict. An image that was DIRTY in
+  an earlier pass and not yet re-reviewed (FLAGGED) is reported as `DIRTY`.
+  `UNREVIEWED` files have no verdict yet.
+- A DICOM with an embedded icon was reviewed as two images. It is CLEAN only
+  if both were marked CLEAN. Otherwise it takes the worse status (DIRTY,
   then NOT_REVIEWED, then UNREVIEWED), and `reason` names the icon's state
   (`icon DIRTY`, or `icon: <error>` if the icon could not be rendered). An
   icon whose file is not in the manifest is reported under that file, as
@@ -534,23 +558,21 @@ as one cell.)
   treat them as possibly containing PHI.
 - `IGNORED` rows are inputs that were not images (the `ignored` rows of
   `skipped.tsv`, e.g. a PDF or a Word file), listed after all other rows.
-  Nobody has looked at them either: they are never CLEAN, so treat them as
-  possibly containing PHI and follow them up.
+  Nobody has looked at them either, so follow them up.
 - `pass_number`, `timestamp` and `reviewer` come from the latest verdict on
   the file's main image and are empty without one. After an undo (`z`) they
   are the undo's time and reviewer.
-- Each entry of a ZIP is its own row (`<zip>::<entry>`); rows follow the
-  manifest's order, then `skipped.tsv`'s (failed, then ignored).
-- Export covers only the files and entries it lists. It never vouches for a
-  ZIP or directory as a whole: a file is CLEAN only if its own row says so.
-- `source_sha256` is the SHA-256 of the source file (or ZIP entry), so you
-  can match rows to files even after they are moved or renamed. It is empty
-  for a file that never rendered, and for work directories made by versions
-  before the hash columns. It is derived from the file's content: treat it as
-  carefully as the `image_id`.
+- Rows follow the manifest's order, then `skipped.tsv`'s (failed, then
+  ignored).
+- `source_sha256` is the SHA-256 of the source file (or ZIP entry), from the
+  manifest: compute each file's own SHA-256 and compare before releasing it.
+  It is derived from the file's content: treat it as carefully as the
+  `image_id`.
 - `reviewer` is whatever name each reviewer gave, unverified, and can start
-  with `=`, `+`, `-` or `@` (one starting with `"` makes export refuse). Import the file into a spreadsheet as text
-  columns rather than opening it directly, so no value is taken as a formula.
+  with `=`, `+`, `-` or `@` (one starting with `"` makes export refuse). Import the files into a spreadsheet as text
+  columns rather than opening them directly, so no value is taken as a formula.
+- Export logs one line to stderr with how many files are allowlisted and how
+  many of each status are in the report.
 
 `image_id`s are the original source paths, which can contain PHI. So export
 runs where the work directory is: on the cluster, not over `--remote`. It
@@ -562,10 +584,12 @@ anyway (with a warning). If a crash cut the last line of `review.tsv` short,
 export refuses until the next verdict is recorded with `review`, which drops
 that line. Re-check the last image you reviewed before the crash.
 
-`--output` creates a new file with the work directory's permissions: 0600
-private, or 0660 and the work directory's group. It refuses to overwrite an
-existing file, and the file appears only once it is complete. It is first
-written to a hidden `.result.tsv.<random>.tmp` beside it, which is removed on
+`--output` and `--report` each create a new file with the work directory's
+permissions: 0600 private, or 0660 and the work directory's group. They refuse
+to overwrite an existing file (or to name the same file), and a file appears
+only once it is complete. The report is written first, so if writing the
+allowlist fails, only a report exists, which releases nothing. Each file is
+first written to a hidden `.allowlist.tsv.<random>.tmp` beside it, which is removed on
 every exit except a hard kill (`kill -9`, a node crash); delete such a
 leftover, as it holds source paths.
 
@@ -762,8 +786,8 @@ image-review review --mode single --work-dir ./phi_review
 # Final status
 image-review status --work-dir ./phi_review
 
-# The result, one row per source file
-image-review export --work-dir ./phi_review --output ./phi_review_result.tsv
+# The allowlist of releasable files, and a report of the rest
+image-review export --work-dir ./phi_review --output ./phi_review_allowlist.tsv --report ./phi_review_report.tsv
 ```
 
 ## Work Directory Files

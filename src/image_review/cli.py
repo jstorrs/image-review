@@ -16,7 +16,7 @@ import click
 from .access import Access, access_of, modes, world_access_warning
 from .atomic import write_new_file
 from .connection import RemoteTarget, parse_reviewer
-from .export import format_export
+from .export import ExportRow, ExportStatus, format_allowlist, format_report, split_allowlist
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
 from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on
 from .status import MarkMode, Rotation, Status
@@ -587,13 +587,27 @@ def status(work_dir, remote, via, check):
         sys.exit(1)
 
 
+def _report_counts(rows: list[ExportRow]) -> str:
+    """Each export status's count among the report's rows, e.g. `4 DIRTY, ..., 0 CLEAN not allowlisted`: every
+    status, CLEAN last."""
+    statuses = [r.status for r in rows]
+    order = sorted(get_args(ExportStatus), key=lambda s: s == "CLEAN")  # stable: the Literal's order otherwise
+    return ", ".join(f"{statuses.count(s)} {'CLEAN not allowlisted' if s == 'CLEAN' else s}" for s in order)
+
+
 @cli.command()
 @work_dir_option
 @click.option(
     "--output",
     type=click.Path(dir_okay=False),
     default=None,
-    help="Write to this new file, with the work directory's file mode and group; an existing file is never overwritten [default: stdout].",
+    help="Write the allowlist to this new file, with the work directory's file mode and group; an existing file is never overwritten [default: stdout].",
+)
+@click.option(
+    "--report",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Also write every file not allowlisted, with its status and reason, to this new file, with the same mode and group as --output; written first, and never overwriting a file. For audit and follow-up only: never use it to choose what to release.",
 )
 @click.option(
     "--allow-live",
@@ -602,42 +616,62 @@ def status(work_dir, remote, via, check):
     help="Export even while a writer (review or serve) has the work directory open; verdicts recorded later are missed.",
 )
 @click.option("--remote", default=None, hidden=True)  # declared only to refuse it; $IMAGE_REVIEW_REMOTE is not read
-def export(work_dir, output, allow_live, remote):
-    """Write the review result as TSV: image_id, status, pass_number, timestamp, reviewer, reason.
+def export(work_dir, output, report, allow_live, remote):
+    """Write the allowlist of releasable files as TSV: source_sha256, image_id, pass_number, timestamp, reviewer.
 
-    One row per source file (a ZIP entry counts as one): CLEAN, DIRTY, UNREVIEWED, NOT_REVIEWED when preprocess
-    failed on it, or IGNORED when preprocess did not take it for an image. A DICOM's icon is folded into its file's
-    row, which is CLEAN only if both are. A FLAGGED image exports as DIRTY. image_ids are source paths and may hold
-    PHI, so export runs only where the work directory is, never with --remote; $IMAGE_REVIEW_REMOTE is ignored.
+    Default deny: release a file only if both its path (image_id; a ZIP entry is `<zip>::<entry>`) and its SHA-256
+    match a row; anything not listed is denied. A file is listed only if it was reviewed CLEAN (a DICOM's icon too),
+    the manifest has its hash, and no file that is not CLEAN has the same recorded hash. --report writes the rest as TSV
+    (image_id, status, pass_number, timestamp, reviewer, reason, source_sha256): DIRTY (a FLAGGED image is DIRTY),
+    UNREVIEWED, NOT_REVIEWED when preprocess failed on it, IGNORED when preprocess did not take it for an image, and
+    CLEAN ones not allowlisted, with why. image_ids are source paths and may hold PHI, so export runs only where the
+    work directory is, never with --remote; $IMAGE_REVIEW_REMOTE is ignored.
     """
     if remote is not None:
         raise click.UsageError(
             "export does not work with --remote: image_ids stay on the server. Run export on the machine (cluster) "
             "holding the work directory, with --work-dir."
         )
+    if report is not None and output is not None and os.path.realpath(report) == os.path.realpath(output):
+        raise click.UsageError("--report and --output name the same file.")
     path = _existing_work_dir(work_dir)
     with interrupt_on(*TERMINATION_SIGNALS):  # a SIGTERM/SIGHUP unwinds like Ctrl-C, removing a half-written file
         writer = live_writer(path)
         _refuse_live(writer, allow_live)
         with open_local_store(path, read_only=True) as store:
+            # A torn review.tsv, a malformed skipped.tsv, or an unsafe field in either text: both are built even
+            # without --report, so one unsafe field anywhere refuses the whole export.
             try:
-                text = format_export(store.export_rows())
+                allowed, denied = split_allowlist(store.export_rows())
+                allowlist_text, report_text = format_allowlist(allowed), format_report(denied)
             except ValueError as e:
                 raise click.ClickException(str(e)) from e
         if writer is None:  # one that opened the work directory while it was read may have changed verdicts
             _refuse_live(live_writer(path), allow_live)
-        if output is None:
-            click.get_binary_stream("stdout").write(text.encode("utf-8"))
-            return
         st = path.stat()
         access = access_of(st.st_mode)
         group = st.st_gid if access == "group" else None  # the study's group, wherever the file is created
-        try:
-            write_new_file(Path(output), modes(access).file_mode, group, text)
-        except FileExistsError:
-            raise click.ClickException(f"{output} already exists; not overwriting it.") from None
-        except OSError as e:
-            raise click.ClickException(f"Cannot write {output}: {e}") from e
+
+        def write(name: str, text: str) -> None:
+            try:
+                write_new_file(Path(name), modes(access).file_mode, group, text)
+            except FileExistsError:
+                raise click.ClickException(f"{name} already exists; not overwriting it.") from None
+            except OSError as e:
+                raise click.ClickException(f"Cannot write {name}: {e}") from e
+
+        # Refuse an existing target before writing either, so no new report sits beside a stale allowlist;
+        # write_new_file's O_EXCL still guards against one created from now on.
+        for name in (report, output):
+            if name is not None and os.path.lexists(name):
+                raise click.ClickException(f"{name} already exists; not overwriting it.")
+        if report is not None:  # first: if the allowlist then fails, only the report exists, and it releases nothing
+            write(report, report_text)
+        if output is None:
+            click.get_binary_stream("stdout").write(allowlist_text.encode("utf-8"))
+        else:
+            write(output, allowlist_text)
+    log.info("%d files allowlisted; %d in the report (%s)", len(allowed), len(denied), _report_counts(denied))
 
 
 @cli.command()
