@@ -387,9 +387,9 @@ split or merge rows there. A `"` anywhere else is written as is.
 | Column | Description |
 |--------|-------------|
 | `image_id` | The source file's path, as in `manifest.tsv` / `skipped.tsv`; a file inside a ZIP is `<zip>::<entry>`, one row per entry |
-| `status` | `CLEAN`, `DIRTY`, `UNREVIEWED` (no verdict yet) or `NOT_REVIEWED` (preprocess could not render it, or its icon) |
+| `status` | `CLEAN`, `DIRTY`, `UNREVIEWED` (no verdict yet), `NOT_REVIEWED` (preprocess could not render it, or its icon) or `IGNORED` (preprocess did not take it for an image, so nobody looked at it) |
 | `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. After an undo they are the undo's time and reviewer. `reviewer` is the reviewer's unverified claim |
-| `reason` | Why the row is not simply the main image's verdict: preprocess's error for a `NOT_REVIEWED` file, `icon DIRTY` / `icon UNREVIEWED` / `icon: <error>` for its icon, `main image missing` (an icon whose file is not in the manifest; the row is then at best `NOT_REVIEWED`); otherwise empty |
+| `reason` | Why the row is not simply the main image's verdict: preprocess's error for a `NOT_REVIEWED` file, `icon DIRTY` / `icon UNREVIEWED` / `icon: <error>` for its icon, `main image missing` (an icon whose file is not in the manifest; the row is then at best `NOT_REVIEWED`), preprocess's reason for an `IGNORED` file; otherwise empty |
 | `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest, for matching rows to files downstream; empty for a file that never rendered or a work dir from an older version. It is derived from the file's content, so treat it like the `image_id` |
 
 - A DICOM's embedded icon (`<path>#icon` in the manifest) is folded into its
@@ -397,13 +397,17 @@ split or merge rows there. A `"` anywhere else is written as is.
   DIRTY if either is, else NOT_REVIEWED, else UNREVIEWED.
 - Inputs that failed to preprocess (the `failed` rows of `skipped.tsv`) are
   `NOT_REVIEWED`: nobody has looked at them, so treat them as possibly
-  containing PHI. This applies even if the manifest also lists them. `ignored`
-  inputs (not images) are left out.
+  containing PHI. This applies even if the manifest also lists them.
+- Inputs preprocess did not take for images (the `ignored` rows of
+  `skipped.tsv`: a PDF, a Word file, a DICOMDIR, ...) are `IGNORED`, one row
+  each, after all other rows. They are never CLEAN: nobody has looked at
+  them, so treat them as possibly containing PHI and follow them up. An
+  ignored input the manifest also lists is `NOT_REVIEWED` instead.
 - A FLAGGED image (DIRTY in an earlier pass, not yet re-reviewed) is `DIRTY`.
-- Rows follow the manifest's order, then `skipped.tsv`'s, one per file.
+- Rows follow the manifest's order, then `skipped.tsv`'s (failed, then
+  ignored), one per file.
 - Export covers only the files and entries it lists. It never vouches for a
-  ZIP or directory as a whole, because ignored members (a DICOMDIR, a PDF, ...)
-  are not listed.
+  ZIP or directory as a whole: a file is CLEAN only if its own row says so.
 - `reviewer` values can start with `=`, `+`, `-` or `@`. Open the file as text
   (e.g. import it as text columns), not by double-clicking it into a
   spreadsheet that would read them as formulas.

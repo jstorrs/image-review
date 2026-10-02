@@ -183,7 +183,8 @@ world-readable.
 - **Worst-of rule.** A file's exported status is the worst of its parts (the
   image and its embedded icon): `DIRTY`, then `NOT_REVIEWED`, then
   `UNREVIEWED`, then `CLEAN`. It is `CLEAN` only if every part is. Inputs that
-  failed to preprocess are `NOT_REVIEWED`: nobody has looked at them, so treat
+  failed to preprocess are `NOT_REVIEWED`, and inputs that were not images
+  (a PDF, a Word file, ...) are `IGNORED`: nobody has looked at them, so treat
   them as possibly containing PHI. A FLAGGED image (DIRTY in an earlier pass,
   not yet re-reviewed) exports as `DIRTY`.
 - **DIRTY-only placeholders.** The viewer shows an image that cannot be
@@ -191,8 +192,9 @@ world-readable.
   CLEAN, so an image nobody could see is not cleared by the viewer (see the
   limit above).
 - **What export does not vouch for.** It covers only the files and ZIP
-  entries it lists, never a ZIP or directory as a whole; ignored members (a
-  DICOMDIR, a PDF, ...) are not listed.
+  entries it lists, never a ZIP or directory as a whole. Ignored inputs (a
+  DICOMDIR, a PDF, ...) are listed as `IGNORED`, never `CLEAN`: treat them as
+  possibly containing PHI.
 
 ## Reporting a vulnerability
 

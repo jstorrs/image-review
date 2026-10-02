@@ -605,10 +605,10 @@ def status(work_dir, remote, via, check):
 def export(work_dir, output, allow_live, remote):
     """Write the review result as TSV: image_id, status, pass_number, timestamp, reviewer, reason.
 
-    One row per source file (a ZIP entry counts as one): CLEAN, DIRTY, UNREVIEWED, or NOT_REVIEWED when
-    preprocess failed on it. A DICOM's icon is folded into its file's row, which is CLEAN only if both are. A FLAGGED
-    image exports as DIRTY. Ignored inputs (not images) are left out. image_ids are source paths and may hold PHI, so
-    export runs only where the work directory is, never with --remote; $IMAGE_REVIEW_REMOTE is ignored.
+    One row per source file (a ZIP entry counts as one): CLEAN, DIRTY, UNREVIEWED, NOT_REVIEWED when preprocess
+    failed on it, or IGNORED when preprocess did not take it for an image. A DICOM's icon is folded into its file's
+    row, which is CLEAN only if both are. A FLAGGED image exports as DIRTY. image_ids are source paths and may hold
+    PHI, so export runs only where the work directory is, never with --remote; $IMAGE_REVIEW_REMOTE is ignored.
     """
     if remote is not None:
         raise click.UsageError(

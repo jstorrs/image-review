@@ -509,6 +509,7 @@ image_id                      status        pass_number  timestamp              
 /data/site_a.zip::003.dcm     DIRTY         1            2026-03-02T10:15:30.101+00:00     alice     icon DIRTY                0d9e...7f30
 /data/site_a.zip::004.dcm     UNREVIEWED                                                                                   c6b2...18de
 /data/site_b/broken.dcm       NOT_REVIEWED                                                           cannot decode pixel data
+/data/site_b/referral.pdf     IGNORED                                                                not an image (unrecognized content)
 ```
 
 (Hashes shortened here; each is 64 hex characters.)
@@ -530,16 +531,18 @@ as one cell.)
   NOT_REVIEWED at best (`main image missing`).
 - `NOT_REVIEWED` rows are inputs that failed to preprocess (the `failed`
   rows of `skipped.tsv`, with its `reason`). Nobody has looked at them, so
-  treat them as possibly containing PHI. Ignored inputs (not images) are left
-  out.
+  treat them as possibly containing PHI.
+- `IGNORED` rows are inputs that were not images (the `ignored` rows of
+  `skipped.tsv`, e.g. a PDF or a Word file), listed after all other rows.
+  Nobody has looked at them either: they are never CLEAN, so treat them as
+  possibly containing PHI and follow them up.
 - `pass_number`, `timestamp` and `reviewer` come from the latest verdict on
   the file's main image and are empty without one. After an undo (`z`) they
   are the undo's time and reviewer.
 - Each entry of a ZIP is its own row (`<zip>::<entry>`); rows follow the
-  manifest's order, then `skipped.tsv`'s.
+  manifest's order, then `skipped.tsv`'s (failed, then ignored).
 - Export covers only the files and entries it lists. It never vouches for a
-  ZIP or directory as a whole, because ignored members (a DICOMDIR, a PDF, ...)
-  are not listed.
+  ZIP or directory as a whole: a file is CLEAN only if its own row says so.
 - `source_sha256` is the SHA-256 of the source file (or ZIP entry), so you
   can match rows to files even after they are moved or renamed. It is empty
   for a file that never rendered, and for work directories made by versions

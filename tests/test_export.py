@@ -92,6 +92,7 @@ EXPECTED = (
     f"/src/m.dcm\tDIRTY\t\t\t\tmain image missing; icon DIRTY\t{sha('/src/m.dcm')}\n"
     "/src/f.dcm\tNOT_REVIEWED\t\t\t\tcannot decode pixel data\t\n"  # never rendered: no source hash
     "/src/g.zip::x.dcm\tNOT_REVIEWED\t\t\t\tunsupported: nested zip\t\n"
+    "/src/notes.txt\tIGNORED\t\t\t\tnot an image\t\n"  # not an image: listed, never CLEAN
 ).encode()
 
 
@@ -173,10 +174,78 @@ class TestExportRows(ExportTestCase):
             HEADER,
             [("/src/scan.dcm#icon", "b1", "CLEAN", "1", "t", "al", "single", "1", "0.1")],
         )
-        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/scan.dcm\tignored\tDICOMDIR\n")
+        (self.work / "skipped.tsv").unlink()  # scan.dcm is in neither file (an ignored one says why instead, below)
         result = self.export()
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(result.stdout.splitlines()[1], "/src/scan.dcm\tNOT_REVIEWED\t\t\t\tmain image missing\t")
+
+    def test_ignored_main_with_an_icon_is_one_not_reviewed_row_saying_why(self):
+        write_tsv(self.work / "manifest.tsv", LEGACY_MANIFEST_HEADER, [("b1", "b1/s.jpg", "/src/scan.dcm#icon")])
+        (self.work / "review.tsv").unlink()
+        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/scan.dcm\tignored\tDICOMDIR\n")
+        result = self.export()
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            result.stdout.splitlines()[1:], ["/src/scan.dcm\tNOT_REVIEWED\t\t\t\tDICOMDIR; icon UNREVIEWED\t"]
+        )
+
+    def test_failed_and_ignored_is_one_not_reviewed_row(self):
+        (self.work / "skipped.tsv").write_text(
+            "image_id\tkind\treason\n/src/x.dcm\tignored\tnot an image\n/src/x.dcm\tfailed\tbad\n"
+        )
+        result = self.export()
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            [line for line in result.stdout.splitlines() if line.startswith("/src/x.dcm")],
+            ["/src/x.dcm\tNOT_REVIEWED\t\t\t\tbad\t"],
+        )
+
+    def test_clean_image_also_ignored_is_not_clean(self):
+        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/a.dcm\tignored\tnot an image\n")
+        result = self.export()
+        self.assertEqual(result.exit_code, 0, result.output)
+        lines = [line for line in result.stdout.splitlines() if line.startswith("/src/a.dcm")]
+        self.assertEqual(lines, [f"/src/a.dcm\tNOT_REVIEWED\t\t\t\tnot an image\t{sha('/src/a.dcm')}"])
+
+    def test_ignored_icon_name_is_its_own_row(self):
+        write_tsv(self.work / "manifest.tsv", LEGACY_MANIFEST_HEADER, [("b1", "b1/a.jpg", "/src/a.dcm")])
+        (self.work / "skipped.tsv").write_text(
+            "image_id\tkind\treason\n"
+            "/src/a.dcm#icon\tignored\tnot an image\n"  # a file named so: not folded into a.dcm
+            "/src/z.dcm#icon\tignored\tnot an image\n"
+            "/src/a.dcm#icon\tignored\tsecond reason\n"  # repeated: one row, first reason
+        )
+        result = self.export()
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            result.stdout.splitlines()[1:],
+            [
+                "/src/a.dcm\tCLEAN\t1\t2026-01-01T00:00:01+00:00\talice\t\t",
+                "/src/a.dcm#icon\tIGNORED\t\t\t\tnot an image\t",
+                "/src/z.dcm#icon\tIGNORED\t\t\t\tnot an image\t",
+            ],
+        )
+
+    def test_ignored_icon_in_the_manifest_folds_into_its_file(self):
+        write_tsv(
+            self.work / "manifest.tsv",
+            LEGACY_MANIFEST_HEADER,
+            [("b1", "b1/h.jpg", "/src/h.dcm"), ("b1", "b1/h_icon.jpg", "/src/h.dcm#icon")],
+        )
+        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/h.dcm#icon\tignored\tnot an image\n")
+        result = self.export()
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            result.stdout.splitlines()[1:],
+            ["/src/h.dcm\tNOT_REVIEWED\t1\t2026-01-02T00:00:07+00:00\tdave\ticon: not an image\t"],  # both CLEAN
+        )
+
+    def test_unsafe_ignored_image_id_is_refused(self):
+        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/a\x85b.pdf\tignored\tnot an image\n")
+        result = self.export()
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("cannot export '/src/a\\x85b.pdf'", result.output)
+        self.assertEqual(result.stdout, "")
 
     def test_malformed_skipped_is_a_clean_error(self):
         (self.work / "skipped.tsv").write_text("wrong\n")

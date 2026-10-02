@@ -87,7 +87,7 @@ if you share work directories with other people.
   - `serve` serves a work directory over HTTPS, with a self-signed
     certificate and a bearer token in an `ir://` connection string.
   - `export` writes the result as TSV, with one row per source file
-    (CLEAN, DIRTY, UNREVIEWED or NOT_REVIEWED). It has `--output FILE`, which
+    (CLEAN, DIRTY, UNREVIEWED, NOT_REVIEWED or IGNORED). It has `--output FILE`, which
     never overwrites. It refuses while a writer holds the work directory
     unless `--allow-live` is given.
 - Global `-v`/`--verbose` (debug) and `-q`/`--quiet` (warnings and errors
@@ -188,6 +188,13 @@ it is reported as "too old to report its API version".
   under a directory or ZIP so named) is now a `failed` row in `skipped.tsv`
   under its escaped name: a non-UTF-8 byte or ASCII control as `\xNN`, any
   other as `\uNNNN`. Rename it and preprocess again.
+- **`export` lists ignored inputs.** It used to leave out the `ignored` rows
+  of `skipped.tsv`, so an input that was not an image (a PDF, a Word file, a
+  DICOMDIR, ...) was never mentioned and nobody followed it up. Each is now a
+  row with status `IGNORED` after all other rows, never CLEAN. A work
+  directory made by a 0.3.0 pre-release may hold an ignored name with a
+  control character or U+2028/U+2029, which now makes `export` refuse;
+  preprocess again into a new work directory (its verdicts must be redone).
 
 ### Requirements
 

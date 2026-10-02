@@ -341,7 +341,7 @@ through overlapping SOURCEs, so the same pair) is not a collision either: one ve
 for both, and both rows stay in the manifest (see *Key versus `image_id`*).
 Only rendered images are compared: a `failed` or `ignored` row sharing an
 `image_id` with an image changes nothing (`export` already reports an
-`image_id` with a `failed` row as `NOT_REVIEWED`).
+`image_id` with a `failed` or `ignored` row as `NOT_REVIEWED`).
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
@@ -588,16 +588,19 @@ included), which the refusals above make unambiguous.
 
 | Column | Description |
 |--------|-------------|
-| `image_id` | The source file: a path, or `<zip>::<entry>` for a ZIP entry (each entry is its own row; a ZIP is not a file of the export). A DICOM's icon is never a row of its own |
-| `status` | The worst status of the file's parts (below): `DIRTY`, then `NOT_REVIEWED`, then `UNREVIEWED`, then `CLEAN` |
-| `pass_number`, `timestamp`, `reviewer` | From the latest decision on the main part (`X` itself), as recorded; empty when it has none (`UNREVIEWED`, `NOT_REVIEWED`, or no main part). After an undo they come from the undo row (its time and the undoing reviewer; the restored pass). `reviewer` is the client's unauthenticated claim, possibly empty in old rows; it is not sanitized, so it may begin with `=`, `+`, `-` or `@`, and the file must be read as text, not as spreadsheet formulas |
-| `reason` | `; `-joined notes, in this order: the main part's skip reason if it is `NOT_REVIEWED`; `main image missing` if there is no main part (it then counts as a `NOT_REVIEWED` part, so the row is never CLEAN); `icon: <skip reason>` if the icon is `NOT_REVIEWED`, else `icon <STATUS>` if the icon is not `CLEAN`. Empty otherwise |
-| `source_sha256` | The SHA-256 of the source file (or ZIP entry) recorded in the manifest for `X` or `X#icon` (they share it), for matching rows to files downstream. Empty when the manifest has none: a file that never rendered (only in `skipped.tsv`), or a manifest from before the hash columns. It is derived from PHI content and, like `image_id`, appears only in this local file, never over the wire |
+| `image_id` | The source file: a path, or `<zip>::<entry>` for a ZIP entry (each entry is its own row; a ZIP that opened and has entries is not a file of the export, but one that cannot be opened or has no file entries gets one row under its own path, from its `skipped.tsv` row). A DICOM's icon is never a row of its own (an `ignored` input whose path ends in `#icon` and that is not a part is a file, see *Ignored inputs*) |
+| `status` | The worst status of the file's parts (below): `DIRTY`, then `NOT_REVIEWED`, then `UNREVIEWED`, then `CLEAN`; or `IGNORED` for an `ignored` input with no parts (below), which nobody looked at |
+| `pass_number`, `timestamp`, `reviewer` | From the latest decision on the main part (`X` itself), as recorded; empty when it has none (`UNREVIEWED`, `NOT_REVIEWED`, `IGNORED`, or no main part). After an undo they come from the undo row (its time and the undoing reviewer; the restored pass). `reviewer` is the client's unauthenticated claim, possibly empty in old rows; it is not sanitized, so it may begin with `=`, `+`, `-` or `@`, and the file must be read as text, not as spreadsheet formulas |
+| `reason` | `; `-joined notes, in this order: the main part's skip reason if it is `NOT_REVIEWED`; `main image missing` if there is no main part and `X` was not ignored (it then counts as a `NOT_REVIEWED` part, so the row is never CLEAN; an ignored `X` gives its ignored reason instead); `icon: <skip reason>` if the icon is `NOT_REVIEWED`, else `icon <STATUS>` if the icon is not `CLEAN`. For an `IGNORED` row, its `ignored` reason. Empty otherwise |
+| `source_sha256` | The SHA-256 of the source file (or ZIP entry) recorded in the manifest for `X` or `X#icon` (they share it), for matching rows to files downstream. Empty when the manifest has none: a file that never rendered (only in `skipped.tsv`, so always for `IGNORED`), or a manifest from before the hash columns. It is derived from PHI content and, like `image_id`, appears only in this local file, never over the wire |
 
 **Parts and folding.** Every distinct `image_id` of the manifest, and of the
 `failed` rows of `skipped.tsv`, is a part:
 - It is `NOT_REVIEWED` if `skipped.tsv` has any `failed` row for it, even if
   the manifest lists it too. Repeated rows count once, with the first reason.
+  A manifest `image_id` with an `ignored` row (and no `failed` one) is
+  likewise `NOT_REVIEWED`, with the first `ignored` reason: the two files
+  disagree, so nobody can vouch for it.
 - Otherwise its status is its latest decision's (CLEAN or DIRTY; a tombstone
   leaves none), or `UNREVIEWED` without one.
 
@@ -605,14 +608,29 @@ Status is not pass-aware: a DIRTY from an earlier pass that is FLAGGED in the
 current one is `DIRTY` (it still contains PHI as far as anyone has said).
 A part `X#icon` (`export.ICON_SUFFIX`) is
 folded into the row of `X`. When there is no part `X` (e.g. a file literally
-named `scan.dcm#icon` whose `scan.dcm` was ignored), the row is still `X` and
-the missing main part counts as `NOT_REVIEWED` (`main image missing`), so it
-is never CLEAN. `ignored` rows (not images) are left out. Rows cover only the
-listed files and ZIP entries, never a ZIP or directory as a whole: its ignored
-members are not listed.
+named `scan.dcm#icon` with no `scan.dcm` beside it), the row is still `X` and
+the missing main part counts as `NOT_REVIEWED` (`main image missing`, or the
+ignored reason if `X` was ignored, see below), so it is never CLEAN.
+
+**Ignored inputs.** Each distinct `image_id` of the `ignored` rows of
+`skipped.tsv` (inputs preprocess did not take for images, e.g. a PDF) gets a
+row of its own, `IGNORED`, with the first such row's reason and every other
+column empty, unless an earlier row already covers it: it is a part (a
+manifest or `failed` `image_id`, reported as above), or the file `X` of a
+folded row: an ignored `X` with a manifest or `failed` `X#icon` but no part
+`X` is that row's main part, `NOT_REVIEWED` with the ignored reason (e.g.
+`DICOMDIR index`) in place of `main image missing`. If the manifest lists
+`X#icon`, an ignored `X#icon` is that part (`NOT_REVIEWED`, folded into `X` as
+`icon: <reason>`); otherwise it is a source path like any other (a file may be
+named so) and gets its own `IGNORED` row, not folded into `X`. An `IGNORED`
+row is never CLEAN; treat its file as possibly containing PHI. Rows cover only
+the listed files and ZIP entries, never a ZIP or directory as a whole. An
+archive that cannot be opened (`failed`) or has no file entries (`ignored`,
+`zip contains no files`) has one row under its own path.
 
 Rows come in order of first appearance of their file: manifest order, then
-`skipped.tsv` order. Decisions for `image_id`s in neither file are left out.
+`skipped.tsv` order of `failed` rows, then `skipped.tsv` order of `IGNORED`
+rows. Decisions for `image_id`s in neither file are left out.
 
 **Output.** Without `--output` the bytes go to stdout's binary stream.
 `--output FILE` is written by `atomic.write_new_file` (the same helper as
@@ -750,7 +768,8 @@ Tab-separated UTF-8 with `\r\n` line endings, one row per input that produced no
 
 It contains source paths, so it is as sensitive as `manifest.tsv`. `export`
 makes each `failed` `image_id` `NOT_REVIEWED` with its `reason` (folding an
-icon's into its file's row), and leaves `ignored` rows out.
+icon's into its file's row), and lists each `ignored` one not otherwise
+covered as `IGNORED` with its `reason` (see *Ignored inputs* under *Parts and folding*).
 
 ### `review.lock`
 
@@ -869,7 +888,7 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 | `ManifestRow` | Frozen dataclass: `key` (the `preprocessed_path`) and `batch` |
 | `SkippedRow` | Frozen dataclass: one `skipped.tsv` row, `image_id`, `kind` (`SkipKind`, `Literal["failed", "ignored"]`) and `reason` |
 | `ManifestEntry` | Frozen dataclass: one `manifest.tsv` row, `batch`, `key`, `image_id`, and `source_sha256` and `jpeg_sha256` (`str \| None`; `None` in a 3-column manifest). Local only |
-| `ExportRow` | (`export.py`) Frozen dataclass: one `export` row (a source file), `image_id`, `status` (`ExportStatus`, `Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]`), `pass_number` (`int \| None`), `timestamp`, `reviewer`, `reason`, `source_sha256` (`""` when unknown) |
+| `ExportRow` | (`export.py`) Frozen dataclass: one `export` row (a source file), `image_id`, `status` (`ExportStatus`, `Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED", "IGNORED"]`), `pass_number` (`int \| None`), `timestamp`, `reviewer`, `reason`, `source_sha256` (`""` when unknown) |
 | `StoreUnavailable` | Exception: the store cannot be reached (as opposed to a bad key or image) |
 
 ### Key versus `image_id`
@@ -1745,4 +1764,5 @@ images.
 
 When done, `export` (on the machine holding the work directory) writes the
 result, one row per source file; images still DIRTY (or FLAGGED) export as
-`DIRTY`, and inputs that failed to preprocess as `NOT_REVIEWED`.
+`DIRTY`, inputs that failed to preprocess as `NOT_REVIEWED`, and inputs that
+were not images as `IGNORED`.
