@@ -1,12 +1,20 @@
 import csv
 import hashlib
+import io
+import tempfile
+import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pydicom
 import skimage as ski
+from PIL import Image
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import SecondaryCaptureImageStorage, generate_uid
+
+from image_review import grid_packer as grid_packer_module
+from image_review.store import LocalStore
 
 # (batch, preprocessed_path, image_id); image_ids deliberately differ from keys
 ROWS = [
@@ -99,3 +107,40 @@ def start_server(work_dir: Path, port: int = 0):
         store.close()
 
     return server, target, stop
+
+
+class StoreTestCase(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.work_dir = Path(self._tmp.name)
+        self.make_work_dir()
+        self.store = LocalStore(self.work_dir)
+        self.addCleanup(self.store.close)
+
+    def make_work_dir(self) -> None:
+        make_work_dir(self.work_dir)
+
+
+def _jpeg_bytes(mode: str) -> bytes:
+    """A 257x131 gradient-plus-noise JPG made like preprocess: Pillow, q95, 4:4:4."""
+    rng = np.random.default_rng(0)
+    y, x = np.mgrid[0:131, 0:257]
+    base = np.stack([x * 255 // 256, y * 255 // 130, (x + y) % 256], axis=-1)
+    pixels = np.clip(base + rng.integers(-20, 20, base.shape), 0, 255).astype(np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(pixels).convert(mode).save(buf, "JPEG", quality=95, subsampling=0)
+    return buf.getvalue()
+
+
+def dropping_packer(rect_id: int):
+    """Patch grid_packer.newPacker so its packer leaves out the rect `rect_id` (the item's index)."""
+    real = grid_packer_module.newPacker
+
+    def factory(*args, **kwargs):
+        packer = real(*args, **kwargs)
+        rect_list = packer.rect_list
+        packer.rect_list = lambda: [r for r in rect_list() if r[5] != rect_id]
+        return packer
+
+    return mock.patch.object(grid_packer_module, "newPacker", factory)
