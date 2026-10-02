@@ -1393,6 +1393,29 @@ class TestEventLoop(EventLoopTestCase):
         show_message.assert_called_once_with(
             "No more todo images this way - 1 todo left - [Left/Right] wrap - [b] next batch"
         )
+        s.handle_events([key(pg.K_LEFT)])  # wraps to the last todo item, not the CLEAN last item
+        self.assertEqual((s._ui_state, s._cursor), (UIState.REVIEWING, 0))
+
+    def test_todo_only_right_from_end_screen_skips_a_clean_first_item(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_c)])  # item 0 CLEAN: item 1 is the first todo item
+        s.handle_events([key(pg.K_RIGHT), key(pg.K_u)])
+        self.assertEqual(s._cursor, 1)
+        s.handle_events([key(pg.K_RIGHT)])
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        s.handle_events([key(pg.K_RIGHT)])
+        self.assertEqual((s._ui_state, s._cursor), (UIState.REVIEWING, 1))
+
+    def test_todo_only_end_screen_wraps_to_first_and_last_todo(self):
+        s = self.reviewing()
+        s.handle_events([key(pg.K_u), key(pg.K_RIGHT), key(pg.K_RIGHT)])
+        self.assertEqual(s._ui_state, UIState.END_MESSAGE)
+        for wrap_key, onto, back_key in ((pg.K_LEFT, 1, pg.K_RIGHT), (pg.K_RIGHT, 0, pg.K_LEFT)):
+            with self.subTest(key=wrap_key):
+                s.handle_events([key(wrap_key)])
+                self.assertEqual((s._ui_state, s._cursor), (UIState.REVIEWING, onto))
+                s.handle_events([key(back_key)])  # off the end of the list again
+                self.assertEqual(s._ui_state, UIState.END_MESSAGE)
 
     def test_empty_mode_message_is_not_painted_over(self):
         s = self.reviewing()

@@ -150,6 +150,11 @@ version on both machines. The versions reached during development:
 `GET /version` reports the API version and package version. A server without
 it is reported as "too old to report its API version".
 
+### Fixes
+
+- **Left from the end screen in todo-only mode goes to the last todo item.** It
+  used to skip that item when it was left unmarked.
+
 ### Requirements
 
 Python >= 3.12. Minimum dependency versions, checked by running the test suite

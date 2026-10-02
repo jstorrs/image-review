@@ -445,13 +445,15 @@ class ReviewSession:
     def _count_todo(self) -> int:
         return sum(1 for item in self._items if self._is_todo(item))
 
-    def next_todo(self, direction: int = 1, *, wrap: bool = True) -> bool:
-        """Navigate to next todo item. Returns True if found."""
+    def _seek(self, start: int, direction: int, *, todo_only: bool, wrap: bool) -> bool:
+        """Show the next item from `start` in `direction`, among the todo items if `todo_only`.
+        Start at -1 going forward, or at len(items) going back with `wrap`, to search the whole
+        list. Returns False, leaving the cursor alone, when there is none."""
         idx = next_index(
             len(self._items),
-            self._cursor,
+            start,
             direction,
-            is_todo=lambda i: self._is_todo(self._items[i]),
+            is_todo=(lambda i: self._is_todo(self._items[i])) if todo_only else None,
             wrap=wrap,
         )
         if idx is None:
@@ -459,6 +461,10 @@ class ReviewSession:
         self._cursor = idx
         self._show_current()
         return True
+
+    def next_todo(self, direction: int = 1, *, wrap: bool = True) -> bool:
+        """Navigate to next todo item. Returns True if found."""
+        return self._seek(self._cursor, direction, todo_only=True, wrap=wrap)
 
     def _show_current(self):
         self._shown_at = None
@@ -497,38 +503,19 @@ class ReviewSession:
             return _grid_status(self._statuses, item.keys)
         return self._statuses[item.keys[0]]
 
-    def _continue_autoplay(self, direction: int, autoplay: bool = False):
-        if direction == 1 and (autoplay or self.autoplay):
-            self.autoplay = True
-            pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
-        elif direction == -1:
-            self.autoplay = False
-
     def _navigate(self, direction: int, *, autoplay: bool = False):
         if not self._items:
             return
 
-        if self._todo_only:
-            if self.next_todo(direction, wrap=False):
-                if self._ui_state == UIState.REVIEWING:
-                    self._continue_autoplay(direction, autoplay)
-            else:
-                self._stop_autoplay()
-                self._ui_state = UIState.END_MESSAGE
-                self._viewer.show_message(self._no_todo_message())
-            return
-
-        idx = next_index(len(self._items), self._cursor, direction, is_todo=None, wrap=False)
-        if idx is None:
+        if not self._seek(self._cursor, direction, todo_only=self._todo_only, wrap=False):
             self._stop_autoplay()
             self._ui_state = UIState.END_MESSAGE
-            self._viewer.show_message(self._end_message(END_OF_LIST_MESSAGE))
-            return
-
-        self._cursor = idx
-        self._show_current()
-        if self._ui_state == UIState.REVIEWING:
-            self._continue_autoplay(direction, autoplay)
+            self._viewer.show_message(
+                self._no_todo_message() if self._todo_only else self._end_message(END_OF_LIST_MESSAGE)
+            )
+        elif self._ui_state == UIState.REVIEWING and direction == 1 and (autoplay or self.autoplay):
+            self.autoplay = True
+            pg.time.set_timer(AUTOPLAY_EVENT, 500, 1)
 
     def next_image(self, *, autoplay=False):
         self._navigate(1, autoplay=autoplay)
@@ -667,15 +654,10 @@ class ReviewSession:
             direction = -1
         if direction is not None and self._items:  # no items: keep the message (e.g. lost connection)
             self._ui_state = UIState.REVIEWING
-            if self._todo_only:
-                if direction == 1:
-                    self._cursor = -1
-                if not self.next_todo(direction):
-                    self._ui_state = UIState.END_MESSAGE
-                    self._viewer.show_message(self._no_todo_message())
-            else:
-                self._cursor = 0 if direction == 1 else len(self._items) - 1
-                self._show_current()
+            start = -1 if direction == 1 else len(self._items)
+            if not self._seek(start, direction, todo_only=self._todo_only, wrap=True):
+                self._ui_state = UIState.END_MESSAGE
+                self._viewer.show_message(self._no_todo_message())
         elif key == pg.K_m:
             if pg.key.get_mods() & pg.KMOD_SHIFT:
                 self._switch_to_grid("never")
