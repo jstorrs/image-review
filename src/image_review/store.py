@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol, Self, get_args
 
-from .access import policy_of_dir
+from .access import MANIFEST_NAME, policy_of_dir
 from .review_db import Change, Decision, ReviewDB
 from .status import TODO_STATUSES, MarkMode, Status, Verdict
 
@@ -127,7 +127,7 @@ def load_manifest(work_dir: Path) -> list[ManifestEntry]:
 
     Both the current header and the legacy 3-column one (no hashes) are accepted; every row has the header's width.
     """
-    path = work_dir / "manifest.tsv"
+    path = work_dir / MANIFEST_NAME
     entries: list[ManifestEntry] = []
     key_lines: dict[str, int] = {}
     with open(path, newline="") as f:
@@ -375,6 +375,7 @@ def release_lock(work_dir: Path, me: LockHolder) -> None:
         return
 
 
+SKIPPED_NAME = "skipped.tsv"
 SKIPPED_HEADER = ["image_id", "kind", "reason"]
 SkipKind = Literal["failed", "ignored"]
 
@@ -390,7 +391,7 @@ class SkippedRow:
 
 def load_skipped(work_dir: Path) -> list[SkippedRow] | None:
     """Parse skipped.tsv strictly, in file order; None if the work dir has none. ValueError (naming file:line) if malformed."""
-    path = work_dir / "skipped.tsv"
+    path = work_dir / SKIPPED_NAME
     if not path.exists():
         return None
     rows: list[SkippedRow] = []
@@ -564,7 +565,7 @@ def summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[str, i
 # saw that part.
 ExportStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]
 EXPORT_HEADER = ["image_id", "status", "pass_number", "timestamp", "reviewer", "reason", "source_sha256"]
-ICON_SUFFIX = "#icon"  # preprocess.ICON_SUFFIX: a DICOM's embedded icon image (not imported: preprocess needs numpy)
+ICON_SUFFIX = "#icon"  # a DICOM's embedded icon image
 # The worst part decides a file's status: CLEAN only if every part is CLEAN.
 _SEVERITY: dict[ExportStatus, int] = {"CLEAN": 0, "UNREVIEWED": 1, "NOT_REVIEWED": 2, "DIRTY": 3}
 # U+2028/U+2029 and control characters: str.splitlines() breaks lines at some, and a TSV cell cannot hold a tab.

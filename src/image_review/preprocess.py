@@ -40,9 +40,9 @@ from pydicom.uid import (
 from scipy import ndimage as ndi
 from tqdm import tqdm
 
-from .access import Access, Modes, modes
+from .access import MANIFEST_NAME, Access, Modes, modes
 from .connection import package_version
-from .store import MANIFEST_HEADER
+from .store import ICON_SUFFIX, MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +79,6 @@ _OVERLAY_FIRST_GROUP = 0x6000
 _OVERLAY_LAST_GROUP = 0x601E
 _OVERLAY_DATA_ELEMENT = 0x3000
 _OVERLAY_ORIGIN_ELEMENT = 0x0050
-ICON_SUFFIX = "#icon"
 _DICOM_SUFFIXES = {".dcm", ".dicom", ".ima"}
 _RASTER_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".webp",
@@ -122,7 +121,6 @@ _SPAWN = multiprocessing.get_context("spawn")
 
 Kind = Literal["dicom", "raster"]
 Content = Literal["dicom", "raster", "zip"]
-SkipKind = Literal["failed", "ignored"]
 
 
 @dataclass(frozen=True)
@@ -1190,11 +1188,11 @@ def _render_into(
             manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
     pending.rmdir()  # every staged JPG was moved or deleted
 
-    _write_tsv(output_dir / "manifest.tsv", MANIFEST_HEADER, manifest_rows, policy.file_mode)
-    skipped_path = output_dir / "skipped.tsv"
+    _write_tsv(output_dir / MANIFEST_NAME, MANIFEST_HEADER, manifest_rows, policy.file_mode)
+    skipped_path = output_dir / SKIPPED_NAME
     _write_tsv(
         skipped_path,
-        ["image_id", "kind", "reason"],
+        SKIPPED_HEADER,
         [(s.image_id, s.kind, s.reason) for s in skipped],
         policy.file_mode,
     )

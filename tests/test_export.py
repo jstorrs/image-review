@@ -12,7 +12,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from image_review import preprocess
 from image_review import store as store_module
 from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADER
@@ -127,9 +126,6 @@ class TestExportRows(ExportTestCase):
         result = self.export()
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(result.stdout_bytes, EXPECTED)
-
-    def test_icon_suffix_matches_preprocess(self):
-        self.assertEqual(store_module.ICON_SUFFIX, preprocess.ICON_SUFFIX)
 
     def test_flagged_exports_as_dirty(self):
         make_work_dir(self.work)  # the fixture's ROWS manifest

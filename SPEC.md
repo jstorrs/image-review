@@ -585,7 +585,7 @@ included), which the refusals above make unambiguous.
 
 Status is not pass-aware: a DIRTY from an earlier pass that is FLAGGED in the
 current one is `DIRTY` (it still contains PHI as far as anyone has said).
-A part `X#icon` (`store.ICON_SUFFIX`, equal to `preprocess.ICON_SUFFIX`) is
+A part `X#icon` (`store.ICON_SUFFIX`) is
 folded into the row of `X`. When there is no part `X` (e.g. a file literally
 named `scan.dcm#icon` whose `scan.dcm` was ignored), the row is still `X` and
 the missing main part counts as `NOT_REVIEWED` (`main image missing`), so it
