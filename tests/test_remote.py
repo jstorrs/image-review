@@ -16,6 +16,7 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame as pg
 
+from image_review.cli import status_report
 from image_review.connection import RemoteTarget, is_int_at_least, package_version
 from image_review.controller import ReviewSession, UIState
 from image_review.remote import (
@@ -355,6 +356,40 @@ class TestSkipped(RemoteTestCase):
                 parse_skipped(bad)
 
 
+STATUS_REPORT = (
+    "\nOverall: 4 images (pass 1)\n"
+    "  CLEAN:           1\n"
+    "  DIRTY:           1\n"
+    "  UNREVIEWED:      2\n"
+    "  FLAGGED:         0\n"
+    "\n"
+    "Batch            Total  Clean  Dirty  Unrev   Flag\n"
+    "----------------------------------------------------\n"
+    "batch_001            2      1      0      1      0\n"
+    "batch_002            2      0      1      1      0\n"
+    "\n"
+    "Current pass: 1\n"
+    "Skipped during preprocess: 2 failed, 1 ignored (see skipped.tsv in the work dir)\n"
+)
+
+
+STATUS_COUNTS = {"total": 4, "CLEAN": 1, "DIRTY": 1, "UNREVIEWED": 2, "FLAGGED": 0}
+STATUS_BATCHES = {
+    "batch_001": {"total": 2, "CLEAN": 1, "DIRTY": 0, "UNREVIEWED": 1, "FLAGGED": 0},
+    "batch_002": {"total": 2, "CLEAN": 0, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 0},
+}
+
+
+class TestStatusReport(unittest.TestCase):
+    def test_two_batches_with_skipped(self):
+        self.assertEqual(status_report(STATUS_COUNTS, STATUS_BATCHES, 1, SkippedCounts(2, 1)), STATUS_REPORT)
+
+    def test_one_batch_and_no_skips_omit_those_sections(self):
+        report = status_report(STATUS_COUNTS, {"batch_001": STATUS_BATCHES["batch_001"]}, 1, SkippedCounts(0, 0))
+        self.assertEqual(report, STATUS_REPORT.split("\nBatch", maxsplit=1)[0] + "\nCurrent pass: 1\n")
+        self.assertEqual(report, status_report(STATUS_COUNTS, {}, 1, None))
+
+
 class TestCli(RemoteTestCase):
     def invoke(self, *args, **kwargs):
         return invoke_cli(*args, **kwargs)
@@ -367,6 +402,14 @@ class TestCli(RemoteTestCase):
         self.assertEqual(remote.exit_code, 0, remote.output)
         self.assertEqual(local.exit_code, 0, local.output)
         self.assertEqual(remote.stdout, local.stdout)
+
+    def test_status_prints_the_report(self):
+        mark(self.store, [KEYS[0]], "CLEAN")
+        mark(self.store, [KEYS[2]], "DIRTY")
+        (self.work_dir / "skipped.tsv").write_text(SKIPPED_TSV)
+        for args in (("--remote", self.target.to_uri()), ("--work-dir", str(self.work_dir))):
+            with self.subTest(args=args[0]):
+                self.assertEqual(self.invoke("status", *args).stdout, STATUS_REPORT)
 
     def test_status_flagged_identical_to_local(self):
         mark(self.store, [KEYS[0]], "DIRTY")

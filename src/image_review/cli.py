@@ -19,7 +19,8 @@ from .connection import RemoteTarget, parse_reviewer
 from .export import format_export
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
 from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on
-from .store import LocalStore, ReviewStore, StatusFilter, batch_summary, summary
+from .status import Status
+from .store import LocalStore, ReviewStore, SkippedCounts, StatusFilter, batch_summary, summary
 
 if TYPE_CHECKING:
     from .remote import RemoteStore
@@ -533,6 +534,27 @@ def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, 
             pg.quit()
 
 
+def status_report(
+    counts: dict[str, int], batch_counts: dict[str, dict[str, int]], current: int, skipped: SkippedCounts | None
+) -> str:
+    """The text `status` prints: overall counts, a per-batch table when there are several batches, the pass, skips."""
+    lines = ["", f"Overall: {counts['total']} images (pass {current})"]
+    lines += [f"  {status + ':':<12}{counts[status]:>6}" for status in get_args(Status)]
+    if len(batch_counts) > 1:
+        lines += ["", f"{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6} {'Flag':>6}", "-" * 52]
+        for batch_id in sorted(batch_counts):
+            bc = batch_counts[batch_id]
+            lines.append(
+                f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6} {bc['FLAGGED']:>6}"
+            )
+    lines += ["", f"Current pass: {current}"]
+    if skipped is not None and skipped.any:
+        lines.append(
+            f"Skipped during preprocess: {skipped.failed} failed, {skipped.ignored} ignored (see skipped.tsv in the work dir)"
+        )
+    return "\n".join(lines) + "\n"
+
+
 @cli.command()
 @work_dir_option
 @remote_option
@@ -558,31 +580,8 @@ def status(work_dir, remote, via, check):
         except ValueError as e:
             raise click.ClickException(str(e)) from e
 
-    # Overall summary
     counts = summary(manifest, statuses)
-    print(f"\nOverall: {counts['total']} images (pass {current})")
-    print(f"  CLEAN:      {counts['CLEAN']:>6}")
-    print(f"  DIRTY:      {counts['DIRTY']:>6}")
-    print(f"  UNREVIEWED: {counts['UNREVIEWED']:>6}")
-    print(f"  FLAGGED:    {counts['FLAGGED']:>6}")
-
-    # Per-batch summary
-    batch_counts = batch_summary(manifest, statuses)
-    if len(batch_counts) > 1:
-        print(f"\n{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6} {'Flag':>6}")
-        print("-" * 52)
-        for batch_id in sorted(batch_counts):
-            bc = batch_counts[batch_id]
-            print(
-                f"{batch_id:<15} {bc['total']:>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6} {bc['FLAGGED']:>6}"
-            )
-
-    print(f"\nCurrent pass: {current}")
-
-    if skipped is not None and skipped.any:
-        print(
-            f"Skipped during preprocess: {skipped.failed} failed, {skipped.ignored} ignored (see skipped.tsv in the work dir)"
-        )
+    print(status_report(counts, batch_summary(manifest, statuses), current, skipped), end="")
 
     # Finished when every image has a verdict: FLAGGED is a DIRTY verdict from an earlier pass; re-review is optional.
     if check and (counts["UNREVIEWED"] or (skipped is not None and skipped.failed)):
