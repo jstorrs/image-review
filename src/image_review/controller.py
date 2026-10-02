@@ -3,6 +3,7 @@ import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import NamedTuple
 
 import pygame as pg
 from pygame._sdl2 import controller as sdl_controller
@@ -67,8 +68,13 @@ def _grid_clean_refused(snapshot: dict[str, Status], keys: tuple[str, ...]) -> b
     return not statuses <= GRID_ELIGIBLE and statuses != {"DIRTY"}
 
 
-# What a grid build depends on: the review rows' keys in order, the bin size and rotation policy
-GridCacheKey = tuple[tuple[str, ...], tuple[int, int], Rotation]
+class GridCacheKey(NamedTuple):
+    """What a grid build depends on: the review rows' keys in order, the bin size the grids were
+    packed for and the rotation policy."""
+
+    keys: tuple[str, ...]
+    size: tuple[int, int]
+    rotation: Rotation
 
 
 @dataclass(frozen=True)
@@ -149,7 +155,6 @@ class ReviewSession:
 
         self.autoplay = False
         self._cursor = -1
-        self._grids_stale = False  # grid mode: the window was resized since the grids were packed
         self._ui_state = UIState.REVIEWING
         self._shown_at: int | None = None  # ticks when the current item was first painted
         self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
@@ -274,7 +279,7 @@ class ReviewSession:
         review_rows = self._review_rows(self.batch)
         # A mark that changes which rows are eligible changes the key, so a cached grid never holds
         # a key the current snapshot excludes (e.g. one now DIRTY)
-        cache_key = (tuple(row.key for row in review_rows), (grid_w, grid_h), self.rotation)
+        cache_key = GridCacheKey(tuple(row.key for row in review_rows), (grid_w, grid_h), self.rotation)
         if self._grid_cache is None or self._grid_cache[0] != cache_key:
             self._grid_cache = None  # hold at most one result, and none if packing fails
             grid_specs, left_out = pack_into_grids(
@@ -344,7 +349,6 @@ class ReviewSession:
         self._cursor = -1
         self._undoable = 0  # z only undoes marks it can show; the old mode's items are gone
         self._shown_at = None
-        self._grids_stale = False  # the items are rebuilt at the current size below
         try:
             if refetch_statuses:
                 self._statuses = self.store.statuses(self.pass_number)
@@ -752,8 +756,7 @@ class ReviewSession:
                     case UIState.REVIEWING:
                         self._handle_review_key(event.key, now)
             case pg.WINDOWRESIZED:
-                self._viewer.resize()
-                self._grids_stale = self._grids_stale or self.mode == "grid"
+                self._viewer.resize()  # grid mode repacks on the next tick if the size changed
             case x if x == AUTOPLAY_EVENT:
                 if self.autoplay and self._ui_state == UIState.REVIEWING:
                     self.next_image()
@@ -781,9 +784,8 @@ class ReviewSession:
         """Repack the grids at the new window size (one rebuild however many resize events came).
         The cursor stays on the grid holding the current item's first key, else goes to the start; the
         dwell restarts, so a verdict never lands on a re-composited grid that has not been seen."""
-        self._grids_stale = False
-        if not self._items or self._grid_cache is None or self._grid_cache[0][1] == self._grid_size():
-            return  # nothing to rebuild, or the size is the one the grids were packed for
+        if not self._items:
+            return  # nothing to rebuild
         self._stop_timers()
         self._undoable = 0  # a repack drops grids marked DIRTY, so z could no longer show what it undoes
         current = self._items[self._cursor].keys[0] if self._cursor >= 0 else None
@@ -806,7 +808,8 @@ class ReviewSession:
         message screens are painted once by the viewer and a repaint would cover them."""
         if self._ui_state != UIState.REVIEWING:
             return
-        if self._grids_stale:
+        # Grid mode repacks when the window size is no longer the one the cached grids were packed for
+        if self.mode == "grid" and self._grid_cache is not None and self._grid_cache[0].size != self._grid_size():
             self._rebuild_grids_for_resize()
             if self._ui_state != UIState.REVIEWING:  # the rebuild ended on a message screen
                 return

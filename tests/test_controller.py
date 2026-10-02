@@ -82,12 +82,12 @@ class TestSession(SessionTestCase):
     def test_grid_cache_key_distinguishes_rotation_policies(self):
         with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
             s = ReviewSession(self.store, reviewer="tester", mode="grid")
-            self.assertEqual(s._grid_cache[0][2], "auto")
+            self.assertEqual(s._grid_cache[0].rotation, "auto")
             s._switch_to_grid("auto")
             self.assertEqual(pack.call_count, 1)
             s._switch_to_grid("never")
             self.assertEqual(pack.call_count, 2)
-            self.assertEqual(s._grid_cache[0][2], "never")
+            self.assertEqual(s._grid_cache[0].rotation, "never")
 
     def test_grid_size_change_packs_again(self):
         with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
@@ -991,7 +991,7 @@ class TestScaleAndResize(EventLoopTestCase):
         pg.display.set_mode((w // 2, h // 2))
         with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
             s.handle_events([self.resized])
-            pack.assert_not_called()  # only marked stale; rebuilt on the next tick
+            pack.assert_not_called()  # rebuilt on the next tick
             self.now += MIN_DWELL_MS
             s.refresh_if_needed()
         pack.assert_called_once()
@@ -1033,7 +1033,6 @@ class TestScaleAndResize(EventLoopTestCase):
             s.handle_events([self.resized])
             s.refresh_if_needed()
         pack.assert_not_called()
-        self.assertFalse(s._grids_stale)
 
     def test_scale_percent_truncates_without_float_error(self):
         self.assertEqual(scale_percent(0.29), 29)  # 0.29 * 100 is 28.999999999999996
@@ -1066,7 +1065,62 @@ class TestScaleAndResize(EventLoopTestCase):
         with mock.patch.object(controller_module, "pack_into_grids") as pack:
             s.refresh_if_needed()
         pack.assert_not_called()
-        self.assertFalse(s._grids_stale)
+
+    def test_single_mode_resize_with_kept_grid_cache_does_not_rebuild(self):
+        s = self.reviewing("grid")
+        s.handle_events([key(pg.K_s)])
+        self.paint(s)
+        self.now += MIN_DWELL_MS
+        s._mark("CLEAN")
+        self.assertIsNotNone(s._grid_cache)  # kept across single mode within the batch
+        cursor, undoable = s._cursor, s._undoable
+        self.assertEqual(undoable, 1)
+        size = pg.display.get_surface().get_size()
+        self.shrink(s, (size[0] // 2, size[1] // 2))
+        with mock.patch.object(s, "_build_items", wraps=s._build_items) as build:
+            for _ in range(3):
+                s.refresh_if_needed()
+        build.assert_not_called()
+        self.assertEqual((s._cursor, s._undoable), (cursor, undoable))
+
+    def test_size_change_without_resize_event_repacks(self):
+        s = self.reviewing("grid")
+        w, h = s._viewer.screen.get_size()
+        pg.display.set_mode((w // 2, h // 2))  # no WINDOWRESIZED: the cached size alone shows the change
+        with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
+            s.refresh_if_needed()
+        pack.assert_called_once()
+        self.assertEqual(s._grid_cache[0].size, s._grid_size())
+
+    def test_no_grid_cache_does_not_repack(self):
+        s = self.reviewing("grid")
+        s._grid_cache = None
+        size = pg.display.get_surface().get_size()
+        self.shrink(s, (size[0] // 2, size[1] // 2))
+        with mock.patch.object(controller_module, "pack_into_grids") as pack:
+            s.refresh_if_needed()
+        pack.assert_not_called()
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+
+    def test_resize_during_the_repack_repacks_again_on_the_next_tick(self):
+        s = self.reviewing("grid")
+        size = pg.display.get_surface().get_size()
+        self.shrink(s, (size[0] // 2, size[1] // 2))
+        real_pack = controller_module.pack_into_grids
+
+        def pack_then_resize(*args, **kwargs):
+            result = real_pack(*args, **kwargs)
+            if pack.call_count == 1:
+                pg.display.set_mode((size[0] // 3, size[1] // 3))  # the window changes while packing
+            return result
+
+        with mock.patch.object(controller_module, "pack_into_grids", side_effect=pack_then_resize) as pack:
+            s.refresh_if_needed()
+            self.assertEqual(pack.call_count, 1)
+            s.refresh_if_needed()
+            s.refresh_if_needed()
+        self.assertEqual(pack.call_count, 2)
+        self.assertEqual(pack.call_args.args[2:4], s._grid_size())
 
     def test_undo_after_rebuild_has_nothing_to_undo(self):
         s = self.reviewing("grid", status_filter="all")  # a CLEAN grid stays eligible, so the repack has items

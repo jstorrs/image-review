@@ -1049,13 +1049,16 @@ single-mode review", ending " (--mode single)" in the terminal and " - press
 [s]" on screen (K counts the left-out rows that are todo as in *Todo*, over the
 selected batch, or all batches when none is selected).
 
-**Resize rebuild.** In grid mode a `WINDOWRESIZED` event refits the current
-grid and marks the grids stale. On the next `refresh_if_needed` (only while
-reviewing, so one rebuild however many resize events a batch holds) the session
-repacks for the new size, unless the size is the one the grids were last packed
-for (a resize back to it before the tick costs nothing): it stops autoplay and
-a pending advance, shows "Computing grids...", and rebuilds the items (the
-cache key includes the size, so a changed size misses the cache). Queued
+**Resize rebuild.** A `WINDOWRESIZED` event refits the current item. In grid
+mode, each `refresh_if_needed` (only while reviewing) compares the size held in
+the grid cache key (the size the grids were last packed for) with the current
+grid size, and repacks when they differ: one rebuild however many resize events
+a batch holds, none for a resize back to the packed size before the tick, and
+a size change that arrives without a `WINDOWRESIZED` is caught too. The repack
+stops autoplay and a pending advance, shows "Computing grids...", and rebuilds
+the items (the changed size misses the cache, and the new cache key records the
+size it was packed for, so the next tick repacks only if the window changed
+meanwhile). Queued
 `KEYDOWN` and `CONTROLLERBUTTONDOWN` events are discarded, as on a mode restart. The repack uses the current statuses, so under the
 default filter it drops grids already marked CLEAN as well as DIRTY or FLAGGED
 ones. The cursor goes to the grid that holds the first key of the item that was
@@ -1067,8 +1070,8 @@ no longer show what it undoes. If nothing is left to show, the session goes to
 the end-of-list state with the held-back message or "End of list - [b] next
 batch", as a mode restart does. If the store is unavailable during the repack
 the session goes to the lost-connection screen, which is not repainted over.
-Single mode only rescales. A restart (mode switch, `b`, display change) clears
-the stale flag.
+Single mode only rescales. A restart (mode switch, `b`, display change) packs
+at the current size, so it leaves nothing to repack.
 
 ### Unloadable Images
 
