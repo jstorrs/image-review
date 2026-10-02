@@ -1130,28 +1130,23 @@ def colliding_ids(images: Iterable[tuple[str, str, str]]) -> frozenset[str]:
     return frozenset(image_id for image_id, found in pairs.items() if len(found) > 1)
 
 
-def _render_into(
+def _stage(
     *,
     sources: list[Path],
     exclude: frozenset[Path],
-    staging: Path,
-    batch_size: int,
+    pending: Path,
     colormap: str,
     policy: Modes,
     jobs: int,
-) -> tuple[int, list[tuple[str, str, str, str, str]], list[Skipped]]:
-    """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches.
+) -> list[tuple[str, list[Staged | Skipped]]]:
+    """Discover and render every input, writing its JPGs into `pending`.
 
-    An input with any colliding image (main or icon) becomes one `failed` row and its JPGs are deleted.
+    Returns `(input image_id, its output rows)` in discovery order.
     Inputs are rendered by `jobs` worker processes, or in this one for 1; either way this process writes
     every file, in discovery order.
     """
-    pending = staging / PENDING_NAME
-    pending.mkdir()
-    os.chmod(pending, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
-    inputs: list[tuple[str, list[Staged | Skipped]]] = []  # (input image_id, its output rows), in discovery order
+    inputs: list[tuple[str, list[Staged | Skipped]]] = []
     staged = 0
-    found = 0
 
     items = discover(sources, exclude)
     with _worker_pool(jobs) if jobs > 1 else nullcontext() as pool:
@@ -1161,7 +1156,6 @@ def _render_into(
             else _outcomes_pooled(items, colormap, pool, IN_FLIGHT_PER_JOB * jobs)
         )
         for input_id, outcome in outcomes:
-            found += 1
             parts: list[Staged | Skipped] = []
             for part in outcome:
                 if isinstance(part, Skipped):
@@ -1175,7 +1169,21 @@ def _render_into(
                     f.write(part.jpeg)
                 parts.append(Staged(part.image_id, path, part.source_sha256, hashlib.sha256(part.jpeg).hexdigest()))
             inputs.append((input_id, parts))
+    return inputs
 
+
+def _place(
+    inputs: list[tuple[str, list[Staged | Skipped]]],
+    *,
+    staging: Path,
+    batch_size: int,
+    policy: Modes,
+) -> tuple[list[tuple[str, str, str, str, str]], list[Skipped]]:
+    """Move the JPGs of inputs without a colliding image_id into batches under `staging`.
+
+    An input with any colliding image (main or icon) becomes one `failed` row and its JPGs are deleted.
+    Returns the manifest rows and the skipped rows, both in discovery order.
+    """
     collisions = colliding_ids(
         (row.image_id, row.source_sha256, row.jpeg_sha256)
         for _, rows in inputs
@@ -1196,16 +1204,34 @@ def _render_into(
             if isinstance(row, Skipped):
                 skipped.append(row)
                 continue
-            n = len(manifest_rows)
-            batch_id = f"batch_{n // batch_size + 1:03d}"
+            batch_index, slot = divmod(len(manifest_rows), batch_size)
+            batch_id = f"batch_{batch_index + 1:03d}"
             batch_dir = staging / batch_id
-            if n % batch_size == 0:
-                batch_dir.mkdir(parents=True, exist_ok=True)
+            if slot == 0:
+                batch_dir.mkdir()
                 os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
-            img_path = batch_dir / f"img_{n % batch_size + 1:05d}.jpg"
+            img_path = batch_dir / f"img_{slot + 1:05d}.jpg"
             os.rename(row.path, img_path)
             key = img_path.relative_to(staging).as_posix()
             manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
-    pending.rmdir()  # every staged JPG was moved or deleted
+    return manifest_rows, skipped
 
-    return found, manifest_rows, skipped
+
+def _render_into(
+    *,
+    sources: list[Path],
+    exclude: frozenset[Path],
+    staging: Path,
+    batch_size: int,
+    colormap: str,
+    policy: Modes,
+    jobs: int,
+) -> tuple[int, list[tuple[str, str, str, str, str]], list[Skipped]]:
+    """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches."""
+    pending = staging / PENDING_NAME
+    pending.mkdir()
+    os.chmod(pending, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
+    inputs = _stage(sources=sources, exclude=exclude, pending=pending, colormap=colormap, policy=policy, jobs=jobs)
+    manifest_rows, skipped = _place(inputs, staging=staging, batch_size=batch_size, policy=policy)
+    pending.rmdir()  # every staged JPG was moved or deleted
+    return len(inputs), manifest_rows, skipped
