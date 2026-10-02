@@ -12,7 +12,12 @@ from click.testing import CliRunner
 
 from image_review.cli import EXTRA_MODULES, cli, requires_extra
 
-ENV = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
+ENV = {
+    "IMAGE_REVIEW_REMOTE": None,
+    "IMAGE_REVIEW_VIA": None,
+    "IMAGE_REVIEW_ACCESS": None,
+    "IMAGE_REVIEW_REVIEWER": None,
+}
 REAL_IMPORT = builtins.__import__
 
 
