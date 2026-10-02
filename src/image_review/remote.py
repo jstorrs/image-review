@@ -170,8 +170,19 @@ class RemoteStore:
                 self._connections.append(conn)
         return conn
 
-    def _request(self, method: str, path: str, body: bytes | None = None, *, retry: bool = True) -> tuple[int, bytes]:
-        """One request on this thread's connection; with `retry`, resent once on a fresh connection after a stale one."""
+    def _request(
+        self, method: str, path: str, body: bytes | None = None, *, idempotent: bool = True
+    ) -> tuple[int, bytes]:
+        """One request on this thread's connection.
+
+        `idempotent`: may be resent once after a stale connection. Otherwise (an undo, where a resend after a
+        lost reply would undo a second mark) it is sent exactly once, on a fresh connection (an idle one may
+        have been closed by the server), and any failure is an outage.
+        """
+        if not idempotent:
+            conn = getattr(self._local, "conn", None)
+            if conn is not None:
+                conn.close()  # the next request reconnects, and the pin is checked again
         headers = dict(self._auth)
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -185,15 +196,17 @@ class RemoteStore:
                 raise
             except _STALE_CONNECTION as e:
                 conn.close()
-                if attempt == 2 or not retry:
+                if attempt == 2 or not idempotent:
                     raise RemoteError(f"connection lost: {type(e).__name__}") from e
             except (OSError, http.client.HTTPException) as e:
                 conn.close()
                 raise RemoteError(f"{type(e).__name__}: {e}") from e
         raise AssertionError("unreachable")
 
-    def _get(self, path: str) -> bytes:
-        status, data = self._request("GET", path)
+    def _call(self, method: str, path: str, payload: object = None, *, idempotent: bool = True) -> bytes:
+        """`_request` with a JSON `payload` if given; any status but 200 is a RemoteError."""
+        body = None if payload is None else json.dumps(payload).encode()
+        status, data = self._request(method, path, body, idempotent=idempotent)
         if status != 200:
             raise RemoteError(f"server returned HTTP {status}", status)
         return data
@@ -202,7 +215,7 @@ class RemoteStore:
         """Raise ApiMismatch unless the server speaks this client's wire API version."""
         advice = "install the same image-review version on both machines"
         try:
-            server = parse_version(self._get("/version"))
+            server = parse_version(self._call("GET", "/version"))
         except RemoteError as e:
             if e.status == 404:
                 raise ApiMismatch(f"server is too old to report its API version; {advice}") from e
@@ -211,7 +224,7 @@ class RemoteStore:
             raise ApiMismatch(f"server speaks API v{server}, this client v{API_VERSION}; {advice}")
 
     def manifest(self) -> list[ManifestRow]:
-        return parse_manifest(self._get("/manifest"))
+        return parse_manifest(self._call("GET", "/manifest"))
 
     def image_bytes(self, key: str) -> bytes:
         status, data = self._request("GET", f"/image?{urlencode({'key': key})}")
@@ -237,33 +250,20 @@ class RemoteStore:
         return found
 
     def statuses(self, pass_number: int) -> dict[str, Status]:
-        return parse_statuses(self._get(f"/statuses?{urlencode({'pass': pass_number})}"))
+        return parse_statuses(self._call("GET", f"/statuses?{urlencode({'pass': pass_number})}"))
 
     def mark(
         self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
     ) -> dict[str, Status]:
-        body = json.dumps(
-            {"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}
-        ).encode()
-        code, data = self._request("POST", "/mark", body)
-        if code != 200:
-            raise RemoteError(f"server returned HTTP {code}", code)
-        return parse_statuses(data)
+        payload = {"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}
+        return parse_statuses(self._call("POST", "/mark", payload))
 
     def undo(self, pass_number: int, *, reviewer: str) -> dict[str, Status]:
-        # Not idempotent: a resend after a lost reply would undo a second mark. So it is sent once, on a
-        # fresh connection (an idle one may have been closed by the server), and any failure is an outage.
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.close()  # the next request reconnects, and the pin is checked again
-        body = json.dumps({"pass": pass_number, "reviewer": reviewer}).encode()
-        code, data = self._request("POST", "/undo", body, retry=False)
-        if code != 200:
-            raise RemoteError(f"server returned HTTP {code}", code)
-        return parse_statuses(data)
+        payload = {"pass": pass_number, "reviewer": reviewer}
+        return parse_statuses(self._call("POST", "/undo", payload, idempotent=False))
 
     def current_pass(self) -> int:
-        return parse_pass(self._get("/current_pass"))
+        return parse_pass(self._call("GET", "/current_pass"))
 
     def skipped(self) -> SkippedCounts | None:
-        return parse_skipped(self._get("/skipped"))
+        return parse_skipped(self._call("GET", "/skipped"))
