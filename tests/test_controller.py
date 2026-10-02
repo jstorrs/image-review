@@ -929,6 +929,60 @@ class TestScaleAndResize(EventLoopTestCase):
         self.assertEqual(viewer._scale, 2.0)
         self.assertEqual(self.bar_texts(viewer)["200%"], ("right", None))
 
+    def test_too_short_window_drops_the_previous_image(self):
+        viewer = ImageViewer()
+        pg.display.set_mode((800, 600))
+        viewer.set_image(pg.Surface((800, 550)), "a", "UNREVIEWED", "info")
+        self.assertTrue(viewer.image_shown)
+        pg.display.set_mode((800, 40))  # no room above the 50px status bar
+        viewer.set_image(pg.Surface((800, 550)), "b", "UNREVIEWED", "info")
+        self.assertIsNone(viewer._content)  # never a's pixels under b's name
+        self.assertFalse(viewer.image_shown)
+        self.assertNotIn("100%", self.bar_texts(viewer))  # the bars alone
+
+    def test_image_scaled_to_zero_width_is_not_shown(self):
+        viewer = ImageViewer()
+        pg.display.set_mode((800, 51))  # a 1px content area: 1000x3000 scales to 0x1
+        viewer.set_image(pg.Surface((1000, 3000)), "thin", "UNREVIEWED", "info")
+        self.assertFalse(viewer.image_shown)
+
+    def test_hiding_the_image_restarts_the_dwell(self):
+        s = self.reviewing("single")
+        s.handle_events([key(pg.K_RIGHT)])
+        s.refresh_if_needed()
+        self.assertEqual(s._shown_at, self.now)
+        w, h = s._viewer.screen.get_size()
+        self.now += 50
+        pg.display.set_mode((w, 40))
+        s.handle_events([self.resized])
+        s.refresh_if_needed()  # bars only
+        self.assertIsNone(s._shown_at)
+        self.now += MIN_DWELL_MS
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_not_called()
+        pg.display.set_mode((w, h))
+        s.handle_events([self.resized])
+        s.refresh_if_needed()
+        self.now += MIN_DWELL_MS
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_called_once()
+
+    def test_dwell_waits_for_a_paint_that_shows_the_image(self):
+        s = self.reviewing("single")
+        w, h = s._viewer.screen.get_size()
+        pg.display.set_mode((w, s._viewer.border))
+        s.handle_events([self.resized, key(pg.K_RIGHT)])
+        self.assertEqual(s._cursor, 1)
+        s.refresh_if_needed()
+        self.assertIsNone(s._shown_at)
+        self.now += MIN_DWELL_MS
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_not_called()
+        pg.display.set_mode((w, h))
+        s.handle_events([self.resized])
+        s.refresh_if_needed()
+        self.assertEqual(s._shown_at, self.now)
+
     def test_grid_resize_repacks_at_new_size_and_resets_dwell(self):
         s = self.reviewing("grid")
         self.assertIsNotNone(s._shown_at)

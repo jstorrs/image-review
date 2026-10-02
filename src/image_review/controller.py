@@ -810,5 +810,10 @@ class ReviewSession:
             self._rebuild_grids_for_resize()
             if self._ui_state != UIState.REVIEWING:  # the rebuild ended on a message screen
                 return
-        if self._viewer.refresh_if_dirty() and self._shown_at is None:
-            self._shown_at = pg.time.get_ticks()
+        # The dwell runs only while paints show the item's pixels: bars alone stop it, and it
+        # restarts once the pixels return
+        if self._viewer.refresh_if_dirty():
+            if not self._viewer.image_shown:
+                self._shown_at = None
+            elif self._shown_at is None:
+                self._shown_at = pg.time.get_ticks()

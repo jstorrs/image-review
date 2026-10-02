@@ -142,6 +142,7 @@ class ImageViewer:
 
     def resize(self) -> None:
         self._dirty = True
+        self._content = None  # an early return paints no image rather than the previous one's pixels
         if self._image is None:
             return
         screen_w, screen_h = self.screen.get_size()
@@ -154,9 +155,17 @@ class ImageViewer:
         scale = min(screen_w / iw, content_height / ih)
         self._scale = scale  # above 1.0 when a small image is enlarged to fit
         scaled_size = (round(iw * scale), round(ih * scale))
+        if 0 in scaled_size:  # too thin to show a pixel
+            return
         self._content = pg.transform.smoothscale(self._image, scaled_size)
         cx, cy = self._content.get_size()
         self._offset = ((screen_w - cx) // 2, (content_height - cy) // 2)
+
+    @property
+    def image_shown(self) -> bool:
+        """Whether refresh() paints visible image pixels: False when none is set, the window is too
+        short to fit it, or it scales to zero size."""
+        return self._content is not None
 
     def refresh_if_dirty(self) -> bool:
         """Repaint if a setter or resize changed the frame since the last paint. Returns True if it did."""

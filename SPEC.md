@@ -1183,12 +1183,15 @@ connection screen only `q`/Esc and Start act (see *Store Failures*).
 **Verdicts need a seen item.** A verdict (`c`/`d`, B/Y) applies only to
 an item that has been painted and on screen for `MIN_DWELL_MS` (200 ms);
 otherwise it is ignored (it still stops autoplay). The session records the tick
-of the first paint of the current item in `refresh_if_needed`, compares it
+of the first paint that shows the current item's pixels in `refresh_if_needed`
+(the viewer's `image_shown`; a window too short to fit an image, or an image
+that scales to zero size, paints only the bars and background and starts no
+dwell), compares it
 with the clock read once at the start of the event batch (so slow events earlier
 in the batch, like a resize, do not count toward the dwell), and clears it
 whenever the current item or screen changes (a new item, a mode restart, the
-help or display-select screen); repainting the same item (resize, a mark) keeps
-it. So a verdict queued in the same event batch as a mode switch, an autoplay
+help or display-select screen) or a repaint shows no pixels of it; repainting
+the same item with its pixels (resize, a mark) keeps it. So a verdict queued in the same event batch as a mode switch, an autoplay
 advance or a post-mark advance, or typed within 200 ms of the new item
 appearing, never judges an item the reviewer has not seen. All keyboard and
 gamepad button events queued during a blocking step (a grid build or mode
@@ -1369,6 +1372,7 @@ uses DejaVu Sans Mono 24pt.
 | `set_status(status)` | Update status bar color without changing image |
 | `set_info(info)`, `set_todo_only(enabled)`, `set_joystick_count(count)` | Update the centered text, the todo-only and the gamepad indicators |
 | `resize()` | Recalculate scaling (and the scale percent) for current screen size |
+| `image_shown -> bool` | Property: whether `refresh()` paints visible image pixels. False when none is set, or it has no visible pixels (the window is too short to fit it, or it scales to zero size); `resize` drops the previous scaled image first, so the frame never shows one image's pixels under another's name |
 | `refresh_if_dirty() -> bool` | `refresh()` if the frame is dirty, clear the flag, return True; else False. Every method above, plus `switch_display` (through `resize`) and a new viewer, marks the frame dirty; `show_message` and `show_splash` do not |
 | `refresh()` | Render frame: background, status bar, text, scaled image |
 | `show_splash(lines, footer)` | Render centered splash/help overlay |

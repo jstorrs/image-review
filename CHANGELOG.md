@@ -158,6 +158,12 @@ it is reported as "too old to report its API version".
   read the live keyboard, so releasing Shift before the press was handled
   (for example after a slow remote fetch) opened grid mode with the wrong
   rotation.
+- **A window too short to fit an image no longer shows the previous one.** With
+  the window at or below the 50px status bar, moving to another item kept the
+  old item's pixels under the new item's name, and its review dwell started,
+  so `c` could mark an image nobody saw. Now only the bars are painted, and the
+  dwell starts once the item's pixels are on screen. Hiding the image this way
+  after it appeared restarts the dwell.
 
 ### Requirements
 
