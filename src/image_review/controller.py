@@ -255,7 +255,6 @@ class ReviewSession:
         rows = self._review_rows(self.batch)
         random.shuffle(rows)
         self._items = [ReviewItem(keys=(row.key,), label=row.key, surface=None, grid=False) for row in rows]
-        self._todo_count = self._count_todo()
 
     def _show_grid_progress(self, done: int, total: int) -> None:
         if done % 25 == 0 or done == total:
@@ -294,7 +293,6 @@ class ReviewSession:
         # placeholder only if that fails
         items += [ReviewItem(keys=(key,), label=key, surface=None, grid=False) for key in left_out]
         self._items = items
-        self._todo_count = self._count_todo()
 
     def _show_display_select(self):
         self._stop_timers()
@@ -442,7 +440,8 @@ class ReviewSession:
             return self._item_status(item) in TODO_STATUSES
         return any(self._key_todo(key) for key in item.keys)
 
-    def _count_todo(self) -> int:
+    @property
+    def _todo_count(self) -> int:
         return sum(1 for item in self._items if self._is_todo(item))
 
     def _seek(self, start: int, direction: int, *, todo_only: bool, wrap: bool) -> bool:
@@ -545,7 +544,6 @@ class ReviewSession:
         self._undoable += 1
         self._marked_this_session.update(item.keys)
         self._statuses.update(changed)
-        self._todo_count = self._count_todo()
         self._viewer.set_status(status)
         self._dirty = True
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
@@ -577,7 +575,6 @@ class ReviewSession:
         self._undoable -= 1
         self._marked_this_session.difference_update(changed)
         self._statuses.update(changed)
-        self._todo_count = self._count_todo()
         index = next((i for i, item in enumerate(self._items) if any(k in changed for k in item.keys)), None)
         if index is None:  # another client's mark on a shared server
             shown = ", ".join(f"{k} {v}" for k, v in list(changed.items())[:3])

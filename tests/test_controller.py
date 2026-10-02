@@ -186,7 +186,7 @@ class TestSession(SessionTestCase):
         s._mark("DIRTY")
         self.assertEqual(s._statuses["batch_001/b.jpg"], "DIRTY")
         self.assertEqual(s._item_status(s._items[1]), "DIRTY")
-        self.assertEqual(s._count_todo(), 0)
+        self.assertEqual(s._todo_count, 0)
         s._cursor = 1
         with mock.patch.object(self.store, "mark", wraps=self.store.mark) as mark, mock.patch("sys.stderr"):
             s._mark("CLEAN")
@@ -207,7 +207,7 @@ class TestSession(SessionTestCase):
         s._items = [ReviewItem(keys=("batch_001/a.jpg",), label="grid (1 images)", surface=None, grid=True)]
         s._cursor = 0
         self.assertEqual(s._item_status(s._items[0]), "DIRTY")
-        self.assertEqual(s._count_todo(), 0)
+        self.assertEqual(s._todo_count, 0)
         with (
             mock.patch.object(self.store, "mark") as mark,
             mock.patch.object(s._viewer, "set_info") as set_info,
@@ -1412,7 +1412,7 @@ class TestUnloadable(EventLoopTestCase):
         for index in range(len(s._items)):
             self.show(s, index)
             s.handle_events([key(pg.K_d if s._items[index].keys[0] == CORRUPT else pg.K_c)])
-        self.assertEqual(s._count_todo(), 0)
+        self.assertEqual(s._todo_count, 0)
         self.assertEqual(ReviewSession(self.store, reviewer="tester", mode="single").batch, "batch_002")
         mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         self.store.close()
