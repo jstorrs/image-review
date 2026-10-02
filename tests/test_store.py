@@ -21,9 +21,9 @@ import skimage as ski
 from image_review import review_db as review_db_module
 from image_review.connection import package_version
 from image_review.controller import ReviewSession
+from image_review.lock import LOCK_NAME
 from image_review.review_db import HEADER, Decision, ReviewDB
 from image_review.store import (
-    LOCK_NAME,
     LocalStore,
     ManifestEntry,
     ManifestRow,

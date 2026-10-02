@@ -53,6 +53,9 @@ cli.py              Command-line entry point, argument parsing
 preprocess.py       DICOM/image loading and normalization
 status.py           Status, Verdict, MarkMode, TODO_STATUSES vocabulary (stdlib only)
 store.py            ReviewStore Protocol, LocalStore, pure filter/summary functions
+lock.py             The work directory's review.lock: acquire, release, live_writer (stdlib only)
+export.py           Export rows and their TSV format: export_rows, format_export (stdlib only)
+atomic.py           write_new_file: create a file atomically, never overwriting (stdlib only)
 server.py           HTTPS + bearer-token server exposing a ReviewStore
 connection.py       RemoteTarget: the ir:// connection string; API_VERSION, package_version, parse_reviewer
 remote.py           RemoteStore: ReviewStore client with certificate pinning
@@ -68,8 +71,9 @@ util.py             Shared utilities (surface loading)
 All review-time data access goes through a `ReviewStore`. The controller and
 grid packer never touch the work directory; `LocalStore` serves it directly,
 and `RemoteStore` talks to an `image-review serve` process that wraps a
-`LocalStore`. `status.py`, `store.py`, `server.py`, `connection.py`, `remote.py`,
-`tunnel.py` and `signals.py` import without pygame, numpy or skimage.
+`LocalStore`. `status.py`, `store.py`, `lock.py`, `export.py`, `atomic.py`, `server.py`,
+`connection.py`, `remote.py`, `tunnel.py` and `signals.py` import without pygame,
+numpy or skimage.
 
 ```
 review (pygame)             serve (compute node)
@@ -537,7 +541,7 @@ command runs under `interrupt_on(*TERMINATION_SIGNALS)`, so SIGTERM/SIGHUP
 unwind like Ctrl-C and remove a half-written output.
 
 **Refusals** (`ClickException`, exit 1, nothing written):
-- `store.live_writer(work_dir)` finds `review.lock` held by a writer. The lock
+- `lock.live_writer(work_dir)` finds `review.lock` held by a writer. The lock
   is held unless it names a process of this machine and boot that no longer
   exists (`is_stale`); an unreadable lock counts as held. The message is
   `WorkDirLocked`'s. `--allow-live` overrides this one refusal only, and then
@@ -559,10 +563,10 @@ unwind like Ctrl-C and remove a half-written output.
 
 Then it opens a read-only `LocalStore` (no lock; nothing is written in the
 work directory) and calls its `export_rows()`. That applies the pure
-`store.export_rows` to the manifest entries, `ReviewDB.decisions()` and
+`export.export_rows` to the manifest entries, `ReviewDB.decisions()` and
 `load_skipped`.
 
-**Format** (`store.format_export`): UTF-8 text, the header line
+**Format** (`export.format_export`): UTF-8 text, the header line
 `image_id status pass_number timestamp reviewer reason source_sha256`, then one line per row.
 Fields are joined with tabs and every line ends in LF. There is no quoting or
 escaping: fields are written exactly as stored (a `"` not at the start
@@ -585,7 +589,7 @@ included), which the refusals above make unambiguous.
 
 Status is not pass-aware: a DIRTY from an earlier pass that is FLAGGED in the
 current one is `DIRTY` (it still contains PHI as far as anyone has said).
-A part `X#icon` (`store.ICON_SUFFIX`) is
+A part `X#icon` (`export.ICON_SUFFIX`) is
 folded into the row of `X`. When there is no part `X` (e.g. a file literally
 named `scan.dcm#icon` whose `scan.dcm` was ignored), the row is still `X` and
 the missing main part counts as `NOT_REVIEWED` (`main image missing`), so it
@@ -597,7 +601,7 @@ Rows come in order of first appearance of their file: manifest order, then
 `skipped.tsv` order. Decisions for `image_id`s in neither file are left out.
 
 **Output.** Without `--output` the bytes go to stdout's binary stream.
-`--output FILE` is written by `store.write_new_file` (the same helper as
+`--output FILE` is written by `atomic.write_new_file` (the same helper as
 `review.lock`; see *Concurrency limits*):
 1. A unique hidden sibling (`.FILE.<random>.tmp`) is created with
    `O_CREAT|O_EXCL` and mode 0600. For a group work directory it is then given
@@ -851,7 +855,7 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 | `ManifestRow` | Frozen dataclass: `key` (the `preprocessed_path`) and `batch` |
 | `SkippedRow` | Frozen dataclass: one `skipped.tsv` row, `image_id`, `kind` (`SkipKind`, `Literal["failed", "ignored"]`) and `reason` |
 | `ManifestEntry` | Frozen dataclass: one `manifest.tsv` row, `batch`, `key`, `image_id`, and `source_sha256` and `jpeg_sha256` (`str \| None`; `None` in a 3-column manifest). Local only |
-| `ExportRow` | Frozen dataclass: one `export` row (a source file), `image_id`, `status` (`ExportStatus`, `Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]`), `pass_number` (`int \| None`), `timestamp`, `reviewer`, `reason`, `source_sha256` (`""` when unknown) |
+| `ExportRow` | (`export.py`) Frozen dataclass: one `export` row (a source file), `image_id`, `status` (`ExportStatus`, `Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]`), `pass_number` (`int \| None`), `timestamp`, `reviewer`, `reason`, `source_sha256` (`""` when unknown) |
 | `StoreUnavailable` | Exception: the store cannot be reached (as opposed to a bad key or image) |
 
 ### Key versus `image_id`
@@ -900,7 +904,7 @@ delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
 `skipped.tsv` strictly with `load_skipped` (header `image_id`, `kind`, `reason`; `kind` is `failed`
 or `ignored`) and returns only the counts. `export_rows()` (not part of the
 `ReviewStore` Protocol: `image_id`s stay local) returns
-`store.export_rows(entries, ReviewDB.decisions(), load_skipped(...) or [])`;
+`export.export_rows(entries, ReviewDB.decisions(), load_skipped(...) or [])`;
 see *`image-review export`*.
 
 ### Pure functions
@@ -911,13 +915,13 @@ see *`image-review export`*.
 | `summary(rows, statuses)` | Count of each `Status` (CLEAN/DIRTY/UNREVIEWED/FLAGGED) plus `total` |
 | `batch_summary(rows, statuses)` | The same per batch |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
-| `export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons folded in |
-| `format_export(rows) -> str` | The export as TSV text with its header; `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
+| `export.export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons folded in |
+| `export.format_export(rows) -> str` | The export as TSV text with its header; `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
 
 `load_skipped(work_dir)` parses `skipped.tsv` into `SkippedRow`s (`None` if
 absent; `ValueError` naming `file:line` if malformed). Two IO helpers serve
-`export` (see *`image-review export`*): `write_new_file(path, file_mode,
-group, text)` creates the `--output` file, and `live_writer(work_dir) ->
+`export` (see *`image-review export`*): `atomic.write_new_file(path, file_mode,
+group, text)` creates the `--output` file, and `lock.live_writer(work_dir) ->
 WorkDirLocked | None` checks the work dir lock.
 
 ## Review Session (`controller.py`)

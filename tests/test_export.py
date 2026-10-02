@@ -12,11 +12,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from image_review import atomic as atomic_module
 from image_review import cli as cli_module
-from image_review import store as store_module
+from image_review import lock as lock_module
+from image_review.lock import boot_id, this_process
 from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADER
-from image_review.store import LocalStore, boot_id, this_process
+from image_review.store import LocalStore
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server, temp_dir
 
 KEYS = [key for _, key, _ in ROWS]
@@ -262,7 +264,7 @@ class TestExportCommand(ExportTestCase):
         out = self.root / "result.tsv"
         old = os.umask(0o002)  # would let a plain create be group-readable from the start
         self.addCleanup(os.umask, old)
-        with mock.patch.object(store_module.os, "fchown", spy_fchown):
+        with mock.patch.object(atomic_module.os, "fchown", spy_fchown):
             result = self.export("--output", str(out))
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(seen, [("fchown", 0o600)])
@@ -271,7 +273,7 @@ class TestExportCommand(ExportTestCase):
     def test_group_that_cannot_be_set_falls_back_to_private(self):
         os.chmod(self.work, 0o2770)
         out = self.root / "result.tsv"
-        with mock.patch.object(store_module.os, "fchown", side_effect=PermissionError(errno.EPERM, "nope")):
+        with mock.patch.object(atomic_module.os, "fchown", side_effect=PermissionError(errno.EPERM, "nope")):
             result = self.export("--output", str(out))
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o600)
@@ -289,7 +291,7 @@ class TestExportCommand(ExportTestCase):
 
     def test_without_hard_links_creates_directly(self):
         out = self.root / "result.tsv"
-        with mock.patch.object(store_module.os, "link", side_effect=OSError(errno.EPERM, "no links")):
+        with mock.patch.object(atomic_module.os, "link", side_effect=OSError(errno.EPERM, "no links")):
             result = self.export("--output", str(out))
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(out.read_bytes(), EXPECTED)
@@ -304,7 +306,7 @@ class TestExportCommand(ExportTestCase):
             raise FileExistsError(errno.EEXIST, "File exists")
 
         out = self.root / "result.tsv"
-        with mock.patch.object(store_module.os, "link", lost_reply):
+        with mock.patch.object(atomic_module.os, "link", lost_reply):
             result = self.export("--output", str(out))
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(out.read_bytes(), EXPECTED)
@@ -313,7 +315,7 @@ class TestExportCommand(ExportTestCase):
 
     def test_interrupted_write_leaves_nothing(self):
         out = self.root / "result.tsv"
-        with mock.patch.object(store_module.os, "link", side_effect=KeyboardInterrupt):
+        with mock.patch.object(atomic_module.os, "link", side_effect=KeyboardInterrupt):
             result = self.export("--output", str(out))
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["work"])
@@ -350,8 +352,8 @@ class TestExportLiveOrTorn(ExportTestCase):
         self.assertEqual(after, before)
 
     def test_writer_appearing_during_export_is_refused(self):
-        lock = self.work / store_module.LOCK_NAME
-        appeared = store_module.WorkDirLocked(lock, this_process())
+        lock = self.work / lock_module.LOCK_NAME
+        appeared = lock_module.WorkDirLocked(lock, this_process())
         for args, code in (((), 1), (("--allow-live",), 0)):
             with self.subTest(args=args):
                 answers = iter([None, appeared])  # free at the start, held by the end
@@ -362,7 +364,7 @@ class TestExportLiveOrTorn(ExportTestCase):
                 self.assertEqual(result.stdout_bytes, b"" if code else EXPECTED)
 
     def test_unreadable_lock_is_refused(self):
-        (self.work / store_module.LOCK_NAME).write_text("not json")
+        (self.work / lock_module.LOCK_NAME).write_text("not json")
         result = self.export()
         self.assertEqual(result.exit_code, 1)
         self.assertIn("unreadable or corrupt", result.output)
@@ -371,7 +373,7 @@ class TestExportLiveOrTorn(ExportTestCase):
         if not boot_id():
             self.skipTest("no boot id: a lock's liveness cannot be checked here")
         holder = dataclasses.replace(this_process(), pid=dead_pid())
-        (self.work / store_module.LOCK_NAME).write_text(json.dumps(dataclasses.asdict(holder)))
+        (self.work / lock_module.LOCK_NAME).write_text(json.dumps(dataclasses.asdict(holder)))
         result = self.export()
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(result.stdout_bytes, EXPECTED)

@@ -42,7 +42,8 @@ from tqdm import tqdm
 
 from .access import MANIFEST_NAME, Access, Modes, modes
 from .connection import package_version
-from .store import ICON_SUFFIX, MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind
+from .export import ICON_SUFFIX
+from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind
 
 log = logging.getLogger(__name__)
 

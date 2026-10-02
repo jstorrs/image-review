@@ -17,19 +17,14 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame as pg
 
+from image_review import atomic as atomic_module
+from image_review import lock as lock_module
 from image_review import store as store_module
 from image_review.access import policy_of_dir
 from image_review.cli import unknown_batch_message
+from image_review.lock import LOCK_NAME, WorkDirLocked, acquire_lock, boot_id, release_lock, this_process
 from image_review.review_db import ReviewDB
-from image_review.store import (
-    LOCK_NAME,
-    LocalStore,
-    WorkDirLocked,
-    acquire_lock,
-    boot_id,
-    release_lock,
-    this_process,
-)
+from image_review.store import LocalStore
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, temp_dir
 
 THIS_BOOT = boot_id()
@@ -154,7 +149,7 @@ class TestWorkDirLock(LockTestCase):
             "started": "t",
         }
         lock_path.write_text(json.dumps(stale))
-        real_is_stale = store_module.is_stale
+        real_is_stale = lock_module.is_stale
         a_started = False
         winners: list[LocalStore] = []
 
@@ -165,14 +160,14 @@ class TestWorkDirLock(LockTestCase):
                 winners.append(LocalStore(work_dir))  # A's own is_stale call goes straight through
             return real_is_stale(holder, me)
 
-        with mock.patch.object(store_module, "is_stale", a_reclaims_first), self.assertRaises(WorkDirLocked):
+        with mock.patch.object(lock_module, "is_stale", a_reclaims_first), self.assertRaises(WorkDirLocked):
             LocalStore(work_dir)  # B
         self.assertEqual(len(winners), 1)
         self.assertTrue(lock_path.exists())  # A's lock survived B's stale decision
         winners[0].close()
         self.assertFalse(lock_path.exists())
 
-    @mock.patch.object(store_module, "EMPTY_LOCK_WAIT", 0.1)
+    @mock.patch.object(lock_module, "EMPTY_LOCK_WAIT", 0.1)
     def test_corrupt_lock_is_refused(self):
         for data in (
             b"",
@@ -311,15 +306,15 @@ class TestWorkDirLock(LockTestCase):
             with self.subTest(link_error=link_error):
                 opened.clear()
                 with (
-                    mock.patch.object(store_module.os, "fchmod", spy_fchmod),
-                    mock.patch.object(store_module.os, "link", side_effect=link_error, wraps=os.link),
+                    mock.patch.object(atomic_module.os, "fchmod", spy_fchmod),
+                    mock.patch.object(atomic_module.os, "link", side_effect=link_error, wraps=os.link),
                 ):
                     me = acquire_lock(self.work_dir)
                 release_lock(self.work_dir, me)
                 self.assertEqual(opened, [file_mode] * (1 if link_error is None else 2))  # sibling (+ direct)
 
     def test_sibling_name_collision_still_acquires(self):
-        real_token_hex = store_module.secrets.token_hex
+        real_token_hex = lock_module.secrets.token_hex
         me = this_process()
         collided = self.work_dir / f"{LOCK_NAME}.{me.host}.{me.boot_id or '-'}.{me.pid}.collide"
         collided.write_text("{}")
@@ -328,7 +323,7 @@ class TestWorkDirLock(LockTestCase):
         def first_collides(nbytes=None):
             return next(tokens, None) or real_token_hex(nbytes)
 
-        with mock.patch.object(store_module.secrets, "token_hex", first_collides):
+        with mock.patch.object(lock_module.secrets, "token_hex", first_collides):
             self.open()
         self.assertEqual(self.holder()["pid"], os.getpid())
         self.assertEqual([p.name for p in self.work_dir.iterdir() if p.name.startswith(LOCK_NAME)], [LOCK_NAME])
