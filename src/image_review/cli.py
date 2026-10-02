@@ -661,7 +661,7 @@ def serve(work_dir, bind, port):
     When stdout is not a terminal (e.g. sbatch), it is written to a private
     file under ~/.image-review/ instead of being printed.
     """
-    from .server import make_server, write_connection_file
+    from .server import make_server
 
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
@@ -678,29 +678,39 @@ def serve(work_dir, bind, port):
             # Exit order (LIFO): connection file, socket, then the store; a handler thread may still be marking.
             stack.callback(_close_store_after_marks, server, store)
             stack.callback(server.server_close)
-            uri = target.to_uri()
-            if sys.stdout.isatty():
-                print("Serving review data. The connection string grants access; treat it like a password.\n")
-                print(uri)
-                remote_arg = f"'{uri}'"
-            else:
-                try:
-                    connection_file = write_connection_file(target)
-                except OSError as e:
-                    raise click.ClickException(f"Cannot write connection file: {e}")
-                stack.callback(connection_file.unlink, missing_ok=True)
-                print("Serving review data. Stdout is not a terminal, so the connection string (an access token;")
-                print(f"treat it like a password) was written to {connection_file} (mode 0600) on this node.")
-                print("Home directories are usually shared with the login node, so on your laptop use:")
-                remote_arg = f'"$(ssh <user>@<login-node> cat {connection_file})"'
-            print("\nOn your laptop, directly:")
-            print(f"  image-review review --remote {remote_arg}")
-            print("or through an SSH tunnel via the login node:")
-            print(f"  image-review review --remote {remote_arg} --via <user>@<login-node>")
-            print("\nPress Ctrl-C to stop.", flush=True)
+            _announce(target, stack)
             server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def _announce(target: RemoteTarget, stack: contextlib.ExitStack) -> None:
+    """Tell the operator how to connect: print the connection string on a terminal, else write it to a private file.
+
+    The file's removal is registered on `stack`.
+    """
+    from .server import write_connection_file
+
+    uri = target.to_uri()
+    if sys.stdout.isatty():
+        print("Serving review data. The connection string grants access; treat it like a password.\n")
+        print(uri)
+        remote_arg = f"'{uri}'"
+    else:
+        try:
+            connection_file = write_connection_file(target)
+        except OSError as e:
+            raise click.ClickException(f"Cannot write connection file: {e}")
+        stack.callback(connection_file.unlink, missing_ok=True)
+        print("Serving review data. Stdout is not a terminal, so the connection string (an access token;")
+        print(f"treat it like a password) was written to {connection_file} (mode 0600) on this node.")
+        print("Home directories are usually shared with the login node, so on your laptop use:")
+        remote_arg = f'"$(ssh <user>@<login-node> cat {connection_file})"'
+    print("\nOn your laptop, directly:")
+    print(f"  image-review review --remote {remote_arg}")
+    print("or through an SSH tunnel via the login node:")
+    print(f"  image-review review --remote {remote_arg} --via <user>@<login-node>")
+    print("\nPress Ctrl-C to stop.", flush=True)
 
 
 def _refuse_live(writer: WorkDirLocked | None, allow_live: bool) -> None:
