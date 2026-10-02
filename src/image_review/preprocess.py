@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager, nullcontext, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -978,6 +978,7 @@ def _library_versions() -> dict[str, str]:
 
 
 def provenance(
+    *,
     sources: list[Path],
     batch_size: int,
     colormap: str,
@@ -1072,17 +1073,34 @@ def run_preprocess(
         staging = _claim_staging(output_dir, policy.dir_mode)
         exclude = frozenset({output_dir.resolve(), staging.resolve()})  # never ingest our own output
         try:
-            result = _render_into(sources, exclude, staging, batch_size, colormap, policy, jobs)
+            found, manifest_rows, skipped = _render_into(
+                sources=sources,
+                exclude=exclude,
+                staging=staging,
+                batch_size=batch_size,
+                colormap=colormap,
+                policy=policy,
+                jobs=jobs,
+            )
+            _write_tsv(staging / MANIFEST_NAME, MANIFEST_HEADER, manifest_rows, policy.file_mode)
+            _write_tsv(
+                staging / SKIPPED_NAME,
+                SKIPPED_HEADER,
+                [(s.image_id, s.kind, s.reason) for s in skipped],
+                policy.file_mode,
+            )
+            written = len(manifest_rows)
+            result = PreprocessResult(found, written, -(-written // batch_size), skipped, output_dir / SKIPPED_NAME)
             record = provenance(
-                sources,
-                batch_size,
-                colormap,
-                access,
-                jobs,
-                result,
-                datetime.now(UTC),
-                package_version(),
-                _library_versions(),
+                sources=sources,
+                batch_size=batch_size,
+                colormap=colormap,
+                access=access,
+                jobs=jobs,
+                result=result,
+                created=datetime.now(UTC),
+                tool_version=package_version(),
+                libraries=_library_versions(),
             )
             with _open_new(staging / PROVENANCE_NAME, policy.file_mode, mode="w", encoding="utf-8") as f:
                 f.write(json.dumps(record, indent=2) + "\n")
@@ -1094,7 +1112,7 @@ def run_preprocess(
             raise
     finally:
         os.umask(previous_umask)
-    return replace(result, skipped_path=output_dir / result.skipped_path.name)
+    return result
 
 
 def colliding_ids(images: Iterable[tuple[str, str, str]]) -> frozenset[str]:
@@ -1113,21 +1131,22 @@ def colliding_ids(images: Iterable[tuple[str, str, str]]) -> frozenset[str]:
 
 
 def _render_into(
+    *,
     sources: list[Path],
     exclude: frozenset[Path],
-    output_dir: Path,
+    staging: Path,
     batch_size: int,
     colormap: str,
     policy: Modes,
     jobs: int,
-) -> PreprocessResult:
+) -> tuple[int, list[tuple[str, str, str, str, str]], list[Skipped]]:
     """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches.
 
     An input with any colliding image (main or icon) becomes one `failed` row and its JPGs are deleted.
     Inputs are rendered by `jobs` worker processes, or in this one for 1; either way this process writes
     every file, in discovery order.
     """
-    pending = output_dir / PENDING_NAME
+    pending = staging / PENDING_NAME
     pending.mkdir()
     os.chmod(pending, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
     inputs: list[tuple[str, list[Staged | Skipped]]] = []  # (input image_id, its output rows), in discovery order
@@ -1179,25 +1198,14 @@ def _render_into(
                 continue
             n = len(manifest_rows)
             batch_id = f"batch_{n // batch_size + 1:03d}"
-            batch_dir = output_dir / batch_id
+            batch_dir = staging / batch_id
             if n % batch_size == 0:
                 batch_dir.mkdir(parents=True, exist_ok=True)
                 os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
             img_path = batch_dir / f"img_{n % batch_size + 1:05d}.jpg"
             os.rename(row.path, img_path)
-            key = img_path.relative_to(output_dir).as_posix()
+            key = img_path.relative_to(staging).as_posix()
             manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
     pending.rmdir()  # every staged JPG was moved or deleted
 
-    _write_tsv(output_dir / MANIFEST_NAME, MANIFEST_HEADER, manifest_rows, policy.file_mode)
-    skipped_path = output_dir / SKIPPED_NAME
-    _write_tsv(
-        skipped_path,
-        SKIPPED_HEADER,
-        [(s.image_id, s.kind, s.reason) for s in skipped],
-        policy.file_mode,
-    )
-
-    written = len(manifest_rows)
-    batches = -(-written // batch_size)
-    return PreprocessResult(found, written, batches, skipped, skipped_path)
+    return found, manifest_rows, skipped
