@@ -72,6 +72,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--colormap NAME]
                                             [--access {private,group}]
                                             [--allow-skipped]
+                                            [--jobs N]
 ```
 
 Accepts ZIP files, directories (searched recursively, including ZIP files
@@ -151,6 +152,22 @@ inputs: wrote K images in B batches; S skipped (F failed, I ignored; see
 .../skipped.tsv)`) and exits 1 if any input failed, unless `--allow-skipped`
 is given. Check `skipped.tsv` before reviewing: those images will not be
 shown.
+
+**Parallel rendering.** `--jobs N` renders inputs in N worker processes
+(default: `$SLURM_CPUS_PER_TASK` when set, else the CPUs the process may use,
+capped by the smallest cgroup v2 CPU quota of the process's cgroup and its
+ancestors, such as a login node's per-user `CPUQuota=` or a container's limit);
+`--jobs 1` renders in the main process. The output is byte-for-byte the same
+for any N; `preprocess.json` records the value. Memory grows with N: the
+main process holds the raw bytes of up to 2 × N inputs and each worker one
+input and its decoded arrays, so lower `--jobs` for very large DICOMs. Workers
+use one BLAS/OpenMP thread each unless you set `OMP_NUM_THREADS` and the like
+yourself. On a
+Slurm cluster request cores with `--cpus-per-task` (e.g. `srun
+--cpus-per-task=8 image-review preprocess ...`) and `--jobs` follows. If a
+worker dies (e.g. out of memory), the run fails and leaves no work directory;
+re-run with `--jobs 1` to find the input. Ctrl-C or `scancel` stops the
+workers and removes the staging directory.
 
 ### `image-review review`
 

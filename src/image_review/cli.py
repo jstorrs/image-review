@@ -2,11 +2,13 @@ import contextlib
 import datetime
 import getpass
 import logging
+import math
+import os
 import signal
 import socket
 import sys
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, get_args
 
 import click
@@ -254,6 +256,53 @@ def _known_colormap(ctx: click.Context, param: click.Parameter, value: str) -> s
     return value
 
 
+CGROUP_ROOT = Path("/sys/fs/cgroup")  # the cgroup v2 mount
+PROC_SELF_CGROUP = Path("/proc/self/cgroup")  # its "0::<path>" line names this process's cgroup v2
+
+
+def _cpu_max(cgroup: Path) -> int | None:
+    """A cgroup's CPU quota (`cpu.max`: "<quota> <period>"), rounded up; None for "max" or a missing or odd file."""
+    try:
+        quota, period = (cgroup / "cpu.max").read_text().split()
+        return max(1, math.ceil(int(quota) / int(period)))
+    except (OSError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _cgroup_cpus() -> int | None:
+    """The smallest CPU quota of this process's cgroup v2 and its ancestors up to the mount root, or None.
+
+    On a host that is e.g. a login node's per-user `CPUQuota=` on `user-UID.slice`; in a container the
+    cgroup is the namespace root (`0::/`), whose `cpu.max` is the container's quota.
+    """
+    try:
+        lines = PROC_SELF_CGROUP.read_text().splitlines()
+    except OSError:  # not Linux
+        lines = []
+    path = next((line.removeprefix("0::") for line in lines if line.startswith("0::")), "/")
+    parts = PurePosixPath(path).parts[1:]
+    if ".." in parts:  # outside our cgroup namespace: only its root is visible
+        parts = ()
+    caps = [_cpu_max(CGROUP_ROOT.joinpath(*parts[:depth])) for depth in range(len(parts), -1, -1)]
+    return min((cap for cap in caps if cap is not None), default=None)
+
+
+def default_jobs() -> int:
+    """The default for `preprocess --jobs`, resolved when the command runs.
+
+    The CPUs this process may run on (its affinity, else the CPU count, else 1), capped by
+    $SLURM_CPUS_PER_TASK when that is a whole number >= 1, else by the smallest cgroup v2 CPU quota
+    (`cpu.max`) of this process's cgroup and its ancestors.
+    """
+    affinity = getattr(os, "sched_getaffinity", None)  # not on macOS or Windows
+    usable = len(affinity(0)) if affinity is not None else (os.cpu_count() or 1)
+    slurm = os.environ.get("SLURM_CPUS_PER_TASK", "").strip()
+    if slurm.isdecimal() and int(slurm) >= 1:  # isdecimal: "²" is a digit int() rejects
+        return min(int(slurm), usable)
+    quota = _cgroup_cpus()
+    return usable if quota is None else min(quota, usable)
+
+
 @cli.command()
 @click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True))
 @click.option("--batch-size", type=click.IntRange(min=1), default=300, show_default=True, help="Images per batch.")
@@ -287,7 +336,14 @@ def _known_colormap(ctx: click.Context, param: click.Parameter, value: str) -> s
     default=False,
     help="Exit 0 even if some inputs failed to preprocess (they are listed in skipped.tsv).",
 )
-def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
+@click.option(
+    "--jobs",
+    type=click.IntRange(min=1),
+    default=default_jobs,
+    show_default="$SLURM_CPUS_PER_TASK, else the usable CPUs capped by the cgroup v2 CPU quotas",
+    help="Worker processes rendering inputs in parallel; 1 renders in this process. The output is the same for any value.",
+)
+def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, jobs):
     """Normalize DICOM and image files to JPGs and organize them into batches.
 
     SOURCES are one or more ZIP files, directories, or image files to process.
@@ -295,17 +351,20 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped):
     either manifest.tsv or skipped.tsv (as failed, or ignored when it is not an
     image). Exits 1 if any input failed, unless --allow-skipped is given.
     """
-    from .preprocess import WorkDirExists, run_preprocess
+    from .preprocess import WorkDirExists, WorkerCrashed, run_preprocess
 
     source_paths = [Path(s).resolve() for s in sources]
     from tqdm.contrib.logging import logging_redirect_tqdm
 
     try:
-        with logging_redirect_tqdm(loggers=[logging.getLogger(PACKAGE_LOGGER)]):  # log lines print above the bars
+        with (
+            interrupt_on(*TERMINATION_SIGNALS),  # SIGTERM/SIGHUP unwind like Ctrl-C: workers stop, staging goes
+            logging_redirect_tqdm(loggers=[logging.getLogger(PACKAGE_LOGGER)]),  # log lines print above the bars
+        ):
             result = run_preprocess(
-                source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap, access=access
+                source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap, access=access, jobs=jobs
             )
-    except WorkDirExists as exc:
+    except (WorkDirExists, WorkerCrashed) as exc:
         raise click.ClickException(str(exc)) from exc
     failed = sum(1 for s in result.skipped if s.kind == "failed")
     click.echo(

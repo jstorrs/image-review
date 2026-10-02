@@ -73,6 +73,7 @@ safe.
 | `--colormap` | `inferno` | Matplotlib colormap for DICOM rendering |
 | `--access` | `private` | `private`: owner only (dirs 0700, files 0600); `group`: the work dir's Unix group too (dirs 2770, files 0660). Never world-readable. Env: `IMAGE_REVIEW_ACCESS` |
 | `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
+| `--jobs` | `$SLURM_CPUS_PER_TASK`, else the usable CPUs, capped by the cgroup v2 CPU quotas (e.g. a login node's per-user limit, a container's limit) | Worker processes rendering in parallel; `1` renders in the main process. The output is the same for any value |
 
 **Examples:**
 
@@ -88,7 +89,16 @@ image-review preprocess scans.zip --batch-size 100 --colormap viridis
 
 # Custom output directory
 image-review preprocess scans.zip --work-dir /data/review_session_1
+
+# Render in 8 worker processes (or 1 for the main process only)
+image-review preprocess scans.zip --jobs 8
 ```
+
+The main process holds the raw bytes of up to 2 × N inputs waiting for or
+being rendered, and each worker holds one input and its decoded arrays, so if
+very large DICOMs run the machine out of memory, lower `--jobs`. A worker that dies fails the
+whole run (no work directory is created); re-run with `--jobs 1` to see which
+input is the problem.
 
 **Sharing with a team:** the work directory holds PHI, so by default only you
 can read it. If several accounts share a study Unix group, use
@@ -544,11 +554,18 @@ serves the preprocessed work directory over HTTPS; `image-review review
 
 ### 1. Preprocess on the cluster
 
-Unchanged. Run it as a batch or interactive job:
+Unchanged. Run it as a batch or interactive job, asking Slurm for several
+cores: `--jobs` defaults to `$SLURM_CPUS_PER_TASK`, so rendering uses every
+core you were given:
 
 ```bash
-image-review preprocess /data/scans.zip --work-dir /scratch/me/review_work
+srun --cpus-per-task=8 --mem=16G image-review preprocess /data/scans.zip --work-dir /scratch/me/review_work
 ```
+
+In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. Without
+`--cpus-per-task`, `$SLURM_CPUS_PER_TASK` is unset and `--jobs` falls back to
+the CPUs the job may use (its CPU affinity, capped by the smallest cgroup v2 CPU quota of its cgroup and its ancestors). `scancel` (or the time limit) stops the workers and
+leaves no work directory.
 
 ### 2. Serve from an interactive session
 
@@ -744,7 +761,7 @@ All state lives in the work directory (default `./review_work`):
 |------|--------|-------------|
 | `manifest.tsv` | TSV | Master image list (batch, preprocessed_path, image_id, source_sha256, jpeg_sha256). Work dirs from older versions have only the first three columns and still load |
 | `skipped.tsv` | TSV | Inputs that produced no image (image_id, kind, reason) |
-| `preprocess.json` | JSON | How the work directory was made: tool and library versions, time (UTC), resolved sources, parameters (batch size, colormap, contrast settings, JPEG quality, access), and counts. Holds source paths; never served |
+| `preprocess.json` | JSON | How the work directory was made: tool and library versions, time (UTC), resolved sources, parameters (batch size, colormap, contrast settings, JPEG quality, access, jobs), and counts. Holds source paths; never served |
 | `review.tsv` | TSV | Review decisions (image_id, batch, status, pass_number, timestamp, reviewer, mode, grid_size, tool_version) |
 | `batch_NNN/img_NNNNN.jpg` | JPG | Preprocessed individual images |
 

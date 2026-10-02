@@ -107,6 +107,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--colormap NAME]
                                             [--access {private,group}]
                                             [--allow-skipped]
+                                            [--jobs N]
 ```
 
 | Argument | Default | Description |
@@ -117,6 +118,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 | `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale (unknown names exit 2 before any output) |
 | `--access` | `private` | `private` (dirs 0700, files 0600) or `group` (dirs 2770, files 0660); env `IMAGE_REVIEW_ACCESS` |
 | `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
+| `--jobs` | `$SLURM_CPUS_PER_TASK`, else the usable CPUs | Worker processes rendering in parallel (integer >= 1; 0 exits 2 before any output). Resolved when the command runs from the usable CPUs (`len(os.sched_getaffinity(0))` where available, else `os.cpu_count()`, else 1): `$SLURM_CPUS_PER_TASK` capped at the usable CPUs if it is a whole number >= 1 (ASCII or other decimal digits only), else the usable CPUs capped at the smallest cgroup v2 CPU quota `ceil(quota / period)` among the `cpu.max` files of the process's own cgroup (the `0::<path>` line of `/proc/self/cgroup`, under `/sys/fs/cgroup`) and each ancestor up to the mount root, e.g. a login node's per-user `CPUQuota=` on `user-UID.slice`, or a container's quota at its namespace root (`0::/`). `max`, a missing or unreadable file, or an unreadable `/proc/self/cgroup` means no cap at that level; a path outside the cgroup namespace (`..`) reads only the mount root. cgroup v1 quotas are not read |
 
 The pipeline has three parts: **discovery** (IO) yields one `Candidate`
 (`image_id`, `kind` = `dicom` or `raster`, and a `read()` returning the raw
@@ -130,6 +132,40 @@ valid until discovery moves on to the next item. Each input's bytes are read
 once; their SHA-256 becomes the `source_sha256` of every image rendered from
 them (a DICOM and its icon share it), and the SHA-256 of each JPG's encoded
 bytes its `jpeg_sha256` (see *`manifest.tsv`*).
+
+**Parallel rendering** (`run_preprocess(..., jobs)`, CLI `--jobs`). Hashing,
+rendering and encoding one input is the pure, top-level
+`render_and_encode(kind, image_id, data, colormap) -> list[Encoded | Skipped]`.
+With `jobs` = 1 it runs in the main process and no pool exists. With `jobs` >
+1 the main process reads each candidate's bytes during discovery (a ZIP entry
+is readable only then) and submits them to a `ProcessPoolExecutor(jobs)` using
+the `spawn` start method on every platform (workers import the package afresh:
+no inherited threads, signal handlers or open archives); workers hash the
+bytes and return JPEG bytes or `Skipped` rows. While the pool exists,
+`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` are set to 1 in
+the main process's environment (only those the user has not set; restored
+afterwards), so each worker inherits single-threaded BLAS instead of a thread
+per core. At most `2 × jobs` inputs are submitted and not yet consumed: the
+main process holds their raw bytes, each worker one input and its decoded
+arrays. Results are consumed in input
+order, so the main process writes every file and row in the same order as
+with `jobs` = 1 and the output is byte-identical (only `preprocess.json`'s
+`created` and `parameters.jobs` differ). Workers ignore SIGINT from the start
+(SIGINT is blocked while they are spawned and the initializer ignores, then
+unblocks it), so Ctrl-C reaches only the main process. The CLI runs preprocess
+under `interrupt_on(SIGTERM, SIGHUP)`. On any exception in the main process
+(Ctrl-C, SIGTERM, a dead worker, a write error) the workers are killed and
+joined, the main process closes its copy of the pool's result-pipe write end
+(so a manager thread reading a result cut off mid-send sees EOF instead of
+waiting forever), and the pool is shut down with queued inputs cancelled,
+all before the staging directory is removed. A worker that dies fails the run
+with `WorkerCrashed` (CLI: exit 1, naming how many inputs were in flight and
+the first, and suggesting `--jobs 1`) rather than retrying in the main
+process, where the same input could kill the whole run without a message.
+The death is seen either as `BrokenProcessPool` or, when the worker died
+mid-send and the pool cannot notice, by the main process checking every
+second while it waits that no worker has exited (without
+`max_tasks_per_child`, workers exit only at shutdown).
 
 **Work directory lifecycle.** The run builds everything (batch directories,
 JPGs, `manifest.tsv`, `skipped.tsv`, `preprocess.json`) in a staging directory
@@ -355,7 +391,7 @@ directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`,
 cannot cause one.
 
 **Batching**: Each input is rendered, encoded and written as soon as discovery yields
-it, so memory does not grow with batch size. The JPG is first written to
+it (with `--jobs` > 1, at most `2 × jobs` inputs ahead), so memory does not grow with batch size. The JPG is first written to
 `<staging>/.pending/` under a provisional name; once every input is rendered
 and collisions are known (see *Collisions*), the JPGs of non-colliding inputs
 are renamed into their batches in discovery order, the rest are deleted, and
@@ -645,7 +681,7 @@ like the other files. One JSON object recording how the work directory was made:
 | `tool_version` | The image-review package version (`"unknown"` if not installed) |
 | `created` | UTC time the run finished, ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) |
 | `sources` | The SOURCES, as resolved absolute paths, in the order given |
-| `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `access` |
+| `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `access`, `jobs` (recorded only: the output does not depend on it) |
 | `libraries` | Versions of `pydicom`, `numpy`, `scikit-image`, `Pillow`, `matplotlib`, plus `gdcm`, `pylibjpeg`, `openjpeg` when importable |
 | `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored` |
 

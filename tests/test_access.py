@@ -27,7 +27,7 @@ from image_review.review_db import ReviewDB
 from image_review.server import ReviewServer
 from tests.fixtures import make_work_dir, write_dicom
 
-ENV = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
+ENV = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None, "SLURM_CPUS_PER_TASK": "1"}
 
 
 def _src(root: Path) -> Path:

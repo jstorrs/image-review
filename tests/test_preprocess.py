@@ -2,15 +2,22 @@
 
 import contextlib
 import csv
+import faulthandler
 import hashlib
 import io
 import json
+import multiprocessing
 import os
+import signal
 import stat
 import tempfile
+import threading
+import time
 import unittest
 import warnings
 import zipfile
+from concurrent.futures import Executor, Future, ProcessPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
@@ -24,8 +31,9 @@ from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import MediaStorageDirectoryStorage, generate_uid
 
+from image_review import cli as cli_module
 from image_review import preprocess as preprocess_module
-from image_review.cli import cli
+from image_review.cli import cli, default_jobs
 from image_review.preprocess import (
     COLLISION_REASON,
     SIDE_BY_SIDE_GAP,
@@ -35,6 +43,7 @@ from image_review.preprocess import (
     Skipped,
     Unsupported,
     WorkDirExists,
+    WorkerCrashed,
     _failed,
     classify,
     colliding_ids,
@@ -42,13 +51,22 @@ from image_review.preprocess import (
     decode_raster,
     discover,
     render,
+    render_and_encode,
     run_preprocess,
 )
+from image_review.signals import TERMINATION_SIGNALS, interrupt_on
 from tests.fixtures import add_overlay, write_dicom
 
 RNG = np.random.default_rng(0)
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 APPLEDOUBLE = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + bytes(100)
+# Ignore the developer's environment; SLURM_CPUS_PER_TASK=1 renders in-process, with no worker start-up per run
+CLI_ENV = {
+    "IMAGE_REVIEW_REMOTE": None,
+    "IMAGE_REVIEW_VIA": None,
+    "IMAGE_REVIEW_ACCESS": None,
+    "SLURM_CPUS_PER_TASK": "1",
+}
 
 
 def _good_pixels() -> np.ndarray:
@@ -300,12 +318,11 @@ class CollisionTest(unittest.TestCase):
         )
 
     def assert_cli_exit_codes(self) -> None:
-        env = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
         for extra, code in (((), 1), (("--allow-skipped",), 0)):
             with self.subTest(args=extra), quiet():
                 work = self.root / f"cli{code}"
                 args = ["preprocess", str(self.src), "--work-dir", str(work), *extra]
-                result = CliRunner().invoke(cli, args, env=env)
+                result = CliRunner().invoke(cli, args, env=CLI_ENV)
             self.assertEqual(result.exit_code, code, result.output)
 
     def test_zip_entry_named_like_a_numbered_duplicate(self):
@@ -474,6 +491,7 @@ class ProvenanceTest(unittest.TestCase):
                 "jpeg_quality": preprocess_module.JPEG_QUALITY,
                 "jpeg_subsampling": preprocess_module.JPEG_SUBSAMPLING,
                 "access": "private",
+                "jobs": 1,
             },
         )
         self.assertLessEqual({"pydicom", "numpy", "scikit-image", "Pillow", "matplotlib"}, set(record["libraries"]))
@@ -604,9 +622,8 @@ class ContentDiscoveryTest(unittest.TestCase):
         self.root = Path(tmp.name).resolve()
 
     def invoke(self, source: Path, work: Path, *args):
-        env = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
         with quiet():
-            return CliRunner().invoke(cli, ["preprocess", str(source), "--work-dir", str(work), *args], env=env)
+            return CliRunner().invoke(cli, ["preprocess", str(source), "--work-dir", str(work), *args], env=CLI_ENV)
 
     def skipped_rows(self, work: Path) -> list[tuple[str, str, str]]:
         return [(r["image_id"], r["kind"], r["reason"]) for r in _read_tsv(work / "skipped.tsv")]
@@ -1488,18 +1505,13 @@ class PreprocessCliTest(unittest.TestCase):
         make_mixed_source(self.root)
 
     def invoke(self, *args, source: str = "src"):
-        env = {
-            "IMAGE_REVIEW_REMOTE": None,
-            "IMAGE_REVIEW_VIA": None,
-            "IMAGE_REVIEW_ACCESS": None,
-        }  # ignore the developer's environment
         with quiet():
             return CliRunner().invoke(
-                cli, ["preprocess", str(self.root / source), "--work-dir", str(self.root / "work"), *args], env=env
+                cli, ["preprocess", str(self.root / source), "--work-dir", str(self.root / "work"), *args], env=CLI_ENV
             )
 
     def test_invalid_options_exit_2_before_any_output(self):
-        for args in (("--batch-size", "0"), ("--batch-size", "-3"), ("--colormap", "nope")):
+        for args in (("--batch-size", "0"), ("--batch-size", "-3"), ("--colormap", "nope"), ("--jobs", "0")):
             with self.subTest(args=args):
                 before = sorted(self.root.iterdir())
                 result = self.invoke(*args)
@@ -1538,6 +1550,421 @@ class PreprocessCliTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("already exists", result.output)
         self.assertEqual((self.root / "work" / "manifest.tsv").read_bytes(), manifest)
+
+    def test_jobs_default_follows_slurm_and_is_recorded(self):
+        result = self.invoke("--allow-skipped")
+        self.assertEqual(result.exit_code, 0, result.output)
+        record = json.loads((self.root / "work" / "preprocess.json").read_text())
+        self.assertEqual(record["parameters"]["jobs"], 1)
+        seen = []
+
+        def fake_run(*args, **kwargs):
+            seen.append(kwargs["jobs"])
+            raise WorkerCrashed("a preprocess worker died")
+
+        with (
+            mock.patch("image_review.preprocess.run_preprocess", fake_run),
+            mock.patch.object(os, "sched_getaffinity", lambda pid: set(range(8)), create=True),
+            quiet(),
+        ):
+            crashed = CliRunner().invoke(
+                cli, ["preprocess", str(self.root / "src")], env={"SLURM_CPUS_PER_TASK": "5"}, catch_exceptions=False
+            )
+        self.assertEqual(seen, [5])
+        self.assertEqual(crashed.exit_code, 1, crashed.output)
+        self.assertIn("a preprocess worker died", crashed.output)
+
+
+class DefaultJobsTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cgroups = Path(tmp.name) / "cgroup"  # a fake cgroup v2 mount
+        self.cgroups.mkdir()
+        self.cpu_max = self.cgroups / "cpu.max"  # missing until a test writes it
+        self.proc_cgroup = Path(tmp.name) / "proc-self-cgroup"
+        self.proc_cgroup.write_text("0::/\n")  # as in a container: the namespace root
+        for patch in (
+            mock.patch.dict(os.environ),
+            mock.patch.object(cli_module, "CGROUP_ROOT", self.cgroups),
+            mock.patch.object(cli_module, "PROC_SELF_CGROUP", self.proc_cgroup),
+            mock.patch.object(os, "sched_getaffinity", lambda pid: set(range(7)), create=True),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        os.environ.pop("SLURM_CPUS_PER_TASK", None)
+
+    def test_slurm_cpus_per_task_when_valid(self):
+        self.cpu_max.write_text("100000 100000\n")  # a quota does not override Slurm's allocation
+        os.environ["SLURM_CPUS_PER_TASK"] = "3"
+        self.assertEqual(default_jobs(), 3)
+
+    def test_slurm_cpus_per_task_is_capped_by_affinity(self):
+        os.environ["SLURM_CPUS_PER_TASK"] = "32"
+        self.assertEqual(default_jobs(), 7)
+
+    def test_usable_cpus_when_slurm_is_unset_or_invalid(self):
+        for value in (None, "", "0", "-2", "abc", "2.5", "\u00b2"):
+            with self.subTest(value=value):
+                os.environ.pop("SLURM_CPUS_PER_TASK", None)
+                if value is not None:
+                    os.environ["SLURM_CPUS_PER_TASK"] = value
+                self.assertEqual(default_jobs(), 7)
+                with (
+                    mock.patch.object(os, "sched_getaffinity", None, create=True),
+                    mock.patch.object(os, "cpu_count", return_value=9),
+                ):
+                    self.assertEqual(default_jobs(), 9)
+                with (
+                    mock.patch.object(os, "sched_getaffinity", None, create=True),
+                    mock.patch.object(os, "cpu_count", return_value=None),
+                ):
+                    self.assertEqual(default_jobs(), 1)
+
+    def test_cgroup_quota_caps_the_usable_cpus(self):
+        for content, expected in (
+            ("200000 100000\n", 2),
+            ("150000 100000\n", 2),  # rounded up
+            ("50000 100000\n", 1),
+            ("1000000 100000\n", 7),  # never above the affinity
+            ("max 100000\n", 7),
+            ("garbage\n", 7),
+            ("100 0\n", 7),
+            ("", 7),
+        ):
+            with self.subTest(content=content):
+                self.cpu_max.write_text(content)
+                self.assertEqual(default_jobs(), expected)
+        self.cpu_max.unlink()
+        self.assertEqual(default_jobs(), 7)
+
+    def test_smallest_quota_of_the_cgroup_and_its_ancestors(self):
+        scope = self.cgroups / "user.slice" / "user-1002.slice" / "session-9.scope"
+        scope.mkdir(parents=True)
+        self.proc_cgroup.write_text("12:cpu,cpuacct:/ignored-v1\n0::/user.slice/user-1002.slice/session-9.scope\n")
+        self.cpu_max.write_text("max 100000\n")
+        (self.cgroups / "user.slice" / "cpu.max").write_text("600000 100000\n")
+        (self.cgroups / "user.slice" / "user-1002.slice" / "cpu.max").write_text("200000 100000\n")  # CPUQuota=200%
+        self.assertEqual(default_jobs(), 2)  # the scope itself has no cpu.max
+        (scope / "cpu.max").write_text("max 100000\n")
+        self.assertEqual(default_jobs(), 2)
+        (scope / "cpu.max").write_text("100000 100000\n")
+        self.assertEqual(default_jobs(), 1)
+
+    def test_cgroup_path_falls_back_to_the_mount_root(self):
+        (self.cgroups / "outside").mkdir()
+        (self.cgroups / "outside" / "cpu.max").write_text("100000 100000\n")
+        self.cpu_max.write_text("300000 100000\n")
+        for content in ("0::/../../outside\n", "1:name=systemd:/x\n", "garbage", None):
+            with self.subTest(content=content):
+                if content is None:
+                    self.proc_cgroup.unlink()  # not Linux
+                else:
+                    self.proc_cgroup.write_text(content)
+                self.assertEqual(default_jobs(), 3)
+
+
+def make_parallel_source(root: Path) -> list[Path]:
+    """Twelve-odd inputs of mixed size and kind, so pooled renders finish out of order, plus failed and ignored ones."""
+    src = root / "src"
+    src.mkdir()
+    for i, side in enumerate((300, 40, 200, 64, 260, 32)):
+        gradient = np.linspace(0, 3000, side * side).reshape(side, side)
+        write_dicom(src / f"d{i}.dcm", (gradient + RNG.integers(0, 200, (side, side))).astype(np.uint16))
+    write_dicom(src / "m1.dcm", _good_pixels(), "MONOCHROME1")
+    _dicom_with_icon(src / "icon.dcm")
+    (src / "j2k.dcm").write_bytes(Path(get_testdata_file("JPEG2000.dcm", download=False)).read_bytes())
+    (src / "p.png").write_bytes(_png_bytes(RNG.integers(0, 255, (90, 120), dtype=np.uint8)))
+    (src / "broken.jpg").write_bytes(b"\xff\xd8\xff truncated jpeg")  # failed
+    (src / "notes.txt").write_text("not an image")  # ignored
+    archive = root / "scans.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("a.png", _png_bytes(RNG.integers(0, 255, (50, 70, 3), dtype=np.uint8)))
+        zf.writestr("b/c.png", _png_bytes(RNG.integers(0, 255, (30, 20), dtype=np.uint8)))
+        zf.writestr("bad.png", b"\x89PNG\r\n\x1a\n broken")  # failed
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # zipfile warns about the duplicate name
+            zf.writestr("a.png", _solid_png(255))  # a.png#2 ...
+        zf.writestr("a.png#2", _solid_png(128))  # ... collides with this one: both fail
+    return [src, archive]
+
+
+def _tree(work: Path) -> dict[str, bytes]:
+    """Every file under `work` by relative path; preprocess.json without its time and jobs."""
+    files = {p.relative_to(work).as_posix(): p.read_bytes() for p in sorted(work.rglob("*")) if p.is_file()}
+    record = json.loads(files.pop("preprocess.json"))
+    del record["created"], record["parameters"]["jobs"]
+    return {**files, "preprocess.json": json.dumps(record).encode()}
+
+
+def _exit_in_worker(kind, image_id, data, colormap):
+    """A pool worker function that kills its process on the input named `crash.png`."""
+    if image_id.endswith("crash.png"):
+        os._exit(1)
+    return render_and_encode(kind, image_id, data, colormap)
+
+
+def _hang_in_worker(kind, image_id, data, colormap):
+    """A pool worker function that marks that it started (beside the source directory), then hangs."""
+    path = Path(image_id)
+    (path.parent.parent / f"started-{path.name}").touch()
+    time.sleep(60)
+    return render_and_encode(kind, image_id, data, colormap)
+
+
+def _probe_worker(kind, image_id, data, colormap):
+    """A pool worker function reporting the worker's BLAS thread variables and SIGINT state as a skipped row."""
+    state: dict[str, object] = {name: os.environ.get(name) for name in preprocess_module._BLAS_THREAD_VARS}
+    state["sigint_ignored"] = signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+    state["sigint_blocked"] = signal.SIGINT in signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    return [Skipped(image_id, "failed", json.dumps(state))]
+
+
+def _start_large_result() -> None:
+    """Write the start of a 10 MB result to the pool's result pipe, as a worker cut off mid-send leaves it.
+
+    The pool's manager thread then reads the rest of that message, which never comes, until the pipe's
+    every write end is closed.
+    """
+    import gc
+    import struct
+    from multiprocessing.queues import SimpleQueue
+
+    [results] = [o for o in gc.get_objects() if isinstance(o, SimpleQueue)]
+    os.write(results._writer.fileno(), struct.pack("!i", 10_000_000) + bytes(1000))
+
+
+def _die_mid_send(kind, image_id, data, colormap):
+    """A pool worker function that dies part way through sending a large result (as the OOM killer would)."""
+    _start_large_result()
+    os._exit(1)
+
+
+def _hang_mid_send(kind, image_id, data, colormap):
+    """A pool worker function that stalls part way through sending a large result, after marking that it did."""
+    _start_large_result()
+    path = Path(image_id)
+    (path.parent.parent / f"started-{path.name}").touch()
+    time.sleep(60)
+    return render_and_encode(kind, image_id, data, colormap)
+
+
+class _CountedFuture(Future):
+    def __init__(self, outstanding: set[Future]) -> None:
+        super().__init__()
+        self.outstanding = outstanding
+
+    def result(self, timeout=None):
+        self.outstanding.discard(self)
+        return super().result(timeout)
+
+
+class _CountingExecutor(Executor):
+    """Runs each call at once; counts the futures whose result the caller has not taken yet."""
+
+    def __init__(self) -> None:
+        self.outstanding: set[Future] = set()
+        self.peak = 0
+        self.submitted = 0
+
+    def submit(self, fn, /, *args, **kwargs):
+        future = _CountedFuture(self.outstanding)
+        future.set_result(fn(*args, **kwargs))
+        self.outstanding.add(future)
+        self.submitted += 1
+        self.peak = max(self.peak, len(self.outstanding))
+        return future
+
+
+class ParallelTest(unittest.TestCase):
+    """--jobs N renders in N spawned worker processes; the output is the same as rendering in-process."""
+
+    @classmethod
+    def setUpClass(cls):
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        cls.root = Path(tmp.name).resolve()
+        cls.sources = make_parallel_source(cls.root)
+        with quiet():
+            cls.serial = run_preprocess(cls.sources, cls.root / "serial", batch_size=4, colormap="viridis", jobs=1)
+            with mock.patch.object(preprocess_module, "ProcessPoolExecutor", wraps=ProcessPoolExecutor) as pool:
+                cls.pooled = run_preprocess(cls.sources, cls.root / "pooled", batch_size=4, colormap="viridis", jobs=2)
+        cls.pool_calls = pool.call_args_list
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name).resolve()
+
+    def test_output_is_identical_to_jobs_1(self):
+        self.assertEqual(self.serial.found, 17)
+        self.assertEqual(self.serial.written, 13)  # 10 files, an icon, 2 zip entries
+        self.assertEqual([s.kind for s in self.serial.skipped], ["failed", "ignored", "failed", "failed", "failed"])
+        self.assertEqual([s.reason for s in self.serial.skipped].count(COLLISION_REASON), 2)
+        self.assertEqual(self.pooled, replace(self.serial, skipped_path=self.root / "pooled" / "skipped.tsv"))
+        serial, pooled = _tree(self.root / "serial"), _tree(self.root / "pooled")
+        self.assertEqual(sorted(serial), sorted(pooled))
+        for name in serial:
+            with self.subTest(name=name):
+                self.assertEqual(serial[name], pooled[name])
+        jobs = [
+            json.loads((self.root / w / "preprocess.json").read_text())["parameters"]["jobs"]
+            for w in ("serial", "pooled")
+        ]
+        self.assertEqual(jobs, [1, 2])
+
+    def test_workers_are_spawned(self):
+        [call] = self.pool_calls
+        self.assertEqual(call.kwargs["max_workers"], 2)
+        self.assertEqual(call.kwargs["mp_context"].get_start_method(), "spawn")
+        self.assertIs(call.kwargs["mp_context"], multiprocessing.get_context("spawn"))
+        self.assertEqual(multiprocessing.active_children(), [])
+
+    def test_jobs_1_uses_no_pool(self):
+        with mock.patch.object(preprocess_module, "ProcessPoolExecutor") as pool, quiet():
+            run_preprocess(self.sources[1:], self.tmp / "work", jobs=1)
+        pool.assert_not_called()
+
+    def test_in_flight_inputs_are_bounded(self):
+        executor = _CountingExecutor()
+        with (
+            mock.patch.object(preprocess_module, "_worker_pool", return_value=contextlib.nullcontext(executor)),
+            quiet(),
+        ):
+            result = run_preprocess(self.sources, self.tmp / "work", batch_size=4, colormap="viridis", jobs=3)
+        self.assertEqual(executor.submitted, 16)  # every candidate: not the ignored text file
+        self.assertEqual(executor.peak, preprocess_module.IN_FLIGHT_PER_JOB * 3)
+        self.assertEqual(executor.outstanding, set())
+        self.assertEqual(_tree(self.tmp / "work"), _tree(self.root / "serial"))
+        self.assertEqual(result.written, self.serial.written)
+
+    def test_worker_crash_fails_the_run(self):
+        src = self.tmp / "src"
+        src.mkdir()
+        for name in ("a.png", "crash.png", "z.png"):
+            (src / name).write_bytes(_solid_png(len(name)))
+        work = self.tmp / "work"
+        with (
+            mock.patch.object(preprocess_module, "render_and_encode", _exit_in_worker),
+            quiet(),
+            self.assertRaises(WorkerCrashed) as ctx,
+        ):
+            run_preprocess([src], work, jobs=2)
+        self.assertIn("worker died", str(ctx.exception))
+        self.assertIn("--jobs 1", str(ctx.exception))
+        self.assertFalse(work.exists())
+        self.assertFalse((self.tmp / ".work.partial").exists())
+        self.assertEqual(multiprocessing.active_children(), [])
+
+    def test_workers_run_single_threaded_blas_and_ignore_sigint(self):
+        src = self.tmp / "src"
+        src.mkdir()
+        (src / "a.png").write_bytes(_solid_png(1))
+        with mock.patch.dict(os.environ, {"OMP_NUM_THREADS": "3"}):  # set by the user: left alone
+            os.environ.pop("OPENBLAS_NUM_THREADS", None)
+            os.environ.pop("MKL_NUM_THREADS", None)
+            with mock.patch.object(preprocess_module, "render_and_encode", _probe_worker), quiet():
+                result = run_preprocess([src], self.tmp / "work", jobs=2)
+            self.assertNotIn("OPENBLAS_NUM_THREADS", os.environ)  # restored afterwards
+            self.assertNotIn("MKL_NUM_THREADS", os.environ)
+            self.assertEqual(os.environ["OMP_NUM_THREADS"], "3")
+        [row] = result.skipped
+        self.assertEqual(
+            json.loads(row.reason),
+            {
+                "OPENBLAS_NUM_THREADS": "1",
+                "OMP_NUM_THREADS": "3",
+                "MKL_NUM_THREADS": "1",
+                "sigint_ignored": True,
+                "sigint_blocked": False,
+            },
+        )
+
+    def test_worker_dying_mid_send_fails_the_run(self):
+        src = self.tmp / "src"
+        src.mkdir()
+        (src / "a.png").write_bytes(_solid_png(1))
+        work = self.tmp / "work"
+        start = time.monotonic()
+        faulthandler.dump_traceback_later(120, exit=True)  # a regression waits forever: fail loudly, not forever
+        self.addCleanup(faulthandler.cancel_dump_traceback_later)
+        with (
+            mock.patch.object(preprocess_module, "render_and_encode", _die_mid_send),
+            quiet(),
+            self.assertRaises(WorkerCrashed) as ctx,
+        ):
+            run_preprocess([src], work, jobs=2)
+        self.assertLess(time.monotonic() - start, 30)
+        self.assertIn(f"1 input(s) were in flight, starting with {(src / 'a.png').as_posix()}", str(ctx.exception))
+        self.assertIn("exited with code 1", str(ctx.exception.__cause__))
+        self.assertEqual(multiprocessing.active_children(), [])
+        self.assertFalse(work.exists())
+        self.assertFalse((self.tmp / ".work.partial").exists())
+
+    def test_sigterm_while_a_worker_is_sending_does_not_hang(self):
+        src = self.tmp / "src"
+        src.mkdir()
+        (src / "a.png").write_bytes(_solid_png(1))
+        main = threading.main_thread().ident
+        assert main is not None
+
+        def terminate_once_sending():
+            deadline = time.monotonic() + 30
+            while not list(self.tmp.glob("started-*")) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            signal.pthread_kill(main, signal.SIGTERM)
+
+        work = self.tmp / "work"
+        killer = threading.Thread(target=terminate_once_sending)
+        start = time.monotonic()
+        faulthandler.dump_traceback_later(120, exit=True)  # a regression hangs in shutdown: fail loudly, not forever
+        self.addCleanup(faulthandler.cancel_dump_traceback_later)
+        with (
+            mock.patch.object(preprocess_module, "render_and_encode", _hang_mid_send),
+            quiet(),
+            interrupt_on(*TERMINATION_SIGNALS),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            killer.start()
+            run_preprocess([src], work, jobs=2)
+        killer.join()
+        self.assertTrue(list(self.tmp.glob("started-*")))
+        self.assertLess(time.monotonic() - start, 30)
+        self.assertEqual(multiprocessing.active_children(), [])
+        self.assertFalse(work.exists())
+        self.assertFalse((self.tmp / ".work.partial").exists())
+
+    def test_sigterm_stops_workers_promptly(self):
+        src = self.tmp / "src"
+        src.mkdir()
+        for name in ("a.png", "b.png", "c.png"):
+            (src / name).write_bytes(_solid_png(len(name)))
+        main = threading.main_thread().ident
+        assert main is not None
+
+        def terminate_once_started():
+            deadline = time.monotonic() + 30
+            while not list(self.tmp.glob("started-*")) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            signal.pthread_kill(main, signal.SIGTERM)
+
+        work = self.tmp / "work"
+        killer = threading.Thread(target=terminate_once_started)
+        start = time.monotonic()
+        with (
+            mock.patch.object(preprocess_module, "render_and_encode", _hang_in_worker),
+            quiet(),
+            interrupt_on(*TERMINATION_SIGNALS),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            killer.start()
+            run_preprocess([src], work, jobs=2)
+        killer.join()
+        self.assertTrue(list(self.tmp.glob("started-*")))
+        self.assertLess(time.monotonic() - start, 30)  # did not wait for the 60 s renders
+        self.assertEqual(multiprocessing.active_children(), [])
+        self.assertFalse(work.exists())
+        self.assertFalse((self.tmp / ".work.partial").exists())
 
 
 def _compress_image_reference(image: np.ndarray) -> np.ndarray:

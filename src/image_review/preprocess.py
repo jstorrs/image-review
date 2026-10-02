@@ -5,12 +5,17 @@ import importlib.util
 import io
 import json
 import logging
+import multiprocessing
 import os
 import re
 import shutil
+import signal
 import stat
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from concurrent.futures import Executor, Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -108,6 +113,12 @@ COLLISION_REASON = "image_id collides with another input (rename one of them)"
 _LIBRARIES = ("pydicom", "numpy", "scikit-image", "Pillow", "matplotlib")  # distribution names
 # Optional pixel-data codecs, recorded when importable: module name -> distribution name
 _CODEC_DISTRIBUTIONS = {"gdcm": "python-gdcm", "pylibjpeg": "pylibjpeg", "openjpeg": "pylibjpeg-openjpeg"}
+IN_FLIGHT_PER_JOB = 2  # inputs submitted to the pool and not yet written, per worker: bounds the bytes held in memory
+WORKER_CHECK_SECONDS = 1.0  # how often the parent, waiting on a render, checks that no worker has died
+# Spawned workers read these at numpy import: one BLAS/OpenMP thread each, not one per core per worker
+_BLAS_THREAD_VARS = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+# Workers start fresh on every platform: no inherited threads, signal handlers or open ZIPs, as with macOS's default
+_SPAWN = multiprocessing.get_context("spawn")
 
 Kind = Literal["dicom", "raster"]
 Content = Literal["dicom", "raster", "zip"]
@@ -178,6 +189,10 @@ class PreprocessResult:
     batches: int
     skipped: list[Skipped]
     skipped_path: Path
+
+
+class WorkerCrashed(RuntimeError):
+    """A worker process died (out of memory, or a crash in a decoder); the run is abandoned."""
 
 
 class WorkDirExists(ValueError):
@@ -736,27 +751,201 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def _process(candidate: Candidate, colormap: str) -> list[Encoded | Skipped]:
-    """Read, render and JPEG-encode one input into its output rows: encoded images and skipped parts.
+def render_and_encode(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Encoded | Skipped]:
+    """Hash, render and JPEG-encode one input's bytes into its output rows: encoded images and skipped parts.
 
-    The source is read once; every image rendered from it (main and icon) carries the SHA-256 of those
-    bytes. A failure of the input itself is a single `Skipped`; an embedded icon that fails is a
-    `Skipped` beside the main image.
+    Pure, and the unit of work sent to pool workers (so it and its arguments pickle). Every image rendered
+    from the input (main and icon) carries the SHA-256 of `data`. A failure of the input itself is a single
+    `Skipped`; an embedded icon that fails is a `Skipped` beside the main image.
     """
     try:
-        data = candidate.read()
         source_sha256 = hashlib.sha256(data).hexdigest()
-        rendered = render(candidate.kind, candidate.image_id, data, colormap)
+        rendered = render(kind, image_id, data, colormap)
         encoded = [
             r if isinstance(r, Skipped) else Encoded(r.image_id, encode_jpeg(r.rgb), source_sha256) for r in rendered
         ]
     except NotAnImage as exc:
-        return [Skipped(candidate.image_id, "ignored", _clean_reason(str(exc)))]
+        return [Skipped(image_id, "ignored", _clean_reason(str(exc)))]
     except Exception as exc:  # noqa: BLE001 - one bad input must not abort the run; it is recorded in skipped.tsv
-        return [_failed(candidate.image_id, exc)]
+        return [_failed(image_id, exc)]
     if not encoded:
-        return [Skipped(candidate.image_id, "failed", "rendered no images")]
+        return [Skipped(image_id, "failed", "rendered no images")]
     return encoded
+
+
+def _read(candidate: Candidate) -> bytes | Skipped:
+    """The input's bytes, read once (a ZIP entry only while discovery is at it), or why they cannot be."""
+    try:
+        return candidate.read()
+    except Exception as exc:  # noqa: BLE001 - an unreadable input is recorded in skipped.tsv
+        return _failed(candidate.image_id, exc)
+
+
+def _process(candidate: Candidate, colormap: str) -> list[Encoded | Skipped]:
+    """Read one input and `render_and_encode` it, in this process."""
+    data = _read(candidate)
+    if isinstance(data, Skipped):
+        return [data]
+    return render_and_encode(candidate.kind, candidate.image_id, data, colormap)
+
+
+Outcome = tuple[str, list[Encoded | Skipped]]  # (input image_id, its output rows)
+
+
+def _outcomes_serial(items: Iterable[Candidate | Skipped], colormap: str) -> Iterator[Outcome]:
+    for item in items:
+        yield item.image_id, (_process(item, colormap) if isinstance(item, Candidate) else [item])
+
+
+def _outcomes_pooled(
+    items: Iterable[Candidate | Skipped], colormap: str, pool: Executor, limit: int
+) -> Iterator[Outcome]:
+    """`_outcomes_serial`, rendered by `pool`: yielded in input order, with at most `limit` inputs submitted and
+    not yet yielded. Bytes are read here (a ZIP entry is readable only while discovery is at it); workers hash.
+
+    A dead worker breaks the pool and every input in flight with it, so the run fails (`WorkerCrashed`) rather
+    than retrying in this process, where the same input could take the whole run down without a message.
+    """
+    queue: deque[tuple[str, Future[list[Encoded | Skipped]] | list[Encoded | Skipped]]] = deque()
+    in_flight = 0
+
+    def start(item: Candidate | Skipped) -> Future[list[Encoded | Skipped]] | list[Encoded | Skipped]:
+        if isinstance(item, Skipped):
+            return [item]
+        data = _read(item)  # the pool keeps these bytes until the result is back; `limit` bounds them
+        if isinstance(data, Skipped):
+            return [data]
+        with _sigint_blocked():  # a worker spawned here starts with SIGINT blocked, until it ignores it
+            return pool.submit(render_and_encode, item.kind, item.image_id, data, colormap)
+
+    def finish() -> Outcome:
+        nonlocal in_flight
+        image_id, rows = queue[0]
+        if isinstance(rows, Future):
+            rows = _result(rows, pool)
+            in_flight -= 1
+        queue.popleft()
+        return image_id, rows
+
+    try:
+        for item in items:
+            queue.append((item.image_id, start(item)))
+            in_flight += isinstance(queue[-1][1], Future)
+            while queue and (in_flight >= limit or not isinstance(queue[0][1], Future)):
+                yield finish()
+        while queue:
+            yield finish()
+    except BrokenProcessPool as exc:
+        first = queue[0][0] if queue else "unknown"
+        raise WorkerCrashed(
+            f"a preprocess worker died (out of memory, or a crash in a decoder); {in_flight} input(s) were in "
+            f"flight, starting with {first}; no work directory was made. "
+            "Re-run with --jobs 1 to find the input, or with more memory."
+        ) from exc
+
+
+def _workers(pool: Executor) -> list[multiprocessing.process.BaseProcess]:
+    """The pool's worker processes; none for another executor or a pool already shut down.
+
+    `_processes` is private (Python 3.14 adds `terminate_workers`), so it is read defensively: an AttributeError
+    here must never replace the exception being handled.
+    """
+    processes = getattr(pool, "_processes", None)
+    return list(processes.values()) if isinstance(processes, dict) else []
+
+
+def _result(future: Future[list[Encoded | Skipped]], pool: Executor) -> list[Encoded | Skipped]:
+    """`future.result()`, checking every `WORKER_CHECK_SECONDS` that no worker has exited.
+
+    A worker killed (e.g. by the OOM killer) while sending a result leaves the pool's manager thread waiting
+    for the rest of the message forever, so the future would never complete. Without `max_tasks_per_child`
+    workers exit only at shutdown, so any exit before then is a death.
+    """
+    while True:
+        try:
+            return future.result(timeout=WORKER_CHECK_SECONDS)
+        except TimeoutError:
+            dead = [w for w in _workers(pool) if w.exitcode is not None]
+            if dead:
+                raise BrokenProcessPool(f"worker {dead[0].pid} exited with code {dead[0].exitcode}") from None
+
+
+@contextmanager
+def _sigint_blocked() -> Iterator[None]:
+    """Block SIGINT in this thread; a process spawned meanwhile inherits the mask through exec."""
+    if not hasattr(signal, "pthread_sigmask"):  # Windows
+        yield
+        return
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _ignore_sigint() -> None:
+    """Pool worker initializer: Ctrl-C reaches the whole process group, but only the parent should act on it.
+
+    The worker started with SIGINT blocked (`_sigint_blocked`); a Ctrl-C pending since then is discarded.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+
+
+@contextmanager
+def _single_threaded_blas() -> Iterator[None]:
+    """Set each of `_BLAS_THREAD_VARS` the user has not set to 1 while workers are spawned (they inherit the
+    environment); restore the environment afterwards."""
+    added = [name for name in _BLAS_THREAD_VARS if name not in os.environ]
+    try:
+        os.environ.update(dict.fromkeys(added, "1"))
+        yield
+    finally:
+        for name in added:
+            os.environ.pop(name, None)
+
+
+def _abandon(pool: Executor) -> None:
+    """Stop the pool's workers now, so `shutdown` cannot hang.
+
+    A worker killed mid-send leaves the manager thread reading a cut-off result; it sees EOF only once every
+    write end of the result pipe is closed. This process's end is closed first (EOF still waits for the
+    workers' ends to close as they die), then the workers are killed and joined. Each step is attempted even
+    if an earlier one fails, or a second Ctrl-C interrupts it.
+    """
+    with suppress(BaseException):
+        writer = getattr(getattr(pool, "_result_queue", None), "_writer", None)
+        if writer is not None:
+            writer.close()
+    workers: list[multiprocessing.process.BaseProcess] = []
+    with suppress(BaseException):
+        workers = _workers(pool)
+    for worker in workers:
+        with suppress(BaseException):
+            worker.kill()
+    for worker in workers:
+        with suppress(BaseException):
+            worker.join()
+
+
+@contextmanager
+def _worker_pool(jobs: int) -> Iterator[Executor]:
+    """A spawn-context process pool whose workers run single-threaded BLAS and ignore SIGINT.
+
+    On any exception (Ctrl-C, SIGTERM through `interrupt_on`, a dead worker, a write error) the workers are
+    killed, queued inputs are cancelled and the pool is joined, so nothing waits on a render and no worker
+    outlives the run.
+    """
+    with _single_threaded_blas():
+        pool = ProcessPoolExecutor(max_workers=jobs, mp_context=_SPAWN, initializer=_ignore_sigint)
+        try:
+            yield pool
+        except BaseException:
+            _abandon(pool)  # never raises: it must not replace the exception being raised
+            raise
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
 
 def _open_new(path: Path, perm: int, **kwargs):
@@ -794,6 +983,7 @@ def provenance(
     batch_size: int,
     colormap: str,
     access: Access,
+    jobs: int,
     result: PreprocessResult,
     created: datetime,
     tool_version: str,
@@ -815,6 +1005,7 @@ def provenance(
             "jpeg_quality": JPEG_QUALITY,
             "jpeg_subsampling": JPEG_SUBSAMPLING,
             "access": access,
+            "jobs": jobs,  # how the run was made, not what it made: the output is the same for any value
         },
         "libraries": libraries,
         "counts": {
@@ -858,6 +1049,7 @@ def run_preprocess(
     batch_size: int = 300,
     colormap: str = "inferno",
     access: Access = "private",
+    jobs: int = 1,
 ) -> PreprocessResult:
     """Render every discovered input into a staging dir, then rename it to `output_dir`.
 
@@ -869,6 +1061,10 @@ def run_preprocess(
     errors (OSError on the work directory) propagate and abort the run. The
     work dir appears only on success; an existing non-empty one is refused
     (`WorkDirExists`), so verdicts can never attach to a replaced image.
+
+    `jobs` > 1 renders in that many worker processes; the output is identical
+    to `jobs` = 1, which renders in this process. A dead worker fails the run
+    (`WorkerCrashed`).
     """
     policy = modes(access)
     output_dir.parent.mkdir(parents=True, exist_ok=True)  # before the umask: parents get normal permissions
@@ -877,9 +1073,17 @@ def run_preprocess(
         staging = _claim_staging(output_dir, policy.dir_mode)
         exclude = frozenset({output_dir.resolve(), staging.resolve()})  # never ingest our own output
         try:
-            result = _render_into(sources, exclude, staging, batch_size, colormap, policy)
+            result = _render_into(sources, exclude, staging, batch_size, colormap, policy, jobs)
             record = provenance(
-                sources, batch_size, colormap, access, result, datetime.now(UTC), package_version(), _library_versions()
+                sources,
+                batch_size,
+                colormap,
+                access,
+                jobs,
+                result,
+                datetime.now(UTC),
+                package_version(),
+                _library_versions(),
             )
             with _open_new(staging / PROVENANCE_NAME, policy.file_mode, mode="w", encoding="utf-8") as f:
                 f.write(json.dumps(record, indent=2) + "\n")
@@ -910,11 +1114,19 @@ def colliding_ids(images: Iterable[tuple[str, str, str]]) -> frozenset[str]:
 
 
 def _render_into(
-    sources: list[Path], exclude: frozenset[Path], output_dir: Path, batch_size: int, colormap: str, policy: Modes
+    sources: list[Path],
+    exclude: frozenset[Path],
+    output_dir: Path,
+    batch_size: int,
+    colormap: str,
+    policy: Modes,
+    jobs: int,
 ) -> PreprocessResult:
     """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches.
 
     An input with any colliding image (main or icon) becomes one `failed` row and its JPGs are deleted.
+    Inputs are rendered by `jobs` worker processes, or in this one for 1; either way this process writes
+    every file, in discovery order.
     """
     pending = output_dir / PENDING_NAME
     pending.mkdir()
@@ -923,22 +1135,28 @@ def _render_into(
     staged = 0
     found = 0
 
-    for item in discover(sources, exclude):
-        found += 1
-        outcome = _process(item, colormap) if isinstance(item, Candidate) else [item]
-        parts: list[Staged | Skipped] = []
-        for part in outcome:
-            if isinstance(part, Skipped):
-                if part.kind == "failed":
-                    log.warning("skipping %s: %s", part.image_id, part.reason)
-                parts.append(part)
-                continue
-            staged += 1
-            path = pending / f"{staged:08d}.jpg"
-            with _open_new(path, policy.file_mode, mode="wb") as f:
-                f.write(part.jpeg)
-            parts.append(Staged(part.image_id, path, part.source_sha256, hashlib.sha256(part.jpeg).hexdigest()))
-        inputs.append((item.image_id, parts))
+    items = discover(sources, exclude)
+    with _worker_pool(jobs) if jobs > 1 else nullcontext() as pool:
+        outcomes = (
+            _outcomes_serial(items, colormap)
+            if pool is None
+            else _outcomes_pooled(items, colormap, pool, IN_FLIGHT_PER_JOB * jobs)
+        )
+        for input_id, outcome in outcomes:
+            found += 1
+            parts: list[Staged | Skipped] = []
+            for part in outcome:
+                if isinstance(part, Skipped):
+                    if part.kind == "failed":
+                        log.warning("skipping %s: %s", part.image_id, part.reason)
+                    parts.append(part)
+                    continue
+                staged += 1
+                path = pending / f"{staged:08d}.jpg"
+                with _open_new(path, policy.file_mode, mode="wb") as f:
+                    f.write(part.jpeg)
+                parts.append(Staged(part.image_id, path, part.source_sha256, hashlib.sha256(part.jpeg).hexdigest()))
+            inputs.append((input_id, parts))
 
     collisions = colliding_ids(
         (row.image_id, row.source_sha256, row.jpeg_sha256)
