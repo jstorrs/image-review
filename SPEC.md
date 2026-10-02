@@ -156,8 +156,8 @@ The pipeline has three parts: **discovery** (IO) yields one `Candidate`
 (`image_id`, `kind` = `dicom` or `raster`, and its raw
 bytes, read during discovery) per input without decoding anything (or a `SkippedRow` for content
 that is not an input or cannot be read); a pure **`render(kind, image_id,
-data, colormap) -> list[Rendered]`** turns the bytes into `(H, W, 3)` uint8
-RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
+data, colormap) -> tuple[Rendered, ...]`** (never empty: the main image first)
+turns the bytes into `(H, W, 3)` uint8 RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and, once collisions are
 known (see *Collisions*), records them in the manifest. Each input's bytes are read
 once; their SHA-256 becomes the `source_sha256` of every image rendered from
@@ -425,8 +425,7 @@ unused bits of PixelData are not drawn.
 rendering or JPEG-encoding one input (e.g. an image wider than libjpeg's
 65500-pixel limit) becomes a `failed` row in `skipped.tsv` with reason
 `<ExceptionClass>: <message>` (or the `unsupported: ...` message), with tabs
-and runs of other control characters, U+2028/U+2029 and non-UTF-8 bytes (surrogates) replaced by one space, and object reprs such as `<_io.BytesIO object at 0x...>` replaced by `<data>` (so `skipped.tsv` is reproducible); a warning is also logged. A render that
-yields no image becomes a `failed` row with reason `rendered no images`. A
+and runs of other control characters, U+2028/U+2029 and non-UTF-8 bytes (surrogates) replaced by one space, and object reprs such as `<_io.BytesIO object at 0x...>` replaced by `<data>` (so `skipped.tsv` is reproducible); a warning is also logged. A
 source that cannot be opened at all (corrupt ZIP, unreadable directory at any
 depth) becomes one `failed` row for its path. An input whose name is not
 UTF-8 or holds a control character or line separator becomes a `failed` row

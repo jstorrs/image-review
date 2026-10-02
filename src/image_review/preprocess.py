@@ -207,7 +207,7 @@ class DecodeError(Exception):
 # ---------------------------------------------------------------- rendering (pure)
 
 
-def compress_image(image):
+def compress_image(image: np.ndarray) -> np.ndarray:
     same_vert = image == np.roll(image, 1, axis=0)
     same_horiz = image == np.roll(image, 1, axis=1)
     both = same_vert & same_horiz
@@ -268,19 +268,17 @@ def _to_uint8(pixels: np.ndarray, bits: int) -> np.ndarray:
     return np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
 
 
-def _overlay_mask(dcm: pydicom.FileDataset, shape: tuple[int, int]) -> np.ndarray | None:
+def _overlay_mask(dcm: pydicom.FileDataset, shape: tuple[int, int]) -> np.ndarray:
     """Union of the overlay planes (groups 0x6000-0x601E with OverlayData) as a bool mask of `shape`.
 
     Each plane is placed at its OverlayOrigin (1-based row, column; default 1, 1)
-    and clipped to the image. None when there are no overlays. A plane that
+    and clipped to the image. All False when there are no overlays. A plane that
     cannot be decoded raises ValueError naming its group.
     """
     mask = np.zeros(shape, dtype=bool)
-    found = False
     for group in range(_OVERLAY_FIRST_GROUP, _OVERLAY_LAST_GROUP + 1, 2):
         if (group, _OVERLAY_DATA_ELEMENT) not in dcm:
             continue
-        found = True
         try:
             plane = dcm.overlay_array(group)
             if plane.ndim != 2:
@@ -294,10 +292,10 @@ def _overlay_mask(dcm: pydicom.FileDataset, shape: tuple[int, int]) -> np.ndarra
         bottom, right = min(row0 + plane.shape[0], shape[0]), min(col0 + plane.shape[1], shape[1])
         if top < bottom and left < right:
             mask[top:bottom, left:right] |= plane[top - row0 : bottom - row0, left - col0 : right - col0].astype(bool)
-    return mask if found else None
+    return mask
 
 
-def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray | None = None) -> np.ndarray:
+def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray) -> np.ndarray:
     """Float [0, 1] image from MONOCHROME1/2 pixels: tail compression, overlay, crop, CLAHE, crop.
 
     Overlay pixels are set to 1.0 after intensity mapping, so they come out at the top of the range.
@@ -307,8 +305,7 @@ def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray | None
         img = -img
     constant = img.min() >= img.max()
     img = np.zeros_like(img) if constant else _compress_tails(img)
-    if overlay is not None:
-        img[overlay] = 1.0
+    img[overlay] = 1.0
     img = _crop(img)
     return img if constant else _crop(ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE))
 
@@ -368,9 +365,7 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
             | "YBR_RCT"
         ):
             rgb = _colour_dicom(dcm, photometric)
-            overlay = _overlay_mask(dcm, rgb.shape[:2])
-            if overlay is not None:
-                rgb[overlay] = 255
+            rgb[_overlay_mask(dcm, rgb.shape[:2])] = 255
             return _crop(rgb)
         case _:
             raise Unsupported(f"photometric interpretation {photometric}")
@@ -522,7 +517,9 @@ def _render_icon(dcm: pydicom.FileDataset, image_id: str, colormap: str) -> Rend
         return _failed(icon_id, exc)
 
 
-def render(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Rendered | SkippedRow]:
+def render(
+    kind: Kind, image_id: str, data: bytes, colormap: str
+) -> tuple[Rendered, *tuple[Rendered | SkippedRow, ...]]:
     """Render one input: its image, plus (DICOM) an `{image_id}#icon` row for an embedded icon image.
 
     A failure of the main image raises; a failure of the icon is returned as a `SkippedRow` row.
@@ -530,11 +527,11 @@ def render(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Render
     match kind:
         case "dicom":
             dcm = read_dicom(data)
-            rendered: list[Rendered | SkippedRow] = [Rendered(image_id, preprocess_dicom(dcm, colormap))]
+            main = Rendered(image_id, preprocess_dicom(dcm, colormap))
             icon = _render_icon(dcm, image_id, colormap)
-            return rendered if icon is None else [*rendered, icon]
+            return (main,) if icon is None else (main, icon)
         case "raster":
-            return [Rendered(image_id, preprocess_raster(decode_raster(data)))]
+            return (Rendered(image_id, preprocess_raster(decode_raster(data))),)
 
 
 # ---------------------------------------------------------------- discovery (IO)
@@ -803,8 +800,6 @@ def render_and_encode(kind: Kind, image_id: str, data: bytes, colormap: str) -> 
         return [SkippedRow(image_id, "ignored", _clean_reason(str(exc)))]
     except Exception as exc:  # noqa: BLE001 - one bad input must not abort the run; it is recorded in skipped.tsv
         return [_failed(image_id, exc)]
-    if not encoded:
-        return [SkippedRow(image_id, "failed", "rendered no images")]
     return encoded
 
 
@@ -1048,7 +1043,7 @@ def _claim_staging(output_dir: Path, dir_mode: int) -> Path:
 
     The work dir keeps the staging dir's mode through the final rename.
     """
-    if output_dir.is_symlink() or (output_dir.exists() and not (output_dir.is_dir() and not any(output_dir.iterdir()))):
+    if output_dir.is_symlink() or (output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir()))):
         raise WorkDirExists(
             f"work directory {output_dir} already exists; choose a new --work-dir or remove the old one"
         )

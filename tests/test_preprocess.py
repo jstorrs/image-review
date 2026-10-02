@@ -1065,13 +1065,6 @@ class RunErrorTest(unittest.TestCase):
         self.assertTrue(skip.reason.startswith("OSError:"), skip.reason)
         self.assertEqual([p.name for p in (self.root / "work" / "batch_001").iterdir()], ["img_00001.jpg"])
 
-    def test_render_returning_nothing_is_a_failure(self):
-        write_dicom(self.root / "good.dcm", _good_pixels())
-        with quiet(), mock.patch("image_review.preprocess.render", return_value=[]):
-            result = run_preprocess([self.root / "good.dcm"], self.root / "work")
-        self.assertEqual(result.written, 0)
-        self.assertEqual([(s.kind, s.reason) for s in result.skipped], [("failed", "rendered no images")])
-
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root can read a mode-000 directory")
     def test_unreadable_source_directory_is_one_failed_row(self):
         src = self.root / "locked"
