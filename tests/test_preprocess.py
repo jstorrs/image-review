@@ -38,6 +38,7 @@ from image_review.preprocess import (
     _failed,
     classify,
     colliding_ids,
+    compress_image,
     decode_raster,
     discover,
     render,
@@ -1537,6 +1538,78 @@ class PreprocessCliTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("already exists", result.output)
         self.assertEqual((self.root / "work" / "manifest.tsv").read_bytes(), manifest)
+
+
+def _compress_image_reference(image: np.ndarray) -> np.ndarray:
+    """The original 2-D skimage erosion implementation of compress_image."""
+    same_vert = image == np.roll(image, 1, axis=0)
+    same_horiz = image == np.roll(image, 1, axis=1)
+    both = same_vert & same_horiz
+    if both.ndim == 3:
+        both = np.all(both, axis=2)
+    uniform = ski.morphology.erosion(both, np.ones((5, 5), dtype=bool))
+    image = np.delete(image, np.all(uniform, axis=1), axis=0)
+    return np.delete(image, np.all(uniform, axis=0), axis=1)
+
+
+def _compress_image_cases(rng: np.random.Generator, count: int) -> list[np.ndarray]:
+    def banded(shape: tuple[int, ...]) -> np.ndarray:
+        img = np.zeros(shape, dtype=np.uint8)
+        for axis in (0, 1):
+            edges = np.sort(rng.integers(0, shape[axis] + 1, size=rng.integers(1, 6)))
+            for lo, hi in zip(edges[::2], edges[1::2], strict=False):
+                index = [slice(None)] * len(shape)
+                index[axis] = slice(lo, hi)
+                img[tuple(index)] = rng.integers(0, 256, size=shape[2:] or None, dtype=np.uint8)
+        return img
+
+    def bordered(shape: tuple[int, ...]) -> np.ndarray:
+        img = np.zeros(shape, dtype=np.uint8)
+        top, left = rng.integers(0, shape[0] // 2 + 1), rng.integers(0, shape[1] // 2 + 1)
+        bottom, right = rng.integers(top + 1, shape[0] + 1), rng.integers(left + 1, shape[1] + 1)
+        inner = img[top:bottom, left:right]
+        inner[...] = rng.integers(0, 256, size=inner.shape, dtype=np.uint8)
+        return img
+
+    cases = [
+        np.zeros((0, 0), np.uint8),
+        np.zeros((1, 1), np.uint8),
+        np.full((40, 30), 7, np.uint8),
+        np.full((40, 30, 3), 7, np.uint8),
+    ]
+    makers = ("noise", "banded", "bordered", "uniform", "small")
+    while len(cases) < count:
+        kind = makers[len(cases) % len(makers)]
+        channels = (3,) if rng.random() < 0.4 else ()
+        h, w = (int(n) for n in rng.integers(1, 80, size=2))
+        if kind == "small":
+            h, w = (int(n) for n in rng.integers(1, 6, size=2))
+            if rng.random() < 0.5:
+                h, w = (h, 60) if rng.random() < 0.5 else (60, w)
+        shape = (h, w, *channels)
+        if kind == "noise":
+            img = rng.integers(0, int(rng.choice([2, 256])), size=shape, dtype=np.uint8)
+        elif kind == "banded":
+            img = banded(shape)
+        elif kind == "bordered":
+            img = bordered(shape)
+        elif kind == "uniform":
+            img = np.full(shape, rng.integers(0, 256), dtype=np.uint8)
+        else:
+            img = rng.integers(0, 3, size=shape, dtype=np.uint8)
+        cases.append(img)
+    return cases
+
+
+class CompressImageTest(unittest.TestCase):
+    def test_matches_2d_erosion_reference(self):
+        for i, image in enumerate(_compress_image_cases(np.random.default_rng(12345), 300)):
+            with self.subTest(case=i, shape=image.shape):
+                expected = _compress_image_reference(image)
+                actual = compress_image(image)
+                self.assertEqual(actual.shape, expected.shape)
+                self.assertEqual(actual.dtype, expected.dtype)
+                self.assertTrue(np.array_equal(actual, expected))
 
 
 if __name__ == "__main__":

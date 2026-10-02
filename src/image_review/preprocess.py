@@ -32,6 +32,7 @@ from pydicom.uid import (
     ImplicitVRLittleEndian,
     MediaStorageDirectoryStorage,
 )
+from scipy import ndimage as ndi
 from tqdm import tqdm
 
 from .access import Access, Modes, modes
@@ -207,12 +208,12 @@ def compress_image(image):
     both = same_vert & same_horiz
     if both.ndim == 3:
         both = np.all(both, axis=2)
-    uniform = ski.morphology.erosion(
-        both,
-        np.ones((EROSION_KERNEL_SIZE, EROSION_KERNEL_SIZE), dtype=bool),
-    )
-    image = np.delete(image, np.all(uniform, axis=1), axis=0)
-    return np.delete(image, np.all(uniform, axis=0), axis=1)
+    # A square erosion is separable, and a row is dropped only if its whole eroded row is True. Every
+    # window cell lies in the row (reflection only repeats cells) and every cell is in its own window, so
+    # that equals eroding the per-row all() with a 1-D window; likewise for columns.
+    rows = ndi.minimum_filter1d(both.all(axis=1), EROSION_KERNEL_SIZE, mode="reflect")
+    cols = ndi.minimum_filter1d(both.all(axis=0), EROSION_KERNEL_SIZE, mode="reflect")
+    return image[~rows][:, ~cols]
 
 
 def _crop(image: np.ndarray) -> np.ndarray:

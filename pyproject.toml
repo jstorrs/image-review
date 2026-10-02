@@ -13,6 +13,7 @@ dependencies = [
     "pydicom",
     "Pillow",
     "scikit-image",
+    "scipy",
     "rectpack",
     "tqdm",
     "pygame-ce",
@@ -69,5 +70,5 @@ files = ["src"]
 python_version = "3.12"
 
 [[tool.mypy.overrides]]
-module = ["rectpack.*", "skimage.*"]
+module = ["rectpack.*", "scipy.*", "skimage.*"]
 ignore_missing_imports = true
