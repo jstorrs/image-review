@@ -23,6 +23,9 @@ Each machine can instead install only what its commands need:
 | `pip install -e '.[preprocess,codecs]'` | `preprocess` (on the cluster) |
 | `pip install -e '.[viewer]'` | `review`, including `review --remote` (on your laptop) |
 
+On a cluster without root, install into a virtual environment; see
+[Cluster install without root](README.md#installation) in the README.
+
 A command whose extra is missing stops with
 `this command needs the <extra> extra: pip install 'image-review[<extra>]'`.
 `preprocess` without the `codecs` extra still runs, but compressed DICOMs that
@@ -681,29 +684,14 @@ viewer shows "Lost connection to server - progress saved" and ignores every
 key but `q`/`Esc`; press `q`, then
 reconnect with the same string while the server is still running.
 
-### Security Model and Limitations
+### Security
 
-**What stays on the cluster:** the original files, DICOM headers, source
-paths and `image_id`s, and `review.tsv`. The client only sees preprocessed
-paths like `batch_001/img_00001.jpg`.
-
-**What travels:** the preprocessed JPGs, over TLS, held only in the client's
-memory. The tool makes no deliberate attempt to persist them, but swap, crash
-dumps, and screenshots or screen recording are outside its control.
-
-**Authentication and encryption:** the server uses a self-signed certificate
-generated at start-up. Its SHA-256 fingerprint is part of the connection
-string and the client checks it on every connection before sending the token,
-so a wrong or replaced server is rejected. Requests also need the bearer
-token. With `--via`, ssh protects laptop to login node and TLS covers the
-whole path to the compute node.
-
-**Limitations:**
-- Anyone holding the connection string can view the images and record review
-  marks while the server runs. Do not paste it into chat or tickets.
-- One writer per work directory: `serve` or a local `review` holds
-  `review.lock` in the work directory while it runs, and a second one exits
-  with an error (see below). `status` still works. Use one reviewer per server.
+The connection string is a password: anyone holding it can view the images and
+record verdicts while the server runs, so do not paste it into chat or tickets.
+Use one reviewer per server, and remember that a work directory and any export
+hold source paths. [SECURITY.md](SECURITY.md) is the full threat model
+(what stays on the cluster, what travels, what the viewer cannot control, and
+the local-disk and integrity rules).
 
 **Troubleshooting `--via`:**
 - The server logs one `connection error: SSLEOFError` line per client start.

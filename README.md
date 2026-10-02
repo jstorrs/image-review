@@ -32,8 +32,27 @@ commands need:
 On a cluster with a laptop viewer (see [Reviewing on an HPC
 cluster](#reviewing-on-an-hpc-cluster)), install `[preprocess,codecs]` where
 you preprocess, core alone where you only `serve`, and `[viewer]` on the
-laptop. A command whose extra is missing exits 1 with
+laptop (`pip install '.[viewer]'`). A command whose extra is missing exits 1 with
 `this command needs the <extra> extra: pip install 'image-review[<extra>]'`.
+
+**Cluster install without root.** Use a virtual environment in your own
+space; no administrator rights are needed. Get a Python 3.12 or later, either
+from your site's module system (`module load python/3.12` is only an example;
+module names vary by site) or from your own interpreter or `uv`, then:
+
+```bash
+module load python/3.12                  # or skip if python3.12 is already on PATH
+python3.12 -m venv ~/venvs/image-review  # or: uv venv --seed --python 3.12 ~/venvs/image-review
+source ~/venvs/image-review/bin/activate
+pip install 'image-review[preprocess,codecs] @ git+https://github.com/jstorrs/image-review@<branch-or-tag>'
+# or, from a clone of the repository:
+pip install -e '.[preprocess,codecs]'
+```
+
+If the repository is private, the https URL needs credentials (or use an
+`ssh://git@github.com/jstorrs/image-review` URL with a key on the cluster).
+Activate the same environment in your `sbatch` scripts. Use the same
+image-review version on the laptop and on the cluster.
 
 Minimum dependency versions (declared in `pyproject.toml`, checked by running
 the test suite on CPython 3.12): click >= 8.2, matplotlib >= 3.7.3,
@@ -445,10 +464,12 @@ image-review review --remote 'ir://...' --via user@login-node
 ```
 
 Original files, DICOM headers and source paths stay on the cluster; only the
-preprocessed JPGs (and their batch/file names and review statuses) travel, over TLS, and are held in the viewer's memory. See
-[TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster) for the full workflow,
-batch jobs, and [security model and
-limitations](TUTORIAL.md#security-model-and-limitations).
+preprocessed JPGs (and their batch/file names and review statuses) travel, over
+TLS with a pinned certificate, and are held in the viewer's memory. The
+connection string is a password. [SECURITY.md](SECURITY.md) states the threat
+model and its limits (swap, screenshots, shared nodes and home directories,
+multiple clients). See [TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster)
+for the full workflow and batch jobs.
 
 If `--remote` reports "server speaks API vN, this client vM" (or "server is too old to report its API version"), install the same image-review version on both machines.
 
@@ -465,29 +486,7 @@ number are auto-detected when not specified. Press `b` at the end of a batch to
 move on to the next one, and into the next pass once this one is done (not
 with `--batch`, which keeps you in that batch).
 
-## Running the tests
+## Contributing
 
-The tests need every extra. From the repository root, install them with the lint and type-check tools, then run
-the tests:
-
-```
-pip install -e ".[dev]"
-python -m unittest discover
-```
-
-Lint and type-check:
-
-```
-ruff check src tests
-mypy --python-executable "$(which python)"
-```
-
-`mypy` reads its settings from `pyproject.toml`; `--python-executable` points it at the environment that has the
-project's dependencies installed.
-
-CI (`.github/workflows/ci.yml`) runs the same checks, plus `ruff format --check src tests`, on Linux and macOS
-with Python 3.12 and 3.13. To keep the one-off reformat out of `git blame`:
-
-```
-git config blame.ignoreRevsFile .git-blame-ignore-revs
-```
+Development setup, the test, lint and type-check commands, and the project's
+conventions are in [CONTRIBUTING.md](CONTRIBUTING.md).

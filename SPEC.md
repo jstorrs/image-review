@@ -1444,6 +1444,8 @@ one `fp=`; a malformed token or fingerprint. `to_uri()` is the inverse.
 
 ## Server (`server.py`)
 
+The threat model these sections implement is summarized in [SECURITY.md](SECURITY.md).
+
 `make_server(store, host, port) -> (ReviewServer, RemoteTarget)` generates a
 token, a certificate, the TLS context and the listening server. It enforces
 the no-wildcard and advertisable-host checks (see `serve`) and leaves no
