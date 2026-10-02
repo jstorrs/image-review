@@ -33,7 +33,7 @@ from image_review.store import (
     summary,
 )
 from image_review.util import load_surface
-from tests.fixtures import ROWS, StoreTestCase, _jpeg_bytes, make_work_dir
+from tests.fixtures import ROWS, StoreTestCase, _jpeg_bytes, make_work_dir, mark
 
 
 def _skimage_reference(buf: bytes) -> np.ndarray:
@@ -125,8 +125,8 @@ class TestMarkAndStatuses(StoreTestCase):
         self.assertEqual(set(self.store.statuses(1).values()), {"UNREVIEWED"})
 
     def test_mark_round_trip_stores_image_id(self):
-        self.store.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_002/c.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN")
+        mark(self.store, ["batch_002/c.jpg"], "DIRTY")
         statuses = LocalStore(self.work_dir, read_only=True).statuses(1)
         self.assertEqual(statuses["batch_001/a.jpg"], "CLEAN")
         self.assertEqual(statuses["batch_001/b.jpg"], "CLEAN")
@@ -140,16 +140,16 @@ class TestMarkAndStatuses(StoreTestCase):
         )
 
     def test_prior_pass_semantics(self):
-        self.store.mark(["batch_001/a.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_001/b.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "CLEAN")
+        mark(self.store, ["batch_001/b.jpg"], "DIRTY")
         statuses = self.store.statuses(2)
         self.assertEqual(statuses["batch_001/a.jpg"], "CLEAN")
         self.assertEqual(statuses["batch_001/b.jpg"], "FLAGGED")
 
     def test_pass_one_dirty_is_flagged_in_pass_two(self):
-        self.store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY")
+        mark(self.store, ["batch_001/b.jpg"], "CLEAN")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         self.assertEqual(self.store.current_pass(), 2)
         self.assertEqual(
             self.store.statuses(2),
@@ -161,15 +161,15 @@ class TestMarkAndStatuses(StoreTestCase):
             },
         )
         self.assertEqual(
-            self.store.mark(["batch_001/a.jpg"], "CLEAN", 2, reviewer="tester", mode="single"),
+            mark(self.store, ["batch_001/a.jpg"], "CLEAN", 2),
             {"batch_001/a.jpg": "CLEAN"},
         )
         self.assertEqual(self.store.current_pass(), 3)
 
     def test_flagged_keeps_pass_open(self):
-        self.store.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_001/a.jpg"], "CLEAN", 2, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
+        mark(self.store, ["batch_001/a.jpg"], "CLEAN", 2)
         self.assertEqual(self.store.statuses(2)["batch_001/b.jpg"], "FLAGGED")
         self.assertEqual(self.store.current_pass(), 2)
 
@@ -187,7 +187,7 @@ class TestSharedImageId(unittest.TestCase):
                 writer.writerow(["batch_002", "batch_002/c.jpg", "/src/other.dcm"])
             store = LocalStore(root)
             self.addCleanup(store.close)
-            changed = store.mark(["batch_001/a.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+            changed = mark(store, ["batch_001/a.jpg"], "CLEAN")
             self.assertEqual(changed, {"batch_001/a.jpg": "CLEAN", "batch_001/b.jpg": "CLEAN"})
             statuses = store.statuses(1)
             self.assertEqual({k: statuses[k] for k in changed}, changed)
@@ -745,7 +745,7 @@ class TestMigration(unittest.TestCase):
 
 class TestReadOnlyTornLog(StoreTestCase):
     def test_read_only_store_never_writes(self):
-        self.store.mark(["batch_001/a.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "CLEAN")
         self.store.close()
         path = self.work_dir / "review.tsv"
         with open(path, "ab") as f:
@@ -756,7 +756,7 @@ class TestReadOnlyTornLog(StoreTestCase):
         self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
         self.assertEqual(ro.statuses(1)["batch_001/a.jpg"], "CLEAN")
         with self.assertRaises(PermissionError):
-            ro.mark(["batch_001/b.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
+            mark(ro, ["batch_001/b.jpg"], "DIRTY")
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(path.stat().st_mtime_ns, mtime)
 
@@ -779,7 +779,7 @@ class TestPassMonotonic(StoreTestCase):
 
     def mark_all(self, status, pass_number, keys):
         for key in keys:
-            self.store.mark([key], status, pass_number, reviewer="tester", mode="single")
+            mark(self.store, [key], status, pass_number)
 
     def test_current_pass_transitions(self):
         keys = [r[1] for r in ROWS]
@@ -805,8 +805,8 @@ class TestPassMonotonic(StoreTestCase):
         self.assertEqual(statuses["batch_002/e.jpg"], "UNREVIEWED")
 
     def test_lower_pass_mark_keeps_recorded_pass(self):
-        self.store.mark(["batch_001/a.jpg"], "DIRTY", 3, reviewer="tester", mode="single")
-        result = self.store.mark(["batch_001/a.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY", 3)
+        result = mark(self.store, ["batch_001/a.jpg"], "CLEAN")
         self.assertEqual(result, {"batch_001/a.jpg": "CLEAN"})
         with open(self.work_dir / "review.tsv", newline="") as f:
             *_, row = csv.DictReader(f, delimiter="\t")  # the log's last row for the image wins
@@ -951,9 +951,9 @@ class TestPureFunctions(StoreTestCase):
 
     def setUp(self):
         super().setUp()
-        self.store.mark(["batch_001/a.jpg", "batch_002/c.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_002/c.jpg"], "DIRTY", 2, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg", "batch_002/c.jpg"], "DIRTY")
+        mark(self.store, ["batch_001/b.jpg"], "CLEAN")
+        mark(self.store, ["batch_002/c.jpg"], "DIRTY", 2)
         self.rows = self.store.manifest()
         self.statuses = self.store.statuses(2)
 

@@ -16,7 +16,9 @@ from pydicom.uid import SecondaryCaptureImageStorage, generate_uid
 
 from image_review import grid_packer as grid_packer_module
 from image_review.cli import cli
-from image_review.store import LocalStore
+from image_review.review_db import MarkMode
+from image_review.status import Verdict
+from image_review.store import LocalStore, ReviewStore
 
 # (batch, preprocessed_path, image_id); image_ids deliberately differ from keys
 ROWS = [
@@ -129,6 +131,19 @@ def start_server(work_dir: Path, port: int = 0):
         store.close()
 
     return server, target, stop
+
+
+def mark(
+    store: ReviewStore,
+    keys: list[str],
+    status: Verdict,
+    pass_number: int = 1,
+    *,
+    reviewer: str = "tester",
+    mode: MarkMode = "single",
+):
+    """store.mark with the usual reviewer and mode, for tests where neither is the point."""
+    return store.mark(keys, status, pass_number, reviewer=reviewer, mode=mode)
 
 
 class StoreTestCase(unittest.TestCase):

@@ -18,7 +18,7 @@ from image_review import store as store_module
 from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADER
 from image_review.store import LocalStore, boot_id, this_process
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server
 
 KEYS = [key for _, key, _ in ROWS]
 MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id", "source_sha256", "jpeg_sha256"]
@@ -139,7 +139,7 @@ class TestExportRows(ExportTestCase):
         (self.work / "review.tsv").unlink()
         (self.work / "skipped.tsv").unlink()
         with LocalStore(self.work) as store:
-            store.mark(KEYS[:1], "DIRTY", 1, reviewer="tester", mode="single")
+            mark(store, KEYS[:1], "DIRTY")
             store.mark(KEYS[1:], "CLEAN", 1, reviewer="tester", mode="grid")
         self.assertIn("FLAGGED:         1", invoke("status", "--work-dir", str(self.work)).stdout)
         lines = self.export().stdout.splitlines()
@@ -404,10 +404,6 @@ class TestStatusCheck(unittest.TestCase):
         self.work = Path(tmp.name)
         make_work_dir(self.work)
 
-    def mark(self, keys, status, pass_number=1):
-        with LocalStore(self.work) as store:
-            store.mark(keys, status, pass_number, reviewer="tester", mode="single")
-
     def check(self, *args):
         result = invoke("status", "--check", *args)
         self.assertIn("Overall:", result.stdout)  # the report is printed either way
@@ -417,14 +413,16 @@ class TestStatusCheck(unittest.TestCase):
         return self.check("--work-dir", str(self.work))
 
     def test_unreviewed_fails(self):
-        self.mark(KEYS[:3], "CLEAN")
+        with LocalStore(self.work) as store:
+            mark(store, KEYS[:3], "CLEAN")
         self.assertEqual(self.local(), 1)
         self.assertEqual(invoke("status", "--work-dir", str(self.work)).exit_code, 0)  # only with --check
 
     def test_flagged_in_pass_two_passes(self):
         # FLAGGED is a DIRTY verdict from an earlier pass: decided, so finished
-        self.mark(KEYS[:1], "DIRTY")
-        self.mark(KEYS[1:], "CLEAN")
+        with LocalStore(self.work) as store:
+            mark(store, KEYS[:1], "DIRTY")
+            mark(store, KEYS[1:], "CLEAN")
         status = invoke("status", "--work-dir", str(self.work)).stdout
         self.assertIn("FLAGGED:         1", status)  # still reported, so a second pass remains available
         self.assertIn("UNREVIEWED:      0", status)
@@ -432,29 +430,33 @@ class TestStatusCheck(unittest.TestCase):
 
     def test_dirty_rolling_over_passes(self):
         # Re-marked DIRTY in pass 2: the pass ends, it is FLAGGED again in pass 3, and the study is still finished
-        self.mark(KEYS[:1], "DIRTY")
-        self.mark(KEYS[1:], "CLEAN")
-        self.mark(KEYS[:1], "DIRTY", 2)
+        with LocalStore(self.work) as store:
+            mark(store, KEYS[:1], "DIRTY")
+            mark(store, KEYS[1:], "CLEAN")
+            mark(store, KEYS[:1], "DIRTY", 2)
         self.assertIn("Current pass: 3", invoke("status", "--work-dir", str(self.work)).stdout)
         self.assertEqual(self.local(), 0)
 
     def test_dirty_verdicts_with_one_unreviewed_fails(self):
         # An image without a verdict keeps the current pass at 1, so earlier DIRTY verdicts show as DIRTY,
         # not FLAGGED: the two never coexist in one report. The unreviewed image alone makes it 1.
-        self.mark(KEYS[:2], "DIRTY")
-        self.mark(KEYS[2:3], "CLEAN")
+        with LocalStore(self.work) as store:
+            mark(store, KEYS[:2], "DIRTY")
+            mark(store, KEYS[2:3], "CLEAN")
         status = invoke("status", "--work-dir", str(self.work)).stdout
         self.assertIn("DIRTY:           2", status)
         self.assertIn("UNREVIEWED:      1", status)
         self.assertEqual(self.local(), 1)
 
     def test_failed_skip_fails(self):
-        self.mark(KEYS, "CLEAN")
+        with LocalStore(self.work) as store:
+            mark(store, KEYS, "CLEAN")
         (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/x.dcm\tfailed\tbad\n")
         self.assertEqual(self.local(), 1)
 
     def test_all_reviewed_passes(self):
-        self.mark(KEYS, "CLEAN")
+        with LocalStore(self.work) as store:
+            mark(store, KEYS, "CLEAN")
         (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/notes.txt\tignored\tnot an image\n")
         self.assertEqual(self.local(), 0)
 
@@ -464,7 +466,7 @@ class TestStatusCheck(unittest.TestCase):
         uri = target.to_uri()
         self.assertEqual(self.check("--remote", uri), 1)
         with RemoteStore(target) as store:
-            store.mark(KEYS[:1], "DIRTY", 1, reviewer="tester", mode="single")
+            mark(store, KEYS[:1], "DIRTY")
             store.mark(KEYS[1:], "CLEAN", 1, reviewer="tester", mode="grid")
         self.assertEqual(self.check("--remote", uri), 0)  # pass 2, one FLAGGED: every image has a verdict
         (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/x.dcm\tfailed\tbad\n")

@@ -26,7 +26,7 @@ from image_review.store import (
     WorkDirLocked,
     boot_id,
 )
-from tests.fixtures import ROWS, invoke_cli, make_work_dir
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark
 
 THIS_BOOT = boot_id()
 
@@ -73,7 +73,7 @@ class TestWorkDirLock(LockTestCase):
         self.assertFalse(self.lock_path.exists())
         with LocalStore(self.work_dir) as second:
             self.assertTrue(self.lock_path.exists())
-            second.mark([ROWS[0][1]], "CLEAN", 1, reviewer="tester", mode="single")
+            mark(second, [ROWS[0][1]], "CLEAN")
         self.assertFalse(self.lock_path.exists())
 
     def test_acquire_leaves_only_the_complete_lock(self):
@@ -242,7 +242,7 @@ class TestWorkDirLock(LockTestCase):
         reader = self.open(read_only=True)
         self.assertEqual(set(reader.statuses(1).values()), {"UNREVIEWED"})
         with self.assertRaises(PermissionError):
-            reader.mark([ROWS[0][1]], "CLEAN", 1, reviewer="tester", mode="single")
+            mark(reader, [ROWS[0][1]], "CLEAN")
         reader.close()
         self.assertTrue(self.lock_path.exists())  # the writer's lock is untouched
 
@@ -250,11 +250,11 @@ class TestWorkDirLock(LockTestCase):
         store = self.open()
         store.close()
         with self.assertRaises(PermissionError):
-            store.mark([ROWS[0][1]], "CLEAN", 1, reviewer="tester", mode="single")
+            mark(store, [ROWS[0][1]], "CLEAN")
 
     def test_read_only_and_closed_stores_refuse_undo(self):
         writer = self.open()
-        writer.mark([ROWS[0][1]], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(writer, [ROWS[0][1]], "CLEAN")
         reader = self.open(read_only=True)
         with self.assertRaises(PermissionError):
             reader.undo(1, reviewer="tester")
@@ -452,9 +452,9 @@ class TestLockCli(LockTestCase):
 
     def test_status_counts_flagged_after_pass_one(self):
         with LocalStore(self.work_dir) as store:
-            store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-            store.mark(["batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-            store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+            mark(store, ["batch_001/a.jpg"], "DIRTY")
+            mark(store, ["batch_001/b.jpg"], "CLEAN")
+            mark(store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         result = self.invoke("status")
         self.assertEqual(result.exit_code, 0, result.output)
         for line in (
@@ -470,9 +470,9 @@ class TestLockCli(LockTestCase):
 
     def test_grid_review_names_held_back_images(self):
         with LocalStore(self.work_dir) as store:
-            store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-            store.mark(["batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-            store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+            mark(store, ["batch_001/a.jpg"], "DIRTY")
+            mark(store, ["batch_001/b.jpg"], "CLEAN")
+            mark(store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         with mock.patch.object(pg.display, "toggle_fullscreen", lambda: None):
             result = self.invoke("review", "--mode", "grid")
         self.assertEqual(result.exit_code, 0, result.output)

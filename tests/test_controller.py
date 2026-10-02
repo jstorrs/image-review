@@ -35,7 +35,7 @@ from image_review.store import (
 )
 from image_review.util import load_surface
 from image_review.viewer import ImageViewer, scale_percent
-from tests.fixtures import StoreTestCase, _jpeg_bytes, dropping_packer, make_work_dir, write_manifest
+from tests.fixtures import StoreTestCase, _jpeg_bytes, dropping_packer, make_work_dir, mark, write_manifest
 
 
 class SessionTestCase(StoreTestCase):
@@ -116,9 +116,9 @@ class TestSession(SessionTestCase):
 
     def finish_pass_one(self):
         """Pass 1 ends with a DIRTY and b, c, d CLEAN."""
-        self.store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY")
+        mark(self.store, ["batch_001/b.jpg"], "CLEAN")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
 
     @staticmethod
     def grid_keys(s: ReviewSession) -> set[str]:
@@ -151,7 +151,7 @@ class TestSession(SessionTestCase):
         self.assertEqual(s._todo_count, 0)
 
     def test_pass_one_all_filter_grid_excludes_dirty(self):
-        self.store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY")
         s = ReviewSession(self.store, reviewer="tester", mode="grid", status_filter="all")
         self.assertEqual(s.pass_number, 1)
         self.assertEqual(self.grid_keys(s), {"batch_001/b.jpg"})
@@ -159,9 +159,9 @@ class TestSession(SessionTestCase):
         self.assertEqual(self.grid_keys(s), {"batch_002/c.jpg", "batch_002/d.jpg"})
 
     def test_auto_select_batch_uses_grid_eligibility(self):
-        self.store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_002/c.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY")
+        mark(self.store, ["batch_001/b.jpg"], "CLEAN")
+        mark(self.store, ["batch_002/c.jpg"], "CLEAN")
         # pass 2: batch_001's only todo image is FLAGGED; batch_002 has d UNREVIEWED
         self.assertEqual(ReviewSession(self.store, reviewer="tester", mode="grid", pass_number=2).batch, "batch_002")
         self.assertEqual(ReviewSession(self.store, reviewer="tester", mode="single", pass_number=2).batch, "batch_001")
@@ -225,7 +225,7 @@ class TestSession(SessionTestCase):
 
     def test_restart_refetches_statuses(self):
         s = ReviewSession(self.store, reviewer="tester", mode="single")
-        self.store.mark(["batch_001/a.jpg"], "CLEAN", s.pass_number, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "CLEAN", s.pass_number)
         self.assertEqual(s._statuses["batch_001/a.jpg"], "UNREVIEWED")
         s._restart_in_mode("grid")
         self.assertEqual(s._statuses["batch_001/a.jpg"], "CLEAN")
@@ -454,7 +454,7 @@ class TestEventLoop(EventLoopTestCase):
 
     def test_empty_mode_message_is_not_painted_over(self):
         s = self.reviewing()
-        self.store.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY")
         s.handle_events([key(pg.K_m)])
         self.assertTrue(s._dirty)
         self.assert_message_stays(s)
@@ -1123,7 +1123,7 @@ class TestNextBatchKey(EventLoopTestCase):
         self.assertEqual({k for item in s._items for k in item.keys}, {"batch_002/c.jpg", "batch_002/d.jpg"})
 
     def test_explicit_pass_is_kept_after_the_pass_advances(self):
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         s = self.start(pass_number=1)
         self.finish(s, dirty="batch_001/a.jpg")
         self.assertEqual(self.store.current_pass(), 2)
@@ -1154,7 +1154,7 @@ class TestNextBatchKey(EventLoopTestCase):
         return show_message
 
     def test_auto_pass_advances_to_the_flagged_batch(self):
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         s = self.reviewing()
         self.assertEqual(s.batch, "batch_001")
         self.finish(s, dirty="batch_001/a.jpg")
@@ -1166,8 +1166,8 @@ class TestNextBatchKey(EventLoopTestCase):
         self.assertEqual(s._viewer._info, "Now pass 2")
 
     def test_new_pass_starts_from_the_first_batch(self):
-        self.store.mark(["batch_002/c.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_002/c.jpg"], "DIRTY")
+        mark(self.store, ["batch_002/d.jpg"], "CLEAN")
         s = self.reviewing()
         self.assertEqual(s.batch, "batch_001")
         self.finish(s, dirty="batch_001/a.jpg")
@@ -1184,7 +1184,7 @@ class TestNextBatchKey(EventLoopTestCase):
         self.assertEqual((s._ui_state, s.pass_number), (UIState.END_MESSAGE, 2))
 
     def test_grid_mode_names_flagged_images_held_back(self):
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         s = self.reviewing("grid")
         self.assertEqual(s.batch, "batch_001")
         self.finish(s, dirty="batch_001/a.jpg")  # the one grid holds a and b: both DIRTY
@@ -1199,8 +1199,8 @@ class TestNextBatchKey(EventLoopTestCase):
         self.assertEqual({item.keys[0] for item in s._items}, {"batch_001/a.jpg", "batch_001/b.jpg"})
 
     def test_held_back_images_move_the_batch_for_s(self):
-        self.store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark(["batch_001/b.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY")
+        mark(self.store, ["batch_001/b.jpg"], "CLEAN")
         s = self.reviewing("grid")
         self.assertEqual(s.batch, "batch_002")
         self.finish(s)
@@ -1226,7 +1226,7 @@ class TestNextBatchKey(EventLoopTestCase):
         show_message.assert_called_once_with("All batches done for pass 1 (current pass is 2)")
 
     def test_all_filter_finds_a_marked_image_flagged_in_the_new_pass(self):
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         s = self.start(status_filter="all")
         self.assertEqual(s.batch, "batch_001")
         self.finish(s, dirty="batch_001/a.jpg")  # a was marked in this session, and is FLAGGED in pass 2
@@ -1237,7 +1237,7 @@ class TestNextBatchKey(EventLoopTestCase):
         self.assertTrue(s._is_todo(a))
 
     def test_explicit_batch_after_the_pass_ends(self):
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         s = self.start(batch="batch_001")
         self.finish(s)
         show_message = self.press_b(s)
@@ -1254,7 +1254,7 @@ class TestNextBatchKey(EventLoopTestCase):
 
     def test_clean_filter_wraps_until_everything_is_rechecked(self):
         for batch_keys in (["batch_001/a.jpg", "batch_001/b.jpg"], ["batch_002/c.jpg", "batch_002/d.jpg"]):
-            self.store.mark(batch_keys, "CLEAN", 1, reviewer="tester", mode="single")
+            mark(self.store, batch_keys, "CLEAN")
         s = self.start(status_filter="clean")
         self.assertEqual(s.batch, "batch_001")
         self.skip(s)  # batch_001 shown but not re-checked
@@ -1395,7 +1395,7 @@ class TestUnloadable(EventLoopTestCase):
             s.handle_events([key(pg.K_d if s._items[index].keys[0] == CORRUPT else pg.K_c)])
         self.assertEqual(s._count_todo(), 0)
         self.assertEqual(ReviewSession(self.store, reviewer="tester", mode="single").batch, "batch_002")
-        self.store.mark(["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
         self.store.close()
         with LocalStore(self.work_dir, read_only=True) as fresh:
             self.assertEqual(fresh.current_pass(), 2)

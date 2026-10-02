@@ -32,7 +32,7 @@ from image_review.remote import (
 )
 from image_review.server import Reply, ReviewHandler
 from image_review.store import LocalStore, ManifestRow, SkippedCounts, StoreUnavailable
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server
 
 KEYS = [key for _, key, _ in ROWS]
 
@@ -83,9 +83,9 @@ class TestRoundTrips(RemoteTestCase):
                 self.store.image_bytes(key)
 
     def test_mark_equals_local(self):
-        changed = self.store.mark([KEYS[0], KEYS[1]], "CLEAN", 1, reviewer="tester", mode="single")
+        changed = mark(self.store, [KEYS[0], KEYS[1]], "CLEAN")
         self.assertEqual(changed, {KEYS[0]: "CLEAN", KEYS[1]: "CLEAN"})
-        self.store.mark([KEYS[2]], "DIRTY", 1, reviewer="tester", mode="single")
+        mark(self.store, [KEYS[2]], "DIRTY")
         local = self.local_copy()
         self.assertEqual(self.store.statuses(1), local.statuses(1))
         self.assertEqual(local.statuses(1)[KEYS[2]], "DIRTY")
@@ -102,7 +102,7 @@ class TestRoundTrips(RemoteTestCase):
         )
 
     def test_undo_equals_local(self):
-        self.store.mark([KEYS[0]], "DIRTY", 1, reviewer="tester", mode="single")
+        mark(self.store, [KEYS[0]], "DIRTY")
         self.store.mark([KEYS[0], KEYS[1]], "CLEAN", 1, reviewer="tester", mode="grid")
         self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "DIRTY", KEYS[1]: "UNREVIEWED"})
         self.assertEqual(self.store.statuses(1), self.local_copy().statuses(1))
@@ -111,8 +111,8 @@ class TestRoundTrips(RemoteTestCase):
         self.assertEqual(set(self.local_copy().statuses(1).values()), {"UNREVIEWED"})
 
     def test_undo_whose_reply_is_lost_is_not_resent(self):
-        self.store.mark([KEYS[0]], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark([KEYS[1]], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, [KEYS[0]], "DIRTY")
+        mark(self.store, [KEYS[1]], "CLEAN")
         real_send = ReviewHandler._send
         dropped = []
 
@@ -136,9 +136,7 @@ class TestRoundTrips(RemoteTestCase):
 
     def test_undo_after_idle_close_succeeds(self):
         with mock.patch.object(ReviewHandler, "timeout", 0.3), redirect_stderr(io.StringIO()):
-            self.store.mark(
-                [KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single"
-            )  # on a connection the server closes when idle
+            mark(self.store, [KEYS[0]], "CLEAN")  # on a connection the server closes when idle
             time.sleep(0.8)
             self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "UNREVIEWED"})
 
@@ -149,7 +147,7 @@ class TestRoundTrips(RemoteTestCase):
 
     def test_bad_mark_is_remote_error(self):
         with self.assertRaises(RemoteError):
-            self.store.mark(["nope"], "CLEAN", 1, reviewer="tester", mode="single")
+            mark(self.store, ["nope"], "CLEAN")
 
     def test_wrong_token_is_remote_error_without_token(self):
         bad = RemoteStore(dataclasses.replace(self.target, token="wrong_token_value"))
@@ -213,9 +211,7 @@ class TestReconnect(RemoteTestCase):
 
             with mock.patch.object(PinnedHTTPSConnection, "connect", counting_connect):
                 self.assertEqual(self.store.current_pass(), 1)
-                self.assertEqual(
-                    self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")[KEYS[0]], "CLEAN"
-                )
+                self.assertEqual(mark(self.store, [KEYS[0]], "CLEAN")[KEYS[0]], "CLEAN")
             self.assertEqual(len(connects), 1)
 
     def test_second_failure_is_not_retried_again(self):
@@ -343,8 +339,8 @@ class TestCli(RemoteTestCase):
         return invoke_cli(*args, **kwargs)
 
     def test_status_identical_to_local(self):
-        self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark([KEYS[2]], "DIRTY", 1, reviewer="tester", mode="single")
+        mark(self.store, [KEYS[0]], "CLEAN")
+        mark(self.store, [KEYS[2]], "DIRTY")
         remote = self.invoke("status", "--remote", self.target.to_uri())
         local = self.invoke("status", "--work-dir", str(self.work_dir))
         self.assertEqual(remote.exit_code, 0, remote.output)
@@ -352,9 +348,9 @@ class TestCli(RemoteTestCase):
         self.assertEqual(remote.stdout, local.stdout)
 
     def test_status_flagged_identical_to_local(self):
-        self.store.mark([KEYS[0]], "DIRTY", 1, reviewer="tester", mode="single")
-        self.store.mark([KEYS[1]], "CLEAN", 1, reviewer="tester", mode="single")
-        self.store.mark([KEYS[2], KEYS[3]], "CLEAN", 1, reviewer="tester", mode="single")
+        mark(self.store, [KEYS[0]], "DIRTY")
+        mark(self.store, [KEYS[1]], "CLEAN")
+        mark(self.store, [KEYS[2], KEYS[3]], "CLEAN")
         remote = self.invoke("status", "--remote", self.target.to_uri())
         local = self.invoke("status", "--work-dir", str(self.work_dir))
         self.assertEqual(remote.exit_code, 0, remote.output)
