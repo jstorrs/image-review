@@ -135,6 +135,15 @@ def open_local_store(path: Path, read_only: bool = False) -> LocalStore:
     return store
 
 
+def _existing_work_dir(work_dir: str | None) -> Path:
+    """The work directory, defaulting to DEFAULT_WORK_DIR; a BadParameter if it does not exist."""
+    raw = work_dir if work_dir is not None else DEFAULT_WORK_DIR
+    path = Path(raw)
+    if not path.exists():
+        raise click.BadParameter(f"Path '{raw}' does not exist.", param_hint="'--work-dir'")
+    return path
+
+
 @contextlib.contextmanager
 def open_store(
     work_dir: str | None, remote: str | None, via: str | None = None, read_only: bool = False
@@ -149,11 +158,7 @@ def open_store(
             and click.get_current_context().get_parameter_source("via") is not click.core.ParameterSource.ENVIRONMENT
         ):
             raise click.UsageError("--via requires --remote.")
-        raw = work_dir if work_dir is not None else DEFAULT_WORK_DIR
-        path = Path(raw)
-        if not path.exists():
-            raise click.BadParameter(f"Path '{raw}' does not exist.", param_hint="'--work-dir'")
-        with open_local_store(path, read_only=read_only) as local:
+        with open_local_store(_existing_work_dir(work_dir), read_only=read_only) as local:
             yield local
         return
 
@@ -337,7 +342,7 @@ def default_jobs() -> int:
     "--work-dir",
     "--output-dir",
     type=click.Path(),
-    default="./review_work",
+    default=DEFAULT_WORK_DIR,
     show_default=True,
     help="Work directory for output.",
 )
@@ -597,10 +602,7 @@ def export(work_dir, output, allow_live, remote):
             "export does not work with --remote: image_ids stay on the server. Run export on the machine (cluster) "
             "holding the work directory, with --work-dir."
         )
-    raw = work_dir if work_dir is not None else DEFAULT_WORK_DIR
-    path = Path(raw)
-    if not path.exists():
-        raise click.BadParameter(f"Path '{raw}' does not exist.", param_hint="'--work-dir'")
+    path = _existing_work_dir(work_dir)
     with interrupt_on(*TERMINATION_SIGNALS):  # a SIGTERM/SIGHUP unwinds like Ctrl-C, removing a half-written file
         writer = live_writer(path)
         _refuse_live(writer, allow_live)
@@ -629,7 +631,7 @@ def export(work_dir, output, allow_live, remote):
 @click.option(
     "--work-dir",
     type=click.Path(exists=True),
-    default="./review_work",
+    default=DEFAULT_WORK_DIR,
     show_default=True,
     help="Work directory containing preprocessed data.",
 )
