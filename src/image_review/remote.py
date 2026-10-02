@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Self, get_args
 from urllib.parse import urlencode
 
-from .connection import API_VERSION, RemoteTarget, cert_fingerprint
+from .connection import API_VERSION, RemoteTarget, cert_fingerprint, is_int_at_least
 from .status import MarkMode, Status, Verdict
 from .store import (
     ManifestRow,
@@ -109,7 +109,7 @@ def parse_statuses(data: bytes) -> dict[str, Status]:
 def parse_pass(data: bytes) -> int:
     payload = _load_json(data)
     value = payload.get("pass") if isinstance(payload, dict) else None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+    if not is_int_at_least(value, 1):
         raise RemoteError("malformed pass number from server")
     return value
 
@@ -117,7 +117,7 @@ def parse_pass(data: bytes) -> int:
 def parse_version(data: bytes) -> int:
     payload = _load_json(data)
     value = payload.get("api") if isinstance(payload, dict) else None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+    if not is_int_at_least(value, 1):
         raise RemoteError("malformed version from server")
     return value
 
@@ -128,13 +128,10 @@ def parse_skipped(data: bytes) -> SkippedCounts | None:
         return None
     if not isinstance(payload, dict) or set(payload) != {"failed", "ignored"}:
         raise RemoteError("malformed skipped counts from server")
-    counts = []
-    for name in ("failed", "ignored"):
-        value = payload[name]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise RemoteError("malformed skipped counts from server")
-        counts.append(value)
-    return SkippedCounts(failed=counts[0], ignored=counts[1])
+    failed, ignored = payload["failed"], payload["ignored"]
+    if not (is_int_at_least(failed, 0) and is_int_at_least(ignored, 0)):
+        raise RemoteError("malformed skipped counts from server")
+    return SkippedCounts(failed=failed, ignored=ignored)
 
 
 class RemoteStore:

@@ -32,6 +32,7 @@ from .connection import (
     API_VERSION,
     RemoteTarget,
     cert_fingerprint,
+    is_int_at_least,
     package_version,
     parse_reviewer,
 )
@@ -89,7 +90,7 @@ def _json_object(body: bytes) -> dict:
 
 
 def _pass_field(value: object) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+    if not is_int_at_least(value, 1):
         raise BadRequest("pass must be an integer >= 1")
     return value
 

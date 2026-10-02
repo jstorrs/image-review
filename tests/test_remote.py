@@ -16,7 +16,7 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame as pg
 
-from image_review.connection import RemoteTarget, package_version
+from image_review.connection import RemoteTarget, is_int_at_least, package_version
 from image_review.controller import ReviewSession, UIState
 from image_review.remote import (
     ApiMismatch,
@@ -301,6 +301,29 @@ class TestParsing(unittest.TestCase):
         ]:
             with self.subTest(parse=parse.__name__, bad=bad), self.assertRaises(RemoteError):
                 parse(bad)
+
+
+class TestIsIntAtLeast(unittest.TestCase):
+    def test_table(self):
+        for value, minimum, expected in [
+            (True, 0, False),
+            (True, 1, False),
+            (False, 0, False),
+            (0, 0, True),
+            (0, 1, False),
+            (1, 0, True),
+            (1, 1, True),
+            (-1, 0, False),
+            (-1, 1, False),
+            (1.0, 0, False),
+            (1.0, 1, False),
+            ("1", 0, False),
+            ("1", 1, False),
+            (None, 0, False),
+            (None, 1, False),
+        ]:
+            with self.subTest(value=value, minimum=minimum):
+                self.assertIs(is_int_at_least(value, minimum), expected)
 
 
 SKIPPED_TSV = "image_id\tkind\treason\n/src/p/x.dcm\tfailed\tbad\n/src/p/y.dcm\tfailed\tbad\n/src/p/z.txt\tignored\tnot an image\n"

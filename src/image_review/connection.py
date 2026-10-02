@@ -4,6 +4,7 @@ import importlib.metadata
 import ipaddress
 import re
 from dataclasses import dataclass, field
+from typing import TypeGuard
 from urllib.parse import parse_qsl, urlsplit
 
 # Wire API version, shared by client and server. Any change to request/response
@@ -25,6 +26,11 @@ def package_version() -> str:
         return importlib.metadata.version("image-review")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+def is_int_at_least(value: object, minimum: int) -> TypeGuard[int]:
+    """True for a JSON integer (never a bool) that is at least `minimum`."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
 
 
 def parse_reviewer(value: object) -> str:
