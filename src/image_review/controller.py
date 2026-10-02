@@ -9,7 +9,7 @@ import pygame as pg
 from pygame._sdl2 import controller as sdl_controller
 
 from .grid_packer import GridSpec, pack_into_grids
-from .status import TODO_STATUSES, MarkMode, Rotation, Status, Verdict
+from .status import TODO_STATUSES, Key, MarkMode, Rotation, Status, Verdict
 from .store import (
     ManifestRow,
     ReviewStore,
@@ -55,11 +55,11 @@ NO_TODO_MESSAGE = "No todo images remaining"
 NO_TODO_THIS_WAY_MESSAGE = "No more todo images this way"
 
 
-def _placeholder(key: str, reason: str) -> pg.Surface:
+def _placeholder(key: Key, reason: str) -> pg.Surface:
     return placeholder_surface(f"Cannot load image: {key}\n{reason}\nIt can only be marked DIRTY")
 
 
-def _grid_status(snapshot: dict[str, Status], keys: tuple[str, ...]) -> Status:
+def _grid_status(snapshot: dict[Key, Status], keys: tuple[Key, ...]) -> Status:
     statuses = {snapshot[key] for key in keys}
     if not statuses <= GRID_ELIGIBLE:
         return "DIRTY"  # e.g. a key sharing an image_id with one marked DIRTY elsewhere this session
@@ -68,7 +68,7 @@ def _grid_status(snapshot: dict[str, Status], keys: tuple[str, ...]) -> Status:
     return "CLEAN"
 
 
-def _grid_clean_refused(snapshot: dict[str, Status], keys: tuple[str, ...]) -> bool:
+def _grid_clean_refused(snapshot: dict[Key, Status], keys: tuple[Key, ...]) -> bool:
     """CLEAN on a grid holding a DIRTY or FLAGGED image is refused, unless the whole grid is
     DIRTY (reversing that grid's own verdict)."""
     statuses = {snapshot[key] for key in keys}
@@ -79,7 +79,7 @@ class GridCacheKey(NamedTuple):
     """What a grid build depends on: the review rows' keys in order, the bin size the grids were
     packed for and the rotation policy."""
 
-    keys: tuple[str, ...]
+    keys: tuple[Key, ...]
     size: tuple[int, int]
     rotation: Rotation
 
@@ -88,10 +88,10 @@ class GridCacheKey(NamedTuple):
 class SingleItem:
     """A single image, loaded when it is displayed."""
 
-    key: str
+    key: Key
 
     @property
-    def keys(self) -> tuple[str, ...]:
+    def keys(self) -> tuple[Key, ...]:
         return (self.key,)
 
     @property
@@ -104,7 +104,7 @@ class GridItem:
     """A grid, composited when built. Its status and CLEAN refusal follow the grid rules even
     when it holds one key, so it is its own type rather than read off len(keys)."""
 
-    keys: tuple[str, ...]
+    keys: tuple[Key, ...]
     surface: pg.Surface
     source_scale: float  # the smallest image scale vs. its source; shown with the display scale
 
@@ -182,12 +182,12 @@ class ReviewSession:
         self._shown_at: int | None = None  # ticks when the current item was first painted
         self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
         self._todo_only = False
-        self._marked_this_session: set[str] = set()  # keys marked here (less those undone): done under clean/all
+        self._marked_this_session: set[Key] = set()  # keys marked here (less those undone): done under clean/all
         self._undoable = 0  # this session's marks since the current mode started, less those undone
-        self._unloadable: set[str] = set()  # keys that failed to load: shown as placeholders, never marked CLEAN
+        self._unloadable: set[Key] = set()  # keys that failed to load: shown as placeholders, never marked CLEAN
         # The last pack_into_grids result and its key, so switching modes back and forth packs once;
         # kept across single mode within a batch, dropped by b
-        self._grid_cache: tuple[GridCacheKey, list[GridSpec], list[str]] | None = None
+        self._grid_cache: tuple[GridCacheKey, list[GridSpec], list[Key]] | None = None
 
         self._viewer = ImageViewer()
         # Gamepads with an SDL game controller mapping, by instance id. SDL also sends JOYDEVICEADDED
@@ -260,7 +260,7 @@ class ReviewSession:
         """Find the first batch that has images the current mode may show."""
         return next_batch(self._batches(), None, lambda b: bool(self._review_rows(b)), wrap=False)
 
-    def _key_todo(self, key: str) -> bool:
+    def _key_todo(self, key: Key) -> bool:
         """A key is todo while its status is UNREVIEWED or FLAGGED; under clean/all, where every key is
         a re-check, also until it is marked in this session."""
         if self._statuses[key] in TODO_STATUSES:
@@ -510,7 +510,7 @@ class ReviewSession:
         info = f"{self._cursor + 1} / {len(self._items)} ({self._todo_count} todo)"
         self._viewer.set_image(surface, item.label, status, info, source_scale)
 
-    def _unloadable_placeholder(self, key: str, reason: str, detail: str | None = None) -> pg.Surface:
+    def _unloadable_placeholder(self, key: Key, reason: str, detail: str | None = None) -> pg.Surface:
         """Record `key` as unloadable and return its placeholder. `reason` is shown on the
         placeholder; `detail` (the error, defaulting to `reason`) goes to the log only."""
         log.warning("cannot load %s: %s", key, detail or reason)

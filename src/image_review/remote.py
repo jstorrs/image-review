@@ -15,7 +15,7 @@ from typing import Self, get_args
 from urllib.parse import urlencode
 
 from .connection import API_VERSION, RemoteTarget, cert_fingerprint, is_int_at_least
-from .status import MarkMode, Status, Verdict
+from .status import Key, MarkMode, Status, Verdict
 from .store import (
     ManifestRow,
     SkippedCounts,
@@ -94,16 +94,16 @@ def parse_manifest(data: bytes) -> list[ManifestRow]:
             or not isinstance(entry.get("batch"), str)
         ):
             raise RemoteError("malformed manifest from server")
-        rows.append(ManifestRow(key=entry["key"], batch=entry["batch"]))
+        rows.append(ManifestRow(key=Key(entry["key"]), batch=entry["batch"]))
     return rows
 
 
-def parse_statuses(data: bytes) -> dict[str, Status]:
+def parse_statuses(data: bytes) -> dict[Key, Status]:
     payload = _load_json(data)
     valid = get_args(Status)
     if not isinstance(payload, dict) or not all(isinstance(v, str) and v in valid for v in payload.values()):
         raise RemoteError("malformed statuses from server")
-    return payload
+    return {Key(k): v for k, v in payload.items()}
 
 
 def parse_pass(data: bytes) -> int:
@@ -223,7 +223,7 @@ class RemoteStore:
     def manifest(self) -> list[ManifestRow]:
         return parse_manifest(self._call("GET", "/manifest"))
 
-    def image_bytes(self, key: str) -> bytes:
+    def image_bytes(self, key: Key) -> bytes:
         status, data = self._request("GET", f"/image?{urlencode({'key': key})}")
         if status == 404:
             raise KeyError(key)
@@ -231,9 +231,9 @@ class RemoteStore:
             raise RemoteError(f"server returned HTTP {status}", status)
         return data
 
-    def image_bytes_many(self, keys: list[str]) -> dict[str, bytes]:
+    def image_bytes_many(self, keys: list[Key]) -> dict[Key, bytes]:
         futures = {key: self._pool.submit(self.image_bytes, key) for key in dict.fromkeys(keys)}
-        found: dict[str, bytes] = {}
+        found: dict[Key, bytes] = {}
         try:
             for key, future in futures.items():
                 try:
@@ -246,16 +246,16 @@ class RemoteStore:
             raise
         return found
 
-    def statuses(self, pass_number: int) -> dict[str, Status]:
+    def statuses(self, pass_number: int) -> dict[Key, Status]:
         return parse_statuses(self._call("GET", f"/statuses?{urlencode({'pass': pass_number})}"))
 
     def mark(
-        self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
-    ) -> dict[str, Status]:
+        self, keys: list[Key], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> dict[Key, Status]:
         payload = {"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}
         return parse_statuses(self._call("POST", "/mark", payload))
 
-    def undo(self, pass_number: int, *, reviewer: str) -> dict[str, Status]:
+    def undo(self, pass_number: int, *, reviewer: str) -> dict[Key, Status]:
         payload = {"pass": pass_number, "reviewer": reviewer}
         return parse_statuses(self._call("POST", "/undo", payload, idempotent=False))
 

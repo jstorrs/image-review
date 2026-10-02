@@ -8,7 +8,7 @@ import pygame as pg
 from PIL import Image
 from rectpack import newPacker
 
-from .status import Rotation
+from .status import Key, Rotation
 from .store import ManifestRow, ReviewStore
 from .util import load_surface
 
@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class GridSpec:
     surface: pg.Surface
-    keys: tuple[str, ...]
+    keys: tuple[Key, ...]
     min_scale: float  # the smallest fit_size / source size ratio among the images drawn
 
 
@@ -64,7 +64,7 @@ def _pack(sizes: dict[int, tuple[int, int]], grid_w: int, grid_h: int, rotate: b
 def _composite_bin(
     placed: list[PlacedRect],
     items: list[ManifestRow],
-    blobs: dict[str, bytes],
+    blobs: dict[Key, bytes],
     sizes: dict[int, tuple[int, int]],
     grid_w: int,
     grid_h: int,
@@ -77,7 +77,7 @@ def _composite_bin(
     failed to decode (their rectangles stay black)."""
     canvas = pg.Surface((grid_w, grid_h))
     canvas.fill((0, 0, 0))
-    keys: list[str] = []
+    keys: list[Key] = []
     min_scale = 1.0
     failed: list[int] = []
     for rect_id, x, y, w, h in placed:
@@ -112,7 +112,7 @@ def pack_into_grids(
     *,
     rotation: Rotation = "auto",
     on_progress: Callable[[int, int], None] | None = None,
-) -> tuple[list[GridSpec], list[str]]:
+) -> tuple[list[GridSpec], list[Key]]:
     """Pack review items into grid canvases sized for the current screen.
 
     Each item is a ManifestRow; image bytes are fetched via the store. Images are

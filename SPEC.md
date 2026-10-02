@@ -920,10 +920,11 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 
 ### Types
 
-`Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode` and `Rotation`) are defined in `status.py`.
+`Key`, `Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode` and `Rotation`) are defined in `status.py`.
 
 | Name | Description |
 |------|-------------|
+| `Key` | `NewType("Key", str)`: a manifest key, the `preprocessed_path` (see *Key versus `image_id`*). A string becomes a `Key` only where it is parsed (`load_manifest`, the client's `parse_manifest` and `parse_statuses`, the server's `parse_mark` and `/image` check), so the type checker keeps keys and source paths apart |
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
@@ -1580,7 +1581,7 @@ the boundary (`parse_pass`, `parse_mark`, `parse_undo`).
 |---------|----------|
 | `GET /version` | `{"api": N, "version": str}`: the wire API version (`connection.API_VERSION`) and the installed `image-review` package version (`"unknown"` if not installed) |
 | `GET /manifest` | `[{"key": str, "batch": str}, ...]` |
-| `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown, unreadable, or does not match its recorded `jpeg_sha256` |
+| `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown (checked against the manifest's keys before the store is asked), unreadable, or does not match its recorded `jpeg_sha256` |
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`), or `null` if the work dir has no `skipped.tsv`. Only counts are sent, never `image_id`s or reasons (which contain source paths) |

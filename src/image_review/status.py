@@ -1,4 +1,7 @@
-from typing import Literal
+from typing import Literal, NewType
+
+# A manifest key: an image's preprocessed JPG path, the only identifier a client ever sees (never a source path).
+Key = NewType("Key", str)
 
 # FLAGGED: marked DIRTY in another pass and not yet re-reviewed in this one. Derived, never stored.
 Status = Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]

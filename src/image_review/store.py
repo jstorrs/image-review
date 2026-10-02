@@ -12,21 +12,21 @@ from .access import MANIFEST_NAME
 from .export import ExportRow, export_rows
 from .lock import LockHolder, acquire_lock, release_lock
 from .review_db import Change, ReviewDB, decode_utf8
-from .status import TODO_STATUSES, MarkMode, Status, Verdict
+from .status import TODO_STATUSES, Key, MarkMode, Status, Verdict
 
 log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class ManifestRow:
-    key: str  # preprocessed_path; the only identifier the client ever sees
+    key: Key  # preprocessed_path; the only identifier the client ever sees
     batch: str
 
 
 @dataclass(frozen=True)
 class ManifestEntry:
     batch: str
-    key: str  # preprocessed_path
+    key: Key  # preprocessed_path
     image_id: str  # original source path; stays server-side
     # SHA-256 (64 lowercase hex) of the source file or ZIP entry, shared by X and X#icon; None in a 3-column manifest.
     # Derived from PHI content: stays server-side like image_id.
@@ -61,26 +61,26 @@ class ReviewStore(Protocol):
 
     def manifest(self) -> list[ManifestRow]: ...
 
-    def image_bytes(self, key: str) -> bytes: ...
+    def image_bytes(self, key: Key) -> bytes: ...
 
-    def image_bytes_many(self, keys: list[str]) -> dict[str, bytes]:
+    def image_bytes_many(self, keys: list[Key]) -> dict[Key, bytes]:
         """Bytes for the keys that loaded; missing or unloadable keys are omitted with a logged warning."""
         ...
 
-    def statuses(self, pass_number: int) -> dict[str, Status]:
+    def statuses(self, pass_number: int) -> dict[Key, Status]:
         """Key -> status for every manifest row."""
         ...
 
     def mark(
-        self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
-    ) -> dict[str, Status]:
+        self, keys: list[Key], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> dict[Key, Status]:
         """Record a verdict on keys, given by `reviewer` (an unauthenticated claim) in `mode`.
 
         Returns the new status of every key affected (incl. keys sharing an image_id).
         """
         ...
 
-    def undo(self, pass_number: int, *, reviewer: str) -> dict[str, Status]:
+    def undo(self, pass_number: int, *, reviewer: str) -> dict[Key, Status]:
         """Undo the latest mark not yet undone, restoring each image's decision from before it; `reviewer` is recorded.
 
         Returns the new status of every key affected, as mark does; {} when there is nothing to undo. The marks
@@ -150,11 +150,11 @@ def load_manifest(work_dir: Path) -> list[ManifestEntry]:
                 f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})"
             )
         key_lines[key] = line
-        entries.append(ManifestEntry(batch, key, image_id, source_sha256, jpeg_sha256))
+        entries.append(ManifestEntry(batch, Key(key), image_id, source_sha256, jpeg_sha256))
     return entries
 
 
-def check_jpeg_hash(key: str, data: bytes, expected: str | None) -> bytes:
+def check_jpeg_hash(key: Key, data: bytes, expected: str | None) -> bytes:
     """data, if it matches the recorded SHA-256 (or none is recorded). ValueError otherwise: the image is unloadable.
 
     Pillow decodes a JPG cut short but still ending in EOI without complaint (grey rows); the hash catches it.
@@ -216,8 +216,8 @@ class LocalStore:
         entries = load_manifest(work_dir)  # written once by preprocess; safe to read before locking
         self._entries = entries
         self._rows = [ManifestRow(key=e.key, batch=e.batch) for e in entries]
-        self._by_key: dict[str, ManifestEntry] = {e.key: e for e in entries}
-        self._keys_by_image_id: dict[str, list[str]] = {}
+        self._by_key: dict[Key, ManifestEntry] = {e.key: e for e in entries}
+        self._keys_by_image_id: dict[str, list[Key]] = {}
         for key, e in self._by_key.items():
             self._keys_by_image_id.setdefault(e.image_id, []).append(key)
         # Lock before loading review.tsv, so the state loaded is not one another writer is about to overwrite.
@@ -245,12 +245,12 @@ class LocalStore:
     def manifest(self) -> list[ManifestRow]:
         return list(self._rows)
 
-    def image_bytes(self, key: str) -> bytes:
+    def image_bytes(self, key: Key) -> bytes:
         entry = self._by_key[key]
         return check_jpeg_hash(key, safe_path(self.work_dir, key).read_bytes(), entry.jpeg_sha256)
 
-    def image_bytes_many(self, keys: list[str]) -> dict[str, bytes]:
-        found: dict[str, bytes] = {}
+    def image_bytes_many(self, keys: list[Key]) -> dict[Key, bytes]:
+        found: dict[Key, bytes] = {}
         for key in keys:
             try:
                 found[key] = self.image_bytes(key)
@@ -258,7 +258,7 @@ class LocalStore:
                 log.warning("cannot load %s: %s", key, exc)
         return found
 
-    def statuses(self, pass_number: int) -> dict[str, Status]:
+    def statuses(self, pass_number: int) -> dict[Key, Status]:
         return {key: self._db.get_status(e.image_id, pass_number) for key, e in self._by_key.items()}
 
     def _require_writable(self) -> None:
@@ -266,7 +266,7 @@ class LocalStore:
             state = "opened read-only" if self.read_only else "closed"
             raise PermissionError(f"store for {self.work_dir} was {state}; cannot record verdicts")
 
-    def _affected(self, image_ids: list[str], pass_number: int) -> dict[str, Status]:
+    def _affected(self, image_ids: list[str], pass_number: int) -> dict[Key, Status]:
         """The status of every key of these image_ids, in their order."""
         return {
             k: self._db.get_status(iid, pass_number)
@@ -275,8 +275,8 @@ class LocalStore:
         }
 
     def mark(
-        self, keys: list[str], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
-    ) -> dict[str, Status]:
+        self, keys: list[Key], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> dict[Key, Status]:
         self._require_writable()
         targets = [self._by_key[k] for k in keys]  # an unknown key raises before anything is written
         changes = self._db.mark_many(
@@ -285,7 +285,7 @@ class LocalStore:
         self._undo.append(changes)  # only once written
         return self._affected([e.image_id for e in targets], pass_number)
 
-    def undo(self, pass_number: int, *, reviewer: str) -> dict[str, Status]:
+    def undo(self, pass_number: int, *, reviewer: str) -> dict[Key, Status]:
         self._require_writable()
         if not self._undo:
             return {}
@@ -312,7 +312,7 @@ StatusFilter = Literal["unreviewed", "clean", "all"]
 
 def filter_rows(
     rows: list[ManifestRow],
-    statuses: dict[str, Status],
+    statuses: dict[Key, Status],
     status_filter: StatusFilter = "unreviewed",
     batch: str | None = None,
 ) -> list[ManifestRow]:
@@ -339,7 +339,7 @@ def _tally(statuses: Iterable[Status]) -> dict[str, int]:
     return counts
 
 
-def batch_summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[str, dict[str, int]]:
+def batch_summary(rows: list[ManifestRow], statuses: dict[Key, Status]) -> dict[str, dict[str, int]]:
     """Per batch: a count for each Status, plus "total"."""
     by_batch: dict[str, list[Status]] = {}
     for row in rows:
@@ -347,6 +347,6 @@ def batch_summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[
     return {batch: _tally(group) for batch, group in by_batch.items()}
 
 
-def summary(rows: list[ManifestRow], statuses: dict[str, Status]) -> dict[str, int]:
+def summary(rows: list[ManifestRow], statuses: dict[Key, Status]) -> dict[str, int]:
     """A count for each Status, plus "total"."""
     return _tally(statuses[row.key] for row in rows)

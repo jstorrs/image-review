@@ -36,7 +36,7 @@ from .connection import (
     package_version,
     parse_reviewer,
 )
-from .status import MarkMode, Verdict
+from .status import Key, MarkMode, Verdict
 from .store import ReviewStore
 
 log = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ class BadRequest(Exception):
 
 @dataclass(frozen=True)
 class MarkRequest:
-    keys: list[str]
+    keys: list[Key]
     status: Verdict
     pass_number: int
     reviewer: str
@@ -102,7 +102,7 @@ def _reviewer_field(value: object) -> str:
         raise BadRequest(str(e)) from e
 
 
-def parse_mark(body: bytes, known_keys: frozenset[str]) -> MarkRequest:
+def parse_mark(body: bytes, known_keys: frozenset[Key]) -> MarkRequest:
     data = _json_object(body)
     keys, status, pass_number, reviewer, mode = (data.get(k) for k in ("keys", "status", "pass", "reviewer", "mode"))
     if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
@@ -117,7 +117,11 @@ def parse_mark(body: bytes, known_keys: frozenset[str]) -> MarkRequest:
         raise BadRequest("mode must be single or grid")
     # The membership checks above guarantee these are valid Literal members; get_args() cannot narrow.
     return MarkRequest(
-        keys=keys, status=cast(Verdict, status), pass_number=pass_number, reviewer=reviewer, mode=cast(MarkMode, mode)
+        keys=[Key(k) for k in keys],
+        status=cast(Verdict, status),
+        pass_number=pass_number,
+        reviewer=reviewer,
+        mode=cast(MarkMode, mode),
     )
 
 
@@ -183,7 +187,7 @@ class ReviewServer(ThreadingHTTPServer):
         self.token = token
         self.store_lock = threading.Lock()
         rows = store.manifest()
-        self.known_keys = frozenset(r.key for r in rows)
+        self.known_keys: frozenset[Key] = frozenset(r.key for r in rows)
 
     def handle_error(self, request, client_address) -> None:
         exc_type = sys.exc_info()[0]
@@ -292,8 +296,10 @@ class ReviewHandler(BaseHTTPRequestHandler):
         keys = query.get("key", [])
         if len(keys) != 1:
             raise BadRequest("key required")
+        if keys[0] not in self.server.known_keys:
+            return Reply(404)  # as the store answers an unknown key
         try:
-            data = self.server.store.image_bytes(keys[0])  # no lock: read-only file access
+            data = self.server.store.image_bytes(Key(keys[0]))  # no lock: read-only file access
         except (KeyError, ValueError, OSError):
             return Reply(404)
         return Reply(200, data, "image/jpeg")
