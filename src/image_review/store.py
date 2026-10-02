@@ -296,45 +296,17 @@ def _record(me: LockHolder) -> str:
     return json.dumps({"host": me.host, "boot_id": me.boot_id, "user": me.user, "pid": me.pid, "started": me.started})
 
 
-def _write_new(path: Path, file_mode: int, text: str) -> None:
-    """Create path (O_EXCL; FileExistsError if present) holding text, synced; removed again on failure."""
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, file_mode)
-    try:
-        with os.fdopen(fd, "w") as f:
-            os.fchmod(f.fileno(), file_mode)  # the umask may have stripped group bits teammates need to read it
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-
-
 def _create_lock(path: Path, file_mode: int, me: LockHolder) -> bool:
     """Atomically create path holding me's record; False if it already exists.
 
-    The record is written in full to a unique sibling, then hard-linked into place,
-    so a lock is never observed empty or half-written. Where hard links are not
-    supported, path is created directly and readers wait briefly for its contents.
+    The record is written in full to a unique sibling, then hard-linked into place (see _publish), so a lock is never
+    observed empty or half-written. Where hard links are not supported, path is created directly and readers wait
+    briefly for its contents. No group: the work directory is setgid where it has one, and with no group pending the
+    lock is opened with file_mode, so it is readable by teammates once fchmod'ed, before anything is written (an empty
+    direct-created lock included).
     """
-    tmp = path.with_name(_sibling_name(me))
-    _write_new(tmp, file_mode, _record(me))
     try:
-        try:
-            os.link(tmp, path)
-        except OSError as e:
-            if os.stat(tmp).st_nlink == 2:
-                return True  # NFS: the link was made but the reply was lost
-            if isinstance(e, FileExistsError):
-                return False
-            if e.errno not in LINK_UNSUPPORTED:
-                raise
-        else:
-            return True
-    finally:
-        tmp.unlink(missing_ok=True)
-    try:
-        _write_new(path, file_mode, _record(me))
+        _publish(path, path.with_name(_sibling_name(me)), file_mode, None, _record(me))
     except FileExistsError:
         return False
     return True
@@ -717,7 +689,9 @@ def _write_file(path: Path, file_mode: int, group: int | None, text: str) -> boo
     """Create path (O_EXCL) with file_mode, owned by `group` if given, holding text (UTF-8), synced; removed again on
     failure. If the group cannot be set, the file is made 0600 instead and a warning logged. Returns whether `group`
     was applied (always True without one)."""
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)  # private until group and mode are set
+    # private until a pending group and the mode are set; with no group, file_mode at once (the umask may strip bits,
+    # restored by fchmod below), so a teammate who opens a directly created lock before it is filled can read it
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600 if group is not None else file_mode)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             grouped = True
@@ -737,29 +711,39 @@ def _write_file(path: Path, file_mode: int, group: int | None, text: str) -> boo
     return grouped
 
 
-def write_new_file(path: Path, file_mode: int, group: int | None, text: str) -> None:
-    """Create path holding text (UTF-8), never overwriting: FileExistsError if it exists.
+def _publish(path: Path, tmp: Path, file_mode: int, group: int | None, text: str) -> None:
+    """Create path holding text, never overwriting: FileExistsError if path exists (or, by a random-name collision,
+    tmp, which is then removed).
 
-    The file appears whole or not at all: text is written and synced in a unique hidden sibling with the mode (and
-    group, see _write_file) already applied, then hard-linked into place. Where hard links are not supported, path is
-    created directly with O_EXCL (a crash then can leave it partial). The sibling is removed on every exit but a hard
-    kill.
+    text is written and synced in the unique sibling tmp (see _write_file for mode and group), then hard-linked into
+    place, so path appears whole or not at all. Where hard links are not supported (LINK_UNSUPPORTED), path is created
+    directly with O_EXCL, so a concurrent creator still loses with FileExistsError (but a crash can leave path partial).
+    tmp is removed on every exit but a hard kill.
     """
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     try:
         if not _write_file(tmp, file_mode, group, text):
             file_mode, group = 0o600, None  # as the sibling ended up; warned about once
         try:
             os.link(tmp, path)
         except OSError as e:
+            # NFS: the link was made but the reply was lost (a retransmitted link then fails, often with EEXIST).
+            # Comparing identities, not tmp's link count, needs no assumption about what else links to tmp.
             with contextlib.suppress(OSError):
                 if os.path.samefile(tmp, path):
-                    return  # NFS: the link was made but the reply was lost
+                    return
             if isinstance(e, FileExistsError) or e.errno not in LINK_UNSUPPORTED:
                 raise
             _write_file(path, file_mode, group, text)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def write_new_file(path: Path, file_mode: int, group: int | None, text: str) -> None:
+    """Create path holding text (UTF-8), never overwriting: FileExistsError if it exists.
+
+    Written through a unique hidden sibling and hard-linked into place; see _publish.
+    """
+    _publish(path, path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp"), file_mode, group, text)
 
 
 def live_writer(work_dir: Path) -> WorkDirLocked | None:

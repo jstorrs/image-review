@@ -18,13 +18,17 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 import pygame as pg
 
 from image_review import store as store_module
+from image_review.access import policy_of_dir
 from image_review.cli import unknown_batch_message
 from image_review.review_db import ReviewDB
 from image_review.store import (
     LOCK_NAME,
     LocalStore,
     WorkDirLocked,
+    acquire_lock,
     boot_id,
+    release_lock,
+    this_process,
 )
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, temp_dir
 
@@ -289,6 +293,45 @@ class TestWorkDirLock(LockTestCase):
                 os.chmod(self.work_dir, dir_mode)
                 with LocalStore(self.work_dir):
                     self.assertEqual(stat.S_IMODE(self.lock_path.stat().st_mode), file_mode)
+
+    def test_lock_is_group_readable_before_it_is_written(self):
+        # a teammate who opens a directly created lock while it is still empty must wait, not get PermissionError
+        os.chmod(self.work_dir, 0o2770)
+        file_mode = policy_of_dir(self.work_dir).file_mode
+        old = os.umask(0o002)
+        self.addCleanup(os.umask, old)
+        real_fchmod = os.fchmod
+        opened: list[int] = []
+
+        def spy_fchmod(fd, mode):
+            opened.append(stat.S_IMODE(os.fstat(fd).st_mode))
+            return real_fchmod(fd, mode)
+
+        for link_error in (None, OSError(errno.EPERM, "no links")):
+            with self.subTest(link_error=link_error):
+                opened.clear()
+                with (
+                    mock.patch.object(store_module.os, "fchmod", spy_fchmod),
+                    mock.patch.object(store_module.os, "link", side_effect=link_error, wraps=os.link),
+                ):
+                    me = acquire_lock(self.work_dir)
+                release_lock(self.work_dir, me)
+                self.assertEqual(opened, [file_mode] * (1 if link_error is None else 2))  # sibling (+ direct)
+
+    def test_sibling_name_collision_still_acquires(self):
+        real_token_hex = store_module.secrets.token_hex
+        me = this_process()
+        collided = self.work_dir / f"{LOCK_NAME}.{me.host}.{me.boot_id or '-'}.{me.pid}.collide"
+        collided.write_text("{}")
+        tokens = iter(["collide"])
+
+        def first_collides(nbytes=None):
+            return next(tokens, None) or real_token_hex(nbytes)
+
+        with mock.patch.object(store_module.secrets, "token_hex", first_collides):
+            self.open()
+        self.assertEqual(self.holder()["pid"], os.getpid())
+        self.assertEqual([p.name for p in self.work_dir.iterdir() if p.name.startswith(LOCK_NAME)], [LOCK_NAME])
 
 
 class TestLockCli(LockTestCase):

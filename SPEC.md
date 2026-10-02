@@ -597,7 +597,8 @@ Rows come in order of first appearance of their file: manifest order, then
 `skipped.tsv` order. Decisions for `image_id`s in neither file are left out.
 
 **Output.** Without `--output` the bytes go to stdout's binary stream.
-`--output FILE` is written by `store.write_new_file`:
+`--output FILE` is written by `store.write_new_file` (the same helper as
+`review.lock`; see *Concurrency limits*):
 1. A unique hidden sibling (`.FILE.<random>.tmp`) is created with
    `O_CREAT|O_EXCL` and mode 0600. For a group work directory it is then given
    the work directory's group (`fchown(fd, -1, gid)`), so it is right even
@@ -1545,19 +1546,20 @@ therefore holds `work_dir/review.lock`:
   `/proc/sys/kernel/random/boot_id` (`""` where unavailable), login name (the
   uid if there is none), pid, and UTC ISO start time. The full record is written
   to a unique sibling `review.lock.<host>.<boot_id or ->.<pid>.<random>`
-  (created `O_EXCL`, `fchmod`ed to the work dir policy's file mode: 0600
-  private, 0660 group, so teammates can read who holds it; then `fsync`ed),
-  which is hard-linked to `review.lock` and then removed. A lock is therefore
-  never seen empty or half-written. If `link` reports an error but the
-  sibling's link count is 2 (a lost NFS reply), the lock was acquired. Where
-  hard links are unsupported (`link` fails with `EPERM`, `ENOTSUP`/`EOPNOTSUPP`
-  or `ENOSYS`: vfat/exFAT, SMB, many FUSE mounts), `review.lock` is created
-  directly with `O_CREAT | O_EXCL` and the record written and `fsync`ed; a
-  reader that finds the lock empty re-reads it for up to 1 s before treating it
-  as corrupt. A process killed mid-acquire can leave a sibling behind; each
-  acquire removes, best effort, siblings named with this host and `boot_id`
-  whose pid no longer exists. Others are harmless and can be deleted by hand.
-  `flock` is not used: it is unreliable on Lustre/GPFS/NFS.
+  (created `O_EXCL` with, and `fchmod`ed to, the work dir policy's file mode:
+  0600 private, 0660 group, so teammates can read who holds it; then
+  `fsync`ed), which is hard-linked to `review.lock` and then removed (the same
+  helper as `export --output`). A lock is therefore never seen empty or
+  half-written. If `link` reports an error but
+  `os.path.samefile(sibling, review.lock)` holds (a lost NFS reply), the lock
+  was acquired. Where hard links are unsupported (`link` fails with `EPERM`,
+  `ENOTSUP`/`EOPNOTSUPP` or `ENOSYS`: vfat/exFAT, SMB, many FUSE mounts),
+  `review.lock` is created directly the same way (`O_CREAT | O_EXCL`, mode,
+  record, `fsync`); a reader that finds the lock empty re-reads it for up to
+  1 s before treating it as corrupt. A process killed mid-acquire can leave a
+  sibling behind; each acquire removes, best effort, siblings named with this
+  host and `boot_id` whose pid no longer exists. Others are harmless and can
+  be deleted by hand. `flock` is not used: it is unreliable on Lustre/GPFS/NFS.
 - A lock is reclaimed automatically only when its process is verifiably gone
   on this machine: same hostname and same non-empty `boot_id` (so neither a
   different machine with the same hostname nor a lock from before a reboot or
