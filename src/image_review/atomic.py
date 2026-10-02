@@ -12,22 +12,21 @@ log = logging.getLogger(__name__)
 LINK_UNSUPPORTED = {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}  # vfat/exFAT, SMB, many FUSE mounts
 
 
-def _write_file(path: Path, file_mode: int, group: int | None, text: str) -> bool:
+def _write_file(path: Path, file_mode: int, group: int | None, text: str) -> tuple[int, int | None]:
     """Create path (O_EXCL) with file_mode, owned by `group` if given, holding text (UTF-8), synced; removed again on
-    failure. If the group cannot be set, the file is made 0600 instead and a warning logged. Returns whether `group`
-    was applied (always True without one)."""
+    failure. If the group cannot be set, the file is made 0600 instead and a warning logged. Returns the (file_mode,
+    group) actually applied: the arguments, or (0o600, None) after that fallback."""
     # private until a pending group and the mode are set; with no group, file_mode at once (the umask may strip bits,
     # restored by fchmod below), so a teammate who opens a directly created lock before it is filled can read it
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600 if group is not None else file_mode)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            grouped = True
             if group is not None:
                 try:
                     os.fchown(f.fileno(), -1, group)
                 except OSError as e:
                     log.warning("cannot give %s to group %d (%s); making it private (0600) instead", path, group, e)
-                    file_mode, grouped = 0o600, False
+                    file_mode, group = 0o600, None
             os.fchmod(f.fileno(), file_mode)  # exact (no umask), and only once the group is right
             f.write(text)
             f.flush()
@@ -35,7 +34,7 @@ def _write_file(path: Path, file_mode: int, group: int | None, text: str) -> boo
     except BaseException:
         path.unlink(missing_ok=True)
         raise
-    return grouped
+    return file_mode, group
 
 
 def publish(path: Path, tmp: Path, file_mode: int, group: int | None, text: str) -> None:
@@ -48,8 +47,7 @@ def publish(path: Path, tmp: Path, file_mode: int, group: int | None, text: str)
     tmp is removed on every exit but a hard kill.
     """
     try:
-        if not _write_file(tmp, file_mode, group, text):
-            file_mode, group = 0o600, None  # as the sibling ended up; warned about once
+        file_mode, group = _write_file(tmp, file_mode, group, text)  # as the sibling ended up; warned about once
         try:
             os.link(tmp, path)
         except OSError as e:
