@@ -1384,7 +1384,7 @@ In-memory dict keyed by `image_id`, backed by `review.tsv` on disk.
 Used only through `LocalStore`, which is the one place that maps keys to
 `image_id`s.
 
-**Persistence**: Every mutation (`mark`, `mark_many`, `undo_many`) appends its rows to
+**Persistence**: Every mutation (`mark_many`, `undo_many`) appends its rows to
 `review.tsv` as one buffer (written in a loop that handles short writes),
 `fsync`s, and only then updates the in-memory dict; a failed append leaves the
 dict unchanged and its partial bytes are cut off. Loading folds the log (last row per `image_id` wins; a tombstone removes the `image_id`). Safe to kill the
@@ -1398,7 +1398,6 @@ by hand.
 
 | Method | Description |
 |--------|-------------|
-| `mark(image_id, batch, status, pass_number, *, reviewer, mode)` | Record a single review decision |
 | `mark_many(targets, status, pass_number, *, reviewer, mode) -> list[Change]` | Record one verdict on every `(image_id, batch)` in `targets` (same timestamp; `grid_size` = `len(targets)`; `tool_version` = `package_version()`); returns each row written with the decision it replaced |
 | `undo_many(changes, *, reviewer)` | Append the undo rows for one `mark_many` result in one append (see *Undo rows*); an `image_id` listed twice (keys sharing it) gets one row |
 | `migrate()` | Rewrite an old five-column file with the current header, once (see *`review.tsv`*); no-op otherwise |

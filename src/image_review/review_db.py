@@ -45,7 +45,7 @@ class Decision:
     tool_version: str  # image-review version that wrote the row; "" in rows from before it was recorded
 
 
-def parse_decision(path: Path, line: int, fields: list[str], header: list[str] = HEADER) -> Decision:
+def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) -> Decision:
     """One row of a review.tsv whose header is `header` (HEADER or LEGACY_HEADER); legacy rows get empty audit columns."""
     where = f"{path}:{line}"
     if len(fields) != len(header):
@@ -152,8 +152,6 @@ class Change:
 
 
 class ReviewDB:
-    HEADER = HEADER
-
     def __init__(self, work_dir: Path):
         self.work_dir = work_dir
         self.review_path = work_dir / "review.tsv"
@@ -268,11 +266,6 @@ class ReviewDB:
         finally:
             os.close(fd)
         self._truncate = None
-
-    def mark(
-        self, image_id: str, batch: str, status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
-    ) -> None:
-        self.mark_many([(image_id, batch)], status, pass_number, reviewer=reviewer, mode=mode)
 
     def mark_many(
         self, targets: list[tuple[str, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode

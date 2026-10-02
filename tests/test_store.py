@@ -410,7 +410,7 @@ class TestReviewLog(unittest.TestCase):
 
     def test_marks_append_lines_and_reload(self):
         db = ReviewDB(self.work_dir)
-        db.mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         db.mark_many([("y", "batch_002"), ("z", "batch_002")], "DIRTY", 2, reviewer="tester", mode="single")
         lines = self.path.read_bytes().splitlines(keepends=True)
         self.assertEqual(lines[0], self.HEADER_LINE)
@@ -419,25 +419,25 @@ class TestReviewLog(unittest.TestCase):
 
     def test_same_image_twice_last_wins(self):
         db = ReviewDB(self.work_dir)
-        db.mark("x", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
-        db.mark("x", "batch_001", "CLEAN", 2, reviewer="tester", mode="single")
+        db.mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
+        db.mark_many([("x", "batch_001")], "CLEAN", 2, reviewer="tester", mode="single")
         self.assertEqual(len(self.path.read_bytes().splitlines()), 3)
         reloaded = self.reload()
         self.assertEqual((reloaded._rows["x"].status, reloaded._rows["x"].pass_number), ("CLEAN", 2))
         self.assertEqual(reloaded._rows, db._rows)
 
     def test_mark_is_a_pure_append(self):
-        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         before = self.path.read_bytes()
         inode = self.path.stat().st_ino
-        ReviewDB(self.work_dir).mark("y", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many([("y", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         after = self.path.read_bytes()
         self.assertEqual(self.path.stat().st_ino, inode)
         self.assertTrue(after.startswith(before))
         self.assertGreater(len(after), len(before))
 
     def test_torn_last_line_is_dropped_and_next_mark_starts_clean(self):
-        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         intact = self.path.read_bytes()
         with open(self.path, "ab") as f:
             f.write(b"y\tbatch_0")  # a crash mid-append
@@ -446,7 +446,7 @@ class TestReviewLog(unittest.TestCase):
         self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
         self.assertIn("review.tsv:3:", logs.records[0].getMessage())
         self.assertEqual(set(db._rows), {"x"})
-        db.mark("z", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
+        db.mark_many([("z", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         after = self.path.read_bytes()
         self.assertTrue(after.startswith(intact))
         self.assertTrue(after[len(intact) :].startswith(b"z\tbatch_001\tDIRTY\t1\t"))
@@ -454,24 +454,24 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(set(self.reload()._rows), {"x", "z"})
 
     def test_torn_last_line_that_parses_is_kept(self):
-        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         with open(self.path, "ab") as f:
             f.write(
                 b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\tr\tsingle\t1\t0.1"
             )  # every field written, line ending not
         db = self.reload()
         self.assertEqual(set(db._rows), {"x", "y"})
-        db.mark("z", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertIn(b"\t0.1\r\nz\t", self.path.read_bytes())  # its missing line ending, in the file's style
         self.assertEqual(set(self.reload()._rows), {"x", "y", "z"})
 
     def test_torn_between_cr_and_lf_is_kept(self):
-        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         with open(self.path, "ab") as f:
             f.write(b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\tr\tsingle\t1\t0.1\r")
         db = self.reload()
         self.assertEqual(set(db._rows), {"x", "y"})
-        db.mark("z", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         data = self.path.read_bytes()
         self.assertIn(b"\t0.1\r\nz\t", data)
         self.assertNotIn(b"\r\r", data)
@@ -480,18 +480,18 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(set(self.reload()._rows), {"x", "y", "z"})
 
     def test_torn_multibyte_character_is_dropped(self):
-        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         with open(self.path, "ab") as f:
             f.write("é\tb".encode()[:2])
         with self.assertLogs("image_review.review_db", "WARNING") as logs:
             db = ReviewDB(self.work_dir)
         self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
-        db.mark("z", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
+        db.mark_many([("z", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         self.assertEqual(set(self.reload()._rows), {"x", "z"})
 
     def test_failed_append_is_rolled_back(self):
         db = ReviewDB(self.work_dir)
-        db.mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         real_write = os.write
         calls = []
 
@@ -505,12 +505,12 @@ class TestReviewLog(unittest.TestCase):
             db.mark_many([("y", "batch_001"), ("z", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         self.assertEqual(len(calls), 2)
         self.assertEqual(set(db._rows), {"x"})
-        db.mark("w", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("w", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertEqual(self.reload()._rows, db._rows)
 
     def test_failed_append_left_on_disk_is_cut_by_the_next(self):
         db = ReviewDB(self.work_dir)
-        db.mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         real_write = os.write
 
         def short_then_full(fd, data):
@@ -528,7 +528,7 @@ class TestReviewLog(unittest.TestCase):
             db.mark_many(
                 [("y", "batch_001"), ("z", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single"
             )  # the rollback fails too: the fragment stays
-        db.mark("w", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("w", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertEqual(self.reload()._rows, db._rows)
 
     def test_stale_truncate_refuses(self):
@@ -543,7 +543,7 @@ class TestReviewLog(unittest.TestCase):
             f.write(b"01\tCLEAN\t1\tt\r\n")  # someone else finished the line since the load
         before = self.path.read_bytes()
         with self.assertRaisesRegex(RuntimeError, "changed since it was loaded"):
-            db.mark("w", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
+            db.mark_many([("w", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_bare_cr_file_with_bad_middle_line_raises(self):
@@ -565,25 +565,25 @@ class TestReviewLog(unittest.TestCase):
         self.path.write_bytes(b"image_id\tba")
         with contextlib.redirect_stderr(io.StringIO()):
             db = ReviewDB(self.work_dir)
-        db.mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertTrue(self.path.read_bytes().startswith(self.HEADER_LINE))
         self.assertEqual(set(self.reload()._rows), {"x"})
 
     def test_empty_file_loads_and_gets_a_header(self):
         self.path.touch()
         db = self.reload()
-        db.mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertTrue(self.path.read_bytes().startswith(self.HEADER_LINE))
 
     def test_unparseable_line_before_the_last_still_raises(self):
-        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         with open(self.path, "ab") as f:
             f.write(b"garbage\r\ny\tbatch_0")
         with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
             ReviewDB(self.work_dir)
 
     def test_unparseable_terminated_last_line_still_raises(self):
-        ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         with open(self.path, "ab") as f:
             f.write(b"y\tbatch_0\r\n")
         with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
@@ -596,7 +596,9 @@ class TestReviewLog(unittest.TestCase):
                 os.chmod(self.work_dir, dir_mode)
                 old_umask = os.umask(0o077)  # O_CREAT's mode alone would lose the group bits
                 try:
-                    ReviewDB(self.work_dir).mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+                    ReviewDB(self.work_dir).mark_many(
+                        [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+                    )
                 finally:
                     os.umask(old_umask)
                 self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), file_mode)
@@ -712,7 +714,7 @@ class TestMigration(unittest.TestCase):
     def test_unmigrated_db_refuses_to_append(self):
         db = ReviewDB(self.work_dir)
         with self.assertRaisesRegex(RuntimeError, "old 5-column header"):
-            db.mark("x", "batch_001", "CLEAN", 1, reviewer="alice", mode="single")
+            db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="alice", mode="single")
         self.assertEqual(self.path.read_bytes(), self.old)
 
     def test_failed_migration_leaves_old_file_and_releases_lock(self):

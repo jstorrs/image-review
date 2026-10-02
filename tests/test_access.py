@@ -208,8 +208,8 @@ class ReviewDbModeTest(unittest.TestCase):
             work = Path(tmp)
             os.chmod(work, dir_mode)
             db = ReviewDB(work)
-            db.mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
-            db.mark("y", "batch_001", "DIRTY", 1, reviewer="tester", mode="single")
+            db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+            db.mark_many([("y", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
             self.assertEqual(sorted(p.name for p in work.iterdir()), ["review.tsv"])
             return stat.S_IMODE((work / "review.tsv").stat().st_mode)
 
@@ -224,7 +224,7 @@ class ReviewDbModeTest(unittest.TestCase):
             root = Path(tmp).resolve()
             with contextlib.redirect_stderr(io.StringIO()):
                 run_preprocess([_src(root)], root / "work", access="group")
-            ReviewDB(root / "work").mark("x", "batch_001", "CLEAN", 1, reviewer="tester", mode="single")
+            ReviewDB(root / "work").mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
             self.assertEqual(stat.S_IMODE((root / "work" / "review.tsv").stat().st_mode), 0o660)
 
 
