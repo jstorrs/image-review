@@ -13,17 +13,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from click.testing import CliRunner
-
 from image_review import preprocess
 from image_review import store as store_module
-from image_review.cli import cli
 from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADER
 from image_review.store import LocalStore, boot_id, this_process
-from tests.fixtures import ROWS, make_work_dir, start_server
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server
 
-ENV = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
 KEYS = [key for _, key, _ in ROWS]
 MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id", "source_sha256", "jpeg_sha256"]
 LEGACY_MANIFEST_HEADER = MANIFEST_HEADER[:3]
@@ -105,7 +101,7 @@ def write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]]) -> Non
 
 
 def invoke(*args, env=None):
-    return CliRunner().invoke(cli, list(args), env={**ENV, **(env or {})})
+    return invoke_cli(*args, env=env)
 
 
 def dead_pid() -> int:

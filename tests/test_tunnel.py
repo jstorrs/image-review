@@ -14,11 +14,8 @@ from unittest import mock
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
-from click.testing import CliRunner
-
-from image_review.cli import cli
 from image_review.tunnel import TunnelError, parse_via, ssh_tunnel
-from tests.fixtures import make_work_dir, start_server
+from tests.fixtures import invoke_cli, make_work_dir, start_server
 
 FAKE_SSH = f"""#!{sys.executable}
 import json, os, signal, socket, sys, threading
@@ -299,11 +296,7 @@ class TestUnreachableHint(unittest.TestCase):
             mock.patch("image_review.remote.RemoteStore", Boom),
             mock.patch("image_review.tunnel.ssh_tunnel", lambda *a, **k: contextlib.nullcontext(1)),
         ):
-            return CliRunner().invoke(
-                cli,
-                ["status", "--remote", target.to_uri(), "--via", "me@login"],
-                env={"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None},
-            )
+            return invoke_cli("status", "--remote", target.to_uri(), "--via", "me@login")
 
     def test_hint_on_transport_failure(self):
         from image_review.remote import RemoteError
@@ -333,8 +326,7 @@ class TestCliVia(FakeSshTestCase):
         self.addCleanup(stop)
 
     def invoke(self, *args, **env):
-        env = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, **env}
-        return CliRunner().invoke(cli, list(args), env=env)
+        return invoke_cli(*args, env=env)
 
     def test_status_through_tunnel_identical_to_direct(self):
         direct = self.invoke("status", "--remote", self.target.to_uri())

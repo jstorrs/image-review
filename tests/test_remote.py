@@ -15,9 +15,7 @@ from unittest import mock
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame as pg
-from click.testing import CliRunner
 
-from image_review.cli import cli
 from image_review.connection import RemoteTarget, package_version
 from image_review.controller import ReviewSession, UIState
 from image_review.remote import (
@@ -34,7 +32,7 @@ from image_review.remote import (
 )
 from image_review.server import Reply, ReviewHandler
 from image_review.store import LocalStore, ManifestRow, SkippedCounts, StoreUnavailable
-from tests.fixtures import ROWS, make_work_dir, start_server
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server
 
 KEYS = [key for _, key, _ in ROWS]
 
@@ -349,10 +347,7 @@ class TestSkipped(RemoteTestCase):
 
 class TestCli(RemoteTestCase):
     def invoke(self, *args, **kwargs):
-        kwargs.setdefault(
-            "env", {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None}
-        )  # ignore the developer's environment
-        return CliRunner().invoke(cli, list(args), **kwargs)
+        return invoke_cli(*args, **kwargs)
 
     def test_status_identical_to_local(self):
         self.store.mark([KEYS[0]], "CLEAN", 1, reviewer="tester", mode="single")

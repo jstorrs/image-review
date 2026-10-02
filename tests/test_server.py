@@ -18,13 +18,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from click.testing import CliRunner
-
 from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, RemoteTarget
 from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
 from image_review.store import LocalStore, load_manifest
-from tests.fixtures import ROWS, make_work_dir
+from tests.fixtures import ROWS, invoke_cli, make_work_dir
 
 FP = "a" * 64
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
@@ -356,7 +354,7 @@ class TestServeCommand(unittest.TestCase):
             mock.patch.object(ReviewServer, "serve_forever", fake_serve),
             mock.patch.object(ReviewServer, "server_close", fake_close),
         ):
-            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 0, result.output)
         target = RemoteTarget.parse(seen["uri"])
         self.assertNotIn(target.token, result.output)
@@ -376,7 +374,7 @@ class TestServeCommand(unittest.TestCase):
             json.dumps({"host": "node042", "user": "alice", "pid": 1234, "started": "2026-09-30T12:00:00Z"})
         )
         with mock.patch.object(ReviewServer, "serve_forever") as serve_forever:
-            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 1, result.output)
         serve_forever.assert_not_called()
         for part in ("alice", "node042", "pid 1234", str(lock)):
@@ -391,7 +389,7 @@ class TestServeCommand(unittest.TestCase):
             raise KeyboardInterrupt
 
         with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
-            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(seen, [os.getpid()])
         self.assertFalse((self.work / "review.lock").exists())
@@ -445,7 +443,7 @@ class TestServeCommand(unittest.TestCase):
     def test_missing_manifest(self):
         empty = self.home / "empty"
         empty.mkdir()
-        result = CliRunner().invoke(cli, ["serve", "--work-dir", str(empty)])
+        result = invoke_cli("serve", "--work-dir", str(empty))
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("No preprocessed data found", result.output)
 
@@ -462,7 +460,7 @@ class TestServeCommand(unittest.TestCase):
         ]
         for args, message in cases:
             with self.subTest(args=args):
-                result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), *args])
+                result = invoke_cli("serve", "--work-dir", str(self.work), *args)
                 self.assertEqual(result.exit_code, 2 if "--port" in args else 1, result.output)
                 self.assertNotIsInstance(result.exception, OSError)
                 self.assertNotIn("Traceback", result.output)
@@ -474,7 +472,7 @@ class TestServeCommand(unittest.TestCase):
             mock.patch("image_review.server.write_connection_file", side_effect=OSError("disk full")),
             mock.patch.object(ReviewServer, "serve_forever") as serve_forever,
         ):
-            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Cannot write connection file: disk full", result.output)
         serve_forever.assert_not_called()
@@ -497,7 +495,7 @@ class TestServeCommand(unittest.TestCase):
             mock.patch.object(ReviewServer, "serve_forever", fake_serve),
             mock.patch.object(LocalStore, "close", close),
         ):
-            result = CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"])
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(lock_held_at_close[0])  # a handler thread's mark cannot interleave with the release
         self.assertFalse((self.work / "review.lock").exists())

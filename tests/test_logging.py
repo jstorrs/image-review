@@ -6,12 +6,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from click.testing import CliRunner
+from image_review.cli import PACKAGE_LOGGER
+from tests.fixtures import invoke_cli, make_work_dir
 
-from image_review.cli import PACKAGE_LOGGER, cli
-from tests.fixtures import make_work_dir
-
-ENV = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None}
 LINE = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d %s image_review\.cli: %s"
 
 
@@ -33,7 +30,7 @@ class LevelFlagsTest(unittest.TestCase):
     def status_stderr(self, *flags: str) -> str:
         # status logs nothing on a healthy work dir; patch in one record per level at the point it would warn
         with mock.patch("image_review.cli.warn_if_world_accessible", _emit_one_per_level):
-            result = CliRunner().invoke(cli, [*flags, "status", "--work-dir", str(self.work)], env=ENV)
+            result = invoke_cli(*flags, "status", "--work-dir", str(self.work))
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Overall: 4 images", result.stdout)
         self.assertNotIn("-line", result.stdout)
@@ -63,7 +60,7 @@ class LevelFlagsTest(unittest.TestCase):
                 self.assertRegex(err, LINE % ("INFO", "info-line"))
 
     def test_verbose_and_quiet_conflict(self):
-        result = CliRunner().invoke(cli, ["-v", "-q", "status", "--work-dir", str(self.work)], env=ENV)
+        result = invoke_cli("-v", "-q", "status", "--work-dir", str(self.work))
         self.assertEqual(result.exit_code, 2)
         self.assertIn("mutually exclusive", result.output)
 
@@ -89,7 +86,7 @@ class PreprocessRoutingTest(unittest.TestCase):
             mock.patch("image_review.preprocess.run_preprocess", fake_run),
             mock.patch("tqdm.tqdm.write") as write,
         ):
-            result = CliRunner().invoke(cli, ["preprocess", tmp, "--work-dir", str(Path(tmp) / "work")], env=ENV)
+            result = invoke_cli("preprocess", tmp, "--work-dir", str(Path(tmp) / "work"))
         self.assertIsInstance(result.exception, RuntimeError)
         self.assertEqual(len(seen[0]), 1)
         self.assertNotEqual(type(seen[0][0]), logging.StreamHandler)  # swapped for tqdm's handler

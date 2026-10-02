@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import click.testing
 import numpy as np
 import pydicom
 import skimage as ski
@@ -14,6 +15,7 @@ from pydicom.dataset import FileMetaDataset
 from pydicom.uid import SecondaryCaptureImageStorage, generate_uid
 
 from image_review import grid_packer as grid_packer_module
+from image_review.cli import cli
 from image_review.store import LocalStore
 
 # (batch, preprocessed_path, image_id); image_ids deliberately differ from keys
@@ -23,6 +25,20 @@ ROWS = [
     ("batch_002", "batch_002/c.jpg", "/src/patient_lee/c.dcm"),
     ("batch_002", "batch_002/d.jpg", "/src/patient_kim/d.dcm"),
 ]
+
+
+# Every variable the CLI reads from the environment; cleared so a developer's exports cannot leak into a test
+CLEAN_ENV: dict[str, str | None] = {
+    "IMAGE_REVIEW_REMOTE": None,
+    "IMAGE_REVIEW_VIA": None,
+    "IMAGE_REVIEW_ACCESS": None,
+    "IMAGE_REVIEW_REVIEWER": None,
+}
+
+
+def invoke_cli(*args: str, env: dict[str, str | None] | None = None, **kwargs) -> click.testing.Result:
+    """Run the CLI in-process with IMAGE_REVIEW_* cleared, plus `env`; `kwargs` go to CliRunner.invoke."""
+    return click.testing.CliRunner().invoke(cli, list(args), env={**CLEAN_ENV, **(env or {})}, **kwargs)
 
 
 def make_work_dir(root: Path, hashed: bool = False) -> None:

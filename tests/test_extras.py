@@ -8,16 +8,10 @@ from pathlib import Path
 from unittest import mock
 
 import click
-from click.testing import CliRunner
 
-from image_review.cli import EXTRA_MODULES, cli, requires_extra
+from image_review.cli import EXTRA_MODULES, requires_extra
+from tests.fixtures import invoke_cli
 
-ENV = {
-    "IMAGE_REVIEW_REMOTE": None,
-    "IMAGE_REVIEW_VIA": None,
-    "IMAGE_REVIEW_ACCESS": None,
-    "IMAGE_REVIEW_REVIEWER": None,
-}
 REAL_IMPORT = builtins.__import__
 
 
@@ -76,7 +70,7 @@ class RequiresExtraTest(unittest.TestCase):
 class CommandHintTest(unittest.TestCase):
     def invoke(self, failing: str, exc: ImportError, *args: str):
         with mock.patch("builtins.__import__", failing_import(failing, exc)):
-            return CliRunner().invoke(cli, list(args), env=ENV)
+            return invoke_cli(*args)
 
     def test_review_without_pygame(self):
         result = self.invoke("pygame", missing("pygame"), "review", "--work-dir", ".")
@@ -117,7 +111,7 @@ class CommandHintTest(unittest.TestCase):
             return REAL_IMPORT(name, globals, locals, fromlist, level)
 
         with mock.patch("builtins.__import__", fake):
-            result = CliRunner().invoke(cli, ["review", "--work-dir", "."], env=ENV)
+            result = invoke_cli("review", "--work-dir", ".")
         self.assertIs(result.exception, exc)
         self.assertNotIn("extra", result.output)
 

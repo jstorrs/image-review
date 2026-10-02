@@ -12,7 +12,6 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
-from click.testing import CliRunner
 
 from image_review.access import (
     Modes,
@@ -21,13 +20,12 @@ from image_review.access import (
     world_access_warning,
     world_accessible,
 )
-from image_review.cli import cli
 from image_review.preprocess import run_preprocess
 from image_review.review_db import ReviewDB
 from image_review.server import ReviewServer
-from tests.fixtures import make_work_dir, write_dicom
+from tests.fixtures import invoke_cli, make_work_dir, write_dicom
 
-ENV = {"IMAGE_REVIEW_REMOTE": None, "IMAGE_REVIEW_VIA": None, "IMAGE_REVIEW_ACCESS": None, "SLURM_CPUS_PER_TASK": "1"}
+ENV = {"SLURM_CPUS_PER_TASK": "1"}
 
 
 def _src(root: Path) -> Path:
@@ -175,7 +173,7 @@ class CliAccessTest(unittest.TestCase):
         self.src = _src(self.root)
 
     def invoke(self, *args, env=None):
-        return CliRunner().invoke(cli, list(args), env={**ENV, **(env or {})})
+        return invoke_cli(*args, env={**ENV, **(env or {})})
 
     def test_option_and_envvar(self):
         for name, args, env, dir_mode, file_mode in [
@@ -243,14 +241,14 @@ class WarningTest(unittest.TestCase):
         make_work_dir(self.work)
 
     def invoke_status(self):
-        return CliRunner().invoke(cli, ["status", "--work-dir", str(self.work)], env=ENV)
+        return invoke_cli("status", "--work-dir", str(self.work), env=ENV)
 
     def invoke_serve(self):
         with (
             mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt),
             mock.patch.dict(os.environ, {"HOME": str(self.work.parent)}),
         ):
-            return CliRunner().invoke(cli, ["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"], env=ENV)
+            return invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1", env=ENV)
 
     def test_warns_for_world_readable_dir(self):
         os.chmod(self.work, 0o755)

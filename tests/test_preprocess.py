@@ -25,7 +25,6 @@ from unittest import mock
 import numpy as np
 import pydicom
 import skimage as ski
-from click.testing import CliRunner
 from PIL import Image, JpegImagePlugin, PngImagePlugin
 from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
@@ -33,7 +32,7 @@ from pydicom.uid import MediaStorageDirectoryStorage, generate_uid
 
 from image_review import cli as cli_module
 from image_review import preprocess as preprocess_module
-from image_review.cli import cli, default_jobs
+from image_review.cli import default_jobs
 from image_review.preprocess import (
     COLLISION_REASON,
     SIDE_BY_SIDE_GAP,
@@ -55,18 +54,13 @@ from image_review.preprocess import (
     run_preprocess,
 )
 from image_review.signals import TERMINATION_SIGNALS, interrupt_on
-from tests.fixtures import add_overlay, write_dicom
+from tests.fixtures import add_overlay, invoke_cli, write_dicom
 
 RNG = np.random.default_rng(0)
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 APPLEDOUBLE = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + bytes(100)
-# Ignore the developer's environment; SLURM_CPUS_PER_TASK=1 renders in-process, with no worker start-up per run
-CLI_ENV = {
-    "IMAGE_REVIEW_REMOTE": None,
-    "IMAGE_REVIEW_VIA": None,
-    "IMAGE_REVIEW_ACCESS": None,
-    "SLURM_CPUS_PER_TASK": "1",
-}
+# SLURM_CPUS_PER_TASK=1 renders in-process, with no worker start-up per run
+CLI_ENV = {"SLURM_CPUS_PER_TASK": "1"}
 
 
 def _good_pixels() -> np.ndarray:
@@ -322,7 +316,7 @@ class CollisionTest(unittest.TestCase):
             with self.subTest(args=extra), quiet():
                 work = self.root / f"cli{code}"
                 args = ["preprocess", str(self.src), "--work-dir", str(work), *extra]
-                result = CliRunner().invoke(cli, args, env=CLI_ENV)
+                result = invoke_cli(*args, env=CLI_ENV)
             self.assertEqual(result.exit_code, code, result.output)
 
     def test_zip_entry_named_like_a_numbered_duplicate(self):
@@ -623,7 +617,7 @@ class ContentDiscoveryTest(unittest.TestCase):
 
     def invoke(self, source: Path, work: Path, *args):
         with quiet():
-            return CliRunner().invoke(cli, ["preprocess", str(source), "--work-dir", str(work), *args], env=CLI_ENV)
+            return invoke_cli("preprocess", str(source), "--work-dir", str(work), *args, env=CLI_ENV)
 
     def skipped_rows(self, work: Path) -> list[tuple[str, str, str]]:
         return [(r["image_id"], r["kind"], r["reason"]) for r in _read_tsv(work / "skipped.tsv")]
@@ -1506,8 +1500,8 @@ class PreprocessCliTest(unittest.TestCase):
 
     def invoke(self, *args, source: str = "src"):
         with quiet():
-            return CliRunner().invoke(
-                cli, ["preprocess", str(self.root / source), "--work-dir", str(self.root / "work"), *args], env=CLI_ENV
+            return invoke_cli(
+                "preprocess", str(self.root / source), "--work-dir", str(self.root / "work"), *args, env=CLI_ENV
             )
 
     def test_invalid_options_exit_2_before_any_output(self):
@@ -1567,8 +1561,8 @@ class PreprocessCliTest(unittest.TestCase):
             mock.patch.object(os, "sched_getaffinity", lambda pid: set(range(8)), create=True),
             quiet(),
         ):
-            crashed = CliRunner().invoke(
-                cli, ["preprocess", str(self.root / "src")], env={"SLURM_CPUS_PER_TASK": "5"}, catch_exceptions=False
+            crashed = invoke_cli(
+                "preprocess", str(self.root / "src"), env={"SLURM_CPUS_PER_TASK": "5"}, catch_exceptions=False
             )
         self.assertEqual(seen, [5])
         self.assertEqual(crashed.exit_code, 1, crashed.output)

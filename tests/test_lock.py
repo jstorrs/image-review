@@ -16,10 +16,9 @@ from unittest import mock
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame as pg
-from click.testing import CliRunner
 
 from image_review import store as store_module
-from image_review.cli import cli, unknown_batch_message
+from image_review.cli import unknown_batch_message
 from image_review.review_db import ReviewDB
 from image_review.store import (
     LOCK_NAME,
@@ -27,7 +26,7 @@ from image_review.store import (
     WorkDirLocked,
     boot_id,
 )
-from tests.fixtures import ROWS, make_work_dir
+from tests.fixtures import ROWS, invoke_cli, make_work_dir
 
 THIS_BOOT = boot_id()
 
@@ -296,14 +295,7 @@ class TestWorkDirLock(LockTestCase):
 
 class TestLockCli(LockTestCase):
     def invoke(self, *args, env=None):
-        env = {
-            "IMAGE_REVIEW_REMOTE": None,
-            "IMAGE_REVIEW_VIA": None,
-            "IMAGE_REVIEW_ACCESS": None,
-            "IMAGE_REVIEW_REVIEWER": None,
-            **(env or {}),
-        }
-        return CliRunner().invoke(cli, [*args, "--work-dir", str(self.work_dir)], env=env)
+        return invoke_cli(*args, "--work-dir", str(self.work_dir), env=env)
 
     def test_review_on_locked_dir_exits_1(self):
         self.write_lock("node042", 1234)
