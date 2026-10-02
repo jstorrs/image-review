@@ -35,7 +35,8 @@ from .connection import (
     package_version,
     parse_reviewer,
 )
-from .store import MarkMode, ReviewStore, Verdict
+from .status import MarkMode, Verdict
+from .store import ReviewStore
 
 log = logging.getLogger(__name__)
 

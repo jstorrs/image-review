@@ -15,13 +15,11 @@ from typing import Self, get_args
 from urllib.parse import urlencode
 
 from .connection import API_VERSION, RemoteTarget, cert_fingerprint
+from .status import MarkMode, Status, Verdict
 from .store import (
     ManifestRow,
-    MarkMode,
     SkippedCounts,
-    Status,
     StoreUnavailable,
-    Verdict,
 )
 
 log = logging.getLogger(__name__)

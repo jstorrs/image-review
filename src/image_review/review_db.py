@@ -14,7 +14,7 @@ from typing import Literal, get_args
 
 from .access import policy_of_dir
 from .connection import package_version, parse_reviewer
-from .status import TODO_STATUSES, Status, Verdict
+from .status import TODO_STATUSES, MarkMode, Status, Verdict
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +24,6 @@ LEGACY_HEADER = HEADER[:5]  # before the audit columns; migrate() rewrites such 
 # fsync errors that only mean a directory cannot be synced on this filesystem
 DIR_FSYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF})
 
-# How a verdict was given: on one image, or on every image of a grid at once. A client may only give these.
-MarkMode = Literal["single", "grid"]
 # A row's mode in review.tsv: a MarkMode, or "undo" for a row written by undo_many (a restore or a tombstone).
 RowMode = MarkMode | Literal["undo"]
 # A row's status in review.tsv: a Verdict, or UNREVIEWED in a tombstone (mode "undo"), which erases the image's

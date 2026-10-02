@@ -51,6 +51,7 @@ interactively in a fullscreen viewer, and report **status** on review progress.
 ```
 cli.py              Command-line entry point, argument parsing
 preprocess.py       DICOM/image loading and normalization
+status.py           Status, Verdict, MarkMode, TODO_STATUSES vocabulary (stdlib only)
 store.py            ReviewStore Protocol, LocalStore, pure filter/summary functions
 server.py           HTTPS + bearer-token server exposing a ReviewStore
 connection.py       RemoteTarget: the ir:// connection string; API_VERSION, package_version, parse_reviewer
@@ -67,7 +68,7 @@ util.py             Shared utilities (surface loading)
 All review-time data access goes through a `ReviewStore`. The controller and
 grid packer never touch the work directory; `LocalStore` serves it directly,
 and `RemoteStore` talks to an `image-review serve` process that wraps a
-`LocalStore`. `store.py`, `server.py`, `connection.py`, `remote.py`,
+`LocalStore`. `status.py`, `store.py`, `server.py`, `connection.py`, `remote.py`,
 `tunnel.py` and `signals.py` import without pygame, numpy or skimage.
 
 ```
@@ -758,7 +759,7 @@ always used); the reader accepts `\n` too.
 | `pass_number` | Integer pass (at least 1) in which this decision was made (an undo row: the restored decision's pass) |
 | `timestamp` | ISO 8601 UTC timestamp |
 | `reviewer` | Who gave the verdict, as the client claims it (`review --reviewer`, default the login name); unauthenticated, recorded as given. Empty in migrated rows (and, in an old five-column file, absent) |
-| `mode` | `single` or `grid` (`review_db.MarkMode`): the display mode the verdict was given in; `undo` for a row written by an undo (`review_db.RowMode`). Empty in migrated rows |
+| `mode` | `single` or `grid` (`status.MarkMode`): the display mode the verdict was given in; `undo` for a row written by an undo (`review_db.RowMode`). Empty in migrated rows |
 | `grid_size` | Integer >= 1: how many keys the one verdict covered (1 in single mode); in an undo row, how many `image_id`s the undo covered. Empty in migrated rows |
 | `tool_version` | `image-review` package version of the writing process (`connection.package_version()`, resolved once per process; `unknown` if not installed). Empty in migrated rows, and possibly cut short or empty in a kept torn last row (see below) |
 
@@ -837,6 +838,8 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 ## Review Store (`store.py`)
 
 ### Types
+
+`Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode`) are defined in `status.py`.
 
 | Name | Description |
 |------|-------------|

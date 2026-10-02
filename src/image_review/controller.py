@@ -8,15 +8,12 @@ import pygame as pg
 from pygame._sdl2 import controller as sdl_controller
 
 from .grid_packer import GridSpec, Rotation, pack_into_grids
+from .status import TODO_STATUSES, MarkMode, Status, Verdict
 from .store import (
-    TODO_STATUSES,
     ManifestRow,
-    MarkMode,
     ReviewStore,
-    Status,
     StatusFilter,
     StoreUnavailable,
-    Verdict,
     filter_rows,
 )
 from .util import load_surface

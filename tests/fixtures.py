@@ -16,8 +16,7 @@ from pydicom.uid import SecondaryCaptureImageStorage, generate_uid
 
 from image_review import grid_packer as grid_packer_module
 from image_review.cli import cli
-from image_review.review_db import MarkMode
-from image_review.status import Verdict
+from image_review.status import MarkMode, Verdict
 from image_review.store import LocalStore, ReviewStore
 
 # (batch, preprocessed_path, image_id); image_ids deliberately differ from keys
