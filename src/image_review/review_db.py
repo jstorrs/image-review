@@ -7,7 +7,7 @@ import os
 import stat
 import tempfile
 from collections.abc import Iterable, Sequence
-from dataclasses import astuple, dataclass
+from dataclasses import astuple, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, get_args
@@ -302,7 +302,7 @@ class ReviewDB:
         self._append(
             decisions
         )  # on disk first; a failed append changes neither memory nor, once its tail is cut, the file
-        self._rows.update((d.image_id, d) for d in decisions)
+        fold(self._rows, decisions)
         return changes
 
     def undo_many(self, changes: list[Change], *, reviewer: str) -> None:
@@ -315,30 +315,25 @@ class ReviewDB:
         tool_version = package_version()
         by_image = {c.written.image_id: c for c in changes}  # an image_id given twice (keys sharing it) is undone once
         decisions = [
-            Decision(
-                image_id,
-                c.previous.batch,
-                c.previous.status,
-                c.previous.pass_number,
-                ts,
-                reviewer,
-                "undo",
-                len(by_image),
-                tool_version,
+            replace(
+                c.previous,
+                timestamp=ts,
+                reviewer=reviewer,
+                mode="undo",
+                grid_size=len(by_image),
+                tool_version=tool_version,
             )
             if c.previous is not None
-            else Decision(
-                image_id,
-                c.written.batch,
-                TOMBSTONE,
-                c.written.pass_number,
-                ts,
-                reviewer,
-                "undo",
-                len(by_image),
-                tool_version,
+            else replace(
+                c.written,
+                status=TOMBSTONE,
+                timestamp=ts,
+                reviewer=reviewer,
+                mode="undo",
+                grid_size=len(by_image),
+                tool_version=tool_version,
             )
-            for image_id, c in by_image.items()
+            for c in by_image.values()
         ]
         if not decisions:
             return
