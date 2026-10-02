@@ -138,9 +138,9 @@ def parse_skipped(data: bytes) -> SkippedCounts | None:
 
 
 class RemoteStore:
-    def __init__(self, target: RemoteTarget, connect_host: str | None = None, connect_port: int | None = None):
-        self._host = connect_host or target.host
-        self._port = connect_port or target.port
+    def __init__(self, target: RemoteTarget):
+        self._host = target.host
+        self._port = target.port
         self._fingerprint = target.fingerprint
         self._auth = {"Authorization": f"Bearer {target.token}"}
         self._local = threading.local()

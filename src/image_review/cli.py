@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import datetime
 import getpass
 import logging
@@ -22,6 +23,7 @@ from .signals import TERMINATION_SIGNALS, interrupt_on
 from .store import LocalStore, ReviewStore, StatusFilter, batch_summary, summary
 
 if TYPE_CHECKING:
+    from .remote import RemoteStore
     from .server import ReviewServer
 
 DEFAULT_WORK_DIR = "./review_work"
@@ -166,16 +168,14 @@ def open_store(
         if click.get_current_context().get_parameter_source("remote") is click.core.ParameterSource.ENVIRONMENT:
             raise click.UsageError("IMAGE_REVIEW_REMOTE is set; unset it to use --work-dir.")
         raise click.UsageError("--remote and --work-dir are mutually exclusive.")
-    from .remote import ApiMismatch, FingerprintMismatch, RemoteError, RemoteStore
-    from .tunnel import TunnelError
+    from .remote import RemoteError
+    from .tunnel import TunnelError, parse_via
 
     try:
         target = RemoteTarget.parse(remote)
     except ValueError as e:
         raise click.ClickException(f"Invalid --remote connection string: {e}")
     if via is not None:
-        from .tunnel import parse_via
-
         try:
             via = parse_via(via)
         except ValueError as e:
@@ -183,23 +183,39 @@ def open_store(
     where = f"{target.host}:{target.port}" + (f" (via {via})" if via else "")
     log.debug("connecting to server at %s", where)
     try:
-        with contextlib.ExitStack() as stack:
-            if via is None:
-                store = RemoteStore(target)
-            else:
-                from .tunnel import ssh_tunnel
-
-                local_port = stack.enter_context(ssh_tunnel(via, target.host, target.port))
-                store = RemoteStore(target, connect_host="127.0.0.1", connect_port=local_port)
-            stack.enter_context(store)  # closed before the tunnel
-            store.check_api()
+        with _remote_store(target, via) as store:
             yield store
-    except TunnelError as e:
-        raise click.ClickException(str(e))
-    except ApiMismatch as e:
-        raise click.ClickException(str(e))
-    except FingerprintMismatch:
-        raise click.ClickException(
+    except (TunnelError, RemoteError) as e:
+        raise _remote_failure(e, where, via)
+
+
+@contextlib.contextmanager
+def _remote_store(target: RemoteTarget, via: str | None) -> Iterator["RemoteStore"]:
+    """Open a RemoteStore (through an ssh tunnel when `via` is given) and check its API version.
+
+    With a tunnel, the store gets a copy of `target` aimed at the forwarded local port; its pin and token are kept.
+    """
+    from .remote import RemoteStore
+    from .tunnel import ssh_tunnel
+
+    with contextlib.ExitStack() as stack:
+        if via is not None:
+            port = stack.enter_context(ssh_tunnel(via, target.host, target.port))
+            target = dataclasses.replace(target, host="127.0.0.1", port=port)
+        store = stack.enter_context(RemoteStore(target))  # closed before the tunnel
+        store.check_api()
+        yield store
+
+
+def _remote_failure(e: Exception, where: str, via: str | None) -> click.ClickException:
+    """The user-facing error for a tunnel or remote-store failure at `where`."""
+    from .remote import ApiMismatch, FingerprintMismatch, RemoteError
+    from .tunnel import TunnelError
+
+    if isinstance(e, (TunnelError, ApiMismatch)):
+        return click.ClickException(str(e))
+    if isinstance(e, FingerprintMismatch):
+        return click.ClickException(
             f"The certificate presented by {where} does NOT match the connection string. "
             "The connection was aborted before any credentials were sent. "
             "Do not continue unless you know why the server's identity changed."
@@ -209,20 +225,21 @@ def open_store(
                 else ""
             )
         )
-    except RemoteError as e:
-        if e.status == 401:
-            raise click.ClickException(
-                f"Server at {where} rejected the access token (connection string from a different or restarted server?)"
-            )
-        if e.status is not None:
-            raise click.ClickException(f"Server at {where} returned HTTP {e.status}")
-        transport_failure = isinstance(e.__cause__, OSError)
-        hint = (
-            " (the login node may not be able to reach the server; see the ssh output above)"
-            if via and transport_failure
-            else ""
+    if not isinstance(e, RemoteError):
+        raise e
+    if e.status == 401:
+        return click.ClickException(
+            f"Server at {where} rejected the access token (connection string from a different or restarted server?)"
         )
-        raise click.ClickException(f"Cannot reach server at {where}: {e}{hint}")
+    if e.status is not None:
+        return click.ClickException(f"Server at {where} returned HTTP {e.status}")
+    transport_failure = isinstance(e.__cause__, OSError)
+    hint = (
+        " (the login node may not be able to reach the server; see the ssh output above)"
+        if via and transport_failure
+        else ""
+    )
+    return click.ClickException(f"Cannot reach server at {where}: {e}{hint}")
 
 
 class FullHelpGroup(click.Group):

@@ -1617,10 +1617,10 @@ handshakes and other connection-level failures, and ERROR `internal error:
 
 ## Remote Store (`remote.py`)
 
-`RemoteStore(target, connect_host=None, connect_port=None)` implements
-`ReviewStore` over HTTPS. `connect_host`/`connect_port` override the address
-(used to connect to the local end of an ssh tunnel) while the pin and token
-still come from `target`. It is a context manager; `close()` shuts down the
+`RemoteStore(target)` implements `ReviewStore` over HTTPS, connecting to
+`target.host:target.port`. With `--via`, the CLI passes a copy of the target
+with host `127.0.0.1` and the forwarded local port (the local end of the ssh
+tunnel), keeping the pin and token. It is a context manager; `close()` shuts down the
 pool and closes every connection. Images are returned as bytes and never
 cached on disk.
 
@@ -1629,8 +1629,9 @@ cached on disk.
 `ApiMismatch` (a `RemoteError`) if the server answers 404 ("server is too old
 to report its API version") or reports a different `api` ("server speaks API
 vS, this client vC"); both messages end "install the same image-review version
-on both machines". `cli.open_store` calls it after entering the store and
-before yielding, and turns `ApiMismatch` into a `ClickException` (exit 1).
+on both machines". `cli._remote_store` calls it after entering the store and
+before yielding, and `cli.open_store` turns `ApiMismatch` into a
+`ClickException` (exit 1).
 
 **Certificate pinning**: `PinnedHTTPSConnection` disables CA and host name
 verification and instead compares the peer certificate's SHA-256 fingerprint
