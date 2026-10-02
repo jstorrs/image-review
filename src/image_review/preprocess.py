@@ -45,7 +45,7 @@ from .access import MANIFEST_NAME, Access, Modes, modes
 from .connection import package_version
 from .export import ICON_SUFFIX, has_unsafe_char
 from .review_db import format_tsv
-from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind
+from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind, SkippedRow
 
 log = logging.getLogger(__name__)
 
@@ -146,15 +146,6 @@ class Candidate:
 
 
 @dataclass(frozen=True)
-class Skipped:
-    """An input (or a whole source) that produced no image, and why."""
-
-    image_id: str
-    kind: SkipKind
-    reason: str
-
-
-@dataclass(frozen=True)
 class Rendered:
     """One output image: (H, W, 3) uint8 RGB."""
 
@@ -186,7 +177,7 @@ class PreprocessResult:
     found: int
     written: int
     batches: int
-    skipped: list[Skipped]
+    skipped: list[SkippedRow]
     skipped_path: Path
 
 
@@ -514,7 +505,7 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
     return dcm
 
 
-def _render_icon(dcm: pydicom.FileDataset, image_id: str, colormap: str) -> Rendered | Skipped | None:
+def _render_icon(dcm: pydicom.FileDataset, image_id: str, colormap: str) -> Rendered | SkippedRow | None:
     """The embedded IconImageSequence thumbnail (item 0) as its own row, or None when there is none."""
     icons = dcm.get("IconImageSequence")
     if not icons:
@@ -531,15 +522,15 @@ def _render_icon(dcm: pydicom.FileDataset, image_id: str, colormap: str) -> Rend
         return _failed(icon_id, exc)
 
 
-def render(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Rendered | Skipped]:
+def render(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Rendered | SkippedRow]:
     """Render one input: its image, plus (DICOM) an `{image_id}#icon` row for an embedded icon image.
 
-    A failure of the main image raises; a failure of the icon is returned as a `Skipped` row.
+    A failure of the main image raises; a failure of the icon is returned as a `SkippedRow` row.
     """
     match kind:
         case "dicom":
             dcm = read_dicom(data)
-            rendered: list[Rendered | Skipped] = [Rendered(image_id, preprocess_dicom(dcm, colormap))]
+            rendered: list[Rendered | SkippedRow] = [Rendered(image_id, preprocess_dicom(dcm, colormap))]
             icon = _render_icon(dcm, image_id, colormap)
             return rendered if icon is None else [*rendered, icon]
         case "raster":
@@ -633,10 +624,10 @@ def _escape_name(text: str) -> str:
     return "".join(map(escape, text))
 
 
-def _checked_name(item: Candidate | Skipped) -> Candidate | Skipped:
+def _checked_name(item: Candidate | SkippedRow) -> Candidate | SkippedRow:
     """`item`, or a failed row under its escaped id if that id could not be written to skipped.tsv or exported."""
     if any(map(_bad_char, item.image_id)):
-        return Skipped(_escape_name(item.image_id), "failed", BAD_NAME_REASON)
+        return SkippedRow(_escape_name(item.image_id), "failed", BAD_NAME_REASON)
     return item
 
 
@@ -646,12 +637,12 @@ def _clean_reason(reason: str) -> str:
     return "".join(" " if bad else "".join(run) for bad, run in groupby(reason, _bad_char)).strip()
 
 
-def _failed(image_id: str, exc: Exception) -> Skipped:
+def _failed(image_id: str, exc: Exception) -> SkippedRow:
     reason = str(exc) if isinstance(exc, Unsupported | DecodeError) else f"{type(exc).__name__}: {exc}"
-    return Skipped(image_id, "failed", _clean_reason(reason))
+    return SkippedRow(image_id, "failed", _clean_reason(reason))
 
 
-def _candidate(image_id: str, kind: Kind, read: Callable[[], bytes]) -> Candidate | Skipped:
+def _candidate(image_id: str, kind: Kind, read: Callable[[], bytes]) -> Candidate | SkippedRow:
     """The input with the bytes `read` returns, or a failed row if they cannot be read."""
     try:
         return Candidate(image_id, kind, read())
@@ -659,7 +650,7 @@ def _candidate(image_id: str, kind: Kind, read: Callable[[], bytes]) -> Candidat
         return _failed(image_id, exc)
 
 
-def _discover_zip(path: Path) -> Iterator[Candidate | Skipped]:
+def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
     try:
         zf = ZipFile(path)
     except Exception as exc:  # noqa: BLE001 - any failure to open the archive is recorded as a skip
@@ -671,7 +662,7 @@ def _discover_zip(path: Path) -> Iterator[Candidate | Skipped]:
         # clash with the second `a.png`; `colliding_ids` catches that after rendering.
         files = [info for info in zf.infolist() if not info.is_dir()]
         if not files:
-            yield Skipped(path.as_posix(), "ignored", "zip contains no files")
+            yield SkippedRow(path.as_posix(), "ignored", "zip contains no files")
         seen: Counter[str] = Counter()
         for info in files:
             seen[info.filename] += 1
@@ -685,14 +676,14 @@ def _discover_zip(path: Path) -> Iterator[Candidate | Skipped]:
                 continue
             match classify(info.filename, head):
                 case "zip":
-                    yield Skipped(image_id, "failed", "unsupported: nested zip")
+                    yield SkippedRow(image_id, "failed", "unsupported: nested zip")
                 case Rejected(kind, reason):
-                    yield Skipped(image_id, kind, reason)
+                    yield SkippedRow(image_id, kind, reason)
                 case "dicom" | "raster" as kind:
                     yield _candidate(image_id, kind, partial(zf.read, info))
 
 
-def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | Skipped]:
+def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | SkippedRow]:
     """Classify one file by content (reading only its first bytes); a ZIP yields its entries.
 
     A file `named` as a source was asked for explicitly, so a file that would be
@@ -712,14 +703,14 @@ def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | Skip
         case "zip":
             yield from _discover_zip(path)
         case Rejected("ignored", reason) if named and reason != _APPLEDOUBLE_REASON:
-            yield Skipped(image_id, "failed", reason)
+            yield SkippedRow(image_id, "failed", reason)
         case Rejected(kind, reason):
-            yield Skipped(image_id, kind, reason)
+            yield SkippedRow(image_id, kind, reason)
         case "dicom" | "raster" as kind:
             yield _candidate(image_id, kind, path.read_bytes)
 
 
-def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]) -> Skipped:
+def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]) -> SkippedRow:
     """The row for a symlinked directory, which is never entered (it could lead out of the source).
 
     `target` is the resolved link. An enclosing directory is the link's own
@@ -727,15 +718,15 @@ def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]
     """
     link_dir = link.parent.resolve()
     if target == link_dir or target in link_dir.parents:
-        return Skipped(link.as_posix(), "ignored", "symlink to an enclosing directory")
+        return SkippedRow(link.as_posix(), "ignored", "symlink to an enclosing directory")
     for source in source_dirs:
         if target == source or source in target.parents:
-            return Skipped(
+            return SkippedRow(
                 link.as_posix(),
                 "ignored",
                 _clean_reason(f"symlinked directory already included via SOURCE {_escape_name(source.as_posix())}"),
             )
-    return Skipped(
+    return SkippedRow(
         link.as_posix(),
         "failed",
         _clean_reason(
@@ -746,7 +737,7 @@ def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]
 
 def _discover_directory(
     root: Path, exclude: frozenset[Path], source_dirs: tuple[Path, ...]
-) -> Iterator[Candidate | Skipped]:
+) -> Iterator[Candidate | SkippedRow]:
     """Walk `root` in sorted order without entering symlinked directories (see `_symlinked_directory`) or `exclude`.
 
     An unreadable directory (including `root`) becomes a failed row. Symlinked
@@ -773,7 +764,7 @@ def _discover_directory(
     yield from (_failed(Path(e.filename).as_posix(), e) for e in errors)
 
 
-def discover(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> Iterator[Candidate | Skipped]:
+def discover(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> Iterator[Candidate | SkippedRow]:
     """Yield every input under `sources`, classified by content; nothing under `exclude` (resolved paths)."""
     source_dirs = tuple(s.resolve() for s in sources if s.is_dir())
     for source in tqdm(sources, desc="Sources", position=0):
@@ -795,43 +786,43 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def render_and_encode(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Encoded | Skipped]:
+def render_and_encode(kind: Kind, image_id: str, data: bytes, colormap: str) -> list[Encoded | SkippedRow]:
     """Hash, render and JPEG-encode one input's bytes into its output rows: encoded images and skipped parts.
 
     Pure, and the unit of work sent to pool workers (so it and its arguments pickle). Every image rendered
     from the input (main and icon) carries the SHA-256 of `data`. A failure of the input itself is a single
-    `Skipped`; an embedded icon that fails is a `Skipped` beside the main image.
+    `SkippedRow`; an embedded icon that fails is a `SkippedRow` beside the main image.
     """
     try:
         source_sha256 = hashlib.sha256(data).hexdigest()
         rendered = render(kind, image_id, data, colormap)
         encoded = [
-            r if isinstance(r, Skipped) else Encoded(r.image_id, encode_jpeg(r.rgb), source_sha256) for r in rendered
+            r if isinstance(r, SkippedRow) else Encoded(r.image_id, encode_jpeg(r.rgb), source_sha256) for r in rendered
         ]
     except NotAnImage as exc:
-        return [Skipped(image_id, "ignored", _clean_reason(str(exc)))]
+        return [SkippedRow(image_id, "ignored", _clean_reason(str(exc)))]
     except Exception as exc:  # noqa: BLE001 - one bad input must not abort the run; it is recorded in skipped.tsv
         return [_failed(image_id, exc)]
     if not encoded:
-        return [Skipped(image_id, "failed", "rendered no images")]
+        return [SkippedRow(image_id, "failed", "rendered no images")]
     return encoded
 
 
-def _process(candidate: Candidate, colormap: str) -> list[Encoded | Skipped]:
+def _process(candidate: Candidate, colormap: str) -> list[Encoded | SkippedRow]:
     """`render_and_encode` one input, in this process."""
     return render_and_encode(candidate.kind, candidate.image_id, candidate.data, colormap)
 
 
-Outcome = tuple[str, list[Encoded | Skipped]]  # (input image_id, its output rows)
+Outcome = tuple[str, list[Encoded | SkippedRow]]  # (input image_id, its output rows)
 
 
-def _outcomes_serial(items: Iterable[Candidate | Skipped], colormap: str) -> Iterator[Outcome]:
+def _outcomes_serial(items: Iterable[Candidate | SkippedRow], colormap: str) -> Iterator[Outcome]:
     for item in items:
         yield item.image_id, (_process(item, colormap) if isinstance(item, Candidate) else [item])
 
 
 def _outcomes_pooled(
-    items: Iterable[Candidate | Skipped], colormap: str, pool: Executor, limit: int
+    items: Iterable[Candidate | SkippedRow], colormap: str, pool: Executor, limit: int
 ) -> Iterator[Outcome]:
     """`_outcomes_serial`, rendered by `pool`: yielded in input order, with at most `limit` inputs submitted and
     not yet yielded. Workers hash.
@@ -839,11 +830,11 @@ def _outcomes_pooled(
     A dead worker breaks the pool and every input in flight with it, so the run fails (`WorkerCrashed`) rather
     than retrying in this process, where the same input could take the whole run down without a message.
     """
-    queue: deque[tuple[str, Future[list[Encoded | Skipped]] | list[Encoded | Skipped]]] = deque()
+    queue: deque[tuple[str, Future[list[Encoded | SkippedRow]] | list[Encoded | SkippedRow]]] = deque()
     in_flight = 0
 
-    def start(item: Candidate | Skipped) -> Future[list[Encoded | Skipped]] | list[Encoded | Skipped]:
-        if isinstance(item, Skipped):
+    def start(item: Candidate | SkippedRow) -> Future[list[Encoded | SkippedRow]] | list[Encoded | SkippedRow]:
+        if isinstance(item, SkippedRow):
             return [item]
         with _sigint_blocked():  # a worker spawned here starts with SIGINT blocked, until it ignores it
             # the pool keeps the bytes until the result is back; `limit` bounds them
@@ -885,7 +876,7 @@ def _workers(pool: Executor) -> list[multiprocessing.process.BaseProcess]:
     return list(processes.values()) if isinstance(processes, dict) else []
 
 
-def _result(future: Future[list[Encoded | Skipped]], pool: Executor) -> list[Encoded | Skipped]:
+def _result(future: Future[list[Encoded | SkippedRow]], pool: Executor) -> list[Encoded | SkippedRow]:
     """`future.result()`, checking every `WORKER_CHECK_SECONDS` that no worker has exited.
 
     A worker killed (e.g. by the OOM killer) while sending a result leaves the pool's manager thread waiting
@@ -1170,14 +1161,14 @@ def _stage(
     colormap: str,
     policy: Modes,
     jobs: int,
-) -> list[tuple[str, list[Staged | Skipped]]]:
+) -> list[tuple[str, list[Staged | SkippedRow]]]:
     """Discover and render every input, writing its JPGs into `pending`.
 
     Returns `(input image_id, its output rows)` in discovery order.
     Inputs are rendered by `jobs` worker processes, or in this one for 1; either way this process writes
     every file, in discovery order.
     """
-    inputs: list[tuple[str, list[Staged | Skipped]]] = []
+    inputs: list[tuple[str, list[Staged | SkippedRow]]] = []
     staged = 0
 
     items = discover(sources, exclude)
@@ -1188,9 +1179,9 @@ def _stage(
             else _outcomes_pooled(items, colormap, pool, IN_FLIGHT_PER_JOB * jobs)
         )
         for input_id, outcome in outcomes:
-            parts: list[Staged | Skipped] = []
+            parts: list[Staged | SkippedRow] = []
             for part in outcome:
-                if isinstance(part, Skipped):
+                if isinstance(part, SkippedRow):
                     if part.kind == "failed":
                         log.warning("skipping %s: %s", part.image_id, part.reason)
                     parts.append(part)
@@ -1204,12 +1195,12 @@ def _stage(
 
 
 def _place(
-    inputs: list[tuple[str, list[Staged | Skipped]]],
+    inputs: list[tuple[str, list[Staged | SkippedRow]]],
     *,
     staging: Path,
     batch_size: int,
     policy: Modes,
-) -> tuple[list[tuple[str, str, str, str, str]], list[Skipped]]:
+) -> tuple[list[tuple[str, str, str, str, str]], list[SkippedRow]]:
     """Move the JPGs of inputs without a colliding image_id into batches under `staging`.
 
     An input with any colliding image (main or icon) becomes one `failed` row and its JPGs are deleted.
@@ -1222,17 +1213,17 @@ def _place(
         if isinstance(row, Staged)
     )
     manifest_rows: list[tuple[str, str, str, str, str]] = []
-    skipped: list[Skipped] = []
+    skipped: list[SkippedRow] = []
     for input_id, rows in inputs:
         if any(isinstance(row, Staged) and row.image_id in collisions for row in rows):
             for row in rows:
                 if isinstance(row, Staged):
                     row.path.unlink()
             log.warning("skipping %s: %s", input_id, COLLISION_REASON)
-            skipped.append(Skipped(input_id, "failed", COLLISION_REASON))
+            skipped.append(SkippedRow(input_id, "failed", COLLISION_REASON))
             continue
         for row in rows:
-            if isinstance(row, Skipped):
+            if isinstance(row, SkippedRow):
                 skipped.append(row)
                 continue
             batch_index, slot = divmod(len(manifest_rows), batch_size)
@@ -1257,7 +1248,7 @@ def _render_into(
     colormap: str,
     policy: Modes,
     jobs: int,
-) -> tuple[int, list[tuple[str, str, str, str, str]], list[Skipped]]:
+) -> tuple[int, list[tuple[str, str, str, str, str]], list[SkippedRow]]:
     """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches."""
     pending = staging / PENDING_NAME
     pending.mkdir()

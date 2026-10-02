@@ -154,7 +154,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 
 The pipeline has three parts: **discovery** (IO) yields one `Candidate`
 (`image_id`, `kind` = `dicom` or `raster`, and its raw
-bytes, read during discovery) per input without decoding anything (or a `Skipped` row for content
+bytes, read during discovery) per input without decoding anything (or a `SkippedRow` for content
 that is not an input or cannot be read); a pure **`render(kind, image_id,
 data, colormap) -> list[Rendered]`** turns the bytes into `(H, W, 3)` uint8
 RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
@@ -166,12 +166,12 @@ bytes its `jpeg_sha256` (see *`manifest.tsv`*).
 
 **Parallel rendering** (`run_preprocess(..., jobs)`, CLI `--jobs`). Hashing,
 rendering and encoding one input is the pure, top-level
-`render_and_encode(kind, image_id, data, colormap) -> list[Encoded | Skipped]`.
+`render_and_encode(kind, image_id, data, colormap) -> list[Encoded | SkippedRow]`.
 With `jobs` = 1 it runs in the main process and no pool exists. With `jobs` >
 1 the main process submits each candidate's bytes (read during discovery) to a `ProcessPoolExecutor(jobs)` using
 the `spawn` start method on every platform (workers import the package afresh:
 no inherited threads, signal handlers or open archives); workers hash the
-bytes and return JPEG bytes or `Skipped` rows. While the pool exists,
+bytes and return JPEG bytes or `SkippedRow`s. While the pool exists,
 `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` are set to 1 in
 the main process's environment (only those the user has not set; restored
 afterwards), so each worker inherits single-threaded BLAS instead of a thread

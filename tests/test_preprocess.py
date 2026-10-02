@@ -42,7 +42,6 @@ from image_review.preprocess import (
     Candidate,
     DecodeError,
     Rejected,
-    Skipped,
     Unsupported,
     WorkDirExists,
     WorkerCrashed,
@@ -58,6 +57,7 @@ from image_review.preprocess import (
     run_preprocess,
 )
 from image_review.signals import TERMINATION_SIGNALS, interrupt_on
+from image_review.store import SkippedRow
 from tests.fixtures import add_overlay, invoke_cli, temp_dir, write_dicom
 
 RNG = np.random.default_rng(0)
@@ -775,7 +775,7 @@ class ContentDiscoveryTest(unittest.TestCase):
         result = self.run_quietly([empty, dirs_only])
         self.assertEqual(
             result.skipped,
-            [Skipped(p.as_posix(), "ignored", "zip contains no files") for p in (empty, dirs_only)],
+            [SkippedRow(p.as_posix(), "ignored", "zip contains no files") for p in (empty, dirs_only)],
         )
 
     def test_unrecognized_file_named_as_source_is_failed(self):
@@ -909,7 +909,11 @@ class ContentDiscoveryTest(unittest.TestCase):
         )
         self.assertEqual(
             result.skipped,
-            [Skipped((s1 / "s2link").as_posix(), "ignored", f"symlinked directory already included via SOURCE {s2}")],
+            [
+                SkippedRow(
+                    (s1 / "s2link").as_posix(), "ignored", f"symlinked directory already included via SOURCE {s2}"
+                )
+            ],
         )
 
     def test_symlink_loop_terminates(self):
@@ -943,7 +947,7 @@ class ContentDiscoveryTest(unittest.TestCase):
             path = Path(bundled)
         result = self.run_quietly([path])
         self.assertEqual(result.written, 0)
-        self.assertEqual(result.skipped, [Skipped(path.as_posix(), "ignored", "DICOMDIR index")])
+        self.assertEqual(result.skipped, [SkippedRow(path.as_posix(), "ignored", "DICOMDIR index")])
 
     def test_nested_zip_is_failed(self):
         nested = io.BytesIO()
@@ -954,7 +958,7 @@ class ContentDiscoveryTest(unittest.TestCase):
             zf.writestr("inner.zip", nested.getvalue())
         result = self.run_quietly([archive])
         self.assertEqual(
-            result.skipped, [Skipped(f"{archive.as_posix()}::inner.zip", "failed", "unsupported: nested zip")]
+            result.skipped, [SkippedRow(f"{archive.as_posix()}::inner.zip", "failed", "unsupported: nested zip")]
         )
 
     def test_zip_entry_with_a_control_character_is_failed_and_exports(self):
@@ -1350,7 +1354,7 @@ class RenderTest(unittest.TestCase):
         data = self.with_elements(_good_pixels(), edit=edit)
         [main, icon] = render("dicom", "/x/a.dcm", data, "gray")
         self.assertIsInstance(main, preprocess_module.Rendered)
-        self.assertEqual(icon, Skipped("/x/a.dcm#icon", "failed", "unsupported: no pixel data"))
+        self.assertEqual(icon, SkippedRow("/x/a.dcm#icon", "failed", "unsupported: no pixel data"))
 
     def test_icon_row_lands_in_manifest_and_failed_icon_in_skipped_tsv(self):
         path = get_testdata_file("examples_overlay.dcm", download=False)
@@ -1823,7 +1827,7 @@ def _probe_worker(kind, image_id, data, colormap):
     state: dict[str, object] = {name: os.environ.get(name) for name in preprocess_module._BLAS_THREAD_VARS}
     state["sigint_ignored"] = signal.getsignal(signal.SIGINT) == signal.SIG_IGN
     state["sigint_blocked"] = signal.SIGINT in signal.pthread_sigmask(signal.SIG_BLOCK, [])
-    return [Skipped(image_id, "failed", json.dumps(state))]
+    return [SkippedRow(image_id, "failed", json.dumps(state))]
 
 
 def _start_large_result() -> None:
