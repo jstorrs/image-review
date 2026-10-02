@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import dataclasses
 import errno
 import hashlib
 import io
@@ -20,7 +21,7 @@ import skimage as ski
 from image_review import review_db as review_db_module
 from image_review.connection import package_version
 from image_review.controller import ReviewSession
-from image_review.review_db import HEADER, ReviewDB
+from image_review.review_db import HEADER, Decision, ReviewDB
 from image_review.store import (
     LOCK_NAME,
     LocalStore,
@@ -393,6 +394,10 @@ class TestReviewLog(unittest.TestCase):
     """review.tsv is an append-only log: one header, then one line per decision, last line per image_id wins."""
 
     HEADER_LINE = b"image_id\tbatch\tstatus\tpass_number\ttimestamp\treviewer\tmode\tgrid_size\ttool_version\r\n"
+
+    def test_decision_fields_match_header_order(self):
+        # _tsv writes dataclasses.astuple(decision) under HEADER, so the two must agree in order
+        self.assertEqual([f.name for f in dataclasses.fields(Decision)], HEADER)
 
     def setUp(self):
         self.work_dir = temp_dir(self)

@@ -6,8 +6,8 @@ import logging
 import os
 import stat
 import tempfile
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import astuple, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, get_args
@@ -102,25 +102,9 @@ class LegacyLog:
     decisions: list[Decision]
 
 
-def _format(header: bool, decisions: Iterable[Decision]) -> str:
+def _tsv(rows: Iterable[Sequence[object]]) -> str:
     buf = io.StringIO()
-    writer = csv.writer(buf, delimiter="\t")  # csv's default "\r\n" line ending, as review.tsv has always used
-    if header:
-        writer.writerow(HEADER)
-    writer.writerows(
-        [
-            d.image_id,
-            d.batch,
-            d.status,
-            d.pass_number,
-            d.timestamp,
-            d.reviewer,
-            d.mode,
-            "" if d.grid_size is None else d.grid_size,
-            d.tool_version,
-        ]
-        for d in decisions
-    )
+    csv.writer(buf, delimiter="\t").writerows(rows)  # csv's default "\r\n" line ending, as review.tsv has always used
     return buf.getvalue()
 
 
@@ -217,7 +201,7 @@ class ReviewDB:
         try:
             with os.fdopen(fd, "wb") as f:
                 os.fchmod(f.fileno(), file_mode)  # mkstemp creates 0600; teammates may need group access
-                f.write(_format(True, legacy.decisions).encode("utf-8"))
+                f.write(_tsv([HEADER, *map(astuple, legacy.decisions)]).encode("utf-8"))
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.review_path)
@@ -247,7 +231,7 @@ class ReviewDB:
             raise RuntimeError(
                 f"{self.review_path} has the old {len(LEGACY_HEADER)}-column header; migrate() it before appending"
             )
-        rows = _format(False, decisions)
+        rows = _tsv(map(astuple, decisions))
         file_mode = policy_of_dir(self.work_dir).file_mode
         fd = os.open(self.review_path, os.O_RDWR | os.O_APPEND | os.O_CREAT, file_mode)
         try:
@@ -263,7 +247,7 @@ class ReviewDB:
             if start == 0:
                 if stat.S_IMODE(st.st_mode) != file_mode:
                     os.fchmod(fd, file_mode)  # the umask may have stripped group bits teammates need to read it
-                payload = _format(True, []) + rows
+                payload = _tsv([HEADER]) + rows
             else:
                 last = os.pread(fd, 1, start - 1)
                 prefix = (
