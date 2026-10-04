@@ -559,13 +559,13 @@ class TestReads(ServerTestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
 
-    def test_api_version_is_5(self):
-        self.assertEqual(API_VERSION, 5)
-        self.assertEqual(self.get_json("/version")["api"], 5)
+    def test_api_version_is_6(self):
+        self.assertEqual(API_VERSION, 6)
+        self.assertEqual(self.get_json("/version")["api"], 6)
 
-    def test_skipped_absent_is_null(self):
+    def test_skipped_absent_is_zero_counts(self):
         resp, data, _ = self.request("GET", "/skipped")
-        self.assertEqual((resp.status, data), (200, b"null"))
+        self.assertEqual((resp.status, json.loads(data)), (200, {"failed": 0, "ignored": 0}))
 
     def test_skipped_counts_only_no_paths(self):
         rows = [(f"{image_id}", "failed", "cannot read /src/secret/dir") for _, _, image_id in ROWS[:2]]

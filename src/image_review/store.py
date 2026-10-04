@@ -91,8 +91,8 @@ class ReviewStore(Protocol):
 
     def current_pass(self) -> int: ...
 
-    def skipped(self) -> SkippedCounts | None:
-        """Counts from preprocess's skipped.tsv; None if the work dir has none. ValueError if it is malformed."""
+    def skipped(self) -> SkippedCounts:
+        """Counts from preprocess's skipped.tsv (zero if the work dir has none). ValueError if it is malformed."""
         ...
 
 
@@ -180,11 +180,11 @@ class SkippedRow:
     reason: str
 
 
-def load_skipped(work_dir: Path) -> list[SkippedRow] | None:
-    """Parse skipped.tsv strictly, in file order; None if the work dir has none. ValueError (naming file:line, or file and byte offset if not UTF-8) if malformed."""
+def load_skipped(work_dir: Path) -> list[SkippedRow]:
+    """Parse skipped.tsv strictly, in file order; empty if the work dir has none. ValueError (naming file:line, or file and byte offset if not UTF-8) if malformed."""
     path = work_dir / SKIPPED_NAME
     if not path.exists():
-        return None
+        return []
     rows: list[SkippedRow] = []
     reader = csv.reader(io.StringIO(decode_utf8(path, path.read_bytes()), newline=""), delimiter="\t")
     if next(reader, None) != SKIPPED_HEADER:
@@ -202,11 +202,6 @@ def skipped_counts(rows: Iterable[SkippedRow]) -> SkippedCounts:
     kinds = [r.kind for r in rows]
     failed = kinds.count("failed")
     return SkippedCounts(failed=failed, ignored=len(kinds) - failed)
-
-
-def load_skipped_counts(work_dir: Path) -> SkippedCounts | None:
-    rows = load_skipped(work_dir)
-    return None if rows is None else skipped_counts(rows)
 
 
 class LocalStore:
@@ -303,13 +298,13 @@ class LocalStore:
     def current_pass(self) -> int:
         return self._db.current_pass(e.image_id for e in self._by_key.values())
 
-    def skipped(self) -> SkippedCounts | None:
-        return load_skipped_counts(self.work_dir)
+    def skipped(self) -> SkippedCounts:
+        return skipped_counts(load_skipped(self.work_dir))
 
     def export_rows(self) -> list["ExportRow"]:
         """The study's result, one row per source file (see export_rows). Local only: image_ids never leave the work
         dir's machine. ValueError if skipped.tsv is malformed or review.tsv ends in a torn line."""
-        return export_rows(self._entries, self._db.decisions(), load_skipped(self.work_dir) or [])
+        return export_rows(self._entries, self._db.decisions(), load_skipped(self.work_dir))
 
 
 # The review --filter vocabulary, parsed by the CLI's click.Choice.

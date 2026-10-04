@@ -278,7 +278,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             case ("GET", "/skipped"):
                 with lock:
                     skipped = store.skipped()
-                return json_reply(None if skipped is None else {"failed": skipped.failed, "ignored": skipped.ignored})
+                return json_reply({"failed": skipped.failed, "ignored": skipped.ignored})
             case ("POST", "/mark"):
                 req = parse_mark(self._read_body(), self.server.known_keys)
                 with lock:

@@ -241,7 +241,7 @@ class ZipSourceTest(unittest.TestCase):
             "    zf.writestr('\\u00e8.txt', b'not an image')\n"
             "run_preprocess([root / 'scans.zip'], root / 'work')\n"
             "print(ascii([e.image_id for e in load_manifest(root / 'work')]))\n"
-            "print(ascii([r.image_id for r in load_skipped(root / 'work') or []]))\n"
+            "print(ascii([r.image_id for r in load_skipped(root / 'work')]))\n"
         )
         env = {**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
         with tempfile.TemporaryDirectory() as tmp:

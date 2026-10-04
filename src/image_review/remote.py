@@ -122,10 +122,8 @@ def parse_version(data: bytes) -> int:
     return value
 
 
-def parse_skipped(data: bytes) -> SkippedCounts | None:
+def parse_skipped(data: bytes) -> SkippedCounts:
     payload = _load_json(data)
-    if payload is None:
-        return None
     if not isinstance(payload, dict) or set(payload) != {"failed", "ignored"}:
         raise RemoteError("malformed skipped counts from server")
     failed, ignored = payload["failed"], payload["ignored"]
@@ -262,5 +260,5 @@ class RemoteStore:
     def current_pass(self) -> int:
         return parse_pass(self._call("GET", "/current_pass"))
 
-    def skipped(self) -> SkippedCounts | None:
+    def skipped(self) -> SkippedCounts:
         return parse_skipped(self._call("GET", "/skipped"))

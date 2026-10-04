@@ -163,7 +163,7 @@ if you share work directories with other people.
 ### Wire API (remote review)
 
 `serve` and `review`/`status --remote` are new in this release. They speak
-wire API version **5** (`connection.API_VERSION`), and the client refuses a
+wire API version **6** (`connection.API_VERSION`), and the client refuses a
 server that reports a different version. Install the same image-review
 version on both machines. The versions reached during development:
 
@@ -173,6 +173,8 @@ version on both machines. The versions reached during development:
 - **v4** dropped `batch` from the `POST /mark` body; the server takes it from
   the manifest. It added `reviewer` and `mode`.
 - **v5** added `POST /undo`.
+- **v6** made `GET /skipped` always send counts (`{"failed": 0, "ignored": 0}`
+  when the work dir has no `skipped.tsv`) instead of `null`.
 
 `GET /version` reports the API version and package version. A server without
 it is reported as "too old to report its API version".

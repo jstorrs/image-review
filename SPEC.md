@@ -957,7 +957,7 @@ image preprocessed more than once); they share a review status.
 | `undo(pass_number, *, reviewer) -> dict[str, Status]` | Undo the latest mark not yet undone (one `mark` call: one image or a whole grid), restoring each of its images' decision from before it (see *Undo rows*); `reviewer` is checked and recorded like `mark`'s. Returns the new status, at `pass_number`, of every key affected, as `mark` does; `{}` when there is nothing to undo |
 | `current_pass() -> int` | Auto-detected pass number |
 | `close()`, `__enter__`, `__exit__` | Release what the store holds (`RemoteStore`: pool and connections; `LocalStore`: the work dir lock); idempotent. Stores are context managers that close on exit |
-| `skipped() -> SkippedCounts \| None` | Counts of `failed` and `ignored` rows in preprocess's `skipped.tsv` (frozen `SkippedCounts(failed, ignored)`); `None` if the file is absent; `ValueError` naming `file:line` if it is malformed |
+| `skipped() -> SkippedCounts` | Counts of `failed` and `ignored` rows in preprocess's `skipped.tsv` (frozen `SkippedCounts(failed, ignored)`); zero counts if the file is absent; `ValueError` naming `file:line` if it is malformed |
 
 ### `LocalStore(work_dir, read_only=False)`
 
@@ -980,9 +980,9 @@ only: it starts empty and is lost when the store is closed or the process ends,
 so only marks made since the store was opened can be undone. `statuses` and `current_pass`
 delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
 `skipped.tsv` strictly with `load_skipped` (header `image_id`, `kind`, `reason`; `kind` is `failed`
-or `ignored`) and returns only the counts. `export_rows()` (not part of the
+or `ignored`) and returns only the counts (zero when the file is absent). `export_rows()` (not part of the
 `ReviewStore` Protocol: `image_id`s stay local) returns
-`export.export_rows(entries, ReviewDB.decisions(), load_skipped(...) or [])`;
+`export.export_rows(entries, ReviewDB.decisions(), load_skipped(...))`;
 see *`image-review export`*.
 
 ### Pure functions
@@ -999,7 +999,7 @@ see *`image-review export`*.
 | `export.format_allowlist(rows: list[AllowedRow]) -> str` | The allowlist as TSV text with `ALLOWLIST_HEADER` (`AllowedRow` is a `NewType` over `ExportRow` that only `split_allowlist` makes, so passing the report's rows is a type error); `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
 | `export.format_report(rows) -> str` | The report as TSV text with `REPORT_HEADER`; the same `ValueError` |
 
-`load_skipped(work_dir)` parses `skipped.tsv` into `SkippedRow`s (`None` if
+`load_skipped(work_dir)` parses `skipped.tsv` into `SkippedRow`s (empty if
 absent; `ValueError` naming `file:line` if malformed). Two IO helpers serve
 `export` (see *`image-review export`*): `atomic.write_new_file(path, file_mode,
 group, text)` creates the `--output` and `--report` files, and `lock.live_writer(work_dir) ->
@@ -1588,17 +1588,17 @@ the boundary (`parse_pass`, `parse_mark`, `parse_undo`).
 | `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown (checked against the manifest's keys before the store is asked), unreadable, or does not match its recorded `jpeg_sha256` |
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
-| `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`), or `null` if the work dir has no `skipped.tsv`. Only counts are sent, never `image_id`s or reasons (which contain source paths) |
+| `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`; both 0 if it has none). Only counts are sent, never `image_id`s or reasons (which contain source paths) |
 | `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
 | `POST /undo` | Body `{"pass": N, "reviewer": str}`, checked as for `/mark`; other fields are ignored. Undoes the server store's latest mark (`ReviewStore.undo`); responds `{key: status, ...}` for every key affected, or `{}` when there is nothing to undo |
 
 Only keys and skip counts appear on the wire; original `image_id`s never do.
 
-**API version rule.** `connection.API_VERSION` (an integer, currently 5; v2 added `GET /skipped`;
+**API version rule.** `connection.API_VERSION` (an integer, currently 6; v2 added `GET /skipped`;
 v3 added `FLAGGED` to the `Status` vocabulary, which `/statuses` responses
 may contain; `/mark` responses hold only the verdict just recorded; v4 dropped
 `batch` from the `/mark` body, the server taking each key's batch from the
-manifest, and added `reviewer` and `mode`; v5 added `POST /undo`) is
+manifest, and added `reviewer` and `mode`; v5 added `POST /undo`; v6 made `GET /skipped` always send counts, never `null`) is
 shared by client and server. Any change to request or response shapes, or to
 the `Status` vocabulary, must bump it. Client and server are installed
 separately, so skew is expected and must fail clearly rather than as a

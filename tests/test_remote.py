@@ -332,8 +332,8 @@ SKIPPED_TSV = "image_id\tkind\treason\n/src/p/x.dcm\tfailed\tbad\n/src/p/y.dcm\t
 
 
 class TestSkipped(RemoteTestCase):
-    def test_absent_is_none(self):
-        self.assertIsNone(self.store.skipped())
+    def test_absent_is_zero(self):
+        self.assertEqual(self.store.skipped(), SkippedCounts(0, 0))
 
     def test_counts_equal_local(self):
         (self.work_dir / "skipped.tsv").write_text(SKIPPED_TSV)
@@ -341,9 +341,9 @@ class TestSkipped(RemoteTestCase):
         self.assertEqual(self.store.skipped(), self.local_copy().skipped())
 
     def test_parse_skipped(self):
-        self.assertIsNone(parse_skipped(b"null"))
         self.assertEqual(parse_skipped(b'{"failed": 0, "ignored": 4}'), SkippedCounts(0, 4))
         for bad in (
+            b"null",
             b"[]",
             b"{}",
             b'{"failed": 1}',
@@ -388,7 +388,7 @@ class TestStatusReport(unittest.TestCase):
     def test_one_batch_and_no_skips_omit_those_sections(self):
         report = status_report(STATUS_COUNTS, {"batch_001": STATUS_BATCHES["batch_001"]}, 1, SkippedCounts(0, 0))
         self.assertEqual(report, STATUS_REPORT.split("\nBatch", maxsplit=1)[0] + "\nCurrent pass: 1\n")
-        self.assertEqual(report, status_report(STATUS_COUNTS, {}, 1, None))
+        self.assertEqual(report, status_report(STATUS_COUNTS, {}, 1, SkippedCounts(0, 0)))
 
 
 class TestCli(RemoteTestCase):
@@ -447,11 +447,11 @@ class TestCli(RemoteTestCase):
         self.assertNotIn("Traceback", result.output)
 
     def test_api_mismatch_message(self):
-        with mock.patch("image_review.remote.API_VERSION", 6):
+        with mock.patch("image_review.remote.API_VERSION", 7):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
         self.assertIn(
-            "server speaks API v5, this client v6; install the same image-review version on both machines",
+            "server speaks API v6, this client v7; install the same image-review version on both machines",
             result.output,
         )
         self.assertNotIn(self.target.token, result.output)
@@ -474,7 +474,7 @@ class TestCli(RemoteTestCase):
 
     def test_check_api(self):
         self.store.check_api()
-        with mock.patch("image_review.remote.API_VERSION", 6), self.assertRaises(ApiMismatch):
+        with mock.patch("image_review.remote.API_VERSION", 7), self.assertRaises(ApiMismatch):
             self.store.check_api()
 
     def test_status_envvar(self):

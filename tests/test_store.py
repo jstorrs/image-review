@@ -34,6 +34,7 @@ from image_review.store import (
     batch_summary,
     filter_rows,
     load_manifest,
+    load_skipped,
     skipped_counts,
     summary,
 )
@@ -98,8 +99,9 @@ class TestSkipped(StoreTestCase):
     def write(self, text: str) -> None:
         (self.work_dir / "skipped.tsv").write_text(text)
 
-    def test_absent_is_none(self):
-        self.assertIsNone(self.store.skipped())
+    def test_absent_is_zero(self):
+        self.assertEqual(self.store.skipped(), SkippedCounts(0, 0))
+        self.assertEqual(load_skipped(self.work_dir), [])
 
     def test_header_only_is_zero(self):
         self.write("image_id\tkind\treason\n")

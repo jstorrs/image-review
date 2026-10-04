@@ -536,7 +536,7 @@ def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, 
 
 
 def status_report(
-    counts: Counter[Status], batch_counts: dict[str, Counter[Status]], current: int, skipped: SkippedCounts | None
+    counts: Counter[Status], batch_counts: dict[str, Counter[Status]], current: int, skipped: SkippedCounts
 ) -> str:
     """The text `status` prints: overall counts, a per-batch table when there are several batches, the pass, skips."""
     lines = ["", f"Overall: {counts.total()} images (pass {current})"]
@@ -549,7 +549,7 @@ def status_report(
                 f"{batch_id:<15} {bc.total():>6} {bc['CLEAN']:>6} {bc['DIRTY']:>6} {bc['UNREVIEWED']:>6} {bc['FLAGGED']:>6}"
             )
     lines += ["", f"Current pass: {current}"]
-    if skipped is not None and skipped.any:
+    if skipped.any:
         lines.append(
             f"Skipped during preprocess: {skipped.failed} failed, {skipped.ignored} ignored (see skipped.tsv in the work dir)"
         )
@@ -585,7 +585,7 @@ def status(work_dir, remote, via, check):
     print(status_report(counts, batch_summary(manifest, statuses), current, skipped), end="")
 
     # Finished when every image has a verdict: FLAGGED is a DIRTY verdict from an earlier pass; re-review is optional.
-    if check and (counts["UNREVIEWED"] or (skipped is not None and skipped.failed)):
+    if check and (counts["UNREVIEWED"] or skipped.failed):
         sys.exit(1)
 
 
