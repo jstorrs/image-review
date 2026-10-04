@@ -60,17 +60,17 @@ class ImageViewer:
 
     SCALE_WARNING_COLOR = pg.Color(192, 0, 0)
 
-    def __init__(self):
+    def __init__(self) -> None:
         sizes = pg.display.get_desktop_sizes()
         self._open_window(max(range(len(sizes)), key=lambda i: sizes[i][0] * sizes[i][1]))
         self.font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSans.ttf"), 36)
         self.font.fgcolor = pg.Color(64, 64, 64)
         self.font.strong = True
-        self._image = None
+        self._image: pg.Surface | None = None
         self._status = "UNREVIEWED"
         self._info = ""
         self._name = ""
-        self._content = None
+        self._content: pg.Surface | None = None
         self._offset = (0, 0)
         self._scale = 1.0  # displayed size / source size of the current image
         self._source_scale = 1.0  # the image's own scale vs. its source: a grid shrinks the images in it
@@ -247,7 +247,7 @@ class ImageViewer:
         screen_w, screen_h = self.screen.get_size()
         self.screen.fill(BACKGROUND)
         splash_font = self._splash_font
-        line_height = splash_font.get_sized_height() + 6
+        line_height = splash_font.get_sized_height(0) + 6
         help_lines = self.HELP_LINES
         all_lines = [*lines, "", *help_lines, "", *footer]
         info_end = len(lines)

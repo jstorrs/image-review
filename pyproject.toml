@@ -83,6 +83,8 @@ ignore = [
 [tool.mypy]
 files = ["src"]
 python_version = "3.12"
+check_untyped_defs = true
+strict_equality = true
 
 [[tool.mypy.overrides]]
 module = ["rectpack.*", "scipy.*", "skimage.*"]

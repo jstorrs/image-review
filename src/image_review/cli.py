@@ -668,7 +668,7 @@ def export(work_dir, output, report, allow_live, remote):
         if report is not None:  # first: if the allowlist then fails, only the report exists, and it releases nothing
             write(report, report_text)
         if output is None:
-            click.get_binary_stream("stdout").write(allowlist_text.encode("utf-8"))
+            click.echo(allowlist_text.encode("utf-8"), nl=False)
         else:
             write(output, allowlist_text)
     log.info("%d files allowlisted; %d in the report (%s)", len(allowed), len(denied), _report_counts(denied))
