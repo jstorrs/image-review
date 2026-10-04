@@ -169,9 +169,11 @@ class ImageViewer:
 
     def resize(self) -> None:
         self._dirty = True
+        self._fitted = None  # first: if scaling raises, the previous image's pixels are not left under the new name
         image = self._image
         fit = None if image is None else fit_image(image.get_size(), self.screen.get_size(), self.border)
-        self._fitted = None if image is None or fit is None else (pg.transform.smoothscale(image, fit.size), fit)
+        if image is not None and fit is not None:
+            self._fitted = (pg.transform.smoothscale(image, fit.size), fit)
 
     @property
     def image_shown(self) -> bool:

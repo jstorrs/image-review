@@ -2027,7 +2027,12 @@ class ParallelTest(unittest.TestCase):
         self.assertFalse((self.tmp / ".work.partial").exists())
 
     def test_worker_crash_names_the_inputs_in_flight(self):
-        items = [Candidate(ImageId(name), "raster", b"") for name in ("a.png", "b.png")]
+        # The skipped row waits in the queue behind a.png, so the count must be of inputs in flight, not queue entries
+        items = [
+            Candidate(ImageId("a.png"), "raster", b""),
+            SkippedRow(ImageId("s.txt"), "ignored", "not an image"),
+            Candidate(ImageId("b.png"), "raster", b""),
+        ]
         outcomes = preprocess_module._outcomes_pooled(items, "viridis", _BrokenExecutor(), limit=4)
         with self.assertRaises(WorkerCrashed) as ctx:
             list(outcomes)

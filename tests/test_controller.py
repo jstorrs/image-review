@@ -939,6 +939,15 @@ class TestScaleAndResize(EventLoopTestCase):
         self.assertFalse(viewer.image_shown)
         self.assertNotIn("100%", self.bar_texts(viewer))  # the bars alone
 
+    def test_failed_scaling_drops_the_previous_image(self):
+        viewer = ImageViewer()
+        pg.display.set_mode((800, 600))
+        viewer.set_image(pg.Surface((800, 550)), "a", "UNREVIEWED", "info")
+        self.assertTrue(viewer.image_shown)
+        with self.assertRaises(ValueError):  # smoothscale takes only 24- and 32-bit surfaces
+            viewer.set_image(pg.Surface((400, 275), depth=8), "b", "UNREVIEWED", "info")
+        self.assertFalse(viewer.image_shown)  # never a's pixels under b's name
+
     def test_image_scaled_to_zero_width_is_not_shown(self):
         viewer = ImageViewer()
         pg.display.set_mode((800, 51))  # a 1px content area: 1000x3000 scales to 0x1
