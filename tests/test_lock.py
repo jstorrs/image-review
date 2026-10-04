@@ -175,6 +175,7 @@ class TestWorkDirLock(LockTestCase):
             b"[]",
             b'{"host": "h", "user": "u", "pid": "1", "started": "t"}',
             b'{"host": "h", "user": "u", "pid": 0, "started": "t"}',
+            b'{"host": "h", "user": "u", "pid": 2147483648, "started": "t"}',
             b"\xff\xfe\x00",
         ):
             with self.subTest(data=data):
@@ -185,6 +186,30 @@ class TestWorkDirLock(LockTestCase):
                 self.assertIn("corrupt", str(ctx.exception))
                 self.assertIn("by hand", str(ctx.exception))
                 self.assertEqual(self.lock_path.read_bytes(), data)
+
+    @unittest.skipUnless(THIS_BOOT, "os.kill is only reached when the boot id is known")
+    def test_pid_beyond_os_kill_range_is_corrupt_not_a_crash(self):
+        self.write_lock(socket.gethostname(), 2**31)
+        with self.assertRaises(WorkDirLocked) as ctx:
+            LocalStore(self.work_dir)
+        self.assertIn("corrupt", str(ctx.exception))
+        busy = lock_module.live_writer(self.work_dir)
+        self.assertIsNotNone(busy)
+        self.assertIn("corrupt", str(busy))
+
+    def test_parse_lock_accepts_the_largest_pid_os_kill_takes(self):
+        text = json.dumps({"host": "h", "user": "u", "pid": 2**31 - 1, "started": "t"})
+        self.assertEqual(lock_module.parse_lock(text).pid, 2**31 - 1)
+
+    @unittest.skipUnless(THIS_BOOT, "siblings are swept only when the boot id is known")
+    def test_sweep_skips_siblings_whose_pid_is_not_a_valid_pid(self):
+        host = socket.gethostname()
+        names = [f"{LOCK_NAME}.{host}.{THIS_BOOT or '-'}.{pid}.abcd" for pid in ("\u00b2", "2147483648")]
+        for name in names:
+            (self.work_dir / name).write_text("{}")
+        self.open()
+        for name in names:
+            self.assertTrue((self.work_dir / name).exists())
 
     def test_hard_links_unsupported_falls_back_to_direct_create(self):
         for err in (errno.EPERM, errno.ENOTSUP, errno.ENOSYS):

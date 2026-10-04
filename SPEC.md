@@ -1637,8 +1637,10 @@ therefore holds `work_dir/review.lock`:
 
 - Contents are JSON `{"host", "boot_id", "user", "pid", "started"}`: hostname,
   `/proc/sys/kernel/random/boot_id` (`""` where unavailable), login name (the
-  uid if there is none), pid, and UTC ISO start time. The full record is written
-  to a unique sibling `review.lock.<host>.<boot_id or ->.<pid>.<random>`
+  uid if there is none), pid (an integer from 1 to 2^31-1, what `os.kill`
+  accepts; any other value makes the lock malformed), and UTC ISO start time.
+  The full record is written to a unique sibling
+  `review.lock.<host>.<boot_id or ->.<pid>.<random>`
   (created `O_EXCL` with, and `fchmod`ed to, the work dir policy's file mode:
   0600 private, 0660 group, so teammates can read who holds it; then
   `fsync`ed), which is hard-linked to `review.lock` and then removed (the same
@@ -1651,7 +1653,8 @@ therefore holds `work_dir/review.lock`:
   record, `fsync`); a reader that finds the lock empty re-reads it for up to
   1 s before treating it as corrupt. A process killed mid-acquire can leave a
   sibling behind; each acquire removes, best effort, siblings named with this
-  host and `boot_id` whose pid no longer exists. Others are harmless and can
+  host and `boot_id` whose pid no longer exists (a name whose pid is not a
+  decimal number from 1 to 2^31-1 is left alone). Others are harmless and can
   be deleted by hand. `flock` is not used: it is unreliable on Lustre/GPFS/NFS.
 - A lock is reclaimed automatically only when its process is verifiably gone
   on this machine: same hostname and same non-empty `boot_id` (so neither a

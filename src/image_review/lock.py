@@ -67,6 +67,13 @@ def this_process() -> LockHolder:
     )
 
 
+MAX_PID = 2**31 - 1  # os.kill takes a C int; a larger pid raises OverflowError
+
+
+def _valid_pid(pid: int) -> bool:
+    return 0 < pid <= MAX_PID
+
+
 def parse_lock(text: str) -> LockHolder:
     """Parse review.lock's JSON; ValueError if it is not a complete holder record."""
     data = json.loads(text)
@@ -79,9 +86,9 @@ def parse_lock(text: str) -> LockHolder:
         and isinstance(started, str)
         and isinstance(boot, str)
         and type(pid) is int
-        and pid > 0
+        and _valid_pid(pid)
     ):
-        raise ValueError("expected a JSON object with host, user, a positive pid and started")
+        raise ValueError(f"expected a JSON object with host, user, a positive pid (at most {MAX_PID}) and started")
     return LockHolder(host, boot, user, pid, started)
 
 
@@ -163,9 +170,13 @@ def _sweep_siblings(work_dir: Path, me: LockHolder) -> None:
     for sibling in work_dir.glob(f"{LOCK_NAME}.*"):
         rest = sibling.name.removeprefix(prefix)
         pid_text, _, _ = rest.partition(".")
-        if rest == sibling.name or not pid_text.isdigit() or int(pid_text) == me.pid:
+        # isdecimal, not isdigit: "\u00b2".isdigit() is True but int() rejects it
+        if rest == sibling.name or not pid_text.isdecimal():
             continue
-        if pid_gone(int(pid_text)):
+        pid = int(pid_text)
+        if not _valid_pid(pid) or pid == me.pid:
+            continue
+        if pid_gone(pid):
             with contextlib.suppress(OSError):
                 sibling.unlink()
 

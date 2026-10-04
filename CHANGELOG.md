@@ -207,6 +207,14 @@ it is reported as "too old to report its API version".
   directory made by a 0.3.0 pre-release may hold an ignored name with a
   control character or U+2028/U+2029, which now makes `export` refuse;
   preprocess again into a new work directory (its verdicts must be redone).
+- **A `review.lock` with an absurd pid is reported, not a traceback.** A pid
+  of 2^31 or more made `review`, `serve` and `export` crash with an
+  `OverflowError` instead of naming the corrupt lock. It is now refused as
+  malformed like any other bad lock. A stray
+  `review.lock.<host>.<boot_id>.<pid>.*` file whose pid text `int()` cannot
+  read (such as `²`) or that is 2^31 or more made every writer on that machine
+  fail to open the work directory until it rebooted; such files are now
+  skipped.
 
 ### Requirements
 
