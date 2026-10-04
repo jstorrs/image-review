@@ -15,7 +15,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -860,6 +860,16 @@ def _outcomes_pooled(
         ) from exc
 
 
+@contextmanager
+def _outcomes(items: Iterable[Candidate | SkippedRow], colormap: str, jobs: int) -> Iterator[Iterator[Outcome]]:
+    """The outcomes of `items`, rendered by `jobs` worker processes, or in this one for 1."""
+    if jobs > 1:
+        with _worker_pool(jobs) as pool:
+            yield _outcomes_pooled(items, colormap, pool, IN_FLIGHT_PER_JOB * jobs)
+    else:
+        yield _outcomes_serial(items, colormap)
+
+
 def _workers(pool: Executor) -> list[multiprocessing.process.BaseProcess]:
     """The pool's worker processes; none for another executor or a pool already shut down.
 
@@ -1166,12 +1176,7 @@ def _stage(
     staged = 0
 
     items = discover(sources, exclude)
-    with _worker_pool(jobs) if jobs > 1 else nullcontext() as pool:
-        outcomes = (
-            _outcomes_serial(items, colormap)
-            if pool is None
-            else _outcomes_pooled(items, colormap, pool, IN_FLIGHT_PER_JOB * jobs)
-        )
+    with _outcomes(items, colormap, jobs) as outcomes:
         for input_id, outcome in outcomes:
             parts: list[Staged | SkippedRow] = []
             for part in outcome:

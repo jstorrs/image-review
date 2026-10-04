@@ -19,6 +19,7 @@ import unittest
 import warnings
 import zipfile
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,6 +58,7 @@ from image_review.preprocess import (
     run_preprocess,
 )
 from image_review.signals import TERMINATION_SIGNALS, interrupt_on
+from image_review.status import ImageId
 from image_review.store import SkippedRow
 from tests.fixtures import add_overlay, invoke_cli, temp_dir, write_dicom
 
@@ -1892,6 +1894,15 @@ class _CountingExecutor(Executor):
         return future
 
 
+class _BrokenExecutor(Executor):
+    """Fails every call as a pool whose worker died does."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        future: Future = Future()
+        future.set_exception(BrokenProcessPool())
+        return future
+
+
 class ParallelTest(unittest.TestCase):
     """--jobs N renders in N spawned worker processes; the output is the same as rendering in-process."""
 
@@ -2014,6 +2025,13 @@ class ParallelTest(unittest.TestCase):
         self.assertEqual(multiprocessing.active_children(), [])
         self.assertFalse(work.exists())
         self.assertFalse((self.tmp / ".work.partial").exists())
+
+    def test_worker_crash_names_the_inputs_in_flight(self):
+        items = [Candidate(ImageId(name), "raster", b"") for name in ("a.png", "b.png")]
+        outcomes = preprocess_module._outcomes_pooled(items, "viridis", _BrokenExecutor(), limit=4)
+        with self.assertRaises(WorkerCrashed) as ctx:
+            list(outcomes)
+        self.assertIn("2 input(s) were in flight, starting with a.png", str(ctx.exception))
 
     def test_sigterm_while_a_worker_is_sending_does_not_hang(self):
         src = self.tmp / "src"
