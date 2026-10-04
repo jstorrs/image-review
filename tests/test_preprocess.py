@@ -916,6 +916,17 @@ class ContentDiscoveryTest(unittest.TestCase):
             ],
         )
 
+    def test_symlinked_directory_reason_keeps_a_trailing_space_in_the_source_path(self):
+        s1, s2 = self.root / "S1", self.root / "S2 "
+        s1.mkdir()
+        s2.mkdir()
+        (s1 / "s2link").symlink_to(s2, target_is_directory=True)
+        self.run_quietly([s1, s2])
+        self.assertEqual(
+            self.skipped_rows(self.root / "work"),
+            [((s1 / "s2link").as_posix(), "ignored", f"symlinked directory already included via SOURCE {s2}")],
+        )
+
     def test_symlink_loop_terminates(self):
         src = self.root / "src"
         (src / "a").mkdir(parents=True)

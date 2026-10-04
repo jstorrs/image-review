@@ -726,16 +726,12 @@ def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]
     for source in source_dirs:
         if target == source or source in target.parents:
             return SkippedRow(
-                link_id,
-                "ignored",
-                _clean_reason(f"symlinked directory already included via SOURCE {_escape_name(source.as_posix())}"),
+                link_id, "ignored", f"symlinked directory already included via SOURCE {_escape_name(source.as_posix())}"
             )
     return SkippedRow(
         link_id,
         "failed",
-        _clean_reason(
-            f"symlinked directory not followed; pass its target {_escape_name(target.as_posix())} as a SOURCE"
-        ),
+        f"symlinked directory not followed; pass its target {_escape_name(target.as_posix())} as a SOURCE",
     )
 
 
