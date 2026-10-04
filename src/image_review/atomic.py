@@ -56,7 +56,7 @@ def publish(path: Path, tmp: Path, file_mode: int, group: int | None, text: str)
             with contextlib.suppress(OSError):
                 if os.path.samefile(tmp, path):
                     return
-            if isinstance(e, FileExistsError) or e.errno not in LINK_UNSUPPORTED:
+            if e.errno not in LINK_UNSUPPORTED:
                 raise
             _write_file(path, file_mode, group, text)
     finally:
