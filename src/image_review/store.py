@@ -12,7 +12,7 @@ from .access import MANIFEST_NAME
 from .export import ExportRow, export_rows
 from .lock import LockHolder, acquire_lock, release_lock
 from .review_db import Change, ReviewDB, decode_utf8
-from .status import TODO_STATUSES, ImageId, Key, MarkMode, Status, Verdict
+from .status import TODO_STATUSES, ImageId, Key, MarkMode, Status, Verdict, parse_choice
 
 log = logging.getLogger(__name__)
 
@@ -167,6 +167,7 @@ def check_jpeg_hash(key: Key, data: bytes, expected: str | None) -> bytes:
 SKIPPED_NAME = "skipped.tsv"
 SKIPPED_HEADER = ["image_id", "kind", "reason"]
 SkipKind = Literal["failed", "ignored"]
+SKIP_KINDS: tuple[SkipKind, ...] = get_args(SkipKind)
 
 
 @dataclass(frozen=True)
@@ -188,10 +189,10 @@ def load_skipped(work_dir: Path) -> list[SkippedRow] | None:
     if next(reader, None) != SKIPPED_HEADER:
         raise ValueError(f"{path}:1: header must be {', '.join(SKIPPED_HEADER)}")
     for fields in reader:
-        if len(fields) != len(SKIPPED_HEADER) or fields[1] not in get_args(SkipKind):
+        kind = parse_choice(fields[1], SKIP_KINDS) if len(fields) == len(SKIPPED_HEADER) else None
+        if kind is None:
             raise ValueError(f"{path}:{reader.line_num}: expected image_id, kind (failed or ignored), reason")
-        image_id, kind, reason = fields
-        rows.append(SkippedRow(ImageId(image_id), kind, reason))  # type: ignore[arg-type]  # kind checked above
+        rows.append(SkippedRow(ImageId(fields[0]), kind, fields[2]))
     return rows
 
 

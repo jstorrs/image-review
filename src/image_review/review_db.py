@@ -14,7 +14,7 @@ from typing import Literal, get_args
 
 from .access import policy_of_dir
 from .connection import package_version, parse_reviewer
-from .status import TODO_STATUSES, ImageId, MarkMode, Status, Verdict
+from .status import MARK_MODES, TODO_STATUSES, VERDICTS, ImageId, MarkMode, Status, Verdict, parse_choice
 
 log = logging.getLogger(__name__)
 
@@ -30,9 +30,12 @@ RowMode = MarkMode | Literal["undo"]
 # earlier rows from the fold. FLAGGED is derived and never stored.
 RowStatus = Verdict | Literal["UNREVIEWED"]
 TOMBSTONE: RowStatus = "UNREVIEWED"
+# get_args() does not flatten a union of Literals, so these are built by hand.
+ROW_STATUSES: tuple[RowStatus, ...] = (*VERDICTS, TOMBSTONE)
+DECISION_MODES: tuple[RowMode | Literal[""], ...] = ("", *MARK_MODES, "undo")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Decision:
     image_id: ImageId
     batch: str
@@ -57,7 +60,8 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) 
     )
     if not image_id:
         raise ValueError(f"{where}: image_id is empty")
-    if status not in get_args(Verdict) and not (status == TOMBSTONE and mode == "undo"):
+    row_status = parse_choice(status, ROW_STATUSES)
+    if row_status is None or (row_status == TOMBSTONE and mode != "undo"):
         raise ValueError(
             f"{where}: status must be one of {', '.join(get_args(Verdict))} ({TOMBSTONE} only in an undo row), got {status!r}"
         )
@@ -67,7 +71,8 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) 
         raise ValueError(f"{where}: pass_number must be an integer, got {pass_text!r}") from None
     if pass_number < 1:
         raise ValueError(f"{where}: pass_number must be at least 1, got {pass_number}")
-    if mode not in ("", *get_args(MarkMode), "undo"):
+    row_mode = parse_choice(mode, DECISION_MODES)
+    if row_mode is None:
         raise ValueError(f"{where}: mode must be one of {', '.join(get_args(MarkMode))}, undo or empty, got {mode!r}")
     grid_size = None
     if size_text:
@@ -77,8 +82,17 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) 
             raise ValueError(f"{where}: grid_size must be an integer or empty, got {size_text!r}") from None
         if grid_size < 1:
             raise ValueError(f"{where}: grid_size must be at least 1, got {grid_size}")
-    # status and mode checked above
-    return Decision(ImageId(image_id), batch, status, pass_number, timestamp, reviewer, mode, grid_size, tool_version)  # type: ignore[arg-type]
+    return Decision(
+        image_id=ImageId(image_id),
+        batch=batch,
+        status=row_status,
+        pass_number=pass_number,
+        timestamp=timestamp,
+        reviewer=reviewer,
+        mode=row_mode,
+        grid_size=grid_size,
+        tool_version=tool_version,
+    )
 
 
 @dataclass(frozen=True)
@@ -291,7 +305,17 @@ class ReviewDB:
             recorded_pass = max(existing.pass_number, pass_number) if existing else pass_number  # never decreases
             changes.append(
                 Change(
-                    Decision(image_id, batch, status, recorded_pass, ts, reviewer, mode, len(targets), tool_version),
+                    Decision(
+                        image_id=image_id,
+                        batch=batch,
+                        status=status,
+                        pass_number=recorded_pass,
+                        timestamp=ts,
+                        reviewer=reviewer,
+                        mode=mode,
+                        grid_size=len(targets),
+                        tool_version=tool_version,
+                    ),
                     existing,
                 )
             )

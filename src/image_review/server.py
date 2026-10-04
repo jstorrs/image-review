@@ -20,7 +20,6 @@ import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import cast, get_args
 from urllib.parse import parse_qs, urlsplit
 
 from cryptography import x509
@@ -36,7 +35,7 @@ from .connection import (
     package_version,
     parse_reviewer,
 )
-from .status import Key, MarkMode, Verdict
+from .status import MARK_MODES, VERDICTS, Key, MarkMode, Verdict, parse_choice
 from .store import ReviewStore
 
 log = logging.getLogger(__name__)
@@ -109,19 +108,20 @@ def parse_mark(body: bytes, known_keys: frozenset[Key]) -> MarkRequest:
         raise BadRequest("keys must be a non-empty list of strings")
     if not all(k in known_keys for k in keys):
         raise BadRequest("unknown key")
-    if status not in get_args(Verdict):
+    verdict = parse_choice(status, VERDICTS)
+    if verdict is None:
         raise BadRequest("status must be CLEAN or DIRTY")
     pass_number = _pass_field(pass_number)
     reviewer = _reviewer_field(reviewer)
-    if mode not in get_args(MarkMode):
+    mark_mode = parse_choice(mode, MARK_MODES)
+    if mark_mode is None:
         raise BadRequest("mode must be single or grid")
-    # The membership checks above guarantee these are valid Literal members; get_args() cannot narrow.
     return MarkRequest(
         keys=[Key(k) for k in keys],
-        status=cast(Verdict, status),
+        status=verdict,
         pass_number=pass_number,
         reviewer=reviewer,
-        mode=cast(MarkMode, mode),
+        mode=mark_mode,
     )
 
 
