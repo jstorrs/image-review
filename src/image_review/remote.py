@@ -87,13 +87,19 @@ def parse_manifest(data: bytes) -> list[ManifestRow]:
     if not isinstance(payload, list):
         raise RemoteError("malformed manifest from server")
     rows = []
+    seen: set[str] = set()
     for entry in payload:
+        # Like load_manifest: no empty fields (an empty batch would read as "all batches") and no repeated keys.
         if (
             not isinstance(entry, dict)
             or not isinstance(entry.get("key"), str)
             or not isinstance(entry.get("batch"), str)
+            or not entry["key"]
+            or not entry["batch"]
+            or entry["key"] in seen
         ):
             raise RemoteError("malformed manifest from server")
+        seen.add(entry["key"])
         rows.append(ManifestRow(key=Key(entry["key"]), batch=entry["batch"]))
     return rows
 
