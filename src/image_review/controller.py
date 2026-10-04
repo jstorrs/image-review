@@ -116,17 +116,21 @@ class GridItem:
 ReviewItem = SingleItem | GridItem
 
 
-def next_index(n: int, cursor: int, direction: int, *, is_todo: Callable[[int], bool] | None, wrap: bool) -> int | None:
-    """Index of the next item from `cursor` (-1: none shown yet) in `direction` (+1 or -1) that
-    `is_todo` accepts (None: any item), or None when there is none.
+def next_index(
+    n: int, cursor: int | None, direction: int, *, is_todo: Callable[[int], bool] | None, wrap: bool
+) -> int | None:
+    """Index of the next item from `cursor` (None: none shown yet) in `direction` (+1 or -1) that
+    `is_todo` accepts (None: any item), or None when there is none. From None the search covers the
+    whole list: 0 to n - 1 going forward, n - 1 to 0 going back.
 
-    Without `wrap` the search stops at the end of the list (index 0 going forward, n - 1 going
-    back), except from cursor -1. With `wrap` it goes round once, back to the cursor itself."""
-    boundary = 0 if direction == 1 else n - 1
+    Without `wrap` the search stops at the end of the list. With `wrap` it goes round once, back
+    to the cursor itself."""
+    start = cursor if cursor is not None else (-1 if direction == 1 else n)
     for offset in range(1, n + 1):
-        idx = (cursor + direction * offset) % n
-        if not wrap and idx == boundary and cursor != -1:
+        pos = start + direction * offset
+        if not wrap and not 0 <= pos < n:
             return None
+        idx = pos % n
         if is_todo is None or is_todo(idx):
             return idx
     return None
@@ -138,7 +142,7 @@ def next_batch(batches: list[str], current: str | None, has_rows: Callable[[str]
 
     Without `wrap` the search stops after the last batch. With `wrap` it goes round once, back to
     `current` itself, so todo images left behind in earlier batches (or skipped in this one) are found."""
-    cursor = batches.index(current) if current in batches else -1
+    cursor = batches.index(current) if current in batches else None
     idx = next_index(len(batches), cursor, 1, is_todo=lambda i: has_rows(batches[i]), wrap=wrap)
     return None if idx is None else batches[idx]
 
@@ -177,7 +181,7 @@ class ReviewSession:
         self._statuses = store.statuses(self.pass_number)
 
         self.autoplay = False
-        self._cursor = -1
+        self._cursor: int | None = None  # None: nothing shown yet
         self._ui_state = UIState.REVIEWING
         self._shown_at: int | None = None  # ticks when the current item was first painted
         self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
@@ -361,7 +365,7 @@ class ReviewSession:
         Without `refetch_statuses` the snapshot the caller just fetched is used."""
         self._stop_timers()
         self.mode = new_mode
-        self._cursor = -1
+        self._cursor = None
         self._undoable = 0  # z only undoes marks it can show; the old mode's items are gone
         self._shown_at = None
         try:
@@ -459,10 +463,10 @@ class ReviewSession:
     def _todo_count(self) -> int:
         return sum(1 for item in self._items if self._is_todo(item))
 
-    def _seek(self, start: int, direction: int, *, todo_only: bool, wrap: bool) -> bool:
+    def _seek(self, start: int | None, direction: int, *, todo_only: bool, wrap: bool) -> bool:
         """Show the next item from `start` in `direction`, among the todo items if `todo_only`.
-        Start at -1 going forward, or at len(items) going back with `wrap`, to search the whole
-        list. Returns False, leaving the cursor alone, when there is none."""
+        Start at None to search the whole list. Returns False, leaving the cursor alone, when
+        there is none."""
         idx = next_index(
             len(self._items),
             start,
@@ -485,6 +489,7 @@ class ReviewSession:
         self._advance_pending = False  # the advance belonged to the item being replaced
         if not self._items:
             return
+        assert self._cursor is not None  # every caller sets the cursor first
         item = self._items[self._cursor]
 
         match item:
@@ -542,8 +547,9 @@ class ReviewSession:
         self._navigate(-1)
 
     def _mark(self, status: Verdict):
-        if not self._items or self._cursor < 0:
+        if not self._items:
             return
+        assert self._cursor is not None  # every caller sets the cursor first
         item = self._items[self._cursor]
         if status == "CLEAN" and not self._unloadable.isdisjoint(item.keys):
             log.warning("%s: %s", UNLOADABLE_CLEAN, ", ".join(k for k in item.keys if k in self._unloadable))
@@ -610,7 +616,7 @@ class ReviewSession:
     def _resume(self):
         """Leave the splash or display-select screen for the current image."""
         self._ui_state = UIState.REVIEWING
-        if self._cursor == -1:
+        if self._cursor is None:
             self.next_image()
         else:
             self._show_current()
@@ -657,8 +663,7 @@ class ReviewSession:
             direction = -1
         if direction is not None and self._items:  # no items: keep the message (e.g. lost connection)
             self._ui_state = UIState.REVIEWING
-            start = -1 if direction == 1 else len(self._items)
-            if not self._seek(start, direction, todo_only=self._todo_only, wrap=True):
+            if not self._seek(None, direction, todo_only=self._todo_only, wrap=True):
                 self._show_end(self._no_todo_message())
         elif key == pg.K_z:
             self._undo()
@@ -801,7 +806,7 @@ class ReviewSession:
             return  # nothing to rebuild
         self._stop_timers()
         self._undoable = 0  # a repack drops grids marked DIRTY, so z could no longer show what it undoes
-        current = self._items[self._cursor].keys[0] if self._cursor >= 0 else None
+        current = self._items[self._cursor].keys[0] if self._cursor is not None else None
         try:
             self._build_items()
         except StoreUnavailable as exc:

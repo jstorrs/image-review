@@ -247,7 +247,7 @@ class TestSession(SessionTestCase):
         before = s._todo_count
         s._mark(status)
         self.assertEqual(s._todo_count, before - 1)
-        s._cursor = -1
+        s._cursor = None
         self.assertTrue(s.next_todo())
         self.assertNotEqual(s._items[s._cursor].keys, marked)
 
@@ -274,7 +274,7 @@ class TestSession(SessionTestCase):
             s._cursor = i
             s._mark("CLEAN")
         self.assertEqual(s._todo_count, 0)
-        s._cursor = -1
+        s._cursor = None
         self.assertFalse(s.next_todo())
 
     def check_undo_makes_item_todo_again(self, status_filter: str) -> None:
@@ -285,7 +285,7 @@ class TestSession(SessionTestCase):
         self.assertEqual(s._todo_count, before - 1)
         s._undo()
         self.assertEqual(s._todo_count, before)
-        s._cursor = -1
+        s._cursor = None
         self.assertTrue(s.next_todo())
         self.assertEqual(s._cursor, 0)
 
@@ -836,7 +836,7 @@ class TestGamepad(EventLoopTestCase):
         s._show_splash()
         for b in (pg.CONTROLLER_BUTTON_B, pg.CONTROLLER_BUTTON_Y, pg.CONTROLLER_BUTTON_DPAD_RIGHT):
             self.assertTrue(s.handle_events([button(b)]))
-        self.assertEqual((s._ui_state, s._cursor), (UIState.SPLASH, -1))
+        self.assertEqual((s._ui_state, s._cursor), (UIState.SPLASH, None))
         self.mark.assert_not_called()
 
     def test_a_continues_from_splash(self):
@@ -1704,17 +1704,33 @@ class TestNextIndex(unittest.TestCase):
         for direction in (1, -1):
             for wrap in (False, True):
                 with self.subTest(direction=direction, wrap=wrap):
-                    self.assertIsNone(next_index(0, -1, direction, is_todo=None, wrap=wrap))
-                    self.assertIsNone(next_index(0, -1, direction, is_todo=lambda i: True, wrap=wrap))
+                    self.assertIsNone(next_index(0, None, direction, is_todo=None, wrap=wrap))
+                    self.assertIsNone(next_index(0, None, direction, is_todo=lambda i: True, wrap=wrap))
 
-    def test_cursor_before_first_item(self):
-        self.assertEqual(next_index(4, -1, 1, is_todo=None, wrap=False), 0)
-        self.assertEqual(next_index(4, -1, 1, is_todo={2}.__contains__, wrap=False), 2)
-        self.assertEqual(next_index(4, -1, 1, is_todo={3}.__contains__, wrap=False), 3)
-        self.assertEqual(
-            next_index(4, -1, -1, is_todo=None, wrap=False), 2
-        )  # the inherited formula's result; unreachable in production
-        self.assertEqual(next_index(1, -1, -1, is_todo=None, wrap=False), 0)
+    def test_nothing_shown_yet(self):
+        self.assertEqual(next_index(4, None, 1, is_todo=None, wrap=False), 0)
+        self.assertEqual(next_index(4, None, 1, is_todo={2}.__contains__, wrap=False), 2)
+        self.assertEqual(next_index(4, None, 1, is_todo={3}.__contains__, wrap=False), 3)
+        self.assertEqual(next_index(4, None, -1, is_todo=None, wrap=False), 3)
+        self.assertEqual(next_index(4, None, -1, is_todo={1, 2}.__contains__, wrap=False), 2)
+        self.assertEqual(next_index(4, None, -1, is_todo={0}.__contains__, wrap=False), 0)
+        self.assertEqual(next_index(1, None, -1, is_todo=None, wrap=False), 0)
+
+    def visit_order(self, n: int, cursor: int | None, direction: int, *, wrap: bool) -> list[int]:
+        visited: list[int] = []
+
+        def is_todo(i: int) -> bool:
+            visited.append(i)
+            return False
+
+        self.assertIsNone(next_index(n, cursor, direction, is_todo=is_todo, wrap=wrap))
+        return visited
+
+    def test_nothing_shown_yet_visits_the_whole_list_in_order(self):
+        for direction, expected in ((1, [0, 1, 2, 3, 4]), (-1, [4, 3, 2, 1, 0])):
+            for wrap in (False, True):
+                with self.subTest(direction=direction, wrap=wrap):
+                    self.assertEqual(self.visit_order(5, None, direction, wrap=wrap), expected)
 
 
 class TestNextBatch(unittest.TestCase):
