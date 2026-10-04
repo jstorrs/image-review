@@ -46,7 +46,7 @@ from .connection import package_version
 from .export import ICON_SUFFIX, has_unsafe_char
 from .review_db import format_tsv
 from .status import ImageId
-from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind, SkippedRow
+from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind, SkippedRow, skipped_counts
 
 log = logging.getLogger(__name__)
 
@@ -1010,7 +1010,7 @@ def provenance(
 ) -> dict[str, Any]:
     """The content of preprocess.json: how this work dir was made. Sources are absolute, resolved paths, escaped like
     a bad image_id (`_escape_name`)."""
-    failed = sum(s.kind == "failed" for s in result.skipped)
+    skipped = skipped_counts(result.skipped)
     return {
         "tool_version": tool_version,
         "created": created.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1031,8 +1031,8 @@ def provenance(
         "counts": {
             "inputs": result.found,
             "written": result.written,
-            "skipped_failed": failed,
-            "skipped_ignored": len(result.skipped) - failed,
+            "skipped_failed": skipped.failed,
+            "skipped_ignored": skipped.ignored,
         },
     }
 

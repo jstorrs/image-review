@@ -20,7 +20,7 @@ from .export import ExportRow, ExportStatus, format_allowlist, format_report, sp
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
 from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on
 from .status import MarkMode, Rotation, Status
-from .store import LocalStore, ReviewStore, SkippedCounts, StatusFilter, batch_summary, summary
+from .store import LocalStore, ReviewStore, SkippedCounts, StatusFilter, batch_summary, skipped_counts, summary
 
 if TYPE_CHECKING:
     from .remote import RemoteError, RemoteStore
@@ -416,10 +416,11 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, j
             )
     except (WorkDirExists, WorkerCrashed) as exc:
         raise click.ClickException(str(exc)) from exc
-    failed = sum(1 for s in result.skipped if s.kind == "failed")
+    skipped = skipped_counts(result.skipped)
+    failed = skipped.failed
     click.echo(
         f"Found {result.found} inputs: wrote {result.written} images in {result.batches} batches; "
-        f"{len(result.skipped)} skipped ({failed} failed, {len(result.skipped) - failed} ignored; see {result.skipped_path})"
+        f"{len(result.skipped)} skipped ({failed} failed, {skipped.ignored} ignored; see {result.skipped_path})"
     )
     if access == "group":
         click.echo(_shared_with(Path(work_dir)))

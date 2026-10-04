@@ -196,12 +196,16 @@ def load_skipped(work_dir: Path) -> list[SkippedRow] | None:
     return rows
 
 
+def skipped_counts(rows: Iterable[SkippedRow]) -> SkippedCounts:
+    """The one place the failed/ignored split is derived, so every report of it agrees."""
+    kinds = [r.kind for r in rows]
+    failed = kinds.count("failed")
+    return SkippedCounts(failed=failed, ignored=len(kinds) - failed)
+
+
 def load_skipped_counts(work_dir: Path) -> SkippedCounts | None:
     rows = load_skipped(work_dir)
-    if rows is None:
-        return None
-    failed = sum(r.kind == "failed" for r in rows)
-    return SkippedCounts(failed=failed, ignored=len(rows) - failed)
+    return None if rows is None else skipped_counts(rows)
 
 
 class LocalStore:

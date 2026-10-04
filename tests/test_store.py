@@ -23,14 +23,17 @@ from image_review.connection import package_version
 from image_review.controller import ReviewSession
 from image_review.lock import LOCK_NAME
 from image_review.review_db import HEADER, Decision, ReviewDB
+from image_review.status import ImageId
 from image_review.store import (
     LocalStore,
     ManifestEntry,
     ManifestRow,
     SkippedCounts,
+    SkippedRow,
     batch_summary,
     filter_rows,
     load_manifest,
+    skipped_counts,
     summary,
 )
 from image_review.util import load_surface
@@ -105,6 +108,11 @@ class TestSkipped(StoreTestCase):
     def test_counts_kinds(self):
         self.write('image_id\tkind\treason\na\tfailed\tx\nb\tignored\ty\nc\tfailed\t"multi\nline"\n')
         self.assertEqual(self.store.skipped(), SkippedCounts(failed=2, ignored=1))
+
+    def test_skipped_counts_of_rows(self):
+        rows = [SkippedRow(ImageId("a"), "failed", "x"), SkippedRow(ImageId("b"), "ignored", "y")]
+        self.assertEqual(skipped_counts(rows + rows[:1]), SkippedCounts(failed=2, ignored=1))
+        self.assertEqual(skipped_counts([]), SkippedCounts(0, 0))
 
     def test_malformed_names_file_and_line(self):
         cases = {
