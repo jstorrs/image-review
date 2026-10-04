@@ -1,5 +1,6 @@
 import io
 import math
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -47,6 +48,31 @@ def scale_percent(scale: float) -> int:
     return math.floor(scale * 100 + 1e-9)
 
 
+@dataclass(frozen=True)
+class Fit:
+    """Where and how large an image is drawn: its scaled size, the top-left offset that centres it in
+    the content area, and displayed size / source size (above 1.0 when a small image is enlarged)."""
+
+    size: tuple[int, int]
+    offset: tuple[int, int]
+    scale: float
+
+
+def fit_image(image_size: tuple[int, int], screen_size: tuple[int, int], border: int) -> Fit | None:
+    """Fit an image into the screen above a `border`-high status bar, or None when no pixel of it
+    would show (no room above the bar, an empty image, or one too thin to keep a pixel)."""
+    screen_w, screen_h = screen_size
+    content_height = screen_h - border
+    iw, ih = image_size
+    if content_height <= 0 or iw == 0 or ih == 0:
+        return None
+    scale = min(screen_w / iw, content_height / ih)
+    size = (round(iw * scale), round(ih * scale))
+    if 0 in size:
+        return None
+    return Fit(size, ((screen_w - size[0]) // 2, (content_height - size[1]) // 2), scale)
+
+
 class ImageViewer:
     border: int = 50
     _status: Status
@@ -70,9 +96,7 @@ class ImageViewer:
         self._status = "UNREVIEWED"
         self._info = ""
         self._name = ""
-        self._content: pg.Surface | None = None
-        self._offset = (0, 0)
-        self._scale = 1.0  # displayed size / source size of the current image
+        self._fitted: tuple[pg.Surface, Fit] | None = None  # the scaled image and where it goes; None: nothing to show
         self._source_scale = 1.0  # the image's own scale vs. its source: a grid shrinks the images in it
         self._splash_font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSansMono.ttf"), 24)
         self._splash_font.fgcolor = pg.Color(200, 200, 200)
@@ -145,30 +169,15 @@ class ImageViewer:
 
     def resize(self) -> None:
         self._dirty = True
-        self._content = None  # an early return paints no image rather than the previous one's pixels
-        if self._image is None:
-            return
-        screen_w, screen_h = self.screen.get_size()
-        content_height = screen_h - self.border
-        if content_height <= 0:
-            return
-        iw, ih = self._image.get_size()
-        if iw == 0 or ih == 0:
-            return
-        scale = min(screen_w / iw, content_height / ih)
-        self._scale = scale  # above 1.0 when a small image is enlarged to fit
-        scaled_size = (round(iw * scale), round(ih * scale))
-        if 0 in scaled_size:  # too thin to show a pixel
-            return
-        self._content = pg.transform.smoothscale(self._image, scaled_size)
-        cx, cy = self._content.get_size()
-        self._offset = ((screen_w - cx) // 2, (content_height - cy) // 2)
+        image = self._image
+        fit = None if image is None else fit_image(image.get_size(), self.screen.get_size(), self.border)
+        self._fitted = None if image is None or fit is None else (pg.transform.smoothscale(image, fit.size), fit)
 
     @property
     def image_shown(self) -> bool:
         """Whether refresh() paints visible image pixels: False when none is set, the window is too
         short to fit it, or it scales to zero size."""
-        return self._content is not None
+        return self._fitted is not None
 
     def refresh_if_dirty(self) -> bool:
         """Repaint if a setter or resize changed the frame since the last paint. Returns True if it did."""
@@ -196,17 +205,18 @@ class ImageViewer:
             left_text += f" | {self._joystick_count} gamepads"
         self._bar_text(left_text, "left", inset=status_inset)
         name_inset = 0
-        if self._content is not None:
+        if self._fitted is not None:
             # Red below 100%: small text may be lost
-            scale = self._scale * self._source_scale
+            scale = self._fitted[1].scale * self._source_scale
             percent = f"{scale_percent(scale)}%"
             color = self.SCALE_WARNING_COLOR if scale < 1.0 else None
             self._bar_text(percent, "right", color=color)
             name_inset = self.font.get_rect(percent).width + self.font.get_rect(percent).height
         self._bar_text(self._name, "right", inset=name_inset)
         self._bar_text(self._info, "center")
-        if self._content is not None:
-            self.screen.blit(self._content, self._offset)
+        if self._fitted is not None:
+            content, fit = self._fitted
+            self.screen.blit(content, fit.offset)
         pg.display.flip()
 
     def _bar_text(

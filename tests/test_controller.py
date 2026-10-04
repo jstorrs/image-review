@@ -35,7 +35,7 @@ from image_review.store import (
     load_manifest,
 )
 from image_review.util import load_surface
-from image_review.viewer import ImageViewer, scale_percent
+from image_review.viewer import Fit, ImageViewer, fit_image, scale_percent
 from tests.fixtures import StoreTestCase, _jpeg_bytes, dropping_packer, make_work_dir, mark, write_manifest
 
 
@@ -917,7 +917,6 @@ class TestScaleAndResize(EventLoopTestCase):
         # Content area is 800 x (600 - 50 border): scale = min(800/2000, 550/2000) = 0.275 = 27.5%,
         # truncated to 27% (the plan's figure)
         viewer.set_image(pg.Surface((2000, 2000)), "big", "UNREVIEWED", "info")
-        self.assertEqual(viewer._scale, 0.275)
         texts = self.bar_texts(viewer)
         self.assertEqual(texts["27%"], ("right", ImageViewer.SCALE_WARNING_COLOR))
 
@@ -927,7 +926,6 @@ class TestScaleAndResize(EventLoopTestCase):
         viewer.set_image(pg.Surface((800, 550)), "exact", "UNREVIEWED", "info")
         self.assertEqual(self.bar_texts(viewer)["100%"], ("right", None))
         viewer.set_image(pg.Surface((400, 275)), "small", "UNREVIEWED", "info")  # resize enlarges it
-        self.assertEqual(viewer._scale, 2.0)
         self.assertEqual(self.bar_texts(viewer)["200%"], ("right", None))
 
     def test_too_short_window_drops_the_previous_image(self):
@@ -937,7 +935,7 @@ class TestScaleAndResize(EventLoopTestCase):
         self.assertTrue(viewer.image_shown)
         pg.display.set_mode((800, 40))  # no room above the 50px status bar
         viewer.set_image(pg.Surface((800, 550)), "b", "UNREVIEWED", "info")
-        self.assertIsNone(viewer._content)  # never a's pixels under b's name
+        self.assertIsNone(viewer._fitted)  # never a's pixels under b's name
         self.assertFalse(viewer.image_shown)
         self.assertNotIn("100%", self.bar_texts(viewer))  # the bars alone
 
@@ -1051,7 +1049,7 @@ class TestScaleAndResize(EventLoopTestCase):
         w4, h3 = fit_size(4000, 3000, w, h, True)
         self.assertEqual(item.source_scale, min(w4 / 4000, h3 / 3000))
         self.assertLess(item.source_scale, 1.0)
-        percent = f"{scale_percent(viewer._scale * item.source_scale)}%"
+        percent = f"{scale_percent(viewer._fitted[1].scale * item.source_scale)}%"
         self.assertEqual(self.bar_texts(viewer)[percent], ("right", ImageViewer.SCALE_WARNING_COLOR))
         self.assertNotEqual(percent, "100%")
 
@@ -1188,6 +1186,26 @@ class TestScaleAndResize(EventLoopTestCase):
         self.now += MIN_DWELL_MS
         s.handle_events(pg.event.get())
         self.mark.assert_not_called()
+
+
+class TestFitImage(unittest.TestCase):
+    def test_shrinks_to_the_content_area_and_centres(self):
+        # Content area 800 x 550: scale = min(800/2000, 550/2000) = 0.275, a 550x550 image
+        self.assertEqual(fit_image((2000, 2000), (800, 600), 50), Fit((550, 550), (125, 0), 0.275))
+
+    def test_enlarges_a_small_image(self):
+        self.assertEqual(fit_image((400, 275), (800, 600), 50), Fit((800, 550), (0, 0), 2.0))
+
+    def test_no_room_above_the_border_is_none(self):
+        self.assertIsNone(fit_image((800, 550), (800, 50), 50))
+        self.assertIsNone(fit_image((800, 550), (800, 40), 50))
+
+    def test_empty_image_is_none(self):
+        self.assertIsNone(fit_image((0, 100), (800, 600), 50))
+        self.assertIsNone(fit_image((100, 0), (800, 600), 50))
+
+    def test_too_thin_to_keep_a_pixel_is_none(self):
+        self.assertIsNone(fit_image((1000, 3000), (800, 51), 50))  # scales to 0x1
 
 
 class TestNextBatchKey(EventLoopTestCase):

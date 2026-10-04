@@ -1434,9 +1434,10 @@ Color encodes review status (green=CLEAN, red=DIRTY, gray=UNREVIEWED,
 orange=FLAGGED).
 The image name is rendered right-aligned, position info is centered.
 
-**Scale indicator**: `resize()` stores the factor it applied (displayed size /
-source size). It never caps the factor, so an image smaller than the content
-area is enlarged and shows more than 100%. The status bar shows it as an
+**Scale indicator**: `resize()` applies the pure `fit_image`, which returns the
+scaled size, offset and factor (displayed size / source size) as one `Fit`, or
+none when no pixel would show. It never caps the factor, so an image smaller
+than the content area is enlarged and shows more than 100%. The status bar shows it as an
 integer percent (truncated, so a scale just under 1.0 never reads "100%") at the
 right edge, with the image name to its left. Below 100% (any scale under 1.0)
 the percent is drawn in red (`SCALE_WARNING_COLOR`), because small text such as
@@ -1459,8 +1460,8 @@ uses DejaVu Sans Mono 24pt.
 | `set_image(surface, name, status, info, source_scale=1.0)` | Set new image; triggers resize/scale |
 | `set_status(status)` | Update status bar color without changing image |
 | `set_info(info)`, `set_todo_only(enabled)`, `set_joystick_count(count)` | Update the centered text, the todo-only and the gamepad indicators |
-| `resize()` | Recalculate scaling (and the scale percent) for current screen size |
-| `image_shown -> bool` | Property: whether `refresh()` paints visible image pixels. False when none is set, or it has no visible pixels (the window is too short to fit it, or it scales to zero size); `resize` drops the previous scaled image first, so the frame never shows one image's pixels under another's name |
+| `resize()` | Apply `fit_image` for the current screen size: scaled image, offset and scale percent are replaced together |
+| `image_shown -> bool` | Property: whether `refresh()` paints visible image pixels. False when none is set, or it has no visible pixels (the window is too short to fit it, or it scales to zero size); `resize` replaces the scaled image with the new fit (or none), so the frame never shows one image's pixels under another's name |
 | `refresh_if_dirty() -> bool` | `refresh()` if the frame is dirty, clear the flag, return True; else False. Every method above, plus `switch_display` (through `resize`) and a new viewer, marks the frame dirty; `show_message` and `show_splash` do not |
 | `refresh()` | Render frame: background, status bar, text, scaled image |
 | `show_splash(lines, footer)` | Render centered splash/help overlay |
