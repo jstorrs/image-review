@@ -1563,11 +1563,11 @@ class TestUnloadable(EventLoopTestCase):
 
     def test_pack_into_grids_reports_unloadable_key(self):
         rows = [row for row in self.store.manifest() if row.batch == "batch_001"]
-        grids, unloadable = pack_into_grids(rows, self.store, 400, 300)
+        grids, unloadable = pack_into_grids([row.key for row in rows], self.store, 400, 300)
         self.assertEqual(list(unloadable), [CORRUPT])
         self.assertEqual([gs.keys for gs in grids], [("batch_001/b.jpg",)])
         missing = [*rows, ManifestRow(key="batch_009/missing.jpg", batch="batch_009")]
-        _, unloadable = pack_into_grids(missing, self.store, 400, 300)
+        _, unloadable = pack_into_grids([row.key for row in missing], self.store, 400, 300)
         self.assertEqual(list(unloadable), [CORRUPT, "batch_009/missing.jpg"])
 
 
@@ -1635,7 +1635,7 @@ class TestJpegHash(EventLoopTestCase):
     def test_flipped_byte_is_left_out_of_grids(self):
         self.flip_one_byte()
         rows = [row for row in self.store.manifest() if row.batch == "batch_001"]
-        grids, left_out = pack_into_grids(rows, self.store, 400, 300)
+        grids, left_out = pack_into_grids([row.key for row in rows], self.store, 400, 300)
         self.assertEqual(left_out, [CORRUPT])
         self.assertEqual([gs.keys for gs in grids], [("batch_001/b.jpg",)])
 

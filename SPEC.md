@@ -1083,7 +1083,8 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
   filter including `all`. A grid mark applies to all its images, so one
   keypress must never clear an image already judged DIRTY (this pass) or
   FLAGGED (DIRTY in another pass); those are reviewed in single mode
-- Pass the rows and the store to `pack_into_grids()` with the screen dimensions.
+- Pass the keys of those rows (the cache key's keys) and the store to
+  `pack_into_grids()` with the screen dimensions.
   The session caches the last result (only one), keyed by the review rows'
   keys in order, the grid size and rotation policy; a rebuild with the same
   key (e.g. `s` then `m` with nothing marked) reuses it instead of packing
@@ -1372,10 +1373,10 @@ only continues (A, as Space) or quits (Start).
 | `keys` | `tuple[str, ...]` | Keys (preprocessed paths) of the images drawn in this grid |
 | `min_scale` | `float` | Smallest `fit_size` / header-size ratio among the images drawn (1.0 if none was shrunk) |
 
-### `pack_into_grids(items, store, grid_w, grid_h, *, rotation="auto", on_progress=None) -> tuple[list[GridSpec], list[str]]`
+### `pack_into_grids(keys, store, grid_w, grid_h, *, rotation="auto", on_progress=None) -> tuple[list[GridSpec], list[Key]]`
 
-`items` is a list of `ManifestRow`. Returns the grids and the keys left out of
-every grid (missing, unreadable header, failed decode, or left unpacked), in input order. A
+`keys` is a `Sequence[Key]`, the images to pack. Returns the grids and the keys
+left out of every grid (missing, unreadable header, failed decode, or left unpacked), in input order. A
 grid holds only keys whose pixels it shows. What to do with the left-out keys is
 left to the caller. At most one bin's decoded images are alive at a time.
 

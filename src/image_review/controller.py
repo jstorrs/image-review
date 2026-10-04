@@ -303,14 +303,14 @@ class ReviewSession:
     def _grid_items(self) -> list[ReviewItem]:
         grid_w, grid_h = self._grid_size()
 
-        review_rows = self._review_rows(self.batch)
-        # A mark that changes which rows are eligible changes the key, so a cached grid never holds
-        # a key the current snapshot excludes (e.g. one now DIRTY)
-        cache_key = GridCacheKey(tuple(row.key for row in review_rows), (grid_w, grid_h), self.rotation)
+        # Packing exactly the cache key's keys means a cached grid never holds a key the current
+        # snapshot excludes (e.g. one now DIRTY): a mark that changes the eligible rows changes the key
+        review_keys = tuple(row.key for row in self._review_rows(self.batch))
+        cache_key = GridCacheKey(review_keys, (grid_w, grid_h), self.rotation)
         if self._grid_cache is None or self._grid_cache[0] != cache_key:
             self._grid_cache = None  # hold at most one result, and none if packing fails
             grid_specs, left_out = pack_into_grids(
-                review_rows, self.store, grid_w, grid_h, rotation=self.rotation, on_progress=self._show_grid_progress
+                cache_key.keys, self.store, grid_w, grid_h, rotation=self.rotation, on_progress=self._show_grid_progress
             )
             self._grid_cache = (cache_key, grid_specs, left_out)
         _, grid_specs, left_out = self._grid_cache

@@ -13,9 +13,14 @@ from PIL import Image
 
 from image_review import grid_packer as grid_packer_module
 from image_review.grid_packer import PlacedRect, fit_size, pack_into_grids
-from image_review.store import LocalStore
+from image_review.status import Key
+from image_review.store import LocalStore, ManifestRow
 from image_review.util import load_surface
 from tests.fixtures import dropping_packer, temp_dir
+
+
+def keys_of(rows: list[ManifestRow]) -> list[Key]:
+    return [row.key for row in rows]
 
 
 class TestPackShrinksOversize(unittest.TestCase):
@@ -49,7 +54,7 @@ class TestPackShrinksOversize(unittest.TestCase):
     def test_nothing_larger_than_the_bin_is_kept(self):
         calls: list[tuple[int, int]] = []
         grids, unloadable = pack_into_grids(
-            self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
+            keys_of(self.store.manifest()), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
         )
         self.assertEqual(unloadable, [])
         self.assertEqual(sorted(k for gs in grids for k in gs.keys), ["big/a.jpg", "big/b.jpg", "big/c.jpg"])
@@ -66,10 +71,10 @@ class TestPackShrinksOversize(unittest.TestCase):
         path.write_bytes(data[: scan + (len(data) - scan) // 2])
         with Image.open(path) as im:  # the header still reads: the failure comes at decode time
             self.assertEqual(im.size, (100, 60))
-        grids, unloadable = pack_into_grids(self.store.manifest()[1:], self.store, 1920, 1030)
+        grids, unloadable = pack_into_grids(keys_of(self.store.manifest()[1:]), self.store, 1920, 1030)
         self.assertEqual(unloadable, ["big/b.jpg"])
         self.assertEqual([gs.keys for gs in grids], [("big/c.jpg",)])
-        grids, unloadable = pack_into_grids(self.store.manifest()[1:2], self.store, 1920, 1030)
+        grids, unloadable = pack_into_grids(keys_of(self.store.manifest()[1:2]), self.store, 1920, 1030)
         self.assertEqual((grids, unloadable), ([], ["big/b.jpg"]))  # a bin left with no keys is dropped
 
     def test_unreadable_header_is_unloadable(self):
@@ -80,7 +85,7 @@ class TestPackShrinksOversize(unittest.TestCase):
             self.assertLogs("image_review.grid_packer", "WARNING") as logs,
         ):
             grids, unloadable = pack_into_grids(
-                self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
+                keys_of(self.store.manifest()), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
             )
         self.assertEqual(unloadable, ["big/b.jpg"])
         self.assertNotIn("big/b.jpg", {k for gs in grids for k in gs.keys})
@@ -103,7 +108,7 @@ class TestPackShrinksOversize(unittest.TestCase):
             return surface
 
         with mock.patch.object(grid_packer_module, "load_surface", counting_load):
-            grids, unloadable = pack_into_grids(store.manifest(), store, 400, 300)
+            grids, unloadable = pack_into_grids(keys_of(store.manifest()), store, 400, 300)
         self.assertEqual(unloadable, [])
         self.assertEqual(sorted(gs.keys[0] for gs in grids), names)
         self.assertEqual([len(gs.keys) for gs in grids], [1] * 6)
@@ -123,7 +128,7 @@ class TestPackShrinksOversize(unittest.TestCase):
         for rot in (True, False):
             with self.subTest(allow_rotation=rot):
                 grids, left_out = pack_into_grids(
-                    store.manifest(), store, 1920, 1030, rotation="always" if rot else "never"
+                    keys_of(store.manifest()), store, 1920, 1030, rotation="always" if rot else "never"
                 )
                 self.assertEqual(left_out, [])
                 self.assertEqual(sorted(k for gs in grids for k in gs.keys), sorted(images))
@@ -146,7 +151,7 @@ class TestPackShrinksOversize(unittest.TestCase):
             self.assertLogs("image_review.grid_packer", "WARNING") as logs,
         ):
             grids, left_out = pack_into_grids(
-                self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
+                keys_of(self.store.manifest()), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
             )
         self.assertEqual(left_out, ["big/a.jpg"])
         self.assertNotIn("big/a.jpg", {k for gs in grids for k in gs.keys})
@@ -157,7 +162,7 @@ class TestPackShrinksOversize(unittest.TestCase):
         calls: list[tuple[int, int]] = []
         with dropping_packer(1), self.assertLogs("image_review.grid_packer", "WARNING") as logs:
             grids, left_out = pack_into_grids(
-                self.store.manifest(), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
+                keys_of(self.store.manifest()), self.store, 1920, 1030, on_progress=lambda i, n: calls.append((i, n))
             )
         self.assertEqual(left_out, ["big/b.jpg"])
         self.assertEqual(sorted(k for gs in grids for k in gs.keys), ["big/a.jpg", "big/c.jpg"])
@@ -174,7 +179,7 @@ class TestPackShrinksOversize(unittest.TestCase):
             return real(rects, *args, **kwargs)
 
         with mock.patch.object(grid_packer_module, "_composite_bin", record):
-            grids, left_out = pack_into_grids(store.manifest(), store, 1920, 1030, rotation=rotation)
+            grids, left_out = pack_into_grids(keys_of(store.manifest()), store, 1920, 1030, rotation=rotation)
         self.assertEqual(left_out, [])
         return placed, len(grids)
 

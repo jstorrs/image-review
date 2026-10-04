@@ -1,6 +1,6 @@
 import io
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -9,7 +9,7 @@ from PIL import Image
 from rectpack import newPacker
 
 from .status import Key, Rotation
-from .store import ManifestRow, ReviewStore
+from .store import ReviewStore
 from .util import load_surface
 
 log = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ def _pack(sizes: dict[int, tuple[int, int]], grid_w: int, grid_h: int, rotate: b
 
 def _composite_bin(
     placed: list[PlacedRect],
-    items: list[ManifestRow],
+    keys: Sequence[Key],
     blobs: dict[Key, bytes],
     sizes: dict[int, tuple[int, int]],
     grid_w: int,
@@ -77,11 +77,11 @@ def _composite_bin(
     failed to decode (their rectangles stay black)."""
     canvas = pg.Surface((grid_w, grid_h))
     canvas.fill((0, 0, 0))
-    keys: list[Key] = []
+    drawn: list[Key] = []
     min_scale = 1.0
     failed: list[int] = []
     for rect_id, x, y, w, h in placed:
-        key = items[rect_id].key
+        key = keys[rect_id]
         target = fit_size(*sizes[rect_id], grid_w, grid_h, rotated)
         try:
             surface = load_surface(blobs[key])
@@ -98,14 +98,14 @@ def _composite_bin(
             failed.append(rect_id)
         else:
             canvas.blit(surface, (x, y))
-            keys.append(key)
+            drawn.append(key)
             min_scale = min(min_scale, target[0] / sizes[rect_id][0], target[1] / sizes[rect_id][1])
         on_done()
-    return GridSpec(surface=canvas, keys=tuple(keys), min_scale=min_scale), failed
+    return GridSpec(surface=canvas, keys=tuple(drawn), min_scale=min_scale), failed
 
 
 def pack_into_grids(
-    items: list[ManifestRow],
+    keys: Sequence[Key],
     store: ReviewStore,
     grid_w: int,
     grid_h: int,
@@ -113,18 +113,17 @@ def pack_into_grids(
     rotation: Rotation = "auto",
     on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[GridSpec], list[Key]]:
-    """Pack review items into grid canvases sized for the current screen.
+    """Pack the images named by `keys` into grid canvases sized for the current screen.
 
-    Each item is a ManifestRow; image bytes are fetched via the store. Images are
-    packed at their fit_size, read from the image header, and decoded one bin at a
-    time while that bin is composited. `rotation` says whether images may be rotated 90 degrees:
+    Image bytes are fetched via the store. Images are packed at their fit_size, read from the image
+    header, and decoded one bin at a time while that bin is composited. `rotation` says whether images may be rotated 90 degrees:
     always, never, or (auto) only if that needs fewer grids. Returns the GridSpecs, each holding a
     composited pygame surface, and the keys left out of every grid (missing,
     unreadable header, failed decode, or left unpacked), in input order. A grid holds only keys
     whose pixels it shows. on_progress(i, n) is called as each of the n images is
     handled, ending with (n, n).
     """
-    n = len(items)
+    n = len(keys)
     done = 0
 
     def advance() -> None:
@@ -133,20 +132,20 @@ def pack_into_grids(
         if on_progress is not None:
             on_progress(done, n)
 
-    blobs = store.image_bytes_many([item.key for item in items])
+    blobs = store.image_bytes_many(list(keys))
 
     # Sizes from the headers only: no image is decoded yet
     sizes: dict[int, tuple[int, int]] = {}
     left_out: set[int] = set()
-    for idx, item in enumerate(items):
-        if item.key not in blobs:  # absent: the store already warned
+    for idx, key in enumerate(keys):
+        if key not in blobs:  # absent: the store already warned
             left_out.add(idx)
             advance()
             continue
         try:
-            w, h = _header_size(blobs[item.key])
+            w, h = _header_size(blobs[key])
         except Exception as exc:  # noqa: BLE001 - an unreadable header makes the image unloadable, not fatal
-            log.warning("cannot load %s: %s", item.key, exc)
+            log.warning("cannot load %s: %s", key, exc)
             left_out.add(idx)
             advance()
             continue
@@ -164,7 +163,7 @@ def pack_into_grids(
     # Composite one bin at a time, so at most one bin's decoded images are alive
     grids = []
     for bin_idx in sorted(bins):
-        grid, failed = _composite_bin(bins[bin_idx], items, blobs, sizes, grid_w, grid_h, rotated, advance)
+        grid, failed = _composite_bin(bins[bin_idx], keys, blobs, sizes, grid_w, grid_h, rotated, advance)
         left_out.update(failed)
         if grid.keys:
             grids.append(grid)
@@ -173,7 +172,7 @@ def pack_into_grids(
     # left to the caller (shown as a single image, loaded on display) rather than dropped
     placed = {rect.rect_id for rects in bins.values() for rect in rects}
     for idx in sizes.keys() - placed:
-        log.warning("%s was not packed into a grid", items[idx].key)
+        log.warning("%s was not packed into a grid", keys[idx])
         left_out.add(idx)
         advance()
 
@@ -187,4 +186,4 @@ def pack_into_grids(
         rotated,
         len(left_out),
     )
-    return grids, [items[idx].key for idx in sorted(left_out)]
+    return grids, [keys[idx] for idx in sorted(left_out)]
