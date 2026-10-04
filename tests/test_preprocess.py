@@ -1150,7 +1150,7 @@ class StagingTest(unittest.TestCase):
         self.assertTrue(result.skipped_path.exists())
 
     def test_interrupt_leaves_neither_work_dir_nor_staging(self):
-        real = preprocess_module._process
+        real = preprocess_module.render_and_encode
         calls = []
 
         def interrupt_on_second(*args, **kwargs):
@@ -1161,7 +1161,7 @@ class StagingTest(unittest.TestCase):
 
         with (
             quiet(),
-            mock.patch("image_review.preprocess._process", side_effect=interrupt_on_second),
+            mock.patch("image_review.preprocess.render_and_encode", side_effect=interrupt_on_second),
             self.assertRaises(KeyboardInterrupt),
         ):
             run_preprocess([self.src], self.work)
@@ -1813,27 +1813,27 @@ def _tree(work: Path) -> dict[str, bytes]:
     return {**files, "preprocess.json": json.dumps(record).encode()}
 
 
-def _exit_in_worker(kind, image_id, data, colormap):
+def _exit_in_worker(candidate, colormap):
     """A pool worker function that kills its process on the input named `crash.png`."""
-    if image_id.endswith("crash.png"):
+    if candidate.image_id.endswith("crash.png"):
         os._exit(1)
-    return render_and_encode(kind, image_id, data, colormap)
+    return render_and_encode(candidate, colormap)
 
 
-def _hang_in_worker(kind, image_id, data, colormap):
+def _hang_in_worker(candidate, colormap):
     """A pool worker function that marks that it started (beside the source directory), then hangs."""
-    path = Path(image_id)
+    path = Path(candidate.image_id)
     (path.parent.parent / f"started-{path.name}").touch()
     time.sleep(60)
-    return render_and_encode(kind, image_id, data, colormap)
+    return render_and_encode(candidate, colormap)
 
 
-def _probe_worker(kind, image_id, data, colormap):
+def _probe_worker(candidate, colormap):
     """A pool worker function reporting the worker's BLAS thread variables and SIGINT state as a skipped row."""
     state: dict[str, object] = {name: os.environ.get(name) for name in preprocess_module._BLAS_THREAD_VARS}
     state["sigint_ignored"] = signal.getsignal(signal.SIGINT) == signal.SIG_IGN
     state["sigint_blocked"] = signal.SIGINT in signal.pthread_sigmask(signal.SIG_BLOCK, [])
-    return [SkippedRow(image_id, "failed", json.dumps(state))]
+    return [SkippedRow(candidate.image_id, "failed", json.dumps(state))]
 
 
 def _start_large_result() -> None:
@@ -1850,19 +1850,19 @@ def _start_large_result() -> None:
     os.write(results._writer.fileno(), struct.pack("!i", 10_000_000) + bytes(1000))
 
 
-def _die_mid_send(kind, image_id, data, colormap):
+def _die_mid_send(candidate, colormap):
     """A pool worker function that dies part way through sending a large result (as the OOM killer would)."""
     _start_large_result()
     os._exit(1)
 
 
-def _hang_mid_send(kind, image_id, data, colormap):
+def _hang_mid_send(candidate, colormap):
     """A pool worker function that stalls part way through sending a large result, after marking that it did."""
     _start_large_result()
-    path = Path(image_id)
+    path = Path(candidate.image_id)
     (path.parent.parent / f"started-{path.name}").touch()
     time.sleep(60)
-    return render_and_encode(kind, image_id, data, colormap)
+    return render_and_encode(candidate, colormap)
 
 
 class _CountedFuture(Future):

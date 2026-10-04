@@ -126,7 +126,7 @@ class PreprocessAccessTest(unittest.TestCase):
         before = os.umask(0o022)
         self.addCleanup(os.umask, before)
         with (
-            mock.patch("image_review.preprocess._process", side_effect=KeyboardInterrupt),
+            mock.patch("image_review.preprocess.render_and_encode", side_effect=KeyboardInterrupt),
             self.assertRaises(KeyboardInterrupt),
         ):
             self.run_pre(self.root / "work", "private")

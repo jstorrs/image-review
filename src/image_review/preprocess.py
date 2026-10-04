@@ -786,13 +786,14 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def render_and_encode(kind: Kind, image_id: ImageId, data: bytes, colormap: str) -> list[Encoded | SkippedRow]:
+def render_and_encode(candidate: Candidate, colormap: str) -> list[Encoded | SkippedRow]:
     """Hash, render and JPEG-encode one input's bytes into its output rows: encoded images and skipped parts.
 
     Pure, and the unit of work sent to pool workers (so it and its arguments pickle). Every image rendered
     from the input (main and icon) carries the SHA-256 of `data`. A failure of the input itself is a single
     `SkippedRow`; an embedded icon that fails is a `SkippedRow` beside the main image.
     """
+    kind, image_id, data = candidate.kind, candidate.image_id, candidate.data
     try:
         source_sha256 = hashlib.sha256(data).hexdigest()
         rendered = render(kind, image_id, data, colormap)
@@ -806,17 +807,12 @@ def render_and_encode(kind: Kind, image_id: ImageId, data: bytes, colormap: str)
     return encoded
 
 
-def _process(candidate: Candidate, colormap: str) -> list[Encoded | SkippedRow]:
-    """`render_and_encode` one input, in this process."""
-    return render_and_encode(candidate.kind, candidate.image_id, candidate.data, colormap)
-
-
 Outcome = tuple[ImageId, list[Encoded | SkippedRow]]  # (input image_id, its output rows)
 
 
 def _outcomes_serial(items: Iterable[Candidate | SkippedRow], colormap: str) -> Iterator[Outcome]:
     for item in items:
-        yield item.image_id, (_process(item, colormap) if isinstance(item, Candidate) else [item])
+        yield item.image_id, (render_and_encode(item, colormap) if isinstance(item, Candidate) else [item])
 
 
 def _outcomes_pooled(
@@ -836,7 +832,7 @@ def _outcomes_pooled(
             return [item]
         with _sigint_blocked():  # a worker spawned here starts with SIGINT blocked, until it ignores it
             # the pool keeps the bytes until the result is back; `limit` bounds them
-            return pool.submit(render_and_encode, item.kind, item.image_id, item.data, colormap)
+            return pool.submit(render_and_encode, item, colormap)
 
     def finish() -> Outcome:
         nonlocal in_flight

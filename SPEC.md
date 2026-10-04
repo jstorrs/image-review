@@ -167,7 +167,7 @@ bytes its `jpeg_sha256` (see *`manifest.tsv`*).
 
 **Parallel rendering** (`run_preprocess(..., jobs)`, CLI `--jobs`). Hashing,
 rendering and encoding one input is the pure, top-level
-`render_and_encode(kind, image_id, data, colormap) -> list[Encoded | SkippedRow]`.
+`render_and_encode(candidate, colormap) -> list[Encoded | SkippedRow]`.
 With `jobs` = 1 it runs in the main process and no pool exists. With `jobs` >
 1 the main process submits each candidate's bytes (read during discovery) to a `ProcessPoolExecutor(jobs)` using
 the `spawn` start method on every platform (workers import the package afresh:
