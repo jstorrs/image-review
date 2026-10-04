@@ -170,9 +170,10 @@ class RemoteStore:
     ) -> tuple[int, bytes]:
         """One request on this thread's connection.
 
-        `idempotent`: may be resent once after a stale connection. Otherwise (an undo, where a resend after a
-        lost reply would undo a second mark) it is sent exactly once, on a fresh connection (an idle one may
-        have been closed by the server), and any failure is an outage.
+        `idempotent`: may be resent once after a stale connection. Otherwise (a mark, where a resend after a
+        lost reply would write a second row, or an undo, where it would undo a second mark) it is sent exactly
+        once, on a fresh connection (an idle one may have been closed by the server), and any failure is an
+        outage.
         """
         if not idempotent:
             conn = getattr(self._local, "conn", None)
@@ -251,7 +252,7 @@ class RemoteStore:
         self, keys: list[Key], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
     ) -> dict[Key, Status]:
         payload = {"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}
-        return parse_statuses(self._call("POST", "/mark", payload))
+        return parse_statuses(self._call("POST", "/mark", payload, idempotent=False))
 
     def undo(self, pass_number: int, *, reviewer: str) -> dict[Key, Status]:
         payload = {"pass": pass_number, "reviewer": reviewer}

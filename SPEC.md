@@ -1743,12 +1743,11 @@ fails with a stale-connection error (connection reset/remote disconnect,
 broken pipe, SSL EOF/zero return, `CannotSendRequest`, `ResponseNotReady`),
 the connection is closed and the request retried once on a fresh one; a
 second failure raises `RemoteError("connection lost: ...")`. Timeout is 30 s.
-A retried `/mark` whose first attempt was applied (its reply lost) is applied
-twice; the store's undo stack then holds two entries for it, so the first `z`
-restores the identical verdict and nothing visibly changes. `POST /undo` is not
-idempotent, so it is never retried: it is sent once on a fresh connection (the
+`POST /mark` and `POST /undo` are not idempotent (a replayed mark writes a
+second row and pushes a second undo entry; a replayed undo undoes a second
+mark), so they are never retried: each is sent once on a fresh connection (the
 thread's connection is closed first, so the request reconnects and re-checks
-the pin), and any transport error raises `RemoteError`.
+the pin), and any transport error raises `RemoteError`; the reviewer re-marks.
 Any other `OSError` or `HTTPException` raises `RemoteError` immediately.
 
 **Error mapping**: `RemoteError(StoreUnavailable)` carries `status`, the HTTP

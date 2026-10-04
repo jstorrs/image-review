@@ -110,6 +110,34 @@ class TestRoundTrips(RemoteTestCase):
         self.assertEqual(self.store.undo(1, reviewer="tester"), {})
         self.assertEqual(set(self.local_copy().statuses(1).values()), {"UNREVIEWED"})
 
+    def test_mark_whose_reply_is_lost_is_not_resent(self):
+        real_send = ReviewHandler._send
+        seen = []
+
+        def lossy_send(handler, reply):
+            if handler.path == "/mark":
+                seen.append(reply)
+                handler.close_connection = True
+                handler.request.shutdown(socket.SHUT_RDWR)  # applied, but the reply never arrives
+                return
+            real_send(handler, reply)
+
+        with (
+            mock.patch.object(ReviewHandler, "_send", lossy_send),
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(RemoteError),
+        ):
+            mark(self.store, [KEYS[0]], "DIRTY")
+        self.assertEqual(len(seen), 1)  # one /mark reached the server, none was resent
+        with open(self.work_dir / "review.tsv", newline="") as f:
+            self.assertEqual(len(list(csv.DictReader(f, delimiter="\t"))), 1)
+
+    def test_mark_after_idle_close_succeeds(self):
+        with mock.patch.object(ReviewHandler, "timeout", 0.3), redirect_stderr(io.StringIO()):
+            self.store.current_pass()
+            time.sleep(0.8)
+            self.assertEqual(mark(self.store, [KEYS[0]], "CLEAN")[KEYS[0]], "CLEAN")
+
     def test_undo_whose_reply_is_lost_is_not_resent(self):
         mark(self.store, [KEYS[0]], "DIRTY")
         mark(self.store, [KEYS[1]], "CLEAN")
@@ -211,7 +239,6 @@ class TestReconnect(RemoteTestCase):
 
             with mock.patch.object(PinnedHTTPSConnection, "connect", counting_connect):
                 self.assertEqual(self.store.current_pass(), 1)
-                self.assertEqual(mark(self.store, [KEYS[0]], "CLEAN")[KEYS[0]], "CLEAN")
             self.assertEqual(len(connects), 1)
 
     def test_second_failure_is_not_retried_again(self):
