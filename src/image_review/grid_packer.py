@@ -116,12 +116,11 @@ def pack_into_grids(
     """Pack the images named by `keys` into grid canvases sized for the current screen.
 
     Image bytes are fetched via the store. Images are packed at their fit_size, read from the image
-    header, and decoded one bin at a time while that bin is composited. `rotation` says whether images may be rotated 90 degrees:
-    always, never, or (auto) only if that needs fewer grids. Returns the GridSpecs, each holding a
-    composited pygame surface, and the keys left out of every grid (missing,
-    unreadable header, failed decode, or left unpacked), in input order. A grid holds only keys
-    whose pixels it shows. on_progress(i, n) is called as each of the n images is
-    handled, ending with (n, n).
+    header, and decoded one bin at a time while that bin is composited. `rotation` says whether images
+    may be rotated 90 degrees: always, never, or (auto) only if that needs fewer grids. Returns the
+    GridSpecs, each holding a composited pygame surface, and the keys left out of every grid (missing,
+    unreadable header, failed decode, or left unpacked), in input order. A grid holds only keys whose
+    pixels it shows. on_progress(i, n) is called as each of the n images is handled, ending with (n, n).
     """
     n = len(keys)
     done = 0

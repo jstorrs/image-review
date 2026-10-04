@@ -1437,10 +1437,10 @@ The image name is rendered right-aligned, position info is centered.
 
 **Scale indicator**: `resize()` applies the pure `fit_image`, which returns the
 scaled size, offset and factor (displayed size / source size) as one `Fit`, or
-none when no pixel would show. It never caps the factor, so an image smaller
-than the content area is enlarged and shows more than 100%. The status bar shows it as an
-integer percent (truncated, so a scale just under 1.0 never reads "100%") at the
-right edge, with the image name to its left. Below 100% (any scale under 1.0)
+`None` when no pixel would show. It never caps the factor, so an image smaller
+than the content area is enlarged and shows more than 100%. The status bar
+shows it as an integer percent (truncated, so a scale just under 1.0 never
+reads "100%") at the right edge, with the image name to its left. Below 100% (any scale under 1.0)
 the percent is drawn in red (`SCALE_WARNING_COLOR`), because small text such as
 burned-in PHI can be lost when an image is scaled down; at or above 100% it uses
 the normal font colour. In grid mode the percent is the smallest image's

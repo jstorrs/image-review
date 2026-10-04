@@ -175,7 +175,7 @@ def _jpeg_bytes(mode: str) -> bytes:
 
 
 def dropping_packer(rect_id: int):
-    """Patch grid_packer.newPacker so its packer leaves out the rect `rect_id` (the item's index)."""
+    """Patch grid_packer.newPacker so its packer leaves out the rect `rect_id` (the key's index in `keys`)."""
     real = grid_packer_module.newPacker
 
     def factory(*args, **kwargs):
