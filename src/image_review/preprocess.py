@@ -1165,36 +1165,37 @@ def _stage(
     colormap: str,
     policy: Modes,
     jobs: int,
-) -> list[tuple[ImageId, list[Staged | SkippedRow]]]:
+) -> list[tuple[ImageId, list[Staged], list[SkippedRow]]]:
     """Discover and render every input, writing its JPGs into `pending`.
 
-    Returns `(input image_id, its output rows)` in discovery order.
+    Returns `(input image_id, its staged rows, its skipped rows)` in discovery order.
     Inputs are rendered by `jobs` worker processes, or in this one for 1; either way this process writes
     every file, in discovery order.
     """
-    inputs: list[tuple[ImageId, list[Staged | SkippedRow]]] = []
-    staged = 0
+    inputs: list[tuple[ImageId, list[Staged], list[SkippedRow]]] = []
+    count = 0
 
     items = discover(sources, exclude)
     with _outcomes(items, colormap, jobs) as outcomes:
         for input_id, outcome in outcomes:
-            parts: list[Staged | SkippedRow] = []
+            staged: list[Staged] = []
+            skipped: list[SkippedRow] = []
             for part in outcome:
                 if isinstance(part, SkippedRow):
                     if part.kind == "failed":
                         log.warning("skipping %s: %s", part.image_id, part.reason)
-                    parts.append(part)
+                    skipped.append(part)
                     continue
-                staged += 1
-                path = pending / f"{staged:08d}.jpg"
+                count += 1
+                path = pending / f"{count:08d}.jpg"
                 _write_new(path, policy.file_mode, part.jpeg)
-                parts.append(Staged(part.image_id, path, part.source_sha256, hashlib.sha256(part.jpeg).hexdigest()))
-            inputs.append((input_id, parts))
+                staged.append(Staged(part.image_id, path, part.source_sha256, hashlib.sha256(part.jpeg).hexdigest()))
+            inputs.append((input_id, staged, skipped))
     return inputs
 
 
 def _place(
-    inputs: list[tuple[ImageId, list[Staged | SkippedRow]]],
+    inputs: list[tuple[ImageId, list[Staged], list[SkippedRow]]],
     *,
     staging: Path,
     batch_size: int,
@@ -1206,25 +1207,20 @@ def _place(
     Returns the manifest rows and the skipped rows, both in discovery order.
     """
     collisions = colliding_ids(
-        (row.image_id, row.source_sha256, row.jpeg_sha256)
-        for _, rows in inputs
-        for row in rows
-        if isinstance(row, Staged)
+        (row.image_id, row.source_sha256, row.jpeg_sha256) for _, staged, _ in inputs for row in staged
     )
     manifest_rows: list[tuple[str, str, str, str, str]] = []
     skipped: list[SkippedRow] = []
-    for input_id, rows in inputs:
-        if any(isinstance(row, Staged) and row.image_id in collisions for row in rows):
-            for row in rows:
-                if isinstance(row, Staged):
-                    row.path.unlink()
+    for input_id, staged, input_skipped in inputs:
+        if any(row.image_id in collisions for row in staged):
+            for row in staged:
+                row.path.unlink()
+            # the input's own skipped rows (e.g. a failed icon) give way to the one collision row
             log.warning("skipping %s: %s", input_id, COLLISION_REASON)
             skipped.append(SkippedRow(input_id, "failed", COLLISION_REASON))
             continue
-        for row in rows:
-            if isinstance(row, SkippedRow):
-                skipped.append(row)
-                continue
+        skipped.extend(input_skipped)
+        for row in staged:
             batch_index, slot = divmod(len(manifest_rows), batch_size)
             batch_id = f"batch_{batch_index + 1:03d}"
             batch_dir = staging / batch_id
