@@ -1598,8 +1598,9 @@ Only keys and skip counts appear on the wire; original `image_id`s never do.
 v3 added `FLAGGED` to the `Status` vocabulary, which `/statuses` responses
 may contain; `/mark` responses hold only the verdict just recorded; v4 dropped
 `batch` from the `/mark` body, the server taking each key's batch from the
-manifest, and added `reviewer` and `mode`; v5 added `POST /undo`; v6 made `GET /skipped` always send counts, never `null`) is
-shared by client and server. Any change to request or response shapes, or to
+manifest, and added `reviewer` and `mode`; v5 added `POST /undo`; v6 made
+`GET /skipped` always send counts, never `null`, and refused repeated query
+parameters with 400) is shared by client and server. Any change to request or response shapes, or to
 the `Status` vocabulary, must bump it. Client and server are installed
 separately, so skew is expected and must fail clearly rather than as a
 malformed reply or a 404.
@@ -1608,7 +1609,7 @@ malformed reply or a 404.
 
 | Status | Cause |
 |--------|-------|
-| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo`; `/image` without exactly one `key`; invalid `pass`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid |
+| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo`; a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid |
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 500 | Any unexpected store failure; only the exception class name is logged |

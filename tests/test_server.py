@@ -589,6 +589,11 @@ class TestReads(ServerTestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.request("GET", path)[0].status, 400)
 
+    def test_repeated_query_parameter_is_400(self):
+        for path in ("/statuses?pass=1&pass=1", "/image?key=batch_001%2Fa.jpg&key=batch_001%2Fb.jpg", "/image"):
+            with self.subTest(path=path):
+                self.assertEqual(self.request("GET", path)[0].status, 400)
+
 
 class TestHashedManifest(ServerTestCase):
     HASHED = True

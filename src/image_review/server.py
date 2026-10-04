@@ -68,9 +68,16 @@ class UndoRequest:
 BODY_ROUTES = frozenset({"/mark", "/undo"})  # the POST routes, the only ones that take a body
 
 
-def parse_pass(raw: str | None) -> int:
+def _one(query: dict[str, list[str]], name: str) -> str:
+    values = query.get(name, [])
+    if len(values) != 1:
+        raise BadRequest(f"{name} must appear exactly once")
+    return values[0]
+
+
+def parse_pass(raw: str) -> int:
     try:
-        value = int(raw) if raw is not None else 0
+        value = int(raw)
     except ValueError:
         value = 0
     if value < 1:
@@ -267,7 +274,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             case ("GET", "/image"):
                 return self._image(query)
             case ("GET", "/statuses"):
-                pass_number = parse_pass(query.get("pass", [None])[0])
+                pass_number = parse_pass(_one(query, "pass"))
                 with lock:
                     statuses = store.statuses(pass_number)
                 return json_reply(statuses)
@@ -293,13 +300,11 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 return Reply(404, close=True)
 
     def _image(self, query: dict[str, list[str]]) -> Reply:
-        keys = query.get("key", [])
-        if len(keys) != 1:
-            raise BadRequest("key required")
-        if keys[0] not in self.server.known_keys:
+        key = _one(query, "key")
+        if key not in self.server.known_keys:
             return Reply(404)  # as the store answers an unknown key
         try:
-            data = self.server.store.image_bytes(Key(keys[0]))  # no lock: read-only file access
+            data = self.server.store.image_bytes(Key(key))  # no lock: read-only file access
         except (KeyError, ValueError, OSError):
             return Reply(404)
         return Reply(200, data, "image/jpeg")

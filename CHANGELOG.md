@@ -174,7 +174,8 @@ version on both machines. The versions reached during development:
   the manifest. It added `reviewer` and `mode`.
 - **v5** added `POST /undo`.
 - **v6** made `GET /skipped` always send counts (`{"failed": 0, "ignored": 0}`
-  when the work dir has no `skipped.tsv`) instead of `null`.
+  when the work dir has no `skipped.tsv`) instead of `null`. The server also
+  refuses a repeated query parameter with 400 instead of using the first value.
 
 `GET /version` reports the API version and package version. A server without
 it is reported as "too old to report its API version".
