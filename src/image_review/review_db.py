@@ -296,6 +296,8 @@ class ReviewDB:
             raise ValueError(f"Invalid status {status!r}, must be one of {get_args(Verdict)}")
         if mode not in get_args(MarkMode):
             raise ValueError(f"Invalid mode {mode!r}, must be one of {get_args(MarkMode)}")
+        if pass_number < 1:  # parse_decision would refuse the row when review.tsv is next loaded
+            raise ValueError(f"Invalid pass_number {pass_number!r}, must be at least 1")
         reviewer = parse_reviewer(reviewer)  # a tab or newline would corrupt the log
         ts = datetime.now(UTC).isoformat()
         tool_version = package_version()

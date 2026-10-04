@@ -664,6 +664,12 @@ class TestAuditColumns(StoreTestCase):
             self.store.mark(["batch_001/a.jpg"], "CLEAN", 1, reviewer="alice", mode="undo")  # type: ignore[arg-type]
         self.assertFalse((self.work_dir / "review.tsv").exists())
 
+    def test_bad_pass_number_is_refused_before_writing(self):
+        for pass_number in (0, -1):
+            with self.subTest(pass_number=pass_number), self.assertRaises(ValueError):
+                self.store.mark(["batch_001/a.jpg"], "CLEAN", pass_number, reviewer="alice", mode="single")
+        self.assertFalse((self.work_dir / "review.tsv").exists())
+
 
 class TestMigration(unittest.TestCase):
     OLD_HEADER = "image_id\tbatch\tstatus\tpass_number\ttimestamp"
