@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from collections import Counter
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
@@ -373,10 +374,10 @@ STATUS_REPORT = (
 )
 
 
-STATUS_COUNTS = {"total": 4, "CLEAN": 1, "DIRTY": 1, "UNREVIEWED": 2, "FLAGGED": 0}
+STATUS_COUNTS = Counter({"CLEAN": 1, "DIRTY": 1, "UNREVIEWED": 2})
 STATUS_BATCHES = {
-    "batch_001": {"total": 2, "CLEAN": 1, "DIRTY": 0, "UNREVIEWED": 1, "FLAGGED": 0},
-    "batch_002": {"total": 2, "CLEAN": 0, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 0},
+    "batch_001": Counter({"CLEAN": 1, "UNREVIEWED": 1}),
+    "batch_002": Counter({"DIRTY": 1, "UNREVIEWED": 1}),
 }
 
 

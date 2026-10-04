@@ -9,6 +9,7 @@ import stat
 import tempfile
 import types
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest import mock
 
@@ -1012,12 +1013,12 @@ class TestPureFunctions(StoreTestCase):
         self.assertEqual(
             batch_summary(self.rows, self.statuses),
             {
-                "batch_001": {"CLEAN": 1, "DIRTY": 0, "UNREVIEWED": 0, "FLAGGED": 1, "total": 2},
-                "batch_002": {"CLEAN": 0, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 0, "total": 2},
+                "batch_001": Counter({"CLEAN": 1, "FLAGGED": 1}),
+                "batch_002": Counter({"DIRTY": 1, "UNREVIEWED": 1}),
             },
         )
         self.assertEqual(
-            summary(self.rows, self.statuses), {"CLEAN": 1, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 1, "total": 4}
+            summary(self.rows, self.statuses), Counter({"CLEAN": 1, "DIRTY": 1, "UNREVIEWED": 1, "FLAGGED": 1})
         )
 
 

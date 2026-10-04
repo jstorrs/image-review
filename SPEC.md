@@ -990,8 +990,8 @@ see *`image-review export`*.
 | Function | Description |
 |----------|-------------|
 | `filter_rows(rows, statuses, status_filter="unreviewed", batch=None)` | Filter rows by status and optional batch: `unreviewed` selects `TODO_STATUSES` (UNREVIEWED and FLAGGED), `clean` selects CLEAN, `all` everything. `status_filter` is a `StatusFilter` (`Literal["unreviewed", "clean", "all"]`), parsed once by the CLI's `--filter` choice |
-| `summary(rows, statuses)` | Count of each `Status` (CLEAN/DIRTY/UNREVIEWED/FLAGGED) plus `total` |
-| `batch_summary(rows, statuses)` | The same per batch |
+| `summary(rows, statuses)` | A `Counter[Status]` of the rows' statuses (a missing status counts 0; `.total()` is the image count) |
+| `batch_summary(rows, statuses)` | The same per batch: `dict[str, Counter[Status]]` |
 | `skipped_counts(rows) -> SkippedCounts` | The failed/ignored split of `SkippedRow`s; the one derivation behind `skipped()`, preprocess's summary line and `preprocess.json` counts |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
 | `export.export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons folded in |

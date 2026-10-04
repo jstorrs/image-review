@@ -3,6 +3,7 @@ import hashlib
 import io
 import logging
 import re
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -335,23 +336,14 @@ def filter_rows(
             return [r for r in selected if statuses[r.key] in TODO_STATUSES]
 
 
-def _tally(statuses: Iterable[Status]) -> dict[str, int]:
-    """A count for each Status, plus "total"."""
-    counts = {**dict.fromkeys(get_args(Status), 0), "total": 0}
-    for status in statuses:
-        counts[status] += 1
-        counts["total"] += 1
-    return counts
-
-
-def batch_summary(rows: list[ManifestRow], statuses: dict[Key, Status]) -> dict[str, dict[str, int]]:
-    """Per batch: a count for each Status, plus "total"."""
-    by_batch: dict[str, list[Status]] = {}
+def batch_summary(rows: list[ManifestRow], statuses: dict[Key, Status]) -> dict[str, Counter[Status]]:
+    """Per batch: a count for each Status (a missing one counts 0); `.total()` is the batch's image count."""
+    by_batch: dict[str, Counter[Status]] = {}
     for row in rows:
-        by_batch.setdefault(row.batch, []).append(statuses[row.key])
-    return {batch: _tally(group) for batch, group in by_batch.items()}
+        by_batch.setdefault(row.batch, Counter())[statuses[row.key]] += 1
+    return by_batch
 
 
-def summary(rows: list[ManifestRow], statuses: dict[Key, Status]) -> dict[str, int]:
-    """A count for each Status, plus "total"."""
-    return _tally(statuses[row.key] for row in rows)
+def summary(rows: list[ManifestRow], statuses: dict[Key, Status]) -> Counter[Status]:
+    """A count for each Status (a missing one counts 0); `.total()` is the image count."""
+    return Counter(statuses[row.key] for row in rows)
