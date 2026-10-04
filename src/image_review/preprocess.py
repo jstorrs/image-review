@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from functools import partial
 from itertools import groupby
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, cast
+from typing import Any, Literal, assert_never, cast
 from zipfile import ZipFile
 
 import matplotlib
@@ -126,7 +126,7 @@ _BLAS_THREAD_VARS = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS
 _SPAWN = multiprocessing.get_context("spawn")
 
 Kind = Literal["dicom", "raster"]
-Content = Literal["dicom", "raster", "zip"]
+Content = Literal[Kind, "zip"]
 
 
 @dataclass(frozen=True)
@@ -680,6 +680,8 @@ def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
                     yield SkippedRow(image_id, kind, reason)
                 case "dicom" | "raster" as kind:
                     yield _candidate(image_id, kind, partial(zf.read, info))
+                case _ as unreachable:
+                    assert_never(unreachable)
 
 
 def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | SkippedRow]:
@@ -707,6 +709,8 @@ def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | Skip
             yield SkippedRow(image_id, kind, reason)
         case "dicom" | "raster" as kind:
             yield _candidate(image_id, kind, path.read_bytes)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]) -> SkippedRow:
