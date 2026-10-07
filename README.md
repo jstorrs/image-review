@@ -25,8 +25,8 @@ commands need:
 
 | Install | Commands | Adds |
 |---|---|---|
-| `pip install .` (core) | `serve`, `status`, `export`, `--help` | click, cryptography |
-| `pip install '.[viewer]'` | `review` (local or `--remote`) | pygame-ce, Pillow, rectpack |
+| `pip install .` (core) | `serve`, `status`, `export`, `--help` | click, cryptography, rectpack |
+| `pip install '.[viewer]'` | `review` (local or `--remote`) | pygame-ce, Pillow |
 | `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
 
 On a cluster with a laptop viewer (see [Reviewing on an HPC
@@ -60,8 +60,11 @@ numpy >= 1.26, pydicom >= 3.0, Pillow >= 10.3 except 11.x (which misdecodes
 multi-frame MPO JPEGs), scikit-image >= 0.22, scipy >= 1.11.2, tqdm >= 4.60,
 pygame-ce >= 2.3.1, cryptography >= 41, python-gdcm >= 3.0.25,
 pylibjpeg >= 2.0, pylibjpeg-openjpeg >= 2.0, and rectpack pinned at 0.2.2
-(unmaintained; grid packing depends on its exact behaviour). See
-[CHANGELOG.md](CHANGELOG.md) for what changed between releases.
+(unmaintained; grid packing depends on its exact behaviour). rectpack is
+published only as a source distribution: a default `pip install` builds it,
+but an offline or `--only-binary :all:` install needs its sdist or a wheel you
+built beforehand. See [CHANGELOG.md](CHANGELOG.md) for what changed between
+releases.
 
 Compressed DICOMs (JPEG, JPEG Lossless, JPEG-LS, JPEG 2000, HTJ2K, RLE) are
 decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`, the `codecs`

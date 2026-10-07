@@ -7,11 +7,14 @@ name = "image-review"
 version = "0.3.0"
 requires-python = ">=3.12"
 dependencies = [
-    # Minimums verified by running the test suite on CPython 3.12, installing wheels only. Where
-    # no comment says why, the minimum is the oldest release with a CPython 3.12 wheel.
-    # Core: what `serve`, `status` and `export` need (and the CLI itself, including --help).
+    # Minimums verified by running the test suite on CPython 3.12, installing wheels only (except
+    # rectpack, which has only an sdist). Where no comment says why, the minimum is the oldest
+    # release with a CPython 3.12 wheel.
+    # Core: what `serve`, `status` and `export` need (and the CLI itself, including --help), plus
+    # the grid layout code (layout.py) shared by the viewer and, later, serve's browser client.
     "click>=8.2",  # the tests read CliRunner stderr separately
     "cryptography>=41",  # 3.1 is the oldest that runs; 41 is a floor without old known CVEs
+    "rectpack==0.2.2",  # unmaintained, sdist only; grid packing results depend on its exact behaviour
 ]
 
 [project.optional-dependencies]
@@ -35,7 +38,6 @@ codecs = [
 viewer = [
     "pygame-ce>=2.3.1",
     "Pillow>=10.3,!=11.*",  # 10.3: 16-bit grayscale PNG; 11.x misdecodes an MPO frame after a mode change
-    "rectpack==0.2.2",  # unmaintained; grid packing results depend on its exact behaviour
 ]
 all = ["image-review[preprocess,codecs,viewer]"]
 dev = [

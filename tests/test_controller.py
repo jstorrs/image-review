@@ -28,7 +28,8 @@ from image_review.controller import (
     next_batch,
     next_index,
 )
-from image_review.grid_packer import fit_size, pack_into_grids
+from image_review.grid_packer import pack_into_grids
+from image_review.layout import fit_size
 from image_review.store import (
     LocalStore,
     ManifestRow,

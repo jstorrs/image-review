@@ -38,10 +38,10 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 log = logging.getLogger(f"{PACKAGE_LOGGER}.cli")  # not __name__: that is "__main__" under `python -m`
 
 # The top-level modules each optional extra (pyproject.toml) provides and the commands import; the core
-# dependencies (click, cryptography) are always there. The codecs extra is loaded by pydicom only when needed.
+# dependencies (click, cryptography, rectpack) are always there. The codecs extra is loaded by pydicom only when needed.
 EXTRA_MODULES: dict[str, frozenset[str]] = {
     "preprocess": frozenset({"matplotlib", "numpy", "pydicom", "PIL", "skimage", "scipy", "tqdm"}),
-    "viewer": frozenset({"pygame", "PIL", "rectpack"}),
+    "viewer": frozenset({"pygame", "PIL"}),
 }
 
 

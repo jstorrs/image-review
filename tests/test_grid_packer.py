@@ -12,7 +12,8 @@ import pygame as pg
 from PIL import Image
 
 from image_review import grid_packer as grid_packer_module
-from image_review.grid_packer import PlacedRect, fit_size, pack_into_grids
+from image_review.grid_packer import pack_into_grids
+from image_review.layout import PlacedRect, fit_size
 from image_review.status import Key
 from image_review.store import LocalStore, ManifestRow
 from image_review.util import load_surface
@@ -204,33 +205,6 @@ class TestPackShrinksOversize(unittest.TestCase):
         store = self.make_store({"p/a.jpg": (1000, 1800), "p/b.jpg": (1000, 1800)})
         self.assertEqual({(r.w, r.h) for r in self.pack_recording(store, "always")[0]}, {(1800, 1000)})
         self.assertEqual({(r.w, r.h) for r in self.pack_recording(store, "never")[0]}, {(572, 1030)})
-
-    def test_fit_size_rotated_orientation_wins(self):
-        self.assertEqual(fit_size(1500, 2500, 1920, 1030, True), (1030, 1716))
-
-    def test_fit_size_always_fits_an_allowed_orientation(self):
-        for w, h in [
-            (1921, 1),
-            (1, 1031),
-            (3000, 2500),
-            (1920, 1031),
-            (1921, 1030),
-            (7, 4000),
-            (4000, 7),
-            (1031, 1921),
-            (999, 1999),
-        ]:
-            for rot in (False, True):
-                with self.subTest(w=w, h=h, rot=rot):
-                    nw, nh = fit_size(w, h, 1920, 1030, rot)
-                    self.assertTrue(nw >= 1 and nh >= 1)
-                    self.assertTrue((nw <= 1920 and nh <= 1030) or (rot and nw <= 1030 and nh <= 1920))
-
-    def test_oversize_image_keeps_aspect_ratio(self):
-        self.assertEqual(fit_size(3000, 2500, 1920, 1030, False), (1236, 1030))
-        self.assertEqual(fit_size(3000, 2500, 1920, 1030, True), (1236, 1030))
-        self.assertEqual(fit_size(1000, 1800, 1920, 1030, True), (1000, 1800))  # fits only rotated: untouched
-        self.assertEqual(fit_size(1000, 1800, 1920, 1030, False), (572, 1030))
 
 
 if __name__ == "__main__":

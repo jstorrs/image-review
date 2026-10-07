@@ -1,13 +1,10 @@
-import io
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import NamedTuple
 
 import pygame as pg
-from PIL import Image
-from rectpack import newPacker
 
+from .layout import PlacedRect, fit_size, is_rotated, jpeg_size, plan_grids
 from .status import Key, Rotation
 from .store import ReviewStore
 from .util import load_surface
@@ -22,47 +19,8 @@ class GridSpec:
     min_scale: float  # the smallest fit_size / source size ratio among the images drawn
 
 
-class PlacedRect(NamedTuple):
-    rect_id: int
-    x: int
-    y: int
-    w: int
-    h: int
-
-
-def fit_size(w: int, h: int, grid_w: int, grid_h: int, allow_rotation: bool) -> tuple[int, int]:
-    """The size a w x h image is packed at: unchanged if it fits the bin upright, or rotated when
-    rotation is allowed; otherwise shrunk, keeping its aspect ratio, by the larger of the two
-    orientations' scales."""
-    bounds = [(grid_w, grid_h), (grid_h, grid_w)] if allow_rotation else [(grid_w, grid_h)]
-    bound_w, bound_h = max(bounds, key=lambda b: min(b[0] / w, b[1] / h))  # orientation needing the least shrink
-    scale = min(bound_w / w, bound_h / h)
-    if scale >= 1:
-        return w, h
-    return max(1, min(bound_w, int(w * scale))), max(1, min(bound_h, int(h * scale)))
-
-
-def _header_size(buf: bytes) -> tuple[int, int]:
-    """Image dimensions from the header alone; no pixels are decoded. Raises on an unreadable header."""
-    with Image.open(io.BytesIO(buf)) as im:
-        return im.size
-
-
-def _pack(sizes: dict[int, tuple[int, int]], grid_w: int, grid_h: int, rotate: bool) -> dict[int, list[PlacedRect]]:
-    """Bin-pack the images at their fit sizes, by bin index; rectpack rotates a rect only if `rotate`."""
-    packer = newPacker(rotation=rotate)
-    packer.add_bin(grid_w, grid_h, float("inf"))
-    for idx, (w, h) in sizes.items():
-        packer.add_rect(*fit_size(w, h, grid_w, grid_h, rotate), idx)
-    packer.pack()
-    bins: dict[int, list[PlacedRect]] = {}
-    for bin_idx, x, y, w, h, rect_id in packer.rect_list():
-        bins.setdefault(bin_idx, []).append(PlacedRect(rect_id, x, y, w, h))
-    return bins
-
-
 def _composite_bin(
-    placed: list[PlacedRect],
+    placed: Sequence[PlacedRect],
     keys: Sequence[Key],
     blobs: dict[Key, bytes],
     sizes: dict[int, tuple[int, int]],
@@ -80,7 +38,8 @@ def _composite_bin(
     drawn: list[Key] = []
     min_scale = 1.0
     failed: list[int] = []
-    for rect_id, x, y, w, h in placed:
+    for rect in placed:
+        rect_id, x, y, w, h = rect
         key = keys[rect_id]
         target = fit_size(*sizes[rect_id], grid_w, grid_h, rotated)
         try:
@@ -89,7 +48,7 @@ def _composite_bin(
                 raise ValueError(f"decoded size {surface.get_size()} differs from header size {sizes[rect_id]}")
             if surface.get_size() != target:
                 surface = pg.transform.smoothscale(surface, target)
-            if (w, h) != target:  # rectpack rotated it
+            if is_rotated(rect, sizes[rect_id], grid_w, grid_h, rotated):
                 surface = pg.transform.rotate(surface, -90)
             if surface.get_size() != (w, h):
                 raise ValueError(f"surface size {surface.get_size()} differs from its packed rectangle {(w, h)}")
@@ -142,7 +101,7 @@ def pack_into_grids(
             advance()
             continue
         try:
-            w, h = _header_size(blobs[key])
+            w, h = jpeg_size(blobs[key])
         except Exception as exc:  # noqa: BLE001 - an unreadable header makes the image unloadable, not fatal
             log.warning("cannot load %s: %s", key, exc)
             left_out.add(idx)
@@ -150,27 +109,20 @@ def pack_into_grids(
             continue
         sizes[idx] = (w, h)
 
-    # Bin-pack at the fit sizes. Packing reads no pixels, so "auto" packs both ways and keeps the
-    # rotated packing only if it needs strictly fewer grids
-    rotated = rotation == "always"
-    bins = _pack(sizes, grid_w, grid_h, rotated)
-    if rotation == "auto":
-        with_rotation = _pack(sizes, grid_w, grid_h, True)
-        if len(with_rotation) < len(bins):
-            bins, rotated = with_rotation, True
+    # Bin-pack at the fit sizes; no pixels are read
+    plan = plan_grids(sizes, grid_w, grid_h, rotation)
 
     # Composite one bin at a time, so at most one bin's decoded images are alive
     grids = []
-    for bin_idx in sorted(bins):
-        grid, failed = _composite_bin(bins[bin_idx], keys, blobs, sizes, grid_w, grid_h, rotated, advance)
+    for placed in plan.bins:
+        grid, failed = _composite_bin(placed, keys, blobs, sizes, grid_w, grid_h, plan.rotated, advance)
         left_out.update(failed)
         if grid.keys:
             grids.append(grid)
 
     # fit_size makes every image fit a bin, so the packer should leave none out; any it does is
     # left to the caller (shown as a single image, loaded on display) rather than dropped
-    placed = {rect.rect_id for rects in bins.values() for rect in rects}
-    for idx in sizes.keys() - placed:
+    for idx in plan.unpacked:
         log.warning("%s was not packed into a grid", keys[idx])
         left_out.add(idx)
         advance()
@@ -182,7 +134,7 @@ def pack_into_grids(
         grid_w,
         grid_h,
         rotation,
-        rotated,
+        plan.rotated,
         len(left_out),
     )
     return grids, [keys[idx] for idx in sorted(left_out)]

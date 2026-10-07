@@ -13,7 +13,10 @@ interactively in a fullscreen viewer, and report **status** on review progress.
 - Dependencies, with the minimums declared in `pyproject.toml`, grouped by
   what needs them:
   - core (always installed; enough for `serve`, `status`, `export` and every
-    `--help`): click >= 8.2, cryptography >= 41 (`serve`'s TLS certificate);
+    `--help`): click >= 8.2, cryptography >= 41 (`serve`'s TLS certificate),
+    rectpack == 0.2.2 (grid layout, `layout.py`, shared by the viewer and
+    `serve`; unmaintained, pinned because grid packing depends on its exact
+    behaviour);
   - extra `preprocess`: matplotlib >= 3.7.3, numpy >= 1.26, pydicom >= 3.0,
     Pillow >= 10.3 except 11.x (11.x misdecodes an MPO frame whose mode
     differs from the one before), scikit-image >= 0.22, scipy >= 1.11.2,
@@ -27,8 +30,7 @@ interactively in a fullscreen viewer, and report **status** on review progress.
     JPEG Lossless, JPEG-LS) is `failed` with `cannot decode <transfer syntax
     name>: ...` (see the DICOM preprocessing pipeline, step 0);
   - extra `viewer` (`review`, local or `--remote`): pygame-ce >= 2.3.1,
-    Pillow (as above), rectpack == 0.2.2 (unmaintained; pinned because grid
-    packing depends on its exact behaviour);
+    Pillow (as above);
   - extra `all` = `preprocess`, `codecs` and `viewer`; extra `dev` = `all`
     plus ruff, mypy, types-tqdm and coverage (the tests need every extra).
 
@@ -63,7 +65,8 @@ tunnel.py           SSH local port-forward for --via
 signals.py          interrupt_on: SIGTERM/SIGHUP to KeyboardInterrupt, shared by serve, review and the tunnel
 controller.py       Review session orchestration and event loop
 viewer.py           Fullscreen pygame display
-grid_packer.py      Review-time bin-packing of images into grids
+layout.py           Pure grid layout: jpeg_size, fit_size, plan_grids (stdlib and rectpack only)
+grid_packer.py      Review-time compositing of packed grids (pygame)
 review_db.py        Persistent review state (review.tsv)
 util.py             Shared utilities (surface loading)
 ```
@@ -72,8 +75,8 @@ All review-time data access goes through a `ReviewStore`. The controller and
 grid packer never touch the work directory; `LocalStore` serves it directly,
 and `RemoteStore` talks to an `image-review serve` process that wraps a
 `LocalStore`. `status.py`, `store.py`, `lock.py`, `export.py`, `atomic.py`, `server.py`,
-`connection.py`, `remote.py`, `tunnel.py` and `signals.py` import without pygame,
-numpy or skimage.
+`connection.py`, `remote.py`, `tunnel.py`, `signals.py` and `layout.py` import without pygame,
+PIL, numpy or skimage.
 
 ```
 review (pygame)             serve (compute node)
@@ -1427,18 +1430,22 @@ left to the caller. At most one bin's decoded images are alive at a time.
 
 1. **Load**: Fetch all image bytes with `store.image_bytes_many()` (an
    8-worker pool for `RemoteStore`, a simple loop for `LocalStore`); compressed
-   JPGs are small. Read each image's dimensions from its header with
-   `PIL.Image.open(BytesIO(bytes)).size`, which decodes no pixels. Images that
-   are missing (the store warns) or whose header cannot be read (warned here)
-   are left out of the packing.
+   JPGs are small. Read each image's dimensions from the JPEG header up to its
+   start of scan with `layout.jpeg_size(bytes)`, which decodes no pixels and
+   raises `ValueError` on an unreadable or truncated header. Images that are
+   missing (the store warns) or whose header cannot be read (warned here) are
+   left out of the packing.
 2. **Pack**: Each image is packed at `fit_size(w, h, grid_w, grid_h,
    rotate)`: its own size if it fits the bin upright (or rotated, when
    `rotate`), otherwise shrunk, keeping its aspect ratio, only as far
    as the better allowed orientation requires, so nothing is larger than the
    bin. `rotation` is `"always"` (`rotate` true), `"never"` (false) or `"auto"`.
-   Create a `rectpack` packer with `rotation=rotate` and
-   `(grid_w, grid_h)` bins (unlimited bin count), and add each image as a rect
-   of its fit size. Under `"auto"` the headers are packed twice, without and
+   The plan comes from `layout.plan_grids(sizes, grid_w, grid_h, rotation)`, a
+   pure function returning a `GridPlan` (whether rotation was used, the placed
+   rects per bin in bin order, and the ids left unpacked), so `serve` can
+   compute the same layout. It creates a `rectpack` packer with
+   `rotation=rotate` and `(grid_w, grid_h)` bins (unlimited bin count), and
+   adds each image as a rect of its fit size, in input order. Under `"auto"` the headers are packed twice, without and
    with rotation (each at its own fit sizes; no pixels are decoded), and the
    rotated packing is kept only if it needs strictly fewer bins. Only the
    chosen packing is composited.
@@ -1446,7 +1453,7 @@ left to the caller. At most one bin's decoded images are alive at a time.
    grid_h)`, decode each of the bin's images with `util.load_surface(bytes)`,
    `pg.transform.smoothscale` it to its fit size, and blit it at the packed
    position, after `pg.transform.rotate(-90)` if rectpack rotated the rect
-   (packed size differs from the fit size). The bin's decoded surfaces are
+   (`layout.is_rotated`: packed size differs from the fit size). The bin's decoded surfaces are
    released before the next bin. An image that fails to decode here (a valid
    header over a truncated body, a decoded size differing from the header's, or
    a final size differing from its packed rectangle) is warned, its rectangle stays black, its key is left out of the grid's

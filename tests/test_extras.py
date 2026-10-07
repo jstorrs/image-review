@@ -1,7 +1,6 @@
 """A command whose optional extra is missing names the install command; other import failures are not masked."""
 
 import builtins
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +57,7 @@ class RequiresExtraTest(unittest.TestCase):
         for exc in (
             missing("numpy"),  # not part of the viewer extra
             missing("kiwisolver"),  # a missing transitive dependency is a broken install, not a missing extra
+            missing("rectpack"),  # a core dependency: missing means a broken install, not a missing extra
             missing(""),
             ModuleNotFoundError("no name"),
             ImportError("libSDL2.so: cannot open shared object file", name="pygame.base"),  # broken, not missing
@@ -76,15 +76,6 @@ class CommandHintTest(unittest.TestCase):
         result = self.invoke("pygame", missing("pygame"), "review", "--work-dir", ".")
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Error: this command needs the viewer extra: pip install 'image-review[viewer]'", result.stderr)
-
-    def test_review_without_rectpack(self):
-        # reached through image_review.controller -> grid_packer; drop the cached modules so the import reruns
-        with mock.patch.dict(sys.modules):
-            for name in ("image_review.controller", "image_review.grid_packer"):
-                sys.modules.pop(name, None)
-            result = self.invoke("rectpack", missing("rectpack"), "review", "--work-dir", ".")
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("pip install 'image-review[viewer]'", result.stderr)
 
     def test_preprocess_without_matplotlib(self):
         with tempfile.TemporaryDirectory() as tmp:

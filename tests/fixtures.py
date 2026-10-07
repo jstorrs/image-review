@@ -16,7 +16,7 @@ from PIL import Image
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import SecondaryCaptureImageStorage, generate_uid
 
-from image_review import grid_packer as grid_packer_module
+from image_review import layout as layout_module
 from image_review.cli import cli
 from image_review.status import MarkMode, Verdict
 from image_review.store import LocalStore, ReviewStore
@@ -207,8 +207,8 @@ def _jpeg_bytes(mode: str) -> bytes:
 
 
 def dropping_packer(rect_id: int):
-    """Patch grid_packer.newPacker so its packer leaves out the rect `rect_id` (the key's index in `keys`)."""
-    real = grid_packer_module.newPacker
+    """Patch layout.newPacker so its packer leaves out the rect `rect_id` (the key's index in `keys`)."""
+    real = layout_module.newPacker
 
     def factory(*args, **kwargs):
         packer = real(*args, **kwargs)
@@ -216,4 +216,4 @@ def dropping_packer(rect_id: int):
         packer.rect_list = lambda: [r for r in rect_list() if r[5] != rect_id]
         return packer
 
-    return mock.patch.object(grid_packer_module, "newPacker", factory)
+    return mock.patch.object(layout_module, "newPacker", factory)

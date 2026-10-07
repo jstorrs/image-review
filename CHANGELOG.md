@@ -21,6 +21,11 @@
   display scale, in red below 100%. There is no grid mode yet. The default
   HTTPS mode and the pygame client are unchanged.
   See [SECURITY.md](SECURITY.md) for the limits.
+- **Requirements:** rectpack (still pinned at 0.2.2) moved from the `viewer`
+  extra to the core dependencies, with the grid layout code (`layout.py`), so
+  that `serve` can later lay out browser grids with the same code as the
+  viewer. rectpack has no wheel: an offline or `--only-binary` install needs
+  its sdist.
 
 ## 0.3.0
 
