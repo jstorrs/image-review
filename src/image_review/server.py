@@ -386,8 +386,8 @@ def make_server(store: ReviewStore, host: str, port: int) -> tuple[ReviewServer,
     return server, target
 
 
-def write_connection_file(target: RemoteTarget) -> Path:
-    """Write the connection string to ~/.image-review/ (dir 0700, file 0600, never briefly looser)."""
+def private_dir() -> Path:
+    """Return ~/.image-review, created or tightened to 0700 and checked to be ours."""
     directory = Path.home() / ".image-review"
     directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.lstat()
@@ -395,10 +395,24 @@ def write_connection_file(target: RemoteTarget) -> Path:
         raise OSError(f"{directory} is not a directory owned by you")
     if info.st_mode & 0o077:
         directory.chmod(0o700)
-    name = re.sub(r"[^A-Za-z0-9._-]", "_", target.host)
-    path = directory / f"connection-{name}-{target.port}.txt"
+    return directory
+
+
+def safe_name(text: str) -> str:
+    """Replace anything outside [A-Za-z0-9._-] so text is safe in a file name."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", text)
+
+
+def write_private_file(name: str, text: str) -> Path:
+    """Write text to ~/.image-review/<name> (dir 0700, file 0600, never briefly looser)."""
+    path = private_dir() / name
     path.unlink(missing_ok=True)  # stale file from a crashed run
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as f:
-        f.write(target.to_uri() + "\n")
+        f.write(text)
     return path
+
+
+def write_connection_file(target: RemoteTarget) -> Path:
+    """Write the connection string to ~/.image-review/ as a private file."""
+    return write_private_file(f"connection-{safe_name(target.host)}-{target.port}.txt", target.to_uri() + "\n")

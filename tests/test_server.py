@@ -392,6 +392,19 @@ class TestServeCommand(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
+    def test_write_private_file_replaces_stale_file(self):
+        from image_review.server import write_private_file
+
+        d = self.home / ".image-review"
+        d.mkdir(mode=0o700)
+        stale = d / "x.txt"
+        stale.write_text("old")
+        stale.chmod(0o644)
+        path = write_private_file("x.txt", "new\n")
+        self.assertEqual(path, stale)
+        self.assertEqual(path.read_text(), "new\n")
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
     def test_tty_prints_connection_string(self):
         class Tty(io.StringIO):
             def isatty(self):
