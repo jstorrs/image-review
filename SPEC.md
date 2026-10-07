@@ -1574,7 +1574,8 @@ string. Nothing is reused across runs.
 
 Every request must carry `Authorization: Bearer <token>`, checked with
 `hmac.compare_digest` before any routing; otherwise 401 and the connection is
-closed (any request body is left unread).
+closed (any request body is left unread). The one exception is socket mode,
+which serves three static files without it (see Unix-socket server).
 
 ### Endpoints
 
@@ -1729,6 +1730,26 @@ check, the single `Host` header must be `localhost`, `127.0.0.1` or `[::1]`
 with an optional port of 1-5 digits in 1-65535; anything else (including a
 missing or repeated header) is 400 and the connection closed, a defence
 against DNS rebinding.
+
+Three static files are served without the token: `GET /` (`index.html`),
+`/app.js` and `/app.css`, from `web/` in the package, read once by
+`load_assets()` at startup so no request path touches the filesystem. They
+hold no PHI and no secret, and the page cannot send the token before it has
+loaded. Only these exact GET paths (a query string is ignored) are public,
+and only in socket mode; `POST /`, `HEAD /`, `/index.html` and every other
+path fall through to the token check, and the usual framing checks (no
+`Transfer-Encoding`, no request body) apply first. CSRF does not apply,
+because browsers never attach an `Authorization` header on their own. The
+page takes the token from the URL fragment, which is never sent to the
+server. Every socket-mode response carries `Content-Security-Policy:
+default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
+img-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
+and `Referrer-Policy: no-referrer`, besides `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`. TLS mode has no public routes and sends
+none of the new headers. `API_VERSION` is unchanged: the public routes exist
+only in socket mode, which the versioned pygame client cannot reach, and the
+page is served by the same server it calls.
+
 `default_socket_path()` is `~/.image-review/serve-<short-host>-<pid>.sock`.
 
 ## Remote Store (`remote.py`)

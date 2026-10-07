@@ -538,6 +538,16 @@ class TestAuth(ServerTestCase):
                     self.assertEqual(data, b"")
                     self.assertEqual(resp.getheader("Cache-Control"), "no-store")
 
+    def test_no_public_routes_or_csp_over_tls(self):
+        resp, data, _ = self.request("GET", "/")
+        self.assertEqual((resp.status, data), (404, b""))
+        self.assertIsNone(resp.getheader("Content-Security-Policy"))
+        self.assertIsNone(resp.getheader("Referrer-Policy"))
+        resp, data, _ = self.request("GET", "/", token=None)
+        self.assertEqual((resp.status, data), (401, b""))
+        self.assertIsNone(resp.getheader("Content-Security-Policy"))
+        self.assertIsNone(resp.getheader("Referrer-Policy"))
+
     def test_unknown_path_with_token_is_404(self):
         resp, data, _ = self.request("GET", "/nope")
         self.assertEqual((resp.status, data), (404, b""))

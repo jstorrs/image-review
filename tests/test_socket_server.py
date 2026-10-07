@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -8,17 +9,25 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import image_review
 from image_review.cli import PACKAGE_LOGGER
 from image_review.server import (
     clear_stale_socket,
     default_socket_path,
     is_local_host,
+    load_assets,
     make_unix_server,
     parse_socket_path,
 )
 from image_review.store import LocalStore
 from tests.fixtures import UnixHTTPConnection, make_work_dir, start_unix_server, temp_dir
 
+WEB_DIR = Path(image_review.__file__).parent / "web"
+ASSETS = [
+    ("/", "index.html", "text/html; charset=utf-8"),
+    ("/app.js", "app.js", "text/javascript; charset=utf-8"),
+    ("/app.css", "app.css", "text/css; charset=utf-8"),
+]
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
 HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 
@@ -196,6 +205,85 @@ class TestSocketRequests(SocketServerTestCase):
         for text in [*messages, *logs.output]:
             self.assertNotIn(self.token, text)
             self.assertNotIn("Error", text)
+
+
+class TestPublicAssets(SocketServerTestCase):
+    def test_assets_served_without_token(self):
+        for path, name, content_type in ASSETS:
+            with self.subTest(path=path):
+                resp, data = self.request("GET", path, token=None)
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.getheader("Content-Type"), content_type)
+                self.assertEqual(resp.getheader("Cache-Control"), "no-store")
+                self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+                self.assertEqual(resp.getheader("Referrer-Policy"), "no-referrer")
+                self.assertIn("default-src 'none'", resp.getheader("Content-Security-Policy"))
+                self.assertEqual(data, (WEB_DIR / name).read_bytes())
+
+    def test_query_is_ignored(self):
+        resp, data = self.request("GET", "/?x=1", token=None)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data, (WEB_DIR / "index.html").read_bytes())
+
+    def test_everything_else_needs_the_token(self):
+        for method, path in [("POST", "/"), ("HEAD", "/"), ("GET", "/index.html"), ("GET", "/favicon.ico")]:
+            with self.subTest(method=method, path=path):
+                head, _, data = self.raw_request(method, path, None).partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 401 "), head)
+                self.assertEqual(data, b"")
+
+    def test_odd_targets_need_the_token(self):
+        for target in ["http://localhost/version", "//version", "/%61pp.js", "/app.js;x"]:
+            with self.subTest(target=target):
+                reply = self.raw(f"GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+                self.assertTrue(reply.startswith(b"HTTP/1.1 401 "), reply)
+
+    def test_unparseable_target_is_401_without_a_warning(self):
+        with self.assertNoLogs(SERVER_LOGGER, "WARNING"):
+            reply = self.raw(b"GET http://[/ HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 401 "), reply)
+
+    def test_stdlib_error_response_carries_the_csp(self):
+        reply = self.raw(b"FOO / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 501 "), reply)
+        self.assertIn(b"\r\nContent-Security-Policy: ", reply)
+
+    def test_body_or_chunking_on_an_asset_is_400(self):
+        reply = self.raw_request("GET", "/", None, body=b"x")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 400 "), reply)
+        reply = self.raw(b"GET / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 400 "), reply)
+
+    def test_bad_host_on_an_asset_is_400(self):
+        resp, data = self.request("GET", "/", token=None, host="evil.example")
+        self.assertEqual((resp.status, data), (400, b""))
+
+    def test_api_responses_carry_the_csp(self):
+        for token in (self.token, None):
+            with self.subTest(token=token):
+                resp, _ = self.request("GET", "/current_pass", token=token)
+                self.assertIn("frame-ancestors 'none'", resp.getheader("Content-Security-Policy"))
+                self.assertEqual(resp.getheader("Referrer-Policy"), "no-referrer")
+
+
+class TestWebFiles(unittest.TestCase):
+    def test_load_assets(self):
+        assets = load_assets()
+        self.assertEqual(sorted(assets), ["/", "/app.css", "/app.js"])
+        for reply in assets.values():
+            self.assertTrue(reply.body)
+
+    def test_page_is_csp_clean(self):
+        html = (WEB_DIR / "index.html").read_text()
+        self.assertNotRegex(html, r"<script(?![^>]*\bsrc=)[^>]*>")
+        self.assertNotRegex(html, r"<script[^>]*>\s*\S[^<]*</script>")
+        self.assertNotRegex(html, r"(?i)\son\w+\s*=")
+        for name in ["index.html", "app.js", "app.css"]:
+            text = (WEB_DIR / name).read_text()
+            with self.subTest(name=name):
+                self.assertNotRegex(text, r"(?i)style\s*=|https?://")
+        self.assertNotIn("innerHTML", (WEB_DIR / "app.js").read_text())
+        self.assertIsNone(re.search(r"<style", html, re.IGNORECASE))
 
 
 @unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")

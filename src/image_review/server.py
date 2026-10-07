@@ -6,6 +6,7 @@ leave the store; clients only ever see keys (preprocessed paths).
 
 import datetime
 import hmac
+import importlib.resources
 import ipaddress
 import json
 import logging
@@ -242,14 +243,25 @@ class ReviewHandler(BaseHTTPRequestHandler):
             reply = Reply(500, close=True)
         self._send(reply)
 
-    def _route(self, method: str) -> Reply:
+    def _check_chunked(self) -> None:
         if "Transfer-Encoding" in self.headers:
             raise BadRequest("Transfer-Encoding not supported")
-        url = urlsplit(self.path)
-        query = parse_qs(url.query)
-        has_body = method == "POST" and url.path in BODY_ROUTES
+
+    def _check_body(self, method: str, path: str) -> None:
+        """Refuse a body on any route that takes none (it would be left unread)."""
+        has_body = method == "POST" and path in BODY_ROUTES
         if not has_body and not all(v.strip() == "0" for v in self.headers.get_all("Content-Length", [])):
             raise BadRequest("unexpected request body")
+
+    def _check_framing(self, method: str, path: str) -> None:
+        self._check_chunked()
+        self._check_body(method, path)
+
+    def _route(self, method: str) -> Reply:
+        self._check_chunked()
+        url = urlsplit(self.path)
+        self._check_body(method, url.path)
+        query = parse_qs(url.query)
         store, lock = self.server.store, self.server.store_lock
         match (method, url.path):
             case ("GET", "/version"):
@@ -370,8 +382,32 @@ def is_local_host(values: list[str]) -> bool:
     return port is None or 1 <= int(port) <= 65535
 
 
+WEB_ASSETS = {
+    "/": ("index.html", "text/html"),
+    "/app.js": ("app.js", "text/javascript"),
+    "/app.css": ("app.css", "text/css"),
+}
+
+# The browser page may only load its own scripts and styles, talk to this origin, and show blob: images
+CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src blob:; "
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
+
+def load_assets() -> dict[str, Reply]:
+    """The packaged browser page, read once; request paths never reach the filesystem."""
+    web = importlib.resources.files("image_review") / "web"
+    return {
+        path: Reply(200, (web / name).read_bytes(), f"{content_type}; charset=utf-8")
+        for path, (name, content_type) in WEB_ASSETS.items()
+    }
+
+
 class UnixReviewHandler(ReviewHandler):
     """Plain HTTP over a Unix socket, reached through `ssh -L`. Experimental."""
+
+    server: "UnixReviewServer"
 
     disable_nagle_algorithm = False  # TCP_NODELAY fails on AF_UNIX
 
@@ -387,13 +423,31 @@ class UnixReviewHandler(ReviewHandler):
         if not is_local_host(self.headers.get_all("Host", [])):
             self._send(Reply(400, close=True))
             return
+        # The three static files are served without the token: they hold no PHI and no secret, and the page
+        # cannot present the token before it has loaded. Exact GET paths only, in socket mode only. CSRF does
+        # not apply: browsers never attach an Authorization header on their own.
+        path = self.path.partition("?")[0]  # not urlsplit: it raises ValueError on targets like "http://["
+        if method == "GET" and path in self.server.assets:
+            try:
+                self._check_framing(method, path)
+            except BadRequest:
+                self._send(Reply(400, close=True))
+                return
+            self._send(self.server.assets[path])
+            return
         super()._handle(method)
+
+    def end_headers(self) -> None:
+        self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        self.send_header("Referrer-Policy", "no-referrer")
+        super().end_headers()
 
 
 class UnixReviewServer(ReviewServer):
     allow_reuse_address = False
 
-    def __init__(self, path: Path, store: ReviewStore, token: str):
+    def __init__(self, path: Path, store: ReviewStore, token: str, assets: dict[str, Reply]):
+        self.assets = assets
         self.address_family = socket.AF_UNIX  # here, not on the class: Windows has no AF_UNIX and must still import
         self._bound: tuple[int, int] | None = None  # (st_dev, st_ino) of our socket file; a failed bind closes
         super().__init__(str(path), store, token, handler=UnixReviewHandler)
@@ -560,5 +614,5 @@ def make_unix_server(store: ReviewStore, path: Path) -> tuple[UnixReviewServer, 
     path = parse_socket_path(path)
     clear_stale_socket(path)
     token = secrets.token_urlsafe(16)
-    server = UnixReviewServer(path, store, token)
+    server = UnixReviewServer(path, store, token, load_assets())
     return server, token

@@ -47,7 +47,7 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
-image_review = ["fonts/*.ttf"]
+image_review = ["fonts/*.ttf", "web/*.html", "web/*.js", "web/*.css"]
 
 [project.scripts]
 image-review = "image_review.cli:main"
