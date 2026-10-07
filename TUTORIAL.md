@@ -711,6 +711,75 @@ viewer shows "Lost connection to server - progress saved" and ignores every
 key but `q`/`Esc`; press `q`, then
 reconnect with the same string while the server is still running.
 
+### Browser review over SSH (experimental)
+
+An experimental alternative to the pygame viewer: a browser on your laptop,
+with only `ssh` installed there. The server listens on a Unix socket on the
+compute node and your laptop forwards a local port to it. At present the page
+only checks the connection to the server; the review interface is coming in a
+following change. [SECURITY.md](SECURITY.md#experimental-browser-review-over-a-unix-socket)
+lists the differences from the HTTPS mode (plain HTTP on the node, a URL that
+holds the token) and the questions to ask your HPC administrator if
+forwarding does not work.
+
+1. On the cluster, get a shell on a compute node (`salloc`, then `srun --pty
+   bash`) and start the server, naming your login node:
+
+   ```bash
+   image-review serve --work-dir /scratch/me/review_work --socket --via me@login-node
+   ```
+
+2. It prints an ssh command and, on a terminal, a URL. On your laptop, paste
+   the ssh command and leave it running (password or MFA prompts appear
+   there):
+
+   ```
+   ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none -J me@login-node -L 127.0.0.1:8080:/home/me/.image-review/serve-node042-12345.sock me@node042.cluster.example
+   ```
+
+3. Open the URL in your browser: `http://127.0.0.1:8080/#TOKEN`. The token is
+   a password; do not paste the URL into chat or tickets.
+
+Stop the server with Ctrl-C, then the ssh command. Each start has a new
+token. `--via` only fills in the `-J` part of the printed command; without
+it the command shows `<user>@<login-node>` for you to fill in.
+
+**Batch mode.** Under `sbatch` stdout is not a terminal, so the URL is
+written to `~/.image-review/browser-<host>-<pid>.txt` (mode 0600) and removed
+when the server stops. The job output gives the ssh command and the file's
+path; fetch the URL from your laptop (use the absolute path, not `~`):
+
+```bash
+ssh me@login-node cat /home/me/.image-review/browser-node042-12345.txt
+```
+
+This assumes your home directory is shared with the login node. Run the ssh
+command from the job output first, then open the URL.
+
+**Troubleshooting:**
+- `channel N: open failed: connect failed` from ssh: the node's sshd would
+  not forward to the socket (a forwarding policy), or the socket on your home
+  filesystem is not usable (some network filesystems do not support Unix
+  sockets). Try a node-local path:
+  `serve --socket-path "$(mktemp -d /tmp/ir.XXXXXX)/ir.sock"`, and use the
+  command it prints. That socket exists only on that node.
+- `Permission denied (publickey,hostbased)`: `-J` makes your laptop
+  authenticate to the compute node itself, through the login node, so the
+  laptop's key must be accepted there (in the cluster's `authorized_keys`),
+  not only on the login node.
+- `bind [127.0.0.1]:8080: Address already in use` or "Could not request local
+  forwarding": port 8080 is busy on your laptop. Change the number in
+  `-L 127.0.0.1:8080:...` and in the URL.
+- If your `ssh_config` enables `ControlPersist` for these hosts, a background
+  master can keep a forward alive after Ctrl-C. The printed command sets
+  `ControlPath=none` to avoid that; if you edit it, keep that option.
+- "Socket path is N bytes; the limit is ...": use a shorter `--socket-path`.
+- "Another server is listening on ...": pick a different `--socket-path`.
+- Prefer the default socket path. On a shared home directory, a second server
+  on another node given the same explicit `--socket-path` takes the first's
+  socket over and the first becomes unreachable. If you must choose a path,
+  include `$SLURM_JOB_ID` in it.
+
 ### Security
 
 The connection string is a password: anyone holding it can view the images and

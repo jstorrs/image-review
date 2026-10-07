@@ -455,6 +455,7 @@ refuse, unless `--allow-live`.
 
 ```
 image-review serve [--work-dir DIR] [--bind HOST] [--port N]
+image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via USER@LOGIN]   # experimental
 ```
 
 Serves a work directory over HTTPS (self-signed certificate, bearer token) so
@@ -469,8 +470,14 @@ file is removed when the server stops.
 | `--work-dir` | `./review_work` | Work directory containing preprocessed data |
 | `--bind` | this machine's FQDN | Hostname or IPv4 address to bind and advertise (wildcard addresses are refused) |
 | `--port` | 0 | Port to listen on (0 picks a free port) |
+| `--socket` | off | Experimental: serve plain HTTP on a Unix socket for browser review over SSH, instead of HTTPS over TCP |
+| `--socket-path` | `~/.image-review/serve-<host>-<pid>.sock` | Experimental: the socket path; implies `--socket` |
+| `--via` | `$IMAGE_REVIEW_VIA` | With `--socket`: the login node to put in the printed ssh command |
 
-Each start generates a new token and certificate.
+Each start generates a new token (and, over HTTPS, a new certificate).
+`--socket` and `--socket-path` cannot be combined with `--bind` or `--port`, and
+`--socket-path` must not be empty; `--via` on the command line requires
+`--socket` (an `$IMAGE_REVIEW_VIA` in the environment is ignored without it).
 
 ## Reviewing on an HPC cluster
 
@@ -503,6 +510,26 @@ multiple clients). See [TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster)
 for the full workflow and batch jobs.
 
 If `--remote` reports "server speaks API vN, this client vM" (or "server is too old to report its API version"), install the same image-review version on both machines.
+
+### Browser review over SSH (experimental)
+
+An experimental alternative to the pygame viewer: a browser on your laptop,
+with nothing installed there but `ssh`. The page currently only checks the
+connection to the server; the review interface is coming in a following
+change. On the node:
+
+```bash
+image-review serve --work-dir ./review_work --socket --via you@login-node
+```
+
+It prints an `ssh -N ... -L 127.0.0.1:8080:/path/to.sock you@node` command
+and an `http://127.0.0.1:8080/#TOKEN` URL (the token is a password). Run the
+ssh command on your laptop, then open the URL. Under `sbatch` the URL is
+written to `~/.image-review/browser-<host>-<pid>.txt` instead. The traffic is
+plain HTTP inside the ssh tunnel, with no TLS on the node; read the
+experimental section of [SECURITY.md](SECURITY.md) first, and the
+[tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the steps and
+troubleshooting.
 
 ## Multi-Pass Workflow
 

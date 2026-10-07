@@ -1,26 +1,36 @@
+import getpass
+import io
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
 import socket
 import stat
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import image_review
-from image_review.cli import PACKAGE_LOGGER
+from image_review import cli
+from image_review.cli import PACKAGE_LOGGER, browser_url, ssh_forward_command
 from image_review.server import (
+    ReviewServer,
     clear_stale_socket,
     default_socket_path,
     is_local_host,
     load_assets,
     make_unix_server,
     parse_socket_path,
+    write_private_file,
 )
 from image_review.store import LocalStore
-from tests.fixtures import UnixHTTPConnection, make_work_dir, start_unix_server, temp_dir
+from tests.fixtures import CLEAN_ENV, UnixHTTPConnection, invoke_cli, make_work_dir, start_unix_server, temp_dir
 
 WEB_DIR = Path(image_review.__file__).parent / "web"
 ASSETS = [
@@ -387,6 +397,259 @@ class TestSocketFile(unittest.TestCase):
             path = default_socket_path()
         self.assertEqual(path, home / ".image-review" / f"serve-node1-{os.getpid()}.sock")
         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+
+
+class TestBrowserHelpers(unittest.TestCase):
+    def test_browser_url_keeps_token_in_fragment(self):
+        self.assertEqual(browser_url("tok"), "http://127.0.0.1:8080/#tok")
+        self.assertEqual(browser_url("tok", 9000), "http://127.0.0.1:9000/#tok")
+
+    def test_ssh_command_with_placeholder_login(self):
+        command = ssh_forward_command(Path("/home/a/ir.sock"), "node1.example", "alice", None)
+        self.assertEqual(
+            command,
+            "ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none -J 'alice@<login-node>'"
+            " -L 127.0.0.1:8080:/home/a/ir.sock alice@node1.example",
+        )
+
+    def test_ssh_command_with_via(self):
+        command = ssh_forward_command(Path("/tmp/ir.sock"), "node1", "alice", "bob@login", port=9000)
+        self.assertIn("-J bob@login ", command)
+        self.assertIn("-L 127.0.0.1:9000:/tmp/ir.sock ", command)
+        self.assertNotIn("<login-node>", command)
+
+    def test_ssh_command_quotes_a_path_with_a_space(self):
+        command = ssh_forward_command(Path("/tmp/my dir/ir.sock"), "node1", "alice", None)
+        self.assertIn("-L '127.0.0.1:8080:/tmp/my dir/ir.sock' ", command)
+        self.assertEqual(shlex.split(command)[-3:], ["-L", "127.0.0.1:8080:/tmp/my dir/ir.sock", "alice@node1"])
+
+    def test_ssh_command_quotes_each_piece(self):
+        command = ssh_forward_command(Path("/tmp/ir.sock"), "node1", "alice", "alice@[fe80::1]")
+        words = shlex.split(command)
+        self.assertEqual(words[words.index("-J") + 1], "alice@[fe80::1]")
+        self.assertIn("-J 'alice@[fe80::1]' ", command)
+
+
+@unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
+class TestPrivateFile(unittest.TestCase):
+    def test_failed_write_leaves_no_file(self):
+        home = socket_dir(self)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            with mock.patch("os.fdopen", side_effect=OSError("boom")), self.assertRaises(OSError):
+                write_private_file("x.txt", "secret\n")
+            self.assertEqual(list((home / ".image-review").iterdir()), [])
+
+
+class Tty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+@unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
+class TestServeSocketCommand(unittest.TestCase):
+    def setUp(self):
+        self.work = temp_dir(self) / "work"
+        self.work.mkdir()
+        make_work_dir(self.work)
+        self.home = socket_dir(self)  # short: the default socket lives under it
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.dir = self.home / ".image-review"
+
+    def serve(self, *args: str, **kwargs):
+        """Run `serve --work-dir ... *args` with serve_forever replaced by a KeyboardInterrupt; returns the result."""
+        with mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt):
+            return invoke_cli("serve", "--work-dir", str(self.work), *args, **kwargs)
+
+    def test_non_tty_writes_private_url_file_and_hides_token(self):
+        seen = {}
+
+        def fake_serve(server, *a, **k):
+            (url_file,) = self.dir.glob("browser-*.txt")
+            seen["mode"] = stat.S_IMODE(url_file.stat().st_mode)
+            seen["url"] = url_file.read_text().strip()
+            seen["file"] = url_file
+            seen["sockets"] = list(self.dir.glob("serve-*.sock"))
+            raise KeyboardInterrupt
+
+        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--socket")
+        self.assertEqual(result.exit_code, 0, result.output)
+        match = re.fullmatch(r"http://127\.0\.0\.1:8080/#(\S+)", seen["url"])
+        assert match is not None
+        self.assertNotIn(match.group(1), result.output)
+        self.assertEqual(seen["mode"], 0o600)
+        (sock,) = seen["sockets"]
+        self.assertIn("experimental", result.output)
+        self.assertIn(f"-L 127.0.0.1:8080:{sock} ", result.output)
+        self.assertIn("-J ", result.output)
+        self.assertIn("@<login-node>", result.output)
+        self.assertIn(str(seen["file"]), result.output)
+        self.assertIn("ssh ", result.output)
+        self.assertIn("'<user>@<login-node>' cat ".replace("<user>", getpass.getuser()), result.output)
+        self.assertEqual(list(self.dir.iterdir()), [])  # socket and URL file are gone
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_via_fills_in_the_login_node(self):
+        result = self.serve("--socket", "--via", "alice@login")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("-J alice@login ", result.output)
+        self.assertIn("ssh alice@login cat ", result.output)
+        self.assertIn("-o ControlPath=none ", result.output)
+        self.assertNotIn("<login-node>", result.output)
+
+    def test_via_from_environment_in_socket_mode(self):
+        result = self.serve("--socket", env={"IMAGE_REVIEW_VIA": "carol@login"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("-J carol@login ", result.output)
+
+    def test_tty_prints_url(self):
+        seen = []
+
+        def fake_serve(server, *a, **k):
+            seen.append(list(self.dir.glob("serve-*.sock")))
+            raise KeyboardInterrupt
+
+        with (
+            mock.patch.object(ReviewServer, "serve_forever", fake_serve),
+            mock.patch("sys.stdout", Tty()) as out,
+            mock.patch.dict(os.environ),
+        ):
+            for name in CLEAN_ENV:  # as invoke_cli: a developer's exports must not leak in
+                os.environ.pop(name, None)
+            cli.cli.main(["serve", "--work-dir", str(self.work), "--socket"], standalone_mode=False)
+        text = out.getvalue()
+        self.assertRegex(text, r"http://127\.0\.0\.1:8080/#\S+")
+        self.assertIn("treat it like a password", text)
+        self.assertEqual(len(seen[0]), 1)
+        self.assertEqual(list(self.dir.iterdir()), [])  # socket gone, no URL file
+
+    def test_relative_socket_path_is_announced_absolute(self):
+        cwd = os.getcwd()
+        os.chdir(self.home)
+        self.addCleanup(os.chdir, cwd)
+        result = self.serve("--socket-path", "ir.sock")
+        self.assertEqual(result.exit_code, 0, result.output)
+        expected = Path.cwd() / "ir.sock"  # resolved: /tmp is a symlink on macOS
+        self.assertIn(f"-L 127.0.0.1:8080:{expected} ", result.output)
+
+    def test_empty_socket_path_is_refused_not_defaulted(self):
+        result = self.serve("--socket-path", "")
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertNotIn("Traceback", result.output)
+        self.assertIn("must not be empty", result.output)
+        self.assertFalse(self.dir.exists() and list(self.dir.glob("serve-*.sock")))
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_busy_path_is_refused_and_leaves_the_first_server(self):
+        path = self.home / "busy.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(path))
+        listener.listen(1)
+        result = self.serve("--socket-path", str(path))
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Another server is listening", result.output)
+        self.assertTrue(stat.S_ISSOCK(path.lstat().st_mode))
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_socket_path_implies_socket(self):
+        path = self.home / "my.sock"
+        seen = []
+
+        def fake_serve(server, *a, **k):
+            seen.append(stat.S_ISSOCK(path.lstat().st_mode))
+            raise KeyboardInterrupt
+
+        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--socket-path", str(path))
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(seen, [True])
+        self.assertIn(f"-L 127.0.0.1:8080:{path} ", result.output)
+        self.assertFalse(path.exists())
+
+    def test_conflicting_options_exit_2(self):
+        for args in (
+            ["--socket", "--bind", "x"],
+            ["--socket-path", str(self.home / "a.sock"), "--bind", "x"],
+            ["--socket", "--port", "1"],
+            ["--socket", "--port", "0"],
+            ["--via", "a@b"],
+        ):
+            with self.subTest(args=args):
+                result = self.serve(*args)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertFalse((self.work / "review.lock").exists())
+                self.assertFalse(self.dir.exists())
+
+    def test_via_from_environment_ignored_without_socket(self):
+        result = self.serve("--bind", "127.0.0.1", env={"IMAGE_REVIEW_VIA": "carol@login"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("image-review review --remote", result.output)
+        self.assertNotIn("Unix socket", result.output)
+
+    def test_bad_via_refused(self):
+        result = self.serve("--socket", "--via", "-oProxyCommand=x")
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Invalid --via", result.output)
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_path_too_long_exits_1_and_releases_lock(self):
+        result = self.serve("--socket-path", str(self.home / ("x" * 120)))
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertNotIsInstance(result.exception, OSError)
+        self.assertNotIn("Traceback", result.output)
+        self.assertIn("limit is", result.output)
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_missing_parent_exits_1(self):
+        result = self.serve("--socket-path", str(self.home / "nope" / "a.sock"))
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Cannot listen on socket", result.output)
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_url_file_failure_releases_everything(self):
+        with mock.patch("image_review.server.write_private_file", side_effect=OSError("disk full")):
+            result = self.serve("--socket")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Cannot write browser URL file: disk full", result.output)
+        self.assertEqual(list(self.dir.iterdir()), [])
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_sigterm_removes_socket_and_url_file(self):
+        path = self.home / "t.sock"
+        env = {**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"}
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "image_review.cli",
+                "serve",
+                "--work-dir",
+                str(self.work),
+                "--socket-path",
+                str(path),
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(proc.kill)
+        deadline = time.monotonic() + 20
+        while not list(self.dir.glob("browser-*.txt")):
+            self.assertLess(time.monotonic(), deadline, "server never wrote its URL file")
+            self.assertIsNone(proc.poll())
+            time.sleep(0.05)
+        self.assertTrue(path.exists())
+        time.sleep(0.3)  # let serve_forever start
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertFalse(path.exists())
+        self.assertEqual(list(self.dir.glob("browser-*.txt")), [])
+        self.assertFalse((self.work / "review.lock").exists())
 
 
 if __name__ == "__main__":

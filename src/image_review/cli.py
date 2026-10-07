@@ -1,14 +1,16 @@
 import contextlib
 import dataclasses
 import datetime
+import functools
 import getpass
 import logging
 import math
 import os
+import shlex
 import socket
 import sys
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, get_args
 
@@ -688,35 +690,118 @@ def export(work_dir, output, report, allow_live, remote):
     "--bind", default=None, help="Hostname/IPv4 address to bind and advertise [default: this machine's FQDN]."
 )
 @click.option("--port", type=click.IntRange(0, 65535), default=0, help="Port to listen on (0 picks a free port).")
-def serve(work_dir, bind, port):
-    """Serve a work directory over HTTPS so a remote client can review it.
+@click.option(
+    "--socket",
+    "socket_mode",
+    is_flag=True,
+    help="Experimental: serve plain HTTP on a Unix socket for browser review over SSH, instead of HTTPS over TCP.",
+)
+@click.option(
+    "--socket-path",
+    default=None,
+    help="Experimental: the socket path; implies --socket [default: ~/.image-review/serve-HOST-PID.sock].",
+)
+@click.option(
+    "--via",
+    envvar="IMAGE_REVIEW_VIA",
+    default=None,
+    help="With --socket: the login node (e.g. user@login.cluster) to put in the printed ssh command (also read from $IMAGE_REVIEW_VIA).",
+)
+def serve(work_dir, bind, port, socket_mode, socket_path, via):
+    """Serve a work directory so a remote client can review it.
 
-    Images never leave this machine except to a client holding the connection
+    By default this is HTTPS over TCP for the `review --remote` client. Images
+    never leave this machine except to a client holding the connection
     string. The string contains an access token: treat it like a password.
     When stdout is not a terminal (e.g. sbatch), it is written to a private
     file under ~/.image-review/ instead of being printed.
+
+    --socket (experimental) serves plain HTTP on a Unix socket instead, for a
+    browser on your laptop reached through `ssh -L`; the URL, which contains
+    the token, is handled the same way.
     """
-    from .server import make_server
+    from .tunnel import parse_via
+
+    if socket_path == "":  # e.g. --socket-path "$UNSET"; Path("") would quietly mean the current directory
+        raise click.UsageError("--socket-path must not be empty.")
+    socket_mode = socket_mode or socket_path is not None
+    ctx = click.get_current_context()
+    if socket_mode:
+        if bind is not None or ctx.get_parameter_source("port") is not click.core.ParameterSource.DEFAULT:
+            raise click.UsageError("--socket and --socket-path cannot be combined with --bind or --port.")
+    elif via is not None:
+        if ctx.get_parameter_source("via") is click.core.ParameterSource.COMMANDLINE:
+            raise click.UsageError("--via requires --socket.")
+        via = None  # from $IMAGE_REVIEW_VIA, which is meant for `review`
+    if via is not None:
+        try:
+            via = parse_via(via)
+        except ValueError as e:
+            raise click.ClickException(f"Invalid --via: {e}")
 
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
         # Installed before the lock is taken, so every exit path releases it.
         with interrupt_on(*TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
             store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
-            host = socket.getfqdn() if bind is None else bind
-            try:
-                server, target = make_server(store, host, port)
-            except ValueError as e:  # wildcard bind or unadvertisable host; make_server closed its socket
-                raise click.ClickException(str(e))
-            except OSError as e:
-                raise click.ClickException(f"Cannot listen on {host}:{port} (IPv4 hostnames/addresses only): {e}")
-            # Exit order (LIFO): connection file, socket, then the store; a handler thread may still be marking.
-            stack.callback(_close_store_after_marks, server, store)
-            stack.callback(server.server_close)
-            _announce(target, stack)
+            if socket_mode:
+                server, announce = _serve_socket(store, socket_path, via, stack)
+            else:
+                server, announce = _serve_tls(store, bind, port, stack)
+            announce(stack)
             server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def _close_with(stack: contextlib.ExitStack, server: "ReviewServer", store: LocalStore) -> None:
+    """Register the server's shutdown on `stack` as soon as it exists.
+
+    Exit order (LIFO): the announced file, the socket (which, for a Unix socket, also removes the socket file),
+    then the store; a handler thread may still be marking.
+    """
+    stack.callback(_close_store_after_marks, server, store)
+    stack.callback(server.server_close)
+
+
+def _serve_tls(
+    store: LocalStore, bind: str | None, port: int, stack: contextlib.ExitStack
+) -> tuple["ReviewServer", Callable[[contextlib.ExitStack], None]]:
+    """Bind the HTTPS server; returns it and the function that announces how to connect."""
+    from .server import make_server
+
+    host = socket.getfqdn() if bind is None else bind
+    try:
+        server, target = make_server(store, host, port)
+    except ValueError as e:  # wildcard bind or unadvertisable host; make_server closed its socket
+        raise click.ClickException(str(e))
+    except OSError as e:
+        raise click.ClickException(f"Cannot listen on {host}:{port} (IPv4 hostnames/addresses only): {e}")
+    _close_with(stack, server, store)
+    return server, functools.partial(_announce, target)
+
+
+def _serve_socket(
+    store: LocalStore, socket_path: str | None, via: str | None, stack: contextlib.ExitStack
+) -> tuple["ReviewServer", Callable[[contextlib.ExitStack], None]]:
+    """Bind the Unix-socket server; returns it and the function that announces how to connect.
+
+    Failures become ClickExceptions. The announced path is the absolute one that was bound.
+    """
+    from .server import default_socket_path, make_unix_server
+
+    try:
+        requested = Path(socket_path) if socket_path is not None else default_socket_path()
+    except OSError as e:  # ~/.image-review is not ours, or cannot be created
+        raise click.ClickException(f"Cannot use ~/.image-review: {e}")
+    try:
+        server, token = make_unix_server(store, requested)
+    except ValueError as e:  # bad or busy path; nothing was left behind
+        raise click.ClickException(str(e))
+    except OSError as e:
+        raise click.ClickException(f"Cannot listen on socket {requested}: {e}")
+    _close_with(stack, server, store)
+    return server, functools.partial(_announce_socket, Path(str(server.server_address)), token, via)
 
 
 def _announce(target: RemoteTarget, stack: contextlib.ExitStack) -> None:
@@ -745,6 +830,64 @@ def _announce(target: RemoteTarget, stack: contextlib.ExitStack) -> None:
     print(f"  image-review review --remote {remote_arg}")
     print("or through an SSH tunnel via the login node:")
     print(f"  image-review review --remote {remote_arg} --via <user>@<login-node>")
+    print("\nPress Ctrl-C to stop.", flush=True)
+
+
+BROWSER_PORT = 8080  # the laptop-side port in the printed ssh command and URL; changeable if busy
+
+
+def browser_url(token: str, port: int = BROWSER_PORT) -> str:
+    """The URL to open on the laptop; the token rides in the fragment, which the browser never sends.
+
+    127.0.0.1, not localhost: the forward below binds only that address, so nothing else can answer the URL.
+    """
+    return f"http://127.0.0.1:{port}/#{token}"
+
+
+def ssh_forward_command(socket_path: Path, node: str, user: str, via: str | None, port: int = BROWSER_PORT) -> str:
+    """The `ssh -L` command that forwards 127.0.0.1:`port` on the laptop to the server's socket on `node`.
+
+    The forward names 127.0.0.1 so ssh does not also bind ::1 (where another process could already listen);
+    ControlPath=none keeps a ControlPersist master from keeping the forward alive after Ctrl-C.
+    """
+    jump = shlex.quote(via or f"{user}@<login-node>")
+    forward = shlex.quote(f"127.0.0.1:{port}:{socket_path}")
+    target = shlex.quote(f"{user}@{node}")
+    return f"ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none -J {jump} -L {forward} {target}"
+
+
+def _announce_socket(socket_path: Path, token: str, via: str | None, stack: contextlib.ExitStack) -> None:
+    """Tell the operator how to reach the socket: the ssh command (no secret), and the URL, which holds the token.
+
+    The URL is printed on a terminal, else written to a private file whose removal is registered on `stack`.
+    """
+    from .server import safe_name, short_host, write_private_file
+
+    try:
+        user = getpass.getuser()
+    except (OSError, KeyError):  # no passwd entry (getuser raises OSError, or KeyError from pwd)
+        user = "<user>"
+    url = browser_url(token)
+    print("Serving review data over a Unix socket (experimental: browser review over SSH).")
+    print("\nOn your laptop, forward a local port to the socket (leave it running):")
+    print(f"  {ssh_forward_command(socket_path, socket.getfqdn(), user, via)}")
+    print(f"If port {BROWSER_PORT} is busy on your laptop, change it in -L and in the URL.")
+    if sys.stdout.isatty():
+        print("\nThen open this URL. It contains an access token; treat it like a password.\n")
+        print(url)
+    else:
+        try:
+            url_file = write_private_file(f"browser-{safe_name(short_host())}-{os.getpid()}.txt", url + "\n")
+        except OSError as e:
+            raise click.ClickException(f"Cannot write browser URL file: {e}")
+        stack.callback(url_file.unlink, missing_ok=True)
+        login = shlex.quote(via or f"{user}@<login-node>")
+        remote_path = shlex.quote(shlex.quote(str(url_file)))  # the remote shell parses it again
+        print("\nStdout is not a terminal, so the URL (it contains an access token; treat it like a")
+        print(f"password) was written to {url_file} (mode 0600) on this node.")
+        print("Home directories are usually shared with the login node, so on your laptop read it with:")
+        print(f"  ssh {login} cat {remote_path}")
+        print("then open it in your browser once the ssh command above is running.")
     print("\nPress Ctrl-C to stop.", flush=True)
 
 

@@ -34,7 +34,8 @@ of human reviewers.
   it sends the token, so a wrong or replaced server is rejected. Nothing is
   reused across runs.
 - **Token.** Every request must carry the bearer token, compared in constant
-  time before any routing. The token is a password: anyone holding the
+  time before any routing (in the experimental socket mode, all but the three
+  public page files; see below). The token is a password: anyone holding the
   connection string (`ir://...`) can view the images and record verdicts
   while the server runs. Do not paste it into chat or tickets. A new token
   and certificate are generated at each start, so an old string stops working.
@@ -80,6 +81,61 @@ of human reviewers.
   port to the compute node. ssh protects the hop to the login node; TLS with
   the pinned certificate covers the whole path to the compute node, and the
   tunnel adds no trust of its own.
+
+## Experimental: browser review over a Unix socket
+
+`image-review serve --socket` serves a browser page instead of the pygame
+client's HTTPS API. It is experimental and has weaker properties than the
+default mode; use it only where you accept the points below.
+
+- **No TLS.** ssh encrypts the path from the laptop to the node. On the node
+  the socket carries plain HTTP, so anyone able to connect to it can read it.
+- **The socket.** It is created 0600 in `~/.image-review/` (0700, owned by
+  you). Linux enforces the socket file's own mode on connect; POSIX does not
+  require `connect()` to check it and some older systems ignored it, so do
+  not rely on it outside Linux. On a `--socket-path` you choose, only that
+  check protects the socket. Root and your own processes can connect.
+- **The page is public; the API is not.** `/`, `/app.js` and `/app.css`
+  carry no PHI or secret and need no token. Every API route needs the token.
+  The `Host` header must be `localhost`, `127.0.0.1` or `[::1]` (with an
+  optional port), which defends against DNS rebinding. Responses carry a Content-Security-Policy and
+  `Referrer-Policy: no-referrer`. At present the page only checks the
+  connection; the review interface follows in a later change.
+- **The token is in the URL fragment**, which the browser never sends to the
+  server. The page keeps it in per-tab `sessionStorage` and rewrites it out
+  of the tab's history entry. It can still stay in browser history and
+  autocomplete, and in the clipboard. It stops working when the server stops.
+  Treat the URL like a password. When stdout is not a terminal it is written
+  to `~/.image-review/browser-<host>-<pid>.txt` (0600, removed on exit), with
+  the same exposure as the connection file above. Browser extensions that
+  can read all sites can read the token and the images.
+- **The laptop side.** The printed command forwards `127.0.0.1:8080` only, and
+  the URL names `127.0.0.1`: ssh given a bare `-L 8080:...` also binds `::1`
+  and succeeds if either bind works, so another process already on
+  `[::1]:8080` could receive the browser and read the token. If you change
+  the command, keep the explicit address. Other users on the laptop can reach
+  `127.0.0.1:8080` while the command runs, but still need the token.
+- **Images** will be held in the browser's memory as blob URLs, with the
+  same swap, crash-dump and screenshot caveats as the viewer, plus whatever
+  the browser itself does with its memory and caches.
+- **Stale-socket races.** A server treats a socket whose connect is refused
+  as stale and unlinks it. Two servers started at once on one explicit
+  `--socket-path` can therefore unlink each other's socket, and on macOS a
+  live server with a full backlog can look stale. On a home directory shared
+  between nodes it is worse than a race: a connect to a live socket from
+  another node is always refused, so a second server on another node with the
+  same explicit path always replaces the first, which becomes unreachable.
+  Use the default path (host and process id in the name) or a per-job one,
+  for example containing `$SLURM_JOB_ID`.
+
+**Questions for your HPC administrator**, if it does not work:
+- Can you `ssh` to a compute node where you have a job (`pam_slurm_adopt`)?
+- Is `AllowStreamLocalForwarding` enabled on compute-node sshd (the default;
+  `DisableForwarding` must not be set)?
+- Is `AllowTcpForwarding` enabled on the login node (needed for `-J`)?
+- Do Unix sockets work on the shared home filesystem (NFS, GPFS, Lustre)?
+- With `job_container/tmpfs`, does an adopted ssh session see the job's
+  private `/tmp`?
 
 ## The client (`image-review review --remote`)
 

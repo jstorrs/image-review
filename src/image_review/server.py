@@ -546,8 +546,12 @@ def write_private_file(name: str, text: str) -> Path:
     path = private_dir() / name
     path.unlink(missing_ok=True)  # stale file from a crashed run
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+    except BaseException:
+        path.unlink(missing_ok=True)  # never leave a partly written file holding a secret
+        raise
     return path
 
 
@@ -599,10 +603,14 @@ def clear_stale_socket(path: Path) -> None:
     raise ValueError(f"Another server is listening on {path}.")
 
 
+def short_host() -> str:
+    """This machine's host name without its domain; it names files and saves sun_path bytes."""
+    return socket.gethostname().split(".")[0]
+
+
 def default_socket_path() -> Path:
-    """~/.image-review/serve-<host>-<pid>.sock; the short host name saves sun_path bytes."""
-    short_host = socket.gethostname().split(".")[0]
-    return private_dir() / f"serve-{safe_name(short_host)}-{os.getpid()}.sock"
+    """~/.image-review/serve-<short-host>-<pid>.sock."""
+    return private_dir() / f"serve-{safe_name(short_host())}-{os.getpid()}.sock"
 
 
 def make_unix_server(store: ReviewStore, path: Path) -> tuple[UnixReviewServer, str]:

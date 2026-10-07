@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Experimental: browser review over SSH (in progress).** `image-review
+  serve --socket` (or `--socket-path PATH`) serves plain HTTP on a Unix socket
+  instead of HTTPS over TCP, for a browser on your laptop reached through
+  `ssh -L`. `serve` prints the ssh command and the
+  `http://127.0.0.1:8080/#TOKEN` URL (or, when stdout is not a terminal,
+  writes the URL to a private file under `~/.image-review/`). `--via` (or
+  `$IMAGE_REVIEW_VIA`) fills in the login node of that command. The page
+  currently only checks the connection; the review interface follows in a
+  later change. The default HTTPS mode and the pygame client are unchanged.
+  See [SECURITY.md](SECURITY.md) for the limits.
+
 ## 0.3.0
 
 Remote review over HTTPS, an allowlist export of the files that may be released, an audit trail in
