@@ -701,7 +701,7 @@ crash) can leave it behind, holding source paths, to be deleted by hand.
 
 ```
 image-review serve [--work-dir DIR] [--bind HOST] [--port N]
-image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via DEST]
+image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via DEST | --direct]
 ```
 
 | Argument | Default | Description |
@@ -712,6 +712,7 @@ image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via DEST]
 | `--socket` | off | Experimental: serve on a Unix socket (see below) |
 | `--socket-path` | `default_socket_path()` | Experimental: the socket path; implies `--socket` |
 | `--via` | `$IMAGE_REVIEW_VIA` | With `--socket`: login node for the printed ssh command; checked with `tunnel.parse_via` |
+| `--direct` | off; `$IMAGE_REVIEW_DIRECT` | With `--socket`: the laptop reaches the node without a jump host; the printed command omits `-J` |
 
 Opens a writable `LocalStore` (holding the work dir lock for the server's
 lifetime; `WorkDirLocked` is a `ClickException`, exit 1), calls
@@ -737,13 +738,17 @@ user, tightened to 0700 if looser; file created `O_EXCL|O_NOFOLLOW` with mode
 (`UsageError`) before the work directory is opened: either option together
 with `--bind` or a `--port` that was given (any parameter source but the
 default), an empty `--socket-path`, and `--via` given on the command line
-without socket mode. A `--via`
-that comes only from `$IMAGE_REVIEW_VIA` is ignored in TCP mode. An invalid
+without socket mode, `--direct` given on the command line without socket
+mode, and `--direct` (any source) together with `--via` given on the command
+line. A `--via` that comes only from `$IMAGE_REVIEW_VIA` is ignored in TCP
+mode, and so is a `--direct` that comes only from `$IMAGE_REVIEW_DIRECT`; with
+`--direct`, an environment `--via` is ignored too. An invalid
 `--via`, a `ValueError` (bad or busy path), an `OSError` from binding or from
 `~/.image-review`, all exit 1 as `ClickException`s with nothing left behind.
 Output, always: an "experimental" notice and
 `ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none -J VIA -L
 127.0.0.1:PORT:SOCKET USER@NODE` (`VIA` is `--via` or `<user>@<login-node>`;
+with `--direct` the `-J VIA` is omitted;
 `PORT` is `BROWSER_PORT`, 8080; `SOCKET` is the absolute path that was bound;
 `NODE` is `socket.getfqdn()`; `USER` is `getpass.getuser()`, else `<user>`;
 each of `VIA`, the `-L` argument and `USER@NODE` goes through `shlex.quote`,
@@ -755,10 +760,10 @@ token. Otherwise `write_private_file` writes it to
 `~/.image-review/browser-<short-host>-<pid>.txt` (0600, host from
 `server.short_host()`, sanitized as above), and the output gives its path and
 an `ssh LOGIN cat FILE` command (the path quoted twice, as the remote shell
-parses it again). The token is printed nowhere else and never logged. The
-server's shutdown is registered as soon as it is bound and the URL file's
-removal as soon as it is written, so a failure at any later point releases
-them. The same shutdown rules apply; `server_close` removes the socket and the
+parses it again; with `--direct`, `LOGIN` is the quoted `USER@NODE`). The
+token is printed nowhere else and never logged. The server's shutdown is
+registered as soon as it is bound and the URL file's removal as soon as it is
+written, so a failure at any later point releases them. The same shutdown rules apply; `server_close` removes the socket and the
 browser file is unlinked too.
 
 **Shutdown**: SIGINT, SIGTERM and SIGHUP all stop the server (SIGTERM is what

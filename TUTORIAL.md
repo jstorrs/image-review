@@ -729,6 +729,10 @@ forwarding does not work.
    image-review serve --work-dir /scratch/me/review_work --socket --via me@login-node
    ```
 
+   If your laptop can ssh to compute nodes directly (`ssh me@<node>` works
+   without a jump host), use `--direct` instead of `--via`; the printed
+   command then has no `-J`.
+
 2. It prints an ssh command and, on a terminal, a URL. On your laptop, paste
    the ssh command and leave it running (password or MFA prompts appear
    there):
@@ -779,7 +783,9 @@ forwarding does not work.
 
 Stop the server with Ctrl-C, then the ssh command. Each start has a new
 token. `--via` only fills in the `-J` part of the printed command; without
-it the command shows `<user>@<login-node>` for you to fill in.
+it the command shows `<user>@<login-node>` for you to fill in. `--direct`
+(or `$IMAGE_REVIEW_DIRECT=1`) leaves `-J` out; it cannot be combined with
+`--via` on the command line.
 
 **Batch mode.** Under `sbatch` stdout is not a terminal, so the URL is
 written to `~/.image-review/browser-<host>-<pid>.txt` (mode 0600) and removed
@@ -791,7 +797,9 @@ ssh me@login-node cat /home/me/.image-review/browser-node042-12345.txt
 ```
 
 This assumes your home directory is shared with the login node. Run the ssh
-command from the job output first, then open the URL.
+command from the job output first, then open the URL. With `--direct` the
+job output gives `ssh me@node cat ...` instead, since you reach the node
+itself.
 
 **Troubleshooting:**
 - `channel N: open failed: connect failed` from ssh: the node's sshd would
@@ -800,6 +808,17 @@ command from the job output first, then open the URL.
   sockets). Try a node-local path:
   `serve --socket-path "$(mktemp -d /tmp/ir.XXXXXX)/ir.sock"`, and use the
   command it prints. That socket exists only on that node.
+- `channel 0: open failed: connect failed: Name or service not known`
+  followed by `stdio forwarding failed`, with `-J`: the login node cannot
+  resolve the compute node's name. If `ssh you@<node>` works from your
+  laptop, rerun the server with `--direct` and use the command it prints.
+- Windows: the built-in OpenSSH client works (a direct forward to the socket
+  was tested from Windows). If `-J` fails with `CreateProcessW failed
+  error:2` or `posix_spawn: No such file or directory`, replace `-J
+  you@login` with `-o ProxyCommand="C:\Windows\System32\OpenSSH\ssh.exe -W
+  %h:%p you@login"`. In PowerShell the single quotes the command may print
+  are fine; cmd.exe does not treat single quotes as quoting, which only
+  matters if a printed piece was quoted (for example a path with spaces).
 - `Permission denied (publickey,hostbased)`: `-J` makes your laptop
   authenticate to the compute node itself, through the login node, so the
   laptop's key must be accepted there (in the cluster's `authorized_keys`),

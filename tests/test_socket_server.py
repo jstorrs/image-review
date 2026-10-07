@@ -461,7 +461,7 @@ class TestBrowserHelpers(unittest.TestCase):
         self.assertEqual(browser_url("tok", 9000), "http://127.0.0.1:9000/#tok")
 
     def test_ssh_command_with_placeholder_login(self):
-        command = ssh_forward_command(Path("/home/a/ir.sock"), "node1.example", "alice", None)
+        command = ssh_forward_command(Path("/home/a/ir.sock"), "node1.example", "alice", "alice@<login-node>")
         self.assertEqual(
             command,
             "ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none -J 'alice@<login-node>'"
@@ -474,8 +474,20 @@ class TestBrowserHelpers(unittest.TestCase):
         self.assertIn("-L 127.0.0.1:9000:/tmp/ir.sock ", command)
         self.assertNotIn("<login-node>", command)
 
-    def test_ssh_command_quotes_a_path_with_a_space(self):
+    def test_ssh_command_direct_has_no_jump(self):
         command = ssh_forward_command(Path("/tmp/my dir/ir.sock"), "node1", "alice", None)
+        self.assertNotIn("-J", command)
+        self.assertEqual(
+            shlex.split(command),
+            [
+                *["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ControlPath=none"],
+                *["-L", "127.0.0.1:8080:/tmp/my dir/ir.sock", "alice@node1"],
+            ],
+        )
+        self.assertIn("-L '127.0.0.1:8080:/tmp/my dir/ir.sock' alice@node1", command)
+
+    def test_ssh_command_quotes_a_path_with_a_space(self):
+        command = ssh_forward_command(Path("/tmp/my dir/ir.sock"), "node1", "alice", "alice@<login-node>")
         self.assertIn("-L '127.0.0.1:8080:/tmp/my dir/ir.sock' ", command)
         self.assertEqual(shlex.split(command)[-3:], ["-L", "127.0.0.1:8080:/tmp/my dir/ir.sock", "alice@node1"])
 
@@ -560,6 +572,38 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("-J carol@login ", result.output)
 
+    def test_direct_omits_jump_and_reads_url_from_the_node(self):
+        result = self.serve("--socket", "--direct")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("-J", result.output)
+        self.assertNotIn("<login-node>", result.output)
+        self.assertIn("-o ControlPath=none -L 127.0.0.1:8080:", result.output)
+        node = socket.getfqdn()
+        self.assertIn(f"ssh {shlex.quote(f'{getpass.getuser()}@{node}')} cat ", result.output)
+
+    def test_direct_from_environment_in_socket_mode(self):
+        result = self.serve("--socket", env={"IMAGE_REVIEW_DIRECT": "1"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("-J", result.output)
+
+    def test_direct_ignores_via_from_environment(self):
+        result = self.serve("--socket", "--direct", env={"IMAGE_REVIEW_VIA": "carol@login"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("-J", result.output)
+        self.assertNotIn("carol@login", result.output)
+
+    def test_direct_and_via_on_the_command_line_conflict(self):
+        for args, env in (
+            (["--socket", "--direct", "--via", "a@b"], {}),
+            (["--socket", "--via", "a@b"], {"IMAGE_REVIEW_DIRECT": "1"}),
+        ):
+            with self.subTest(args=args, env=env):
+                result = self.serve(*args, env=env)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("mutually exclusive", result.output)
+                self.assertFalse((self.work / "review.lock").exists())
+                self.assertFalse(self.dir.exists())
+
     def test_tty_prints_url(self):
         seen = []
 
@@ -632,6 +676,7 @@ class TestServeSocketCommand(unittest.TestCase):
             ["--socket", "--port", "1"],
             ["--socket", "--port", "0"],
             ["--via", "a@b"],
+            ["--direct"],
         ):
             with self.subTest(args=args):
                 result = self.serve(*args)
@@ -641,6 +686,12 @@ class TestServeSocketCommand(unittest.TestCase):
 
     def test_via_from_environment_ignored_without_socket(self):
         result = self.serve("--bind", "127.0.0.1", env={"IMAGE_REVIEW_VIA": "carol@login"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("image-review review --remote", result.output)
+        self.assertNotIn("Unix socket", result.output)
+
+    def test_direct_from_environment_ignored_without_socket(self):
+        result = self.serve("--bind", "127.0.0.1", env={"IMAGE_REVIEW_DIRECT": "1"})
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("image-review review --remote", result.output)
         self.assertNotIn("Unix socket", result.output)

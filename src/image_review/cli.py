@@ -707,7 +707,13 @@ def export(work_dir, output, report, allow_live, remote):
     default=None,
     help="With --socket: the login node (e.g. user@login.cluster) to put in the printed ssh command (also read from $IMAGE_REVIEW_VIA).",
 )
-def serve(work_dir, bind, port, socket_mode, socket_path, via):
+@click.option(
+    "--direct",
+    envvar="IMAGE_REVIEW_DIRECT",
+    is_flag=True,
+    help="With --socket: your laptop reaches compute nodes without a jump host; the printed ssh command omits -J (also read from $IMAGE_REVIEW_DIRECT).",
+)
+def serve(work_dir, bind, port, socket_mode, socket_path, via, direct):
     """Serve a work directory so a remote client can review it.
 
     By default this is HTTPS over TCP for the `review --remote` client. Images
@@ -729,9 +735,17 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via):
     if socket_mode:
         if bind is not None or ctx.get_parameter_source("port") is not click.core.ParameterSource.DEFAULT:
             raise click.UsageError("--socket and --socket-path cannot be combined with --bind or --port.")
-    elif via is not None:
+    else:
+        if direct and ctx.get_parameter_source("direct") is click.core.ParameterSource.COMMANDLINE:
+            raise click.UsageError("--direct requires --socket.")
+        direct = False  # from $IMAGE_REVIEW_DIRECT, which only means something in socket mode
+        if via is not None:
+            if ctx.get_parameter_source("via") is click.core.ParameterSource.COMMANDLINE:
+                raise click.UsageError("--via requires --socket.")
+            via = None  # from $IMAGE_REVIEW_VIA, which is meant for `review`
+    if direct and via is not None:
         if ctx.get_parameter_source("via") is click.core.ParameterSource.COMMANDLINE:
-            raise click.UsageError("--via requires --socket.")
+            raise click.UsageError("--direct and --via are mutually exclusive.")
         via = None  # from $IMAGE_REVIEW_VIA, which is meant for `review`
     if via is not None:
         try:
@@ -745,7 +759,7 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via):
         with interrupt_on(*TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
             store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
             if socket_mode:
-                server, announce = _serve_socket(store, socket_path, via, stack)
+                server, announce = _serve_socket(store, socket_path, via, direct, stack)
             else:
                 server, announce = _serve_tls(store, bind, port, stack)
             announce(stack)
@@ -782,7 +796,7 @@ def _serve_tls(
 
 
 def _serve_socket(
-    store: LocalStore, socket_path: str | None, via: str | None, stack: contextlib.ExitStack
+    store: LocalStore, socket_path: str | None, via: str | None, direct: bool, stack: contextlib.ExitStack
 ) -> tuple["ReviewServer", Callable[[contextlib.ExitStack], None]]:
     """Bind the Unix-socket server; returns it and the function that announces how to connect.
 
@@ -801,7 +815,7 @@ def _serve_socket(
     except OSError as e:
         raise click.ClickException(f"Cannot listen on socket {requested}: {e}")
     _close_with(stack, server, store)
-    return server, functools.partial(_announce_socket, Path(str(server.server_address)), token, via)
+    return server, functools.partial(_announce_socket, Path(str(server.server_address)), token, via, direct)
 
 
 def _announce(target: RemoteTarget, stack: contextlib.ExitStack) -> None:
@@ -844,19 +858,20 @@ def browser_url(token: str, port: int = BROWSER_PORT) -> str:
     return f"http://127.0.0.1:{port}/#{token}"
 
 
-def ssh_forward_command(socket_path: Path, node: str, user: str, via: str | None, port: int = BROWSER_PORT) -> str:
+def ssh_forward_command(socket_path: Path, node: str, user: str, jump: str | None, port: int = BROWSER_PORT) -> str:
     """The `ssh -L` command that forwards 127.0.0.1:`port` on the laptop to the server's socket on `node`.
 
     The forward names 127.0.0.1 so ssh does not also bind ::1 (where another process could already listen);
     ControlPath=none keeps a ControlPersist master from keeping the forward alive after Ctrl-C.
+    `jump` is the -J host; None means the laptop reaches `node` directly.
     """
-    jump = shlex.quote(via or f"{user}@<login-node>")
+    jump_option = "" if jump is None else f"-J {shlex.quote(jump)} "
     forward = shlex.quote(f"127.0.0.1:{port}:{socket_path}")
     target = shlex.quote(f"{user}@{node}")
-    return f"ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none -J {jump} -L {forward} {target}"
+    return f"ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none {jump_option}-L {forward} {target}"
 
 
-def _announce_socket(socket_path: Path, token: str, via: str | None, stack: contextlib.ExitStack) -> None:
+def _announce_socket(socket_path: Path, token: str, via: str | None, direct: bool, stack: contextlib.ExitStack) -> None:
     """Tell the operator how to reach the socket: the ssh command (no secret), and the URL, which holds the token.
 
     The URL is printed on a terminal, else written to a private file whose removal is registered on `stack`.
@@ -868,9 +883,11 @@ def _announce_socket(socket_path: Path, token: str, via: str | None, stack: cont
     except (OSError, KeyError):  # no passwd entry (getuser raises OSError, or KeyError from pwd)
         user = "<user>"
     url = browser_url(token)
+    node = socket.getfqdn()
+    jump = None if direct else via or f"{user}@<login-node>"
     print("Serving review data over a Unix socket (experimental: browser review over SSH).")
     print("\nOn your laptop, forward a local port to the socket (leave it running):")
-    print(f"  {ssh_forward_command(socket_path, socket.getfqdn(), user, via)}")
+    print(f"  {ssh_forward_command(socket_path, node, user, jump)}")
     print(f"If port {BROWSER_PORT} is busy on your laptop, change it in -L and in the URL.")
     if sys.stdout.isatty():
         print("\nThen open this URL. It contains an access token; treat it like a password.\n")
@@ -881,12 +898,15 @@ def _announce_socket(socket_path: Path, token: str, via: str | None, stack: cont
         except OSError as e:
             raise click.ClickException(f"Cannot write browser URL file: {e}")
         stack.callback(url_file.unlink, missing_ok=True)
-        login = shlex.quote(via or f"{user}@<login-node>")
+        read_host = shlex.quote(f"{user}@{node}" if jump is None else jump)
         remote_path = shlex.quote(shlex.quote(str(url_file)))  # the remote shell parses it again
         print("\nStdout is not a terminal, so the URL (it contains an access token; treat it like a")
         print(f"password) was written to {url_file} (mode 0600) on this node.")
-        print("Home directories are usually shared with the login node, so on your laptop read it with:")
-        print(f"  ssh {login} cat {remote_path}")
+        if jump is None:
+            print("On your laptop, read it from the node with:")
+        else:
+            print("Home directories are usually shared with the login node, so on your laptop read it with:")
+        print(f"  ssh {read_host} cat {remote_path}")
         print("then open it in your browser once the ssh command above is running.")
     print("\nPress Ctrl-C to stop.", flush=True)
 
