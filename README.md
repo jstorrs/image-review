@@ -514,9 +514,11 @@ If `--remote` reports "server speaks API vN, this client vM" (or "server is too 
 ### Browser review over SSH (experimental)
 
 An experimental alternative to the pygame viewer: a browser on your laptop,
-with nothing installed there but `ssh`. The page currently only checks the
-connection to the server; the review interface is coming in a following
-change. On the node:
+with nothing installed there but `ssh`. The page reviews single images:
+enter a reviewer name, then `c` clean, `d` dirty, Left/Right to move and `z`
+to undo (no grid mode yet). With one page per server `z` undoes only that
+page's marks; the server's undo history is shared by every client. On the
+node:
 
 ```bash
 image-review serve --work-dir ./review_work --socket --via you@login-node

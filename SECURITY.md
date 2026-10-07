@@ -99,8 +99,9 @@ default mode; use it only where you accept the points below.
   carry no PHI or secret and need no token. Every API route needs the token.
   The `Host` header must be `localhost`, `127.0.0.1` or `[::1]` (with an
   optional port), which defends against DNS rebinding. Responses carry a Content-Security-Policy and
-  `Referrer-Policy: no-referrer`. At present the page only checks the
-  connection; the review interface follows in a later change.
+  `Referrer-Policy: no-referrer`. The page reviews single images; it reads
+  the image list and statuses, fetches each image and records verdicts and
+  undos through the same API, with the token.
 - **The token is in the URL fragment**, which the browser never sends to the
   server. The page keeps it in per-tab `sessionStorage` and rewrites it out
   of the tab's history entry. It can still stay in browser history and
@@ -115,9 +116,11 @@ default mode; use it only where you accept the points below.
   `[::1]:8080` could receive the browser and read the token. If you change
   the command, keep the explicit address. Other users on the laptop can reach
   `127.0.0.1:8080` while the command runs, but still need the token.
-- **Images** will be held in the browser's memory as blob URLs, with the
-  same swap, crash-dump and screenshot caveats as the viewer, plus whatever
-  the browser itself does with its memory and caches.
+- **Images** are held in the browser's memory as blob URLs, each revoked
+  once the next item is shown, with the same swap, crash-dump and screenshot
+  caveats as the viewer, plus whatever the browser itself does with its
+  memory and caches. Responses carry `Cache-Control: no-store`, so they
+  should not be written to the disk cache.
 - **Stale-socket races.** A server treats a socket whose connect is refused
   as stale and unlinks it. Two servers started at once on one explicit
   `--socket-path` can therefore unlink each other's socket, and on macOS a

@@ -715,9 +715,9 @@ reconnect with the same string while the server is still running.
 
 An experimental alternative to the pygame viewer: a browser on your laptop,
 with only `ssh` installed there. The server listens on a Unix socket on the
-compute node and your laptop forwards a local port to it. At present the page
-only checks the connection to the server; the review interface is coming in a
-following change. [SECURITY.md](SECURITY.md#experimental-browser-review-over-a-unix-socket)
+compute node and your laptop forwards a local port to it. The page reviews
+single images (there is no grid mode yet).
+[SECURITY.md](SECURITY.md#experimental-browser-review-over-a-unix-socket)
 lists the differences from the HTTPS mode (plain HTTP on the node, a URL that
 holds the token) and the questions to ask your HPC administrator if
 forwarding does not work.
@@ -739,6 +739,43 @@ forwarding does not work.
 
 3. Open the URL in your browser: `http://127.0.0.1:8080/#TOKEN`. The token is
    a password; do not paste the URL into chat or tickets.
+
+4. Type your name in the Reviewer box (1-64 characters; it is recorded with
+   every verdict, as `--reviewer` is for the viewer), then click on the image
+   or press Enter so the keys reach the page. The page shows the current
+   pass's UNREVIEWED and FLAGGED images one at a time, in random order:
+
+   | Key | Button | Action |
+   |-----|--------|--------|
+   | `c` | Clean | Mark the image CLEAN and move on |
+   | `d` | Dirty | Mark the image DIRTY and move on |
+   | Right / Left | Next / Previous | Move through the list without marking |
+   | `z` | Undo | Undo the latest mark and show that image again |
+
+   A verdict counts only once the image has been on screen for 200 ms, so a
+   key pressed as an image appears is ignored. An image that cannot be
+   loaded shows "Cannot load image: KEY" and can be marked DIRTY but never
+   CLEAN. The header shows the display scale as a percent; below 100%
+   (shown in red) the image is shrunk to fit and small burned-in text can be
+   lost, so enlarge the window or go full screen (browser zoom does not
+   help: it makes the page's text larger and the image's share smaller).
+   `z` says "Nothing to undo" once this page has no marks left to undo.
+   With one page per server it only
+   undoes this page's marks; the server keeps a single undo history, so with
+   a second tab or client it undoes the latest mark from any of them (see
+   "Multi-client limits" in [SECURITY.md](SECURITY.md)), and the page warns
+   "Undid another client's mark". When the list is done the page says
+   "Pass N: nothing left to review".
+
+   Your marks so far are always saved on the server. If the tunnel drops,
+   the page says "Lost connection": run the same ssh command again and
+   reload the page. If the server was restarted, the old tunnel points at a
+   socket that is gone (the default path includes the server's process id),
+   so the page also says "Lost connection": stop the old ssh command (it
+   holds port 8080, so the new one would fail), run the new command the
+   server printed, and open its new URL (pasting it into the same tab
+   works). The page says "token rejected" only when a restarted server
+   reuses the same `--socket-path`.
 
 Stop the server with Ctrl-C, then the ssh command. Each start has a new
 token. `--via` only fills in the `-J` part of the printed command; without

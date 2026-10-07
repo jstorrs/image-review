@@ -2,15 +2,20 @@
 
 ## Unreleased
 
-- **Experimental: browser review over SSH (in progress).** `image-review
+- **Experimental: browser review over SSH.** `image-review
   serve --socket` (or `--socket-path PATH`) serves plain HTTP on a Unix socket
   instead of HTTPS over TCP, for a browser on your laptop reached through
   `ssh -L`. `serve` prints the ssh command and the
   `http://127.0.0.1:8080/#TOKEN` URL (or, when stdout is not a terminal,
   writes the URL to a private file under `~/.image-review/`). `--via` (or
   `$IMAGE_REVIEW_VIA`) fills in the login node of that command. The page
-  currently only checks the connection; the review interface follows in a
-  later change. The default HTTPS mode and the pygame client are unchanged.
+  reviews single images, like the viewer's single mode: enter a reviewer
+  name, then `c` clean, `d` dirty, Left/Right to move, `z` to undo (this
+  page's own marks, with one page per server: the undo history is shared).
+  A verdict counts only once the image has been on screen for 200 ms, an
+  image that cannot be loaded takes DIRTY only, and the header shows the
+  display scale, in red below 100%. There is no grid mode yet. The default
+  HTTPS mode and the pygame client are unchanged.
   See [SECURITY.md](SECURITY.md) for the limits.
 
 ## 0.3.0

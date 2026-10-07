@@ -1786,6 +1786,84 @@ page is served by the same server it calls.
 
 `default_socket_path()` is `~/.image-review/serve-<short-host>-<pid>.sock`.
 
+### Browser client (experimental)
+
+`web/app.js` (plain ES2020, no build step) reviews single images, following
+the pygame client's single mode (see *Single Mode*, *Unloadable Images*,
+*Undo*). There is no grid mode. It obeys the CSP above: no inline script or
+style, no `innerHTML`, no external URLs; all text goes in with `textContent`.
+
+- **Token**: taken from the fragment into `sessionStorage` (memory if
+  storage is blocked) and sent as `Authorization: Bearer` on every API call.
+  Pasting a new URL into the tab changes only the fragment, so on a
+  `hashchange` to a token fragment the page reloads to take it.
+- **Reviewer**: a required text field, kept in `sessionStorage`. The page
+  accepts 1-64 code points, not all spaces; the server's `parse_reviewer`
+  decides, and a 400 from `/mark` or `/undo` shows "invalid reviewer name".
+  Every review control is disabled until a name is set.
+- **Startup**: `GET /current_pass`, `/manifest`, `/statuses?pass=N`. The
+  list is the keys whose status is UNREVIEWED or FLAGGED, shuffled
+  (Fisher-Yates); keys stay in it after they are marked. The header shows
+  "Pass N · K / T remaining" (K todo of the T listed), the item's status,
+  and its batch and key.
+- **Images**: `GET /image?key=K`. The reply must be `image/jpeg` and end in
+  `FF D9` (a truncated body is refused); it becomes a blob URL in an `<img>`,
+  awaited with `decode()`, and the previous blob URL is revoked. Any failure
+  but a 401 or a network error shows the placeholder "Cannot load image:
+  KEY", which can be marked DIRTY but never CLEAN ("cannot mark CLEAN: image
+  could not be loaded", no request).
+- **Scale**: after each paint, on every window resize (which includes a
+  browser zoom) and whenever a `ResizeObserver` sees the `<img>` box change,
+  the page computes the display scale, `min(width / naturalWidth, height /
+  naturalHeight) * devicePixelRatio` with the box from
+  `getBoundingClientRect()` (screen pixels per image pixel under
+  `object-fit: contain`), and shows it in the header as an integer percent,
+  `floor(scale * 100 + 1e-9)` as in the viewer, red (class `low`) below
+  100%, as the viewer's scale indicator does: small burned-in text can be
+  lost when an image is scaled down. A scale that leaves less than one pixel
+  counts as 0.
+- **Dwell**: `c`/`d` and their buttons act only once the image or
+  placeholder has been decoded, painted (two animation frames) and on screen
+  for `MIN_DWELL_MS` (200 ms); earlier ones are ignored. The dwell is a
+  per-item state (`none`, `running`, `over`) set to `over` by a timer started
+  after the paint, so no clock comparison can leave it short. It restarts on
+  every item change, including after an undo. An image whose scale is 0 (a
+  window too small to show it) starts no dwell, and a resize to 0 clears it;
+  a resize that shows it again starts a new one.
+- **Marking**: one `POST /mark` with `mode: "single"`, controls disabled
+  while it is in flight, never retried. On a 200 the key is pushed on the
+  page's stack of marked keys, the reply updates the status map, and the page
+  moves to the next todo item after the current one, wrapping round; with
+  none left it shows "Pass N: nothing left to review". A 200 whose body
+  cannot be parsed (on `/mark` or `/undo`) still counts, since the server has
+  acted: the page rereads `/statuses` instead, and stops with "unexpected
+  reply from the server; reload the page" if that fails too.
+- **Navigation**: Left/Right (and buttons) step through the list without
+  marking, stopping at its ends; from the end screen they go to the last or
+  first item.
+- **Undo**: `z` (and a button), also on the end screen. With an empty
+  stack it says "Nothing to undo" without a request. Otherwise `POST /undo`;
+  `{}` empties the stack and says "Nothing to undo". If the reply holds the
+  key on top of the stack, it is popped and that item is shown again with a
+  fresh dwell. The server keeps one undo history for every client (see
+  *Concurrency limits*), so with another tab or client marking too the reply
+  can name other keys: the page then leaves the stack alone, says "Undid
+  another client's mark: KEY is STATUS" (up to three keys), and shows the
+  first listed item holding a returned key, if any. So `z` is limited to
+  this page's marks only while the page is the server's one client.
+- **Keys**: `c`, `d`, `z` (either case, so Caps Lock does not matter) and
+  Left/Right. Ignored while the reviewer field has focus, with
+  Ctrl/Alt/Meta, and on key repeat (a held key acts once). The five buttons
+  never take focus (`tabindex="-1"`, and `mousedown` is cancelled), so Enter
+  or Space cannot click one, held, past the repeat guard; a click on one
+  also takes focus out of the reviewer field, so later keys act on the page.
+- **Errors**: a 401 clears the stored token, shows "token rejected (server
+  restarted?)" and disables everything; a network failure shows "Lost
+  connection — your marks so far are saved on the server" and does the same.
+  Other HTTP errors show a short message with the status and leave the
+  controls usable (at startup the page stops instead); nothing is retried
+  automatically.
+
 ## Remote Store (`remote.py`)
 
 `RemoteStore(target)` implements `ReviewStore` over HTTPS, connecting to

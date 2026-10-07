@@ -1,25 +1,164 @@
+/* A dark neutral surround, so burned-in text in the image is easy to read. */
 :root {
-  color-scheme: light dark;
-  --bg: #f4f4f5;
-  --fg: #1c1c1e;
+  color-scheme: dark;
+  --bg: #1a1a1a;
+  --stage: #101010;
+  --bar: #262626;
+  --fg: #e6e6e6;
+  --muted: #a3a3a3;
+  --border: #404040;
+  --clean: #2e7d32;
+  --dirty: #c62828;
+  --flagged: #e07b00;
+  --unreviewed: #5f5f5f;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1c1c1e;
-    --fg: #e4e4e7;
-  }
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
   margin: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.5 system-ui, sans-serif;
+  font: 15px/1.4 system-ui, sans-serif;
 }
 
-main {
-  max-width: 40rem;
-  margin: 0 auto;
-  padding: 1rem;
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.5rem 1rem;
+  background: var(--bar);
+}
+
+header.bar {
+  border-bottom: 1px solid var(--border);
+}
+
+footer.bar {
+  border-top: 1px solid var(--border);
+}
+
+.reviewer input {
+  margin-left: 0.25rem;
+  width: 12rem;
+  padding: 0.2rem 0.4rem;
+  font: inherit;
+  color: var(--fg);
+  background: var(--stage);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.reviewer input:invalid {
+  border-color: var(--flagged);
+}
+
+#progress {
+  font-variant-numeric: tabular-nums;
+}
+
+#item-status {
+  padding: 0.1rem 0.5rem;
+  border-radius: 3px;
+  font-weight: 600;
+  background: var(--unreviewed);
+}
+
+#item-status[data-status="CLEAN"] {
+  background: var(--clean);
+}
+
+#item-status[data-status="DIRTY"] {
+  background: var(--dirty);
+}
+
+#item-status[data-status="FLAGGED"] {
+  background: var(--flagged);
+}
+
+#scale {
+  font-variant-numeric: tabular-nums;
+}
+
+#scale.low {
+  color: #ff6b6b;
+  font-weight: 600;
+}
+
+#where {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+#stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--stage);
+}
+
+#image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.notice {
+  margin: 1rem;
+  padding: 1rem 1.5rem;
+  border: 1px solid var(--border);
+  font-size: 1.2rem;
+  overflow-wrap: anywhere;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+button {
+  padding: 0.35rem 0.9rem;
+  font: inherit;
+  color: var(--fg);
+  background: #333;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#clean:not(:disabled) {
+  background: var(--clean);
+}
+
+#dirty:not(:disabled) {
+  background: var(--dirty);
+}
+
+#status {
+  flex: 1;
+  min-width: 12rem;
+  margin: 0;
+}
+
+.help {
+  margin: 0;
+  color: var(--muted);
 }

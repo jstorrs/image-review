@@ -292,8 +292,64 @@ class TestWebFiles(unittest.TestCase):
             text = (WEB_DIR / name).read_text()
             with self.subTest(name=name):
                 self.assertNotRegex(text, r"(?i)style\s*=|https?://")
-        self.assertNotIn("innerHTML", (WEB_DIR / "app.js").read_text())
         self.assertIsNone(re.search(r"<style", html, re.IGNORECASE))
+
+    def test_script_is_csp_clean(self):
+        script = (WEB_DIR / "app.js").read_text()
+        forbidden = [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "eval(",
+            "new Function",
+            "document.write",
+            'setAttribute("style"',
+            "http://",
+            "https://",
+            "data:",
+        ]
+        for text in forbidden:
+            with self.subTest(text=text):
+                self.assertNotIn(text, script)
+
+    def test_script_ids_exist_in_page(self):
+        used = set(re.findall(r'\$\("([^"]+)"\)', (WEB_DIR / "app.js").read_text()))
+        defined = set(re.findall(r'\bid="([^"]+)"', (WEB_DIR / "index.html").read_text()))
+        self.assertIn("reviewer", used)
+        self.assertLessEqual(used, defined)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_script_helpers(self):
+        # The pure helpers come before the "---- Token" section and touch no DOM
+        checks = r"""
+        const vm = require("vm");
+        const assert = require("assert");
+        const src = require("fs").readFileSync(process.argv[1], "utf8");
+        assert(src.includes("// ---- Token"), "app.js lost its '// ---- Token' marker after the pure helpers");
+        const m = vm.runInNewContext(src.slice(0, src.indexOf("// ---- Token")) +
+          ";({validReviewer, shuffle, isCompleteJpeg, nextTodoIndex, countTodo, describeStatuses, parseStatusMap})");
+        assert(m.validReviewer("a") && m.validReviewer("\u{1F600}".repeat(64)));
+        assert(!m.validReviewer("") && !m.validReviewer("   ") && !m.validReviewer("x".repeat(65)));
+        assert.deepStrictEqual(m.shuffle([1, 2, 3, 4], () => 0.99), [1, 2, 3, 4]);
+        assert.deepStrictEqual([...m.shuffle([3, 1, 2])].sort(), [1, 2, 3]);
+        assert(m.isCompleteJpeg(new Uint8Array([0xff, 0xd8, 0, 0xff, 0xd9])));
+        assert(!m.isCompleteJpeg(new Uint8Array([0xff, 0xd8, 0, 0xff])));
+        assert(!m.isCompleteJpeg(new Uint8Array([0xff, 0xd8, 0, 0xff, 0])));
+        assert(!m.isCompleteJpeg(new Uint8Array([0, 0xd8, 0, 0xff, 0xd9])));
+        const st = new Map([["a", "CLEAN"], ["b", "FLAGGED"], ["c", "UNREVIEWED"]]);
+        assert.strictEqual(m.nextTodoIndex(["a", "b", "c"], st, 1), 2);
+        assert.strictEqual(m.nextTodoIndex(["a", "b", "c"], st, 2), 1);
+        assert.strictEqual(m.nextTodoIndex(["a"], st, 0), -1);
+        assert.strictEqual(m.countTodo(["a", "b", "c"], st), 2);
+        assert.strictEqual(m.describeStatuses(new Map([["a", "CLEAN"]])), "a is CLEAN");
+        assert.throws(() => m.parseStatusMap({ a: "BOGUS" }));
+        """
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", checks, str(WEB_DIR / "app.js")], capture_output=True, text=True, timeout=30, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 @unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
