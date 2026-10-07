@@ -581,6 +581,44 @@ class TestServeSocketCommand(unittest.TestCase):
         node = socket.getfqdn()
         self.assertIn(f"ssh {shlex.quote(f'{getpass.getuser()}@{node}')} cat ", result.output)
 
+    def test_ssh_host_names_the_node(self):
+        user = getpass.getuser()
+        result = self.serve("--socket", "--ssh-host", "node042.example.org")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"-L 127.0.0.1:8080:{self.dir}", result.output)
+        self.assertIn(f" {user}@node042.example.org\n", result.output)
+        self.assertNotIn(socket.getfqdn() + "\n", result.output.replace(f"{user}@node042.example.org", ""))
+
+    def test_ssh_host_with_direct_names_the_node_in_the_cat_line(self):
+        user = getpass.getuser()
+        result = self.serve("--socket", "--direct", "--ssh-host", "node042.example.org")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f" {user}@node042.example.org\n", result.output)
+        self.assertIn(f"ssh {user}@node042.example.org cat ", result.output)
+
+    def test_default_node_is_the_fqdn(self):
+        result = self.serve("--socket")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(shlex.quote(f"{getpass.getuser()}@{socket.getfqdn()}"), result.output)
+
+    def test_ssh_host_requires_socket_mode(self):
+        result = self.serve("--ssh-host", "node042.example.org")
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--ssh-host requires --socket", result.output)
+        self.assertFalse((self.work / "review.lock").exists())
+        self.assertFalse(self.dir.exists())
+
+    def test_bad_ssh_host_refused(self):
+        for bad in ["", "-oProxyCommand=x", "a@b", "a b", "a;b"]:
+            with self.subTest(bad=bad):
+                result = self.serve("--socket", "--ssh-host", bad)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIsInstance(result.exception, SystemExit)
+                self.assertNotIn("Traceback", result.output)
+                self.assertIn("Invalid --ssh-host", result.output)
+                self.assertFalse((self.work / "review.lock").exists())
+                self.assertFalse(self.dir.exists())
+
     def test_direct_from_environment_in_socket_mode(self):
         result = self.serve("--socket", env={"IMAGE_REVIEW_DIRECT": "1"})
         self.assertEqual(result.exit_code, 0, result.output)

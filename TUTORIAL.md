@@ -731,7 +731,9 @@ forwarding does not work.
 
    If your laptop can ssh to compute nodes directly (`ssh me@<node>` works
    without a jump host), use `--direct` instead of `--via`; the printed
-   command then has no `-J`.
+   command then has no `-J`. If the node name it prints does not resolve from
+   your laptop, add `--ssh-host NAME` (a host name, no `user@`) with the name
+   that does.
 
 2. It prints an ssh command and, on a terminal, a URL. On your laptop, paste
    the ssh command and leave it running (password or MFA prompts appear
@@ -799,7 +801,9 @@ ssh me@login-node cat /home/me/.image-review/browser-node042-12345.txt
 This assumes your home directory is shared with the login node. Run the ssh
 command from the job output first, then open the URL. With `--direct` the
 job output gives `ssh me@node cat ...` instead, since you reach the node
-itself.
+itself. Under `sbatch` the node name is only known when the job runs, so set
+it there if the default does not work from your laptop, e.g. `--ssh-host
+"$(hostname -f)"` or a site-specific name.
 
 **Troubleshooting:**
 - `channel N: open failed: connect failed` from ssh: the node's sshd would
@@ -812,6 +816,8 @@ itself.
   followed by `stdio forwarding failed`, with `-J`: the login node cannot
   resolve the compute node's name. If `ssh you@<node>` works from your
   laptop, rerun the server with `--direct` and use the command it prints.
+- The printed node name does not resolve from your laptop: rerun with
+  `--ssh-host` set to the name that works, and use the command it prints.
 - Windows: the built-in OpenSSH client works (a direct forward to the socket
   was tested from Windows). If `-J` fails with `CreateProcessW failed
   error:2` or `posix_spawn: No such file or directory`, replace `-J

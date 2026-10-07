@@ -702,6 +702,7 @@ crash) can leave it behind, holding source paths, to be deleted by hand.
 ```
 image-review serve [--work-dir DIR] [--bind HOST] [--port N]
 image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via DEST | --direct]
+                    [--ssh-host NODE]
 ```
 
 | Argument | Default | Description |
@@ -713,6 +714,7 @@ image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via DEST 
 | `--socket-path` | `default_socket_path()` | Experimental: the socket path; implies `--socket` |
 | `--via` | `$IMAGE_REVIEW_VIA` | With `--socket`: login node for the printed ssh command; checked with `tunnel.parse_via` |
 | `--direct` | off; `$IMAGE_REVIEW_DIRECT` | With `--socket`: the laptop reaches the node without a jump host; the printed command omits `-J` |
+| `--ssh-host` | `socket.getfqdn()` | With `--socket`: the node name to print as `NODE`; checked with `tunnel.parse_ssh_host`; no environment variable |
 
 Opens a writable `LocalStore` (holding the work dir lock for the server's
 lifetime; `WorkDirLocked` is a `ClickException`, exit 1), calls
@@ -739,18 +741,22 @@ user, tightened to 0700 if looser; file created `O_EXCL|O_NOFOLLOW` with mode
 with `--bind` or a `--port` that was given (any parameter source but the
 default), an empty `--socket-path`, and `--via` given on the command line
 without socket mode, `--direct` given on the command line without socket
-mode, and `--direct` (any source) together with `--via` given on the command
-line. A `--via` that comes only from `$IMAGE_REVIEW_VIA` is ignored in TCP
+mode, `--ssh-host` without socket mode, and `--direct` (any source) together
+with `--via` given on the command line. A `--via` that comes only from
+`$IMAGE_REVIEW_VIA` is ignored in TCP
 mode, and so is a `--direct` that comes only from `$IMAGE_REVIEW_DIRECT`; with
 `--direct`, an environment `--via` is ignored too. An invalid
-`--via`, a `ValueError` (bad or busy path), an `OSError` from binding or from
+`--via`, an invalid `--ssh-host` (empty, a leading `-`, an `@`, or anything
+outside letters, digits and `. _ : [ ] -`; `parse_ssh_host`), a
+`ValueError` (bad or busy path), an `OSError` from binding or from
 `~/.image-review`, all exit 1 as `ClickException`s with nothing left behind.
 Output, always: an "experimental" notice and
 `ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none -J VIA -L
 127.0.0.1:PORT:SOCKET USER@NODE` (`VIA` is `--via` or `<user>@<login-node>`;
 with `--direct` the `-J VIA` is omitted;
 `PORT` is `BROWSER_PORT`, 8080; `SOCKET` is the absolute path that was bound;
-`NODE` is `socket.getfqdn()`; `USER` is `getpass.getuser()`, else `<user>`;
+`NODE` is `--ssh-host` or else `socket.getfqdn()`; `USER` is
+`getpass.getuser()`, else `<user>`;
 each of `VIA`, the `-L` argument and `USER@NODE` goes through `shlex.quote`,
 so is quoted only when it needs it; the command holds no secret). The forward
 names 127.0.0.1 so ssh does not also bind `::1`, and `ControlPath=none` keeps

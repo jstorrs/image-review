@@ -713,7 +713,12 @@ def export(work_dir, output, report, allow_live, remote):
     is_flag=True,
     help="With --socket: your laptop reaches compute nodes without a jump host; the printed ssh command omits -J (also read from $IMAGE_REVIEW_DIRECT).",
 )
-def serve(work_dir, bind, port, socket_mode, socket_path, via, direct):
+@click.option(
+    "--ssh-host",
+    default=None,
+    help="With --socket: the node name to put in the printed ssh command, if its own FQDN does not work from your laptop [default: this machine's FQDN].",
+)
+def serve(work_dir, bind, port, socket_mode, socket_path, via, direct, ssh_host):
     """Serve a work directory so a remote client can review it.
 
     By default this is HTTPS over TCP for the `review --remote` client. Images
@@ -726,7 +731,7 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via, direct):
     browser on your laptop reached through `ssh -L`; the URL, which contains
     the token, is handled the same way.
     """
-    from .tunnel import parse_via
+    from .tunnel import parse_ssh_host, parse_via
 
     if socket_path == "":  # e.g. --socket-path "$UNSET"; Path("") would quietly mean the current directory
         raise click.UsageError("--socket-path must not be empty.")
@@ -738,6 +743,8 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via, direct):
     else:
         if direct and ctx.get_parameter_source("direct") is click.core.ParameterSource.COMMANDLINE:
             raise click.UsageError("--direct requires --socket.")
+        if ssh_host is not None:
+            raise click.UsageError("--ssh-host requires --socket.")
         direct = False  # from $IMAGE_REVIEW_DIRECT, which only means something in socket mode
         if via is not None:
             if ctx.get_parameter_source("via") is click.core.ParameterSource.COMMANDLINE:
@@ -752,6 +759,11 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via, direct):
             via = parse_via(via)
         except ValueError as e:
             raise click.ClickException(f"Invalid --via: {e}")
+    if ssh_host is not None:
+        try:
+            ssh_host = parse_ssh_host(ssh_host)
+        except ValueError as e:
+            raise click.ClickException(f"Invalid --ssh-host: {e}")
 
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
@@ -759,7 +771,7 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via, direct):
         with interrupt_on(*TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
             store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
             if socket_mode:
-                server, announce = _serve_socket(store, socket_path, via, direct, stack)
+                server, announce = _serve_socket(store, socket_path, via, direct, ssh_host, stack)
             else:
                 server, announce = _serve_tls(store, bind, port, stack)
             announce(stack)
@@ -796,7 +808,12 @@ def _serve_tls(
 
 
 def _serve_socket(
-    store: LocalStore, socket_path: str | None, via: str | None, direct: bool, stack: contextlib.ExitStack
+    store: LocalStore,
+    socket_path: str | None,
+    via: str | None,
+    direct: bool,
+    ssh_host: str | None,
+    stack: contextlib.ExitStack,
 ) -> tuple["ReviewServer", Callable[[contextlib.ExitStack], None]]:
     """Bind the Unix-socket server; returns it and the function that announces how to connect.
 
@@ -815,7 +832,7 @@ def _serve_socket(
     except OSError as e:
         raise click.ClickException(f"Cannot listen on socket {requested}: {e}")
     _close_with(stack, server, store)
-    return server, functools.partial(_announce_socket, Path(str(server.server_address)), token, via, direct)
+    return server, functools.partial(_announce_socket, Path(str(server.server_address)), token, via, direct, ssh_host)
 
 
 def _announce(target: RemoteTarget, stack: contextlib.ExitStack) -> None:
@@ -871,7 +888,14 @@ def ssh_forward_command(socket_path: Path, node: str, user: str, jump: str | Non
     return f"ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none {jump_option}-L {forward} {target}"
 
 
-def _announce_socket(socket_path: Path, token: str, via: str | None, direct: bool, stack: contextlib.ExitStack) -> None:
+def _announce_socket(
+    socket_path: Path,
+    token: str,
+    via: str | None,
+    direct: bool,
+    ssh_host: str | None,
+    stack: contextlib.ExitStack,
+) -> None:
     """Tell the operator how to reach the socket: the ssh command (no secret), and the URL, which holds the token.
 
     The URL is printed on a terminal, else written to a private file whose removal is registered on `stack`.
@@ -883,7 +907,7 @@ def _announce_socket(socket_path: Path, token: str, via: str | None, direct: boo
     except (OSError, KeyError):  # no passwd entry (getuser raises OSError, or KeyError from pwd)
         user = "<user>"
     url = browser_url(token)
-    node = socket.getfqdn()
+    node = socket.getfqdn() if ssh_host is None else ssh_host
     jump = None if direct else via or f"{user}@<login-node>"
     print("Serving review data over a Unix socket (experimental: browser review over SSH).")
     print("\nOn your laptop, forward a local port to the socket (leave it running):")

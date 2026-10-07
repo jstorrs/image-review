@@ -10,7 +10,9 @@
   writes the URL to a private file under `~/.image-review/`). `--via` (or
   `$IMAGE_REVIEW_VIA`) fills in the login node of that command; `--direct`
   (or `$IMAGE_REVIEW_DIRECT`) is for laptops that can ssh to compute nodes
-  without a jump host, and omits `-J`. The page
+  without a jump host, and omits `-J`. `--ssh-host NAME` sets the node name
+  it prints, for sites where the node's own FQDN does not work from the
+  laptop. The page
   reviews single images, like the viewer's single mode: enter a reviewer
   name, then `c` clean, `d` dirty, Left/Right to move, `z` to undo (this
   page's own marks, with one page per server: the undo history is shared).

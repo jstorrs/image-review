@@ -12,7 +12,7 @@ from unittest import mock
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
-from image_review.tunnel import TunnelError, parse_via, ssh_tunnel
+from image_review.tunnel import TunnelError, parse_ssh_host, parse_via, ssh_tunnel
 from tests.fixtures import invoke_cli, make_work_dir, start_server, temp_dir
 
 FAKE_SSH = f"""#!{sys.executable}
@@ -143,6 +143,18 @@ class TestParseVia(unittest.TestCase):
         ]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_via(bad)
+
+
+class TestParseSshHost(unittest.TestCase):
+    def test_accepts(self):
+        for ok in ["node042", "node042.example.org", "10.0.0.1", "[::1]", "a_b-c"]:
+            with self.subTest(ok=ok):
+                self.assertEqual(parse_ssh_host(ok), ok)
+
+    def test_rejects(self):
+        for bad in ["", "-oProxyCommand=x", "a@b", "u@node", "a b", "a\nb", "a;b", "a/b", "a%b", "$(x)"]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                parse_ssh_host(bad)
 
 
 class TestSshTunnel(FakeSshTestCase):

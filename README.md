@@ -455,7 +455,7 @@ refuse, unless `--allow-live`.
 
 ```
 image-review serve [--work-dir DIR] [--bind HOST] [--port N]
-image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via USER@LOGIN | --direct]   # experimental
+image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via USER@LOGIN | --direct] [--ssh-host NODE]   # experimental
 ```
 
 Serves a work directory over HTTPS (self-signed certificate, bearer token) so
@@ -474,13 +474,15 @@ file is removed when the server stops.
 | `--socket-path` | `~/.image-review/serve-<host>-<pid>.sock` | Experimental: the socket path; implies `--socket` |
 | `--via` | `$IMAGE_REVIEW_VIA` | With `--socket`: the login node to put in the printed ssh command |
 | `--direct` | off; `$IMAGE_REVIEW_DIRECT` | With `--socket`: your laptop can ssh to compute nodes without a jump host; the printed ssh command omits `-J` |
+| `--ssh-host` | this machine's FQDN | With `--socket`: the node name to put in the printed ssh command, for when the node's own FQDN does not resolve from your laptop |
 
 Each start generates a new token (and, over HTTPS, a new certificate).
 `--socket` and `--socket-path` cannot be combined with `--bind` or `--port`, and
 `--socket-path` must not be empty; `--via` on the command line requires
 `--socket` (an `$IMAGE_REVIEW_VIA` in the environment is ignored without it).
 `--direct` follows the same rule (with `$IMAGE_REVIEW_DIRECT`) and cannot be
-combined with `--via` on the command line.
+combined with `--via` on the command line. `--ssh-host` requires `--socket`,
+takes a host name only (no `user@`), and has no environment variable.
 
 ## Reviewing on an HPC cluster
 
@@ -529,7 +531,9 @@ image-review serve --work-dir ./review_work --socket --via you@login-node
 
 If your laptop can reach compute nodes directly (`ssh you@node` works from
 it), add `--direct` instead of `--via`: the printed command then has no `-J`.
-It prints an `ssh -N ... -L 127.0.0.1:8080:/path/to.sock you@node` command
+If the node's own name does not work from your laptop, add
+`--ssh-host NAME` with the name that does. It prints an `ssh -N ... -L
+127.0.0.1:8080:/path/to.sock you@node` command
 and an `http://127.0.0.1:8080/#TOKEN` URL (the token is a password). Run the
 ssh command on your laptop, then open the URL. Under `sbatch` the URL is
 written to `~/.image-review/browser-<host>-<pid>.txt` instead. The traffic is
