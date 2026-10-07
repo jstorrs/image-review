@@ -327,7 +327,7 @@ class TestWebFiles(unittest.TestCase):
         const src = require("fs").readFileSync(process.argv[1], "utf8");
         assert(src.includes("// ---- Token"), "app.js lost its '// ---- Token' marker after the pure helpers");
         const m = vm.runInNewContext(src.slice(0, src.indexOf("// ---- Token")) +
-          ";({validReviewer, shuffle, isCompleteJpeg, nextTodoIndex, countTodo, describeStatuses, parseStatusMap})");
+          ";({validReviewer, shuffle, isCompleteJpeg, itemKeys, itemStatus, nextTodoIndex, countTodo, describeStatuses, parseStatusMap})");
         assert(m.validReviewer("a") && m.validReviewer("\u{1F600}".repeat(64)));
         assert(!m.validReviewer("") && !m.validReviewer("   ") && !m.validReviewer("x".repeat(65)));
         assert.deepStrictEqual(m.shuffle([1, 2, 3, 4], () => 0.99), [1, 2, 3, 4]);
@@ -337,10 +337,15 @@ class TestWebFiles(unittest.TestCase):
         assert(!m.isCompleteJpeg(new Uint8Array([0xff, 0xd8, 0, 0xff, 0])));
         assert(!m.isCompleteJpeg(new Uint8Array([0, 0xd8, 0, 0xff, 0xd9])));
         const st = new Map([["a", "CLEAN"], ["b", "FLAGGED"], ["c", "UNREVIEWED"]]);
-        assert.strictEqual(m.nextTodoIndex(["a", "b", "c"], st, 1), 2);
-        assert.strictEqual(m.nextTodoIndex(["a", "b", "c"], st, 2), 1);
-        assert.strictEqual(m.nextTodoIndex(["a"], st, 0), -1);
-        assert.strictEqual(m.countTodo(["a", "b", "c"], st), 2);
+        const single = (key) => ({ kind: "single", key });
+        const items = ["a", "b", "c"].map(single);
+        assert.deepStrictEqual([...m.itemKeys(single("a"))], ["a"]);
+        assert.strictEqual(m.itemStatus(single("b"), st), "FLAGGED");
+        assert.strictEqual(m.itemStatus(single("zz"), st), undefined);
+        assert.strictEqual(m.nextTodoIndex(items, st, 1), 2);
+        assert.strictEqual(m.nextTodoIndex(items, st, 2), 1);
+        assert.strictEqual(m.nextTodoIndex([single("a")], st, 0), -1);
+        assert.strictEqual(m.countTodo(items, st), 2);
         assert.strictEqual(m.describeStatuses(new Map([["a", "CLEAN"]])), "a is CLEAN");
         assert.throws(() => m.parseStatusMap({ a: "BOGUS" }));
         """

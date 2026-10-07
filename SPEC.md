@@ -1915,8 +1915,8 @@ style, no `innerHTML`, no external URLs; all text goes in with `textContent`.
   first item.
 - **Undo**: `z` (and a button), also on the end screen. With an empty
   stack it says "Nothing to undo" without a request. Otherwise `POST /undo`;
-  `{}` empties the stack and says "Nothing to undo". If the reply holds the
-  key on top of the stack, it is popped and that item is shown again with a
+  `{}` empties the stack and says "Nothing to undo". If the reply holds any
+  key of the entry on top of the stack, it is popped and that item is shown again with a
   fresh dwell. The server keeps one undo history for every client (see
   *Concurrency limits*), so with another tab or client marking too the reply
   can name other keys: the page then leaves the stack alone, says "Undid

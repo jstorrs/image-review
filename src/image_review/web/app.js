@@ -43,12 +43,22 @@ function isCompleteJpeg(bytes) {
   return n >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[n - 2] === 0xff && bytes[n - 1] === 0xd9;
 }
 
+// A review item is {kind: "single", key}; the keys one verdict covers.
+function itemKeys(item) {
+  return [item.key];
+}
+
+// The item's status for the todo list.
+function itemStatus(item, statuses) {
+  return statuses.get(item.key);
+}
+
 // The index of the next item whose status is todo, searching forward from `from`
 // and wrapping round (including `from` itself last); -1 if none.
 function nextTodoIndex(items, statuses, from) {
   for (let step = 1; step <= items.length; step++) {
     const i = (from + step) % items.length;
-    if (isTodo(statuses.get(items[i]))) {
+    if (isTodo(itemStatus(items[i], statuses))) {
       return i;
     }
   }
@@ -56,7 +66,7 @@ function nextTodoIndex(items, statuses, from) {
 }
 
 function countTodo(items, statuses) {
-  return items.filter((key) => isTodo(statuses.get(key))).length;
+  return items.filter((item) => isTodo(itemStatus(item, statuses))).length;
 }
 
 // "k1 is S1, k2 is S2, k3 is S3 and N more"
@@ -149,12 +159,13 @@ const state = {
   pass: null,
   batchOf: new Map(), // key -> batch
   statuses: new Map(), // key -> status, for the pass under review
-  items: [], // keys in review order: the todo list at startup, shuffled
+  items: [], // review items in order: the todo list at startup, shuffled
   index: -1, // the current item, or -1 for the end screen
   reviewer: null, // a name that passed validReviewer, or null
   busy: false, // a request is in flight, or the list is loading
   dead: false, // token rejected or connection lost: nothing more is sent
-  marked: [], // keys this page marked, less those undone: what z may undo
+  mode: "single",
+  marked: [], // key arrays this page marked, less those undone: what z may undo
   loaded: false, // the current item's image is on screen (else a placeholder)
   scale: null, // screen pixels per image pixel, while an image is shown
   dwell: "none", // "none", "running" (painted, under MIN_DWELL_MS) or "over"
@@ -267,7 +278,7 @@ function say(text) {
   ui.status.textContent = text;
 }
 
-function currentKey() {
+function currentItem() {
   return state.index >= 0 ? state.items[state.index] : null;
 }
 
@@ -276,17 +287,18 @@ function canAct() {
 }
 
 function canJudge() {
-  return canAct() && currentKey() !== null && state.dwell === "over";
+  return canAct() && currentItem() !== null && state.dwell === "over";
 }
 
 function render() {
-  const key = currentKey();
+  const item = currentItem();
   if (state.pass !== null) {
     const left = countTodo(state.items, state.statuses);
     ui.progress.textContent = "Pass " + state.pass + " · " + left + " / " + state.items.length + " remaining";
   }
+  const key = item === null ? null : itemKeys(item)[0];
   ui.where.textContent = key === null ? "" : state.batchOf.get(key) + " · " + key;
-  const status = key === null ? "" : state.statuses.get(key) || "";
+  const status = item === null ? "" : itemStatus(item, state.statuses) || "";
   ui.itemStatus.textContent = status;
   ui.itemStatus.dataset.status = status;
   ui.itemStatus.hidden = status === "";
@@ -405,7 +417,7 @@ async function showItem(index) {
     showEnd();
     return;
   }
-  const key = state.items[index];
+  const key = itemKeys(state.items[index])[0];
   let url = await loadImage(key);
   if (seq !== state.showSeq) {
     if (url !== null) {
@@ -481,25 +493,25 @@ async function mark(verdict) {
     say(UNLOADABLE_CLEAN);
     return;
   }
-  const key = currentKey();
+  const keys = itemKeys(currentItem());
   state.busy = true;
   render();
   try {
     const response = await postJson("/mark", {
-      keys: [key],
+      keys,
       status: verdict,
       pass: state.pass,
       reviewer: state.reviewer,
-      mode: "single",
+      mode: state.mode,
     });
     if (!response.ok) {
       say(response.status === 400 ? "invalid reviewer name" : "mark failed (HTTP " + response.status + ")");
       return;
     }
-    state.marked.push(key); // recorded on the server, whatever the body holds
+    state.marked.push(keys); // recorded on the server, whatever the body holds
     const { changed } = await replyStatuses(response);
     applyStatuses(changed);
-    say("Marked " + verdict + ": " + key);
+    say("Marked " + verdict + ": " + keys[0]);
     state.busy = false;
     showItem(nextTodoIndex(state.items, state.statuses, state.index)).catch(reportError);
   } finally {
@@ -535,13 +547,14 @@ async function undo() {
     }
     applyStatuses(changed);
     let index;
-    if (resynced || changed.has(expected)) {
+    if (resynced || expected.some((key) => changed.has(key))) {
       state.marked.pop();
-      index = state.items.indexOf(expected);
-      say("Undone: " + expected + " is " + state.statuses.get(expected));
+      const covered = new Set(expected); // show again the item this page marked
+      index = state.items.findIndex((item) => itemKeys(item).some((key) => covered.has(key)));
+      say("Undone: " + expected[0] + " is " + state.statuses.get(expected[0]));
     } else {
       say("Undid another client's mark: " + describeStatuses(changed));
-      index = state.items.findIndex((k) => changed.has(k));
+      index = state.items.findIndex((item) => itemKeys(item).some((key) => changed.has(key)));
     }
     if (index < 0) {
       return; // nothing in this page's list to show again
@@ -698,7 +711,9 @@ async function start() {
     state.pass = pass;
     state.statuses = statuses;
     state.batchOf = new Map(manifest.map((row) => [row.key, row.batch]));
-    state.items = shuffle(manifest.filter((row) => isTodo(statuses.get(row.key))).map((row) => row.key));
+    state.items = shuffle(
+      manifest.filter((row) => isTodo(statuses.get(row.key))).map((row) => ({ kind: "single", key: row.key })),
+    );
   } catch (error) {
     state.dead = true; // nothing to review without the list
     reportError(error);
