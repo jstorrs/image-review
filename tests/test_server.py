@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import socket
+import socketserver
 import ssl
 import stat
 import subprocess
@@ -50,6 +51,19 @@ class MakeServerChecksTest(unittest.TestCase):
 
     def test_unadvertisable_host_closes_socket(self):
         self.assert_refused("127.1", "cannot be advertised", binds=True)
+
+    def test_tls_manifest_failure_binds_nothing(self):
+        work_dir = temp_dir(self)
+        make_work_dir(work_dir)
+        store = LocalStore(work_dir)
+        self.addCleanup(store.close)
+        with (
+            mock.patch.object(store, "manifest", side_effect=OSError),
+            mock.patch.object(socketserver.TCPServer, "server_bind") as server_bind,
+            self.assertRaises(OSError),
+        ):
+            make_server(store, "127.0.0.1", 0)
+        server_bind.assert_not_called()
 
 
 class ServerTestCase(unittest.TestCase):

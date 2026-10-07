@@ -1711,7 +1711,25 @@ call site), and stdlib `log_message` output (which can echo request lines) is
 suppressed. Tokens, keys in queries and exception messages are not logged. Two
 other records exist: WARNING `connection error: <ExceptionClass>` for failed
 handshakes and other connection-level failures, and ERROR `internal error:
-<ExceptionClass>` for 500s.
+<ExceptionClass>` for 500s. On the Unix-socket server the peer is the
+literal `unix` (`accept` gives no peer address there).
+
+### Unix-socket server (experimental)
+
+`make_unix_server(store, path) -> (UnixReviewServer, token)` serves the same
+API as plain HTTP on a Unix domain socket, for a browser reaching it through
+`ssh -L PORT:PATH node`. TLS is not used; ssh provides the transport. The path
+is made absolute and must fit `sun_path` (108 bytes, 104 on macOS) and contain
+no `:` or control characters (`parse_socket_path`). A stale socket file of the
+user's with no listener is replaced; a live listener, another user's file or a
+non-socket is refused with `ValueError` (`clear_stale_socket`). The socket is
+chmodded 0600 before `listen()` (until then every connect is refused), and
+`server_close` unlinks it only if it is still the same file. Before the token
+check, the single `Host` header must be `localhost`, `127.0.0.1` or `[::1]`
+with an optional port of 1-5 digits in 1-65535; anything else (including a
+missing or repeated header) is 400 and the connection closed, a defence
+against DNS rebinding.
+`default_socket_path()` is `~/.image-review/serve-<short-host>-<pid>.sock`.
 
 ## Remote Store (`remote.py`)
 

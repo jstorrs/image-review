@@ -1,6 +1,8 @@
 import csv
 import hashlib
+import http.client
 import io
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,15 +107,10 @@ def add_overlay(ds: pydicom.Dataset, mask: np.ndarray, origin: tuple[int, int] =
     ds.add_new((group, 0x3000), "OW", packed + b"\x00" * (len(packed) % 2))
 
 
-def start_server(work_dir: Path, port: int = 0):
-    """Serve work_dir on 127.0.0.1 in a thread; returns (server, target, stop). The store holds the work dir lock until stop(), which is idempotent."""
+def _serve_in_thread(server, store):
+    """Run server.serve_forever in a thread; returns an idempotent stop() that shuts down, closes and releases the store."""
     import threading
 
-    from image_review.server import make_server
-    from image_review.store import LocalStore
-
-    store = LocalStore(work_dir)
-    server, target = make_server(store, "127.0.0.1", port)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
 
@@ -129,7 +126,41 @@ def start_server(work_dir: Path, port: int = 0):
         server.server_close()
         store.close()
 
-    return server, target, stop
+    return stop
+
+
+def start_server(work_dir: Path, port: int = 0):
+    """Serve work_dir on 127.0.0.1 in a thread; returns (server, target, stop). The store holds the work dir lock until stop(), which is idempotent."""
+    from image_review.server import make_server
+    from image_review.store import LocalStore
+
+    store = LocalStore(work_dir)
+    server, target = make_server(store, "127.0.0.1", port)
+    return server, target, _serve_in_thread(server, store)
+
+
+def start_unix_server(work_dir: Path, path: Path):
+    """Serve work_dir on the Unix socket `path` in a thread; returns (server, token, stop). As start_server."""
+    from image_review.server import make_unix_server
+    from image_review.store import LocalStore
+
+    store = LocalStore(work_dir)
+    server, token = make_unix_server(store, path)
+    return server, token, _serve_in_thread(server, store)
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """HTTP over the Unix socket `path`; `host` only sets the Host header."""
+
+    def __init__(self, path: Path, host: str = "localhost:8080", timeout: float = 10):
+        super().__init__(host, timeout=timeout)
+        self.path = path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(str(self.path))
+        self.sock = sock
 
 
 def mark(

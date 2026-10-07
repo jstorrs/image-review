@@ -1,4 +1,4 @@
-"""HTTPS + bearer-token server exposing a ReviewStore.
+"""Bearer-token server exposing a ReviewStore: HTTPS over TCP, or plain HTTP on a Unix socket.
 
 Must stay importable without pygame/numpy/skimage. Original image_ids never
 leave the store; clients only ever see keys (preprocessed paths).
@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import secrets
+import socket
+import socketserver
 import ssl
 import stat
 import sys
@@ -185,27 +187,11 @@ def json_reply(payload) -> Reply:
     return Reply(200, json.dumps(payload).encode())
 
 
-class ReviewServer(ThreadingHTTPServer):
-    daemon_threads = True
-
-    def __init__(self, address: tuple[str, int], store: ReviewStore, token: str):
-        super().__init__(address, ReviewHandler)
-        self.store = store
-        self.token = token
-        self.store_lock = threading.Lock()
-        rows = store.manifest()
-        self.known_keys: frozenset[Key] = frozenset(r.key for r in rows)
-
-    def handle_error(self, request, client_address) -> None:
-        exc_type = sys.exc_info()[0]
-        log.warning("connection error: %s", exc_type.__name__ if exc_type else "unknown")
-
-
 class ReviewHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = HANDLER_TIMEOUT_SECONDS
     disable_nagle_algorithm = True  # headers and body are separate writes
-    server: ReviewServer
+    server: "ReviewServer"
 
     def setup(self) -> None:
         # Bound pre-auth time: the TLS handshake (deferred from accept) gets a short timeout.
@@ -235,7 +221,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(reply.body)
+        if reply.body:  # a client done with an empty reply may have closed; writing b"" would then hit EPIPE
+            self.wfile.write(reply.body)
 
     def _authorized(self) -> bool:
         expected = f"Bearer {self.server.token}".encode()
@@ -333,13 +320,110 @@ class ReviewHandler(BaseHTTPRequestHandler):
     def log_request(self, code="-", size="-") -> None:
         # One INFO line per response: peer, method, path, status. The formatter adds the time.
         # Command and path are attacker-controlled: escape control chars; drop the query (it carries keys)
-        peer = str(self.client_address[0])
+        peer = self._peer()
         command = str(getattr(self, "command", None) or "-")
         path = str(getattr(self, "path", "-")).split("?", 1)[0]
         log.info("%s %s %s %s", _escape(peer), _escape(command), _escape(path), code)
 
+    def _peer(self) -> str:
+        return str(self.client_address[0])
+
     def log_message(self, format, *args) -> None:
         pass  # stdlib error messages can echo request lines; log_request is the only log
+
+
+class ReviewServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        address: str | tuple[str, int],
+        store: ReviewStore,
+        token: str,
+        *,
+        handler: type[ReviewHandler] = ReviewHandler,
+    ):
+        # Read the manifest before binding, so a failure here leaves no socket (or socket file) behind
+        rows = store.manifest()
+        self.known_keys: frozenset[Key] = frozenset(r.key for r in rows)
+        self.store = store
+        self.token = token
+        self.store_lock = threading.Lock()
+        super().__init__(address, handler)  # type: ignore[arg-type]  # typeshed omits AF_UNIX path addresses
+
+    def handle_error(self, request, client_address) -> None:
+        exc_type = sys.exc_info()[0]
+        log.warning("connection error: %s", exc_type.__name__ if exc_type else "unknown")
+
+
+_LOCAL_HOST = re.compile(r"(localhost|127\.0\.0\.1|\[::1\])(?::([0-9]{1,5}))?", re.IGNORECASE | re.ASCII)
+
+
+def is_local_host(values: list[str]) -> bool:
+    """True for exactly one Host header naming the loopback (localhost, 127.0.0.1, [::1]), optionally with a port."""
+    if len(values) != 1:
+        return False
+    match = _LOCAL_HOST.fullmatch(values[0].strip(" \t"))  # optional whitespace is not part of the value
+    if match is None:
+        return False
+    port = match.group(2)
+    return port is None or 1 <= int(port) <= 65535
+
+
+class UnixReviewHandler(ReviewHandler):
+    """Plain HTTP over a Unix socket, reached through `ssh -L`. Experimental."""
+
+    disable_nagle_algorithm = False  # TCP_NODELAY fails on AF_UNIX
+
+    def setup(self) -> None:
+        # No TLS handshake to bound: skip ReviewHandler.setup. The handler timeout still bounds pre-auth time.
+        socketserver.StreamRequestHandler.setup(self)
+
+    def _peer(self) -> str:
+        return "unix"  # accept() gives no peer address on AF_UNIX
+
+    def _handle(self, method: str) -> None:
+        # Before the token check: a browser tricked by DNS rebinding sends the attacker's host name
+        if not is_local_host(self.headers.get_all("Host", [])):
+            self._send(Reply(400, close=True))
+            return
+        super()._handle(method)
+
+
+class UnixReviewServer(ReviewServer):
+    allow_reuse_address = False
+
+    def __init__(self, path: Path, store: ReviewStore, token: str):
+        self.address_family = socket.AF_UNIX  # here, not on the class: Windows has no AF_UNIX and must still import
+        self._bound: tuple[int, int] | None = None  # (st_dev, st_ino) of our socket file; a failed bind closes
+        super().__init__(str(path), store, token, handler=UnixReviewHandler)
+
+    def server_bind(self) -> None:
+        # Not HTTPServer.server_bind: it treats the address as (host, port)
+        socketserver.TCPServer.server_bind(self)
+        path = str(self.server_address)
+        info = os.lstat(path)
+        self._bound = (info.st_dev, info.st_ino)  # before chmod, so a failing chmod still lets server_close unlink
+        # chmod before listen(): connecting to a bound socket that is not listening is refused, so no connect
+        # can succeed before the mode is 0600. Also narrows the ACL mask under a default ACL.
+        os.chmod(path, 0o600)
+        self.server_name = "localhost"
+        self.server_port = 0
+
+    def server_close(self) -> None:
+        # Unlink before closing: while our socket is open its inode cannot be freed and reused by a replacement
+        try:
+            if self._bound is not None:
+                path = str(self.server_address)
+                bound, self._bound = self._bound, None
+                try:
+                    info = os.lstat(path)
+                    if (info.st_dev, info.st_ino) == bound:  # leave alone a file that replaced ours
+                        os.unlink(path)
+                except FileNotFoundError:
+                    pass
+        finally:
+            super().server_close()  # the listening socket is closed even if the unlink fails
 
 
 def _escape(text: str) -> str:
@@ -416,3 +500,65 @@ def write_private_file(name: str, text: str) -> Path:
 def write_connection_file(target: RemoteTarget) -> Path:
     """Write the connection string to ~/.image-review/ as a private file."""
     return write_private_file(f"connection-{safe_name(target.host)}-{target.port}.txt", target.to_uri() + "\n")
+
+
+SUN_PATH_SIZE = 104 if sys.platform == "darwin" else 108  # sockaddr_un.sun_path, including the NUL
+_UNSAFE_PATH_CHARS = re.compile(r"[:\x00-\x1f\x7f-\x9f]")
+
+
+def parse_socket_path(raw: str | os.PathLike[str]) -> Path:
+    """Absolute socket path that fits sun_path and can be written in `ssh -L port:path`. Raises ValueError."""
+    path = Path(os.path.abspath(raw))  # ssh needs an absolute path
+    if _UNSAFE_PATH_CHARS.search(str(path)):
+        raise ValueError(f"Socket path {str(path)!r} must not contain ':' or control characters.")
+    length = len(os.fsencode(path))
+    if length >= SUN_PATH_SIZE:
+        raise ValueError(
+            f"Socket path is {length} bytes; the limit is {SUN_PATH_SIZE - 1}. Use a shorter path such as /tmp/ir.sock."
+        )
+    return path
+
+
+def clear_stale_socket(path: Path) -> None:
+    """Remove a socket file left by a dead server. Raises ValueError if something else, or a live server, is there."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(info.st_mode):
+        raise ValueError(f"{path} exists and is not a socket.")
+    if info.st_uid != os.getuid():
+        raise ValueError(f"{path} is owned by another user.")
+    # Not race-free: two servers starting on one path, or a live server whose backlog is full on macOS
+    # (ECONNREFUSED there), can see a live socket as stale and unlink it.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.setblocking(False)  # never wait on a listener; Linux answers a full backlog with EAGAIN
+        try:
+            probe.connect(str(path))
+        except ConnectionRefusedError:
+            path.unlink(missing_ok=True)
+            return
+        except FileNotFoundError:
+            return  # removed since the lstat
+        except BlockingIOError:
+            pass  # listening, backlog full
+    raise ValueError(f"Another server is listening on {path}.")
+
+
+def default_socket_path() -> Path:
+    """~/.image-review/serve-<host>-<pid>.sock; the short host name saves sun_path bytes."""
+    short_host = socket.gethostname().split(".")[0]
+    return private_dir() / f"serve-{safe_name(short_host)}-{os.getpid()}.sock"
+
+
+def make_unix_server(store: ReviewStore, path: Path) -> tuple[UnixReviewServer, str]:
+    """Create the Unix-socket server; returns (server, token). Raises ValueError for a bad or busy path,
+    OSError if binding fails.
+
+    No socket file is left behind on failure.
+    """
+    path = parse_socket_path(path)
+    clear_stale_socket(path)
+    token = secrets.token_urlsafe(16)
+    server = UnixReviewServer(path, store, token)
+    return server, token
