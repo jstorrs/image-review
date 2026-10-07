@@ -102,6 +102,20 @@ default mode; use it only where you accept the points below.
   `Referrer-Policy: no-referrer`. The page reviews single images; it reads
   the image list and statuses, fetches each image and records verdicts and
   undos through the same API, with the token.
+- **Grid layouts cost the server work.** In socket mode only, `POST /grids`
+  lets a token holder make the server read image files (to learn each
+  image's size from its header) and run the bin packer. It is bounded to at
+  most 1000 known keys per request, grid sides of 256-16384 pixels, and one
+  request computed at a time (others get 503), but the bound is loose: a
+  realistic batch packs in seconds, while a worst-case request (1000 small
+  images in a huge grid) takes tens of seconds to a few minutes. Packing is
+  not cancelled when the client disconnects, so a reloaded page gets 503
+  until it finishes, and meanwhile other requests are slowed, not blocked
+  (an image fetch went from about 3 ms to 40-85 ms during a 28 s pack).
+  Sizes read are cached for the life of the server, so a file replaced while
+  the server runs keeps its old size; the page must check each decoded
+  image against the size the server reported and leave a mismatch out of
+  the grid verdict. Nothing about individual keys is logged.
 - **The token is in the URL fragment**, which the browser never sends to the
   server. The page keeps it in per-tab `sessionStorage` and rewrites it out
   of the tab's history entry. It can still stay in browser history and

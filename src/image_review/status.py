@@ -19,6 +19,7 @@ MARK_MODES: tuple[MarkMode, ...] = get_args(MarkMode)
 
 # When images may be rotated 90 degrees in a grid: "auto" rotates only if that saves a grid
 Rotation = Literal["auto", "always", "never"]
+ROTATIONS: tuple[Rotation, ...] = get_args(Rotation)
 
 
 def parse_choice[T: str](value: object, choices: tuple[T, ...]) -> T | None:

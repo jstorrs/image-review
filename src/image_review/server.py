@@ -20,6 +20,7 @@ import stat
 import sys
 import tempfile
 import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,7 +39,8 @@ from .connection import (
     package_version,
     parse_reviewer,
 )
-from .status import MARK_MODES, VERDICTS, Key, MarkMode, Verdict, parse_choice
+from .layout import GridPlan, is_rotated, jpeg_size, plan_grids
+from .status import MARK_MODES, ROTATIONS, VERDICTS, Key, MarkMode, Rotation, Verdict, parse_choice
 from .store import ReviewStore
 
 log = logging.getLogger(__name__)
@@ -47,6 +49,9 @@ MAX_BODY_BYTES = 1 << 20
 CERT_VALIDITY = datetime.timedelta(days=30)
 HANDLER_TIMEOUT_SECONDS = 60
 HANDSHAKE_TIMEOUT_SECONDS = 10
+MAX_GRID_KEYS = 1000
+MIN_GRID_SIDE = 256
+MAX_GRID_SIDE = 16384
 
 
 class BadRequest(Exception):
@@ -69,6 +74,14 @@ class UndoRequest:
 
 
 BODY_ROUTES = frozenset({"/mark", "/undo"})  # the POST routes, the only ones that take a body
+
+
+@dataclass(frozen=True)
+class GridsRequest:
+    keys: tuple[Key, ...]  # distinct, known
+    width: int
+    height: int
+    rotation: Rotation
 
 
 def _one(query: dict[str, list[str]], name: str) -> str:
@@ -138,6 +151,57 @@ def parse_mark(body: bytes, known_keys: frozenset[Key]) -> MarkRequest:
 def parse_undo(body: bytes) -> UndoRequest:
     data = _json_object(body)
     return UndoRequest(pass_number=_pass_field(data.get("pass")), reviewer=_reviewer_field(data.get("reviewer")))
+
+
+def _grid_side(value: object) -> int:
+    if not is_int_at_least(value, MIN_GRID_SIDE) or value > MAX_GRID_SIDE:
+        raise BadRequest(f"width and height must be integers {MIN_GRID_SIDE}-{MAX_GRID_SIDE}")
+    return value
+
+
+def parse_grids(body: bytes, known_keys: frozenset[Key]) -> GridsRequest:
+    data = _json_object(body)
+    keys = data.get("keys")
+    if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
+        raise BadRequest("keys must be a non-empty list of strings")
+    if len(keys) > MAX_GRID_KEYS:
+        raise BadRequest(f"at most {MAX_GRID_KEYS} keys")
+    if len(set(keys)) != len(keys):
+        raise BadRequest("keys must be distinct")
+    if not all(k in known_keys for k in keys):
+        raise BadRequest("unknown key")
+    width, height = _grid_side(data.get("width")), _grid_side(data.get("height"))
+    rotation = parse_choice(data.get("rotation"), ROTATIONS)
+    if rotation is None:
+        raise BadRequest("rotation must be auto, always or never")
+    return GridsRequest(keys=tuple(Key(k) for k in keys), width=width, height=height, rotation=rotation)
+
+
+def grids_payload(
+    keys: Sequence[Key], sizes: Mapping[int, tuple[int, int]], plan: GridPlan, width: int, height: int
+) -> dict:
+    """The /grids response for `plan`, packed from `sizes` (by index into `keys`) into width x height grids.
+
+    As grid_packer.pack_into_grids: grids in bin order, placements in rectpack's order, and left out (in input
+    order) every key with no size (unreadable bytes or header) or that the packer did not place.
+    """
+    grids = [
+        [
+            {
+                "key": keys[rect.rect_id],
+                "x": rect.x,
+                "y": rect.y,
+                "w": rect.w,
+                "h": rect.h,
+                "rotated": is_rotated(rect, sizes[rect.rect_id], width, height, plan.rotated),
+                "source": list(sizes[rect.rect_id]),
+            }
+            for rect in placed
+        ]
+        for placed in plan.bins
+    ]
+    left_out = [key for idx, key in enumerate(keys) if idx not in sizes or idx in plan.unpacked]
+    return {"grids": grids, "left_out": left_out}
 
 
 def generate_cert(host: str) -> tuple[x509.Certificate, bytes]:
@@ -437,6 +501,24 @@ class UnixReviewHandler(ReviewHandler):
             return
         super()._handle(method)
 
+    def _route(self, method: str) -> Reply:
+        if method == "POST" and self.path.partition("?")[0] == "/grids":  # the query is ignored, as on /mark
+            self._check_chunked()  # as ReviewHandler._route; the body is read here, so no _check_body
+            return self._grids()
+        return super()._route(method)
+
+    def _grids(self) -> Reply:
+        req = parse_grids(self._read_body(), self.server.known_keys)
+        # One packing at a time; the body is read, so a busy reply can keep the connection
+        if not self.server.grid_slot.acquire(blocking=False):
+            return Reply(503)
+        try:  # no store_lock: image reads are read-only and packing is pure
+            sizes = {idx: size for idx, key in enumerate(req.keys) if (size := self.server.image_size(key))}
+            plan = plan_grids(sizes, req.width, req.height, req.rotation)
+            return json_reply(grids_payload(req.keys, sizes, plan, req.width, req.height))
+        finally:
+            self.server.grid_slot.release()
+
     def end_headers(self) -> None:
         self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         self.send_header("Referrer-Policy", "no-referrer")
@@ -448,9 +530,23 @@ class UnixReviewServer(ReviewServer):
 
     def __init__(self, path: Path, store: ReviewStore, token: str, assets: dict[str, Reply]):
         self.assets = assets
+        self.grid_slot = threading.Lock()  # held while a /grids request reads sizes and packs
+        self.image_sizes: dict[Key, tuple[int, int]] = {}  # header sizes read so far; failures are not kept
         self.address_family = socket.AF_UNIX  # here, not on the class: Windows has no AF_UNIX and must still import
         self._bound: tuple[int, int] | None = None  # (st_dev, st_ino) of our socket file; a failed bind closes
         super().__init__(str(path), store, token, handler=UnixReviewHandler)
+
+    def image_size(self, key: Key) -> tuple[int, int] | None:
+        """The image's (width, height) from its JPEG header, or None if its bytes or header cannot be read.
+
+        Only under grid_slot. Nothing is logged: the failure would name the key or path.
+        """
+        if key not in self.image_sizes:
+            try:
+                self.image_sizes[key] = jpeg_size(self.store.image_bytes(key))  # one image's bytes at a time
+            except (KeyError, ValueError, OSError):
+                return None
+        return self.image_sizes[key]
 
     def server_bind(self) -> None:
         # Not HTTPServer.server_bind: it treats the address as (host, port)

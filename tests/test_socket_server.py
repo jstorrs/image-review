@@ -10,7 +10,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -30,7 +29,16 @@ from image_review.server import (
     write_private_file,
 )
 from image_review.store import LocalStore
-from tests.fixtures import CLEAN_ENV, UnixHTTPConnection, invoke_cli, make_work_dir, start_unix_server, temp_dir
+from tests.fixtures import (
+    CLEAN_ENV,
+    HAS_AF_UNIX,
+    UnixHTTPConnection,
+    invoke_cli,
+    make_work_dir,
+    socket_dir,
+    start_unix_server,
+    temp_dir,
+)
 
 WEB_DIR = Path(image_review.__file__).parent / "web"
 ASSETS = [
@@ -39,7 +47,6 @@ ASSETS = [
     ("/app.css", "app.css", "text/css; charset=utf-8"),
 ]
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
-HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 
 # As TestAuth in test_server.py
 ROUTES = [
@@ -54,13 +61,6 @@ ROUTES = [
     ("GET", "/nope"),
     ("DELETE", "/manifest"),
 ]
-
-
-def socket_dir(testcase: unittest.TestCase) -> Path:
-    """A fresh directory under /tmp: macOS $TMPDIR is too long for sun_path."""
-    path = Path(tempfile.mkdtemp(dir="/tmp"))
-    testcase.addCleanup(shutil.rmtree, path, ignore_errors=True)
-    return path
 
 
 class IsLocalHostTest(unittest.TestCase):

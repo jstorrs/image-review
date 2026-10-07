@@ -1632,7 +1632,7 @@ which serves three static files without it (see Unix-socket server).
 ### Endpoints
 
 All responses are JSON unless noted. Requests are parsed into typed values at
-the boundary (`parse_pass`, `parse_mark`, `parse_undo`).
+the boundary (`parse_pass`, `parse_mark`, `parse_undo`, `parse_grids`).
 
 | Request | Response |
 |---------|----------|
@@ -1644,6 +1644,7 @@ the boundary (`parse_pass`, `parse_mark`, `parse_undo`).
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`; both 0 if it has none). Only counts are sent, never `image_id`s or reasons (which contain source paths) |
 | `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
 | `POST /undo` | Body `{"pass": N, "reviewer": str}`, checked as for `/mark`; other fields are ignored. Undoes the server store's latest mark (`ReviewStore.undo`); responds `{key: status, ...}` for every key affected, or `{}` when there is nothing to undo |
+| `POST /grids` | Socket mode only (404 over TLS): grid layouts for the browser client; see *Unix-socket server* |
 
 Only keys and skip counts appear on the wire; original `image_id`s never do.
 
@@ -1662,13 +1663,15 @@ malformed reply or a 404.
 
 | Status | Cause |
 |--------|-------|
-| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo`; a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid |
+| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo` (and, in socket mode, `POST /grids`); a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid; `/grids` as described under *Unix-socket server* |
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 500 | Any unexpected store failure; only the exception class name is logged |
+| 503 | Socket mode: `POST /grids` while another `/grids` request is being computed; retry later |
 
 400, 401, 500 and unknown-route 404 replies send `Connection: close`, because
-a request body may be unread; an image 404 keeps the connection open.
+a request body may be unread; an image 404 and a `/grids` 503 (sent after the
+body is read) keep the connection open.
 
 ### Headers and connection handling
 
@@ -1750,8 +1753,9 @@ clients at once is out of scope.
 ### Locking
 
 Manifest, statuses, current-pass, mark and undo calls run under a single store lock
-(`ReviewDB` is not thread-safe). `/image` does not take it (read-only file
-access), and the lock is never held while writing to the network.
+(`ReviewDB` is not thread-safe). `/image` and `/grids` do not take it
+(read-only file access; packing is pure), and the lock is never held while
+writing to the network.
 
 ### Logging policy
 
@@ -1801,6 +1805,56 @@ and `Referrer-Policy: no-referrer`, besides `Cache-Control: no-store` and
 none of the new headers. `API_VERSION` is unchanged: the public routes exist
 only in socket mode, which the versioned pygame client cannot reach, and the
 page is served by the same server it calls.
+
+`POST /grids` (socket mode only; over TLS it is an unknown path, 404, and a
+body on it is refused with 400 as on any bodyless route) lays out images into
+grids for the browser client with the code the pygame client uses
+(`layout.plan_grids`), so a grid verdict covers the same images in both. The
+body, parsed by `parse_grids` into a `GridsRequest`, is `{"keys": [str, ...],
+"width": W, "height": H, "rotation": "auto"|"always"|"never"}`: `keys` a
+non-empty list of 1 to `MAX_GRID_KEYS` (1000) distinct manifest keys; `W` and
+`H` JSON integers (not booleans) from `MIN_GRID_SIDE` (256) to `MAX_GRID_SIDE`
+(16384); other fields are ignored. Anything else is 400. The response is
+
+    {"grids": [[{"key": K, "x": X, "y": Y, "w": W, "h": H,
+                 "rotated": bool, "source": [SW, SH]}, ...], ...],
+     "left_out": [K, ...]}
+
+with grids in bin order and placements in the packer's order; `source` is the
+image's size from its JPEG header, `w`/`h` its packed size (shrunk to fit a
+grid, and swapped when `rotated`, as `layout.is_rotated`). `left_out` lists,
+in request order, keys whose bytes cannot be read (missing file, `jpeg_sha256`
+mismatch), whose header `layout.jpeg_size` refuses, or that the packer left
+unplaced. Identical requests give identical responses.
+
+Parity with the pygame client holds under two preconditions. First, key order
+matters: rects go to rectpack in request order and its area sort is stable,
+so images of equal area can swap places or grids when the order changes. The
+page must send a batch's grid-eligible keys in manifest order, as the pygame
+controller does (`_grid_items`), to get the same grids. Second, a batch with
+more grid-eligible keys than `MAX_GRID_KEYS` cannot use `/grids` (preprocess
+`--batch-size` is unbounded): the page must refuse grid mode for that batch
+rather than split it, since chunks would pack differently. Given both, the
+layout matches `grid_packer.pack_into_grids` exactly for images that decode;
+the pygame client also leaves out images that fail to decode, which the
+server does not try.
+
+The server reads each image's bytes one at a time, never holding the store
+lock, and keeps each successfully read header size in memory for the life of
+the server (failures are retried on the next request). `source` and
+`left_out` therefore reflect each file's first successful read during this
+server run: a file replaced or deleted later keeps its old size and place.
+The client contract covers this: the page must check that each decoded
+image's natural size equals its `source`, and treat a mismatch or any
+`/image` failure as left out, never covered by a grid verdict (as
+`grid_packer._composite_bin` checks the decoded size).
+
+One `/grids` request is computed at a time; another arriving meanwhile gets
+503 with the connection kept open, meaning retry later. Packing is not
+cancelled when the client disconnects, so a reloaded page may see 503 until
+the earlier request finishes. Nothing about individual keys is logged.
+`API_VERSION` is unchanged for the same reason as the public routes: `/grids`
+exists only in socket mode, whose page is served by the server it calls.
 
 `default_socket_path()` is `~/.image-review/serve-<short-host>-<pid>.sock`.
 

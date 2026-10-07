@@ -21,6 +21,10 @@
   display scale, in red below 100%. There is no grid mode yet. The default
   HTTPS mode and the pygame client are unchanged.
   See [SECURITY.md](SECURITY.md) for the limits.
+- **Experimental:** in socket mode, `POST /grids` returns grid layouts
+  computed with the viewer's own packing code, for the browser page's
+  coming grid mode (which does not use it yet). Socket mode only; the
+  HTTPS API and its version are unchanged.
 - **Requirements:** rectpack (still pinned at 0.2.2) moved from the `viewer`
   extra to the core dependencies, with the grid layout code (`layout.py`), so
   that `serve` can later lay out browser grids with the same code as the

@@ -2,6 +2,7 @@ import csv
 import hashlib
 import http.client
 import io
+import shutil
 import socket
 import tempfile
 import unittest
@@ -175,6 +176,16 @@ def mark(
 ):
     """store.mark with the usual reviewer and mode, for tests where neither is the point."""
     return store.mark(keys, status, pass_number, reviewer=reviewer, mode=mode)
+
+
+HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
+
+
+def socket_dir(testcase: unittest.TestCase) -> Path:
+    """A fresh directory under /tmp: macOS $TMPDIR is too long for sun_path."""
+    path = Path(tempfile.mkdtemp(dir="/tmp"))
+    testcase.addCleanup(shutil.rmtree, path, ignore_errors=True)
+    return path
 
 
 def temp_dir(testcase: unittest.TestCase) -> Path:
