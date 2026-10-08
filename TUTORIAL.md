@@ -768,14 +768,21 @@ forwarding does not work.
    | `q` | Done | Done with this server: the page waits for the next one |
    | `?` or `h` | ? | Show or hide the help (Escape also closes it) |
 
-   Everything is in one bar at the bottom of the page: a row of buttons and
-   counts, and under it a line for messages (what was marked, refusals,
-   errors). Its colour is the current item's status, also written in it:
-   grey UNREVIEWED, green CLEAN, red DIRTY, amber FLAGGED (grey too on the
-   end screen and once the page has stopped). Text too long for its place
-   is cut short; hover over it to read it whole. While the help or the name
-   box is open nothing can be marked, and once it closes the page waits the
-   200 ms again before a verdict counts.
+   Everything is in one bar at the bottom of the page: on the left the review
+   buttons, the status word and the scale; on the right your name, "?" and
+   Done (or Reconnect); in the middle a message (what was undone, refusals,
+   errors) when there is one, otherwise the mode, the progress and the image's
+   batch and key. Your own moves (arrows, marking, switching mode) clear the
+   message; an undo or Reconnect says what it did. After `c` or `d` the image
+   stays up for a moment (200 ms) with the bar in its new colour, then the
+   next one appears and no message is left, so the progress stays in view
+   while you mark. In a window about 1400 pixels wide or less the middle part
+   gets a row of its own under the buttons. The bar's colour is the current
+   item's status, also written in it: grey UNREVIEWED, green CLEAN, red DIRTY,
+   amber FLAGGED (grey too on the end screen and once the page has stopped).
+   Text too long for its place is cut short; hover over it to read it whole.
+   While the help or the name box is open nothing can be marked, and once it
+   closes the page waits the 200 ms again before a verdict counts.
 
    A verdict counts only once the image has been on screen for 200 ms, so a
    key pressed as an image appears is ignored. An image that cannot be
@@ -893,9 +900,9 @@ command last the whole job:
 If you skip step 1 or 4 and keep reviewing in the old tab, nothing goes to
 the wrong images: the new server refuses anything from a page loaded from
 the old one (its keys may name the new work directory's images), so the
-page records nothing, stops and says "The server was restarted or now
-serves another work directory. Press Reconnect (r) to load it." (or "Lost
-connection", if the new server is not up yet). Press Reconnect, and judge
+page records nothing, stops and says "Server restarted or changed work
+directory - press Reconnect (r)" (or "Lost connection", if the new server is
+not up yet). Press Reconnect, and judge
 the images it then shows.
 
 If Reconnect says "Lost connection", the new server is not up yet: press it

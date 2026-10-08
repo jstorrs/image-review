@@ -104,25 +104,32 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* ---- The bar: a row of controls over a line for the status message, both of
-   fixed height, so no text or visibility change resizes the stage (which would
-   repack the grids and clear undo). Nothing wraps; long text is cut short with
-   an ellipsis and its title holds it whole. Sizes are in em, so they follow the
-   bar's own font size whatever the browser's root font size. ---- */
+/* ---- The bar: one row of fixed height (a second, shorter one at or below
+   the breakpoint further down, set by the window's width alone), so no text
+   or visibility change resizes the stage (which would repack the grids and
+   clear undo). Nothing wraps; long text is cut short with an ellipsis and its
+   title holds it whole. Its font is a fixed 15px and its breakpoints below
+   are in px, so what fits at a width fits whatever the browser's default
+   font size (an em breakpoint would follow that default, the 15px text
+   would not); browser zoom scales both alike. Its sizes are in em of its
+   font. ---- */
 
 #bar {
   --tint: var(--neutral);
   --tint-fg: var(--neutral-fg);
   --button: var(--neutral-button);
   --bar-height: 2.8em;
-  --status-height: 1.6em;
+  --centre-height: 1.6em; /* the second row, at or below the breakpoint: text only */
+  --pad: 0.5em;
+  position: relative; /* the centre group's second row, below the breakpoint, is placed in it */
   flex: none;
-  height: calc(var(--bar-height) + var(--status-height));
+  height: var(--bar-height);
   display: flex;
   flex-direction: column;
-  padding: 0 0.5em;
+  padding: 0 var(--pad);
   overflow: hidden;
   white-space: nowrap;
+  font-size: 15px; /* fixed, as the px breakpoints below */
   color: var(--tint-fg);
   background: var(--tint);
   border-top: 1px solid var(--border);
@@ -148,8 +155,9 @@ body {
   --button: var(--flagged-button);
 }
 
-/* What overflows a narrow row is clipped at its right end: "?" first, then the
-   chip (both have keys or matter less); Done and Reconnect sit before them */
+/* The row holds three groups: the controls on the left, the status message
+   (or, with none, the item's mode, progress and place) centred in the space
+   between, and the reviewer, "?" and Done or Reconnect pinned at the right end */
 .row {
   flex: none;
   height: var(--bar-height);
@@ -160,17 +168,64 @@ body {
   overflow: hidden;
 }
 
-.row > * {
+.left,
+.centre,
+.right {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: inherit;
+}
+
+.left > *,
+.centre > *,
+.right > * {
   flex: none;
   margin: 0;
 }
 
-/* Its own line, as wide as the bar, so a message stays readable at any width */
+/* When the row is short of room the centre gives way first (it has none of its
+   own, only what is left over), then the reviewer's name, down to its "✎",
+   and only then the left group, cut at its right end. The right group never
+   shrinks below its content, so Done and Reconnect are never clipped. */
+.left {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.centre {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  justify-content: center;
+}
+
+/* Shrinks a million times faster than the left group, so in effect first;
+   pushed to the right end when the centre is a row of its own */
+.right {
+  flex: 0 1000000 auto;
+  margin-left: auto;
+}
+
+/* A message takes the centre's place; with none, the mode, progress and place
+   are shown (app.js empties the message, never hides it) */
+#status:not(:empty) ~ * {
+  display: none;
+}
+
+/* Empty, it stays rendered (a live region a screen reader keeps watching) but
+   out of the flow and unseen */
+#status:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
 #status {
-  flex: none;
-  height: var(--status-height);
-  margin: 0;
-  line-height: var(--status-height);
+  flex: 0 1 auto;
 }
 
 button {
@@ -228,7 +283,7 @@ button:disabled {
 #progress,
 #where,
 #status,
-#reviewer-chip {
+#reviewer-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -247,9 +302,14 @@ button:disabled {
   flex: 0 1000 auto;
 }
 
+/* The name's column may shrink to nothing (minmax(0, ...)), so the chip's
+   narrowest is its "✎" alone */
 #reviewer-chip {
-  flex: 0 2 auto;
-  min-width: 3em;
+  flex: 0 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, max-content) auto;
+  column-gap: 0.3em;
+  align-items: center;
   max-width: 12em;
 }
 
@@ -272,7 +332,7 @@ button:disabled {
    and tighten the spacing, leaving the text more room */
 @media (max-width: 960px) {
   #bar {
-    padding: 0 0.25em;
+    --pad: 0.25em;
   }
 
   .row {
@@ -285,6 +345,43 @@ button:disabled {
 
   #bar .key {
     display: none;
+  }
+}
+
+/* Shorter labels for the narrowest windows (see below) */
+.short {
+  display: none;
+}
+
+/* The narrowest windows shorten Clean, Dirty and Undo to "C", "D" and "↶" (their
+   titles and labels keep the names), so the left group, scale badge included,
+   fits beside the right group down to 520 CSS pixels */
+@media (max-width: 640px) {
+  #bar .long {
+    display: none;
+  }
+
+  #bar .short {
+    display: inline;
+  }
+}
+
+/* At or below this width the centre group would cut the longest messages
+   short, so it gets a second row of its own, as wide as the bar, under the
+   left and right groups. The breakpoint depends on the window's width alone,
+   so the bar's height never changes with its content. */
+@media (max-width: 1408px) {
+  #bar {
+    height: calc(var(--bar-height) + var(--centre-height));
+  }
+
+  .centre {
+    position: absolute;
+    top: var(--bar-height);
+    right: 0;
+    left: 0;
+    height: var(--centre-height);
+    padding: 0 var(--pad);
   }
 }
 

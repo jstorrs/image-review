@@ -18,16 +18,18 @@
   `openssl rand -hex 16`) is reused as the token with `--socket`, so the URL
   survives restarts; an invalid value is refused without being printed. The page
   starts with single images, like the viewer's single mode: enter a reviewer
-  name, then `c` clean, `d` dirty, Left/Right to move, `z` to undo (this
-  page's own marks, with one page per server: the undo history is shared).
+  name, then `c` clean, `d` dirty (the item stays up 200 ms in its new
+  status, then the next), Left/Right to move, `z` to undo (this page's own
+  marks, with one page per server: the undo history is shared).
   A verdict counts only once the image has been on screen for 200 ms, an image
   that cannot be loaded takes DIRTY only, and one bar at the bottom holds the
-  buttons, the status and the progress, with the messages on a line of their
-  own, its colour the item's status (grey UNREVIEWED, green CLEAN, red DIRTY,
-  amber FLAGGED), with the display scale as a "⚠ 46%" badge below 100%. The
-  name is asked for in a box at startup and changed from the bar; `?` (or `h`)
-  shows every key. Nothing can be marked while the help or the name box is
-  open, and a verdict waits 200 ms again once it closes. `m` (rotation `auto`)
+  buttons, the status and the progress, with the messages in its middle
+  (a second row in a narrow window), its colour the item's status (grey
+  UNREVIEWED, green CLEAN, red DIRTY, amber FLAGGED), with the display scale
+  as a "⚠ 46%" badge below 100%. The name is asked for in a box at startup
+  and changed from the bar; `?` (or `h`) shows every key. Nothing can be
+  marked while the help or the name box is open, and a verdict waits 200 ms
+  again once it closes. `m` (rotation `auto`)
   or `M` (`never`) switches to grid mode, one batch at a time (`b` for the
   next, `s` back to single mode): the batch's UNREVIEWED images are packed by
   the server into grids sized to the window, and one `c` or `d` marks every

@@ -18,12 +18,12 @@ const INSTANCE_HEADER = "X-Review-Instance"; // server.INSTANCE_HEADER
 const GRID_IMAGE_FETCHES = 4; // concurrent /image requests while a grid is drawn
 const GRID_RETRY_MS = 2000; // between /grids attempts while the server is busy
 const REPACK_DELAY_MS = 300; // resize debounce before grids are repacked
+const MARK_FLASH_MS = 200; // a marked item stays up this long, the bar in its new status, before the next (as pygame)
 
 const TOKEN_REJECTED = "token rejected (server restarted?) - open the new URL";
 const LOST_CONNECTION = "Lost connection — your marks so far are saved on the server";
 // A 412: this page was loaded from an earlier serve (its keys may name another work directory's images).
-const SERVER_CHANGED =
-  "The server was restarted or now serves another work directory. Press Reconnect (r) to load it.";
+const SERVER_CHANGED = "Server restarted or changed work directory - press Reconnect (r)";
 // With the same socket path and token, the next serve is loaded in this tab by Reconnect.
 const NEXT_SERVE = "Stop serve (Ctrl-C), start the next one, then press Reconnect (r).";
 const WAITING = "Done; waiting for the next serve";
@@ -426,6 +426,7 @@ const state = {
   showSeq: 0, // bumped by every showItem, so a stale load is dropped
   objectUrl: null, // the blob URL the <img> shows
   overlay: null, // the overlay over the stage: null, "help" or "name"; while one is up nothing is judged
+  flashing: false, // a marked item is up in its new status before the move on: busy, and q waits too
 };
 
 const $ = (id) => document.getElementById(id);
@@ -435,6 +436,7 @@ const ui = {
   nameBox: $("name-box"),
   nameOk: $("name-ok"),
   chip: $("reviewer-chip"),
+  reviewerName: $("reviewer-name"), // the chip's name, before its fixed "✎": cut short first when the bar is narrow
   help: $("help"),
   helpButton: $("help-button"),
   progress: $("progress"),
@@ -652,6 +654,9 @@ async function requestGrids(body, seq) {
 
 // ---- Display ----
 
+// The message takes the centre of the bar in place of the mode, progress and place.
+// The reviewer's own moves (arrows, a mark moving on, a mode switch) clear it first;
+// a show the reviewer did not start (a repack, a redraw) leaves it.
 function say(text) {
   ui.status.textContent = text;
   ui.status.title = text; // the bar is one line and cuts it short, so the stage keeps its height
@@ -721,7 +726,7 @@ function render() {
     ui.scale.textContent = state.scale < 1 ? "⚠ " + percent : percent;
     ui.scale.classList.toggle("low", state.scale < 1);
   }
-  ui.chip.textContent = (state.reviewer === null ? "Name" : state.reviewer) + " ✎";
+  ui.reviewerName.textContent = state.reviewer === null ? "Name" : state.reviewer;
   ui.chip.title = state.reviewer === null ? "Set your name" : "Reviewer: " + state.reviewer + " (click to change)";
   const nameValid = validReviewer(ui.reviewer.value);
   ui.reviewer.classList.toggle("invalid", !nameValid);
@@ -730,7 +735,7 @@ function render() {
   const covered = state.overlay !== null;
   ui.chip.disabled = state.dead || covered;
   ui.helpButton.disabled = state.overlay === "name";
-  ui.done.disabled = state.waiting || covered;
+  ui.done.disabled = state.waiting || covered || state.flashing;
   ui.clean.disabled = !canJudge() || !state.loaded;
   ui.dirty.disabled = !canJudge();
   ui.prev.disabled = !canAct() || state.items.length === 0;
@@ -1164,11 +1169,31 @@ async function mark(verdict) {
     }
     const { changed } = await replyStatuses(response);
     applyStatuses(changed);
-    say("Marked " + verdict + ": " + describeKeys(keys));
-    state.busy = false;
-    if (current && build === state.buildSeq) {
-      showItem(nextTodoIndex(state.items, state.statuses, state.index)).catch(reportError);
+    if (!current || build !== state.buildSeq) {
+      say("Marked " + verdict + ": " + describeKeys(keys)); // a repack dropped the items meanwhile: no move
+      return;
     }
+    // As the pygame client: the marked item stays up, the bar in its new status, for
+    // MARK_FLASH_MS, still busy (nothing else is judged, moved or sent), then the next
+    // item (or the end screen). A stop (epoch), a repack (buildSeq) or a context loss or
+    // other show (showSeq) meanwhile makes the move on stale, and it is dropped.
+    const seq = state.showSeq;
+    state.flashing = true;
+    render();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, MARK_FLASH_MS));
+    } finally {
+      state.flashing = false;
+    }
+    if (epoch !== state.epoch || build !== state.buildSeq || seq !== state.showSeq) {
+      render(); // the flash is over: redraw the controls it disabled (Done)
+      return;
+    }
+    state.busy = false;
+    // No message, so the mode and progress stay in view through a run of c and d;
+    // and none left from before (a refusal, say) now that the reviewer moves on
+    say("");
+    showItem(nextTodoIndex(state.items, state.statuses, state.index)).catch(reportError);
   } finally {
     endBusy(epoch);
   }
@@ -1480,7 +1505,7 @@ async function reconnect() {
 // so every request in flight turns stale and nothing more is sent, and frees the images
 // and the review, but keeps the token and the reviewer name for Reconnect.
 function waitForNextServer() {
-  if (state.waiting || state.overlay !== null) {
+  if (state.waiting || state.overlay !== null || state.flashing) {
     return;
   }
   abandonItems(); // also clears the stage

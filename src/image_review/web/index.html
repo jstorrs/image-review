@@ -48,24 +48,30 @@
 </main>
 <footer id="bar" class="bar" data-status="">
 <div class="row">
+<div class="left">
 <button type="button" tabindex="-1" id="prev" title="Previous (&larr;)" disabled>&larr;</button>
 <button type="button" tabindex="-1" id="next" title="Next (&rarr;)" disabled>&rarr;</button>
-<button type="button" tabindex="-1" id="clean" class="verdict" disabled>Clean<span class="key"> (c)</span></button>
-<button type="button" tabindex="-1" id="dirty" class="verdict" disabled>Dirty<span class="key"> (d)</span></button>
-<button type="button" tabindex="-1" id="undo" disabled>Undo<span class="key"> (z)</span></button>
+<button type="button" tabindex="-1" id="clean" class="verdict" title="Clean (c)" aria-label="Clean (c)" disabled>C<span class="long">lean</span><span class="key"> (c)</span></button>
+<button type="button" tabindex="-1" id="dirty" class="verdict" title="Dirty (d)" aria-label="Dirty (d)" disabled>D<span class="long">irty</span><span class="key"> (d)</span></button>
+<button type="button" tabindex="-1" id="undo" title="Undo (z)" aria-label="Undo (z)" disabled><span class="long">Undo</span><span class="short">&#8630;</span><span class="key"> (z)</span></button>
 <span id="item-status" hidden></span>
 <span id="scale" hidden title="Display scale: below 100% the image is shrunk and small text may be lost"></span>
+</div>
+<div class="centre">
+<span id="status" role="status">loading...</span>
+<span id="mode">Single</span>
+<span id="progress"></span>
+<span id="where"></span>
+</div>
+<div class="right">
+<button type="button" tabindex="-1" id="reviewer-chip" title="Reviewer (click to change)"><span id="reviewer-name"></span>&#9998;</button>
+<button type="button" tabindex="-1" id="help-button" title="Keys and help (? or h)">?</button>
 <span class="end">
 <button type="button" tabindex="-1" id="done">Done<span class="key"> (q)</span></button>
 <button type="button" tabindex="-1" id="reconnect" hidden>Reconnect<span class="key"> (r)</span></button>
 </span>
-<span id="mode">Single</span>
-<span id="progress"></span>
-<span id="where"></span>
-<button type="button" tabindex="-1" id="reviewer-chip" title="Reviewer (click to change)"></button>
-<button type="button" tabindex="-1" id="help-button" title="Keys and help (? or h)">?</button>
 </div>
-<p id="status" role="status">loading...</p>
+</div>
 </footer>
 </body>
 </html>

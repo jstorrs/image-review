@@ -498,17 +498,19 @@ class TestWebFiles(unittest.TestCase):
         html = (WEB_DIR / "index.html").read_text()
 
         def rule(selector: str) -> str:
-            found = re.search(r"(?m)^" + re.escape(selector) + r" \{\n(.*?)^\}", css, re.DOTALL)
+            # (not the last line of a selector list: `.left,\n.right {` is not the `.right` rule)
+            found = re.search(r"(?m)(?<!,\n)^" + re.escape(selector) + r" \{\n(.*?)^\}", css, re.DOTALL)
             assert found is not None, selector
             return found[1]
 
         def declares(block: str, declaration: str) -> None:
             self.assertRegex(block, r"(?m)^\s+" + re.escape(declaration) + r"(\s*/\*.*\*/)?$")
 
-        # The bar: a row of controls, then the status message on its own line, each of fixed height
+        # The bar: one row of fixed height, and at or below a width breakpoint a second for the centre group
         bar = rule("#bar")
         for declaration in [
-            "height: calc(var(--bar-height) + var(--status-height));",
+            "height: var(--bar-height);",
+            "font-size: 15px;",  # fixed, as the px breakpoints are
             "flex: none;",
             "flex-direction: column;",
             "overflow: hidden;",
@@ -517,19 +519,78 @@ class TestWebFiles(unittest.TestCase):
             with self.subTest(declaration=declaration):
                 declares(bar, declaration)
         self.assertRegex(bar, r"--bar-height: [\d.]+em;")  # follows the bar's font size, not the root's
+        self.assertRegex(bar, r"--centre-height: [\d.]+em;")
         row = rule(".row")
         for declaration in ["height: var(--bar-height);", "flex: none;", "flex-wrap: nowrap;", "overflow: hidden;"]:
             with self.subTest(declaration=declaration):
                 declares(row, declaration)
-        status = rule("#status")
-        for declaration in ["height: var(--status-height);", "line-height: var(--status-height);", "flex: none;"]:
+        # The only other height the bar takes is set by the window's width alone, in px, as the bar's font
+        two_rows = re.search(r"(?m)^@media \(max-width: 1408px\) \{\n  #bar \{\n(.*?)^  \}\n(.*?)^\}", css, re.DOTALL)
+        assert two_rows is not None
+        self.assertEqual(two_rows[1], "    height: calc(var(--bar-height) + var(--centre-height));\n")
+        centre_row = re.search(r"(?m)^  \.centre \{\n(.*?)^  \}", two_rows[2], re.DOTALL)
+        assert centre_row is not None
+        for declaration in ["position: absolute;", "top: var(--bar-height);", "height: var(--centre-height);"]:
             with self.subTest(declaration=declaration):
-                declares(status, declaration)
-        self.assertRegex(
-            html, r'(?s)<footer id="bar"[^>]*>\s*<div class="row">.*</div>\s*<p id="status"[^>]*>[^<]*</p>\s*</footer>'
-        )
+                declares(centre_row[1], declaration)
+        self.assertRegex(css, r"(?m)^@media \(max-width: 960px\) \{\n  #bar \{\n    --pad: 0\.25em;")
+        bar_css = css[css.index("#bar {") : css.index("/* ---- Overlays")]
+        self.assertEqual(
+            re.findall(r"(?m)^\s+height: (.*);", bar_css),
+            [
+                "var(--bar-height)",
+                "var(--bar-height)",
+                "1px",
+                "calc(var(--bar-height) + var(--centre-height))",
+                "var(--centre-height)",
+            ],
+        )  # the bar, the row, the empty status (out of the flow), and the two above
+        # In px, as the bar's font: an em breakpoint would follow the browser's default font size, the text would not
+        self.assertNotRegex(css, r"@media \(max-width: [\d.]+r?em\)")
         self.assertNotIn("flex-wrap: wrap", css)
-        cut = rule("#mode,\n#progress,\n#where,\n#status,\n#reviewer-chip")
+        # Left, centre (the status message, else mode, progress and place) and right, ending with Done/Reconnect
+        groups = re.fullmatch(
+            r'(?s).*<footer id="bar"[^>]*>\s*<div class="row">\s*'
+            r'<div class="left">(.*?)</div>\s*<div class="centre">(.*?)</div>\s*<div class="right">(.*?)</div>\s*'
+            r"</div>\s*</footer>.*",
+            html,
+        )
+        assert groups is not None
+        ids = [re.findall(r'id="([^"]+)"', group) for group in groups.groups()]
+        self.assertEqual(ids[0], ["prev", "next", "clean", "dirty", "undo", "item-status", "scale"])
+        self.assertEqual(ids[1], ["status", "mode", "progress", "where"])
+        self.assertEqual(ids[2], ["reviewer-chip", "reviewer-name", "help-button", "done", "reconnect"])
+        self.assertIn('<span id="status" role="status">', groups[2])
+        # The centre gives way first, then the reviewer's name; the right group never shrinks below its content
+        centre = rule(".centre")
+        for declaration in ["flex: 1 1 0;", "min-width: 0;", "overflow: hidden;", "justify-content: center;"]:
+            with self.subTest(declaration=declaration):
+                declares(centre, declaration)
+        left = rule(".left")
+        declares(left, "min-width: 0;")
+        declares(left, "overflow: hidden;")
+        right = rule(".right")
+        self.assertNotIn("min-width", right)
+        self.assertNotIn("overflow", right)
+        declares(right, "flex: 0 1000000 auto;")  # shrinks first, in effect, but never below its content
+        declares(right, "margin-left: auto;")  # at the right end when the centre has its own row
+        declares(rule("#reviewer-chip"), "grid-template-columns: minmax(0, max-content) auto;")
+        # The narrowest windows shorten Clean, Dirty and Undo, so the scale badge is never clipped; the full names stay
+        self.assertRegex(
+            css,
+            r"(?m)^@media \(max-width: 640px\) \{\n  #bar \.long \{\n    display: none;\n  \}\n\n"
+            r"  #bar \.short \{\n    display: inline;\n  \}\n\}",
+        )
+        declares(rule(".short"), "display: none;")
+        for name, key in [("Clean", "c"), ("Dirty", "d"), ("Undo", "z")]:
+            with self.subTest(button=name):
+                self.assertRegex(groups[1], rf'<button [^>]*aria-label="{name} \({key}\)"[^>]*>')
+        declares(rule("#status:not(:empty) ~ *"), "display: none;")
+        empty = rule("#status:empty")  # still rendered, so its live region stays, but out of the flow and unseen
+        self.assertNotIn("display", empty)
+        declares(empty, "position: absolute;")
+        declares(empty, "clip-path: inset(50%);")
+        cut = rule("#mode,\n#progress,\n#where,\n#status,\n#reviewer-name")
         declares(cut, "text-overflow: ellipsis;")
         declares(cut, "min-width: 0;")
         # The overlays float over the stage, out of its layout

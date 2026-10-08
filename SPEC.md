@@ -1964,9 +1964,9 @@ canvas box is within half a device pixel of the canvas size), and the dwell
 starts as in single mode once the whole canvas is painted inside the stage. A
 resize to a new device size hides the grid at once and repacks 300 ms after
 the last resize event, landing on the grid holding the previous item's first
-key. The bar is one line of fixed height and the overlays float over the
-stage (see *Layout*), so a message, a button shown or hidden, the help or the
-name box never changes the stage size and so never repacks.
+key. The bar's height depends only on the window's width and the overlays
+float over the stage (see *Layout*), so a message, a button shown or hidden,
+the help or the name box never changes the stage size and so never repacks.
 
 A grid verdict covers exactly the grid's drawn keys (any demoted to single
 items are not in it) in one `POST /mark` with `mode: "grid"`; every item
@@ -1995,35 +1995,54 @@ the end screen by `z` or Left/Right at a new size repacks first, landing on
 the grid holding the item that would have been shown, and that repack
 empties the rest of the stack.
 
-- **Layout**: the stage fills the window above one bar at the bottom,
-  of fixed height: a row of controls (`--bar-height`) over a line for the
-  status message (`--status-height`), both in `em` of the bar's font, so
-  they follow its text whatever the browser's root font size. Nothing
+- **Layout**: the stage fills the window above one bar at the bottom, one row
+  (`--bar-height`) of fixed height. The bar's font is a fixed 15px and its
+  sizes are in `em` of it; its breakpoints are in CSS pixels, so what fits at
+  a width fits whatever the browser's default font size (an `em` breakpoint
+  would follow that default while the text would not), and browser zoom scales
+  text and breakpoints alike. At or below a breakpoint of 1408 CSS pixels of
+  window width the bar has a second, shorter row (`--centre-height`, text
+  only) for the centre group; the breakpoint depends on the window's width
+  alone, so the bar's height never changes with its text or state. Nothing
   wraps; long text is cut short with an ellipsis and its `title` holds it
-  whole. The status message has the whole width of the bar to itself, so
-  refusals and errors stay readable at any window width. Narrow windows
-  (960 CSS pixels or less) drop the key hints from the button labels and
-  tighten the spacing. The row, left to right: ← and → (Previous, Next),
-  Clean (c), Dirty (d), Undo (z), the item's status word (UNREVIEWED,
-  CLEAN, DIRTY or FLAGGED; a grid's is `gridStatus`), the scale badge, Done
-  (q), whose place Reconnect (r) takes while it is offered (the place is as
-  wide as the wider of the two, so neither moves anything), the mode
-  ("Single", "Grid · auto" or "Grid · never"), the progress, the item's
-  batch and key (in grid mode "grid (N images)"; cut short first), the
-  reviewer chip ("NAME ✎") and "?" (help). A row too narrow for all of it
-  is clipped at its right end, so "?" and then the chip, which have key
-  equivalents, go first and Done or Reconnect stays in view. The bar's
-  whole background is the item's status colour, from the `data-status`
-  attribute on `#bar`: neutral grey for UNREVIEWED, and also on the end
-  screen, with no item, and once the page has stopped (lost connection,
-  rejected token, Done); green CLEAN, red DIRTY, amber FLAGGED. The colours
-  are CSS custom properties with light and dark variants
+  whole. Narrow windows (960 CSS pixels or less) drop the key hints from the
+  button labels and tighten the spacing; the narrowest (640 CSS pixels or
+  less) also shorten Clean, Dirty and Undo to "C", "D" and "↶" (their `title`
+  and `aria-label` keep the names). The row has three groups. Left: ← and →
+  (Previous, Next), Clean (c), Dirty (d), Undo (z), the item's status word
+  (UNREVIEWED, CLEAN, DIRTY or FLAGGED; a grid's is `gridStatus`) and the
+  scale badge. Right, pinned to the right end: the reviewer chip ("NAME ✎"),
+  "?" (help) and, last, Done (q), whose place Reconnect (r) takes while it is
+  offered (the place is as wide as the wider of the two, so neither moves
+  anything). Centre, centred in the space between (or in its own row): the
+  status message (`#status`, `role="status"`) while it is not empty, else the
+  mode ("Single", "Grid · auto" or "Grid · never"), the progress and the
+  item's batch and key (in grid mode "grid (N images)"). Empty, the message
+  stays rendered (its live region kept) but out of the flow and unseen. The
+  reviewer's own moves empty the message: Left/Right, a mark moving on, a mode
+  switch (`m`, `M`, `s`, `b`). An undo, a Reconnect and startup set their own
+  message as they move ("Undone …", "Undid another client's mark …",
+  "Reconnected …", the name prompt). A show the reviewer did not start (a
+  resize repack, a redraw after a context loss) leaves the message as it is,
+  so a refusal or error lasts until the reviewer's next move, and a stopped
+  page's message until Reconnect. Above the breakpoint the centre has room for
+  the longest fixed message with the widest left and right groups. A row too
+  narrow for all of it gives way in this order: the centre first (it has only
+  the space left over; of its parts the batch and key are cut short first),
+  then the reviewer's name, down to its "✎"; the left group is clipped at its
+  right end only as a last resort, which never happens at 520 CSS pixels or
+  more, so the scale badge, like Done or Reconnect, always stays in view
+  there. The bar's whole background is the item's status colour, from the
+  `data-status` attribute on `#bar`: neutral grey for UNREVIEWED, and also on
+  the end screen, with no item, and once the page has stopped (lost
+  connection, rejected token, Done); green CLEAN, red DIRTY, amber FLAGGED.
+  The colours are CSS custom properties with light and dark variants
   (`prefers-color-scheme`; the stage stays dark in both), and every tint has
-  its own text and button colours, at least 4.5:1 (WCAG AA) against it;
-  where a verdict button's colour would match the tint (Clean on light
-  CLEAN, Dirty on light DIRTY) it takes a darker shade. Disabled buttons are
-  drawn at 55% opacity. The status word is always written too, so colour is
-  never the only cue.
+  its own text and button colours, at least 4.5:1 (WCAG AA) against it; where
+  a verdict button's colour would match the tint (Clean on light CLEAN, Dirty
+  on light DIRTY) it takes a darker shade. Disabled buttons are drawn at 55%
+  opacity. The status word is always written too, so colour is never the only
+  cue.
 - **Overlays**: the help and the name box float over the stage (absolutely
   positioned, out of its layout) and never change its size; at most one is
   up. While one is up, `c`, `d`, `z`, Left/Right, `m`/`M`, `s`, `b`, `q` and
@@ -2086,24 +2105,32 @@ empties the rest of the stack.
 - **Marking**: one `POST /mark` with the item's keys and `mode` the display
   mode (`single`, or `grid` for every item in grid mode), controls disabled
   while it is in flight, never retried. On a 200 the keys are pushed on the
-  page's stack of marked keys, the reply updates the status map, and the page
-  moves to the next todo item after the current one, wrapping round. With
-  none left, the end screen says what is next. Only when no manifest row of
-  the pass is todo (UNREVIEWED or FLAGGED) is it the end of the pass: "Pass
-  N: nothing left to review. Stop serve (Ctrl-C), start the next one, then
-  press Reconnect (r)." with the Reconnect button, offered while no request
-  is in flight and the page has not stopped (a stop takes the hint off the
-  stage; see *Errors*). Otherwise, as
+  page's stack of marked keys and the reply updates the status map. As in the
+  viewer, the marked item then stays up for `MARK_FLASH_MS` (200 ms) with the
+  bar in its new status (colour and word; a grid's from `gridStatus`), and the
+  page is busy meanwhile: no verdict, move, undo, mode switch, `q` or `r`
+  acts. Then it empties the status message (so a run of `c` and `d` keeps the
+  mode and progress in view) and moves to the next todo item after the current
+  one, wrapping round, or to the end screen. A stop (lost connection, 401,
+  412), a resize repack or a context loss during those 200 ms drops the move
+  on (a context loss redraws the marked grid instead). A mark whose items a
+  resize repack dropped while it was in flight does not move and says "Marked
+  STATUS: KEY" (or "grid of N images"). With none left, the end screen says
+  what is next. Only when no manifest row of the pass is todo (UNREVIEWED or
+  FLAGGED) is it the end of the pass: "Pass N: nothing left to review. Stop
+  serve (Ctrl-C), start the next one, then press Reconnect (r)." with the
+  Reconnect button, offered while no request is in flight and the page has not
+  stopped (a stop takes the hint off the stage; see *Errors*). Otherwise, as
   the controller: in grid mode (whose list is one batch) "No todo images
   remaining - [b] next batch" while any batch has grid items, else the
-  pass-wide "No grid items for pass N; K FLAGGED/DIRTY images need
-  single-mode review - press [s]"; in single mode (whose list is the whole
-  pass, so only when other clients changed statuses meanwhile) "No todo
-  images remaining - press [s] to reload the list". Entering grid mode, or
-  a repack, with nothing to pack shows the same screen. A 200 whose body
-  cannot be parsed (on `/mark` or `/undo`) still counts, since the server has
-  acted: the page rereads `/statuses` instead, and stops with "unexpected
-  reply from the server; reload the page" if that fails too.
+  pass-wide "No grid items for pass N; K FLAGGED/DIRTY images need single-mode
+  review - press [s]"; in single mode (whose list is the whole pass, so only
+  when other clients changed statuses meanwhile) "No todo images remaining -
+  press [s] to reload the list". Entering grid mode, or a repack, with nothing
+  to pack shows the same screen. A 200 whose body cannot be parsed (on `/mark`
+  or `/undo`) still counts, since the server has acted: the page rereads
+  `/statuses` instead, and stops with "unexpected reply from the server;
+  reload the page" if that fails too.
 - **Navigation**: Left/Right (and buttons) step through the list without
   marking, stopping at its ends; from the end screen they go to the last or
   first item.
@@ -2136,9 +2163,9 @@ empties the rest of the stack.
 - **Errors**: a 401 clears the stored token, shows "token rejected (server
   restarted?) - open the new URL" and disables everything; a 412 (another
   server run answers: see *Unix-socket server*) stops the page as a lost
-  connection does, with "The server was restarted or now serves another
-  work directory. Press Reconnect (r) to load it.": the verdict, undo or
-  read it answered changes nothing, and Reconnect loads the new server as
+  connection does, with "Server restarted or changed work directory -
+  press Reconnect (r)": the verdict, undo or read it answered changes
+  nothing, and Reconnect loads the new server as
   below; a network failure
   shows "Lost connection — your marks so far are saved on the server", does
   the same and shows a Reconnect button in Done's place (see *Layout*;
@@ -2164,7 +2191,7 @@ empties the rest of the stack.
   `/grids` and landing on the
   grid holding the previous item's first key (kept across a failed
   Reconnect, and the key a pending repack would have landed on), else the
-  first. Every item then starts a fresh dwell. The status line says
+  first. Every item then starts a fresh dwell. The status message says
   "Reconnected", or "Reconnected; now on pass N" if the current pass
   changed or was forgotten by `q` (the new pass is reviewed); after `q` the
   server may serve another work directory or batch, so grid mode starts
@@ -2189,7 +2216,7 @@ empties the rest of the stack.
   too, since another work directory's keys and batch names usually match
   these. Every control is disabled, the Done
   button and the reviewer chip included, but Reconnect is shown; the
-  status line says "Done; waiting for the next serve" and the stage "Done.
+  status message says "Done; waiting for the next serve" and the stage "Done.
   Your marks are saved. Stop serve (Ctrl-C), start the next one, then press
   Reconnect (r)." Reconnect then loads whatever the server serves (see
   *Errors*); a 401 shows the token-rejected message. There is no way to
