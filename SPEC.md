@@ -1989,9 +1989,9 @@ at once, as `controller._rebuild_grids_for_resize` resets its undo count
 (the old items are gone, so `z` then says "Nothing to undo"); a repack due
 while a `/mark` or `/undo` is in flight waits for its reply, and a mark
 whose reply arrives after a resize hid the grids is not pushed on the stack
-and moves nowhere. On the end screen a resize does not repack (the
+and moves nowhere. On the end (or stop) screen a resize does not repack (the
 controller repacks only while reviewing), so `z` still undoes there; leaving
-the end screen by `z` or Left/Right at a new size repacks first, landing on
+that screen by `z` or Left/Right at a new size repacks first, landing on
 the grid holding the item that would have been shown, and that repack
 empties the rest of the stack.
 
@@ -2034,7 +2034,7 @@ empties the rest of the stack.
   more, so the scale badge, like Done or Reconnect, always stays in view
   there. The bar's whole background is the item's status colour, from the
   `data-status` attribute on `#bar`: neutral grey for UNREVIEWED, and also on
-  the end screen, with no item, and once the page has stopped (lost
+  the end and stop screens, with no item, and once the page has stopped (lost
   connection, rejected token, Done); green CLEAN, red DIRTY, amber FLAGGED.
   The colours are CSS custom properties with light and dark variants
   (`prefers-color-scheme`; the stage stays dark in both), and every tint has
@@ -2132,21 +2132,39 @@ empties the rest of the stack.
   `/statuses` instead, and stops with "unexpected reply from the server;
   reload the page" if that fails too.
 - **Navigation**: Left/Right (and buttons) step through the list without
-  marking, stopping at its ends; from the end screen they go to the last or
-  first item.
-- **Undo**: `z` (and a button), also on the end screen. With an empty stack
-  it says "Nothing to undo" without a request. Otherwise `POST /undo`; `{}`
-  empties the stack and says "Nothing to undo". If the reply holds any key of
-  the entry on top of the stack, it is popped and the item holding those keys
-  is shown again with a fresh dwell (a grid is drawn again from its images).
-  If a repack is pending when the reply arrives, the repack lands on the grid
-  holding the undone keys instead. The server keeps one undo history for every
-  client (see *Concurrency limits*), so with another tab or client marking too
-  the reply can name other keys: the page then leaves the stack alone, says
-  "Undid another client's mark: KEY is STATUS" (up to three keys), and shows
-  the first listed item holding a returned key, if any. So `z` is limited to
-  this page's marks only while the page is the server's one client. A
-  Reconnect empties the stack (see *Errors*).
+  marking. As the viewer's "End of list" message, a step past either end
+  shows the stop screen on the stage: a red octagonal stop sign (inline SVG,
+  coloured by the CSS) over "End of the list", "→ first item · ← last item"
+  and the list's todo count, "K todo left in this list" (grid mode: "K todo
+  left in this batch - [b] next batch"), or, with none left in the list, the
+  end screen's hint (e.g. "No todo images remaining - [b] next batch" or the
+  held-back "No grid items for pass N; …", see *Marking*). No item
+  is current there: the bar is neutral, no dwell runs, and `c`/`d` and their
+  buttons do nothing; `z`, `m`/`M`, `s`, `b`, `q`, `?`/`h` act as on any
+  screen, and in grid mode a resize does not repack, as on the end screen. A
+  stop (lost connection, rejected token, `q`) takes the stop sign off. A
+  further step goes on round: Right to the first item, Left to the last,
+  whichever end it was reached from, with a fresh dwell. The end screen
+  behaves the same way under Left/Right. Stepping onto the stop screen is a
+  move, so it empties the status message. With no todo row left in the pass,
+  a step past either end shows the end-of-pass screen (with Reconnect)
+  instead of the stop sign, since the next serve is due; Left/Right go round
+  from it too. A list with no items keeps its own screen, and the arrows do
+  nothing.
+- **Undo**: `z` (and a button), also on the end and stop screens. With an
+  empty stack it says "Nothing to undo" without a request. Otherwise
+  `POST /undo`; `{}` empties the stack and says "Nothing to undo". If the
+  reply holds any key of the entry on top of the stack, it is popped and the
+  item holding those keys is shown again with a fresh dwell (a grid is drawn
+  again from its images). If a repack is pending when the reply arrives, the
+  repack lands on the grid holding the undone keys instead. The server keeps
+  one undo history for every client (see *Concurrency limits*), so with
+  another tab or client marking too the reply can name other keys: the page
+  then leaves the stack alone, says "Undid another client's mark: KEY is
+  STATUS" (up to three keys), and shows the first listed item holding a
+  returned key, if any. So `z` is limited to this page's marks only while the
+  page is the server's one client. A Reconnect empties the stack (see
+  *Errors*).
 - **Keys**: `c`, `d`, `z`, `s` (single mode), `b` (next batch, grid mode
   only), `r` (Reconnect, only while its button is shown) and `q` (done with
   this server, in any state), in either case, so Caps Lock does not matter;

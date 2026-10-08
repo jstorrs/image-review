@@ -400,7 +400,7 @@ const state = {
   batchOf: new Map(), // key -> batch
   statuses: new Map(), // key -> status, for the pass under review
   items: [], // review items in order: the todo list at startup, shuffled
-  index: -1, // the current item, or -1 for the end screen
+  index: -1, // the current item, or -1 for the end screen (or the stop sign past either end of the list)
   reviewer: null, // a name that passed validReviewer, or null
   busy: false, // a request is in flight, or the list is loading
   dead: false, // token rejected, connection lost or done (q): nothing more is sent
@@ -449,6 +449,8 @@ const ui = {
   grid: $("grid"),
   placeholder: $("placeholder"),
   message: $("message"),
+  listEnd: $("list-end"), // the stop sign past either end of the list
+  listEndDetail: $("list-end-detail"),
   status: $("status"),
   clean: $("clean"),
   dirty: $("dirty"),
@@ -479,6 +481,7 @@ function stop(text) {
     state.atEnd = false;
     ui.message.hidden = true; // its hint says to press Reconnect, which a stop may not offer
   }
+  ui.listEnd.hidden = true; // its arrows no longer move
   say(text);
   render();
   return new Stopped(text);
@@ -826,9 +829,9 @@ async function startDwell(seq) {
   render();
 }
 
-// In grid mode a resize repacks, except on the end screen: as the controller,
-// which repacks only while reviewing, the end screen keeps z, and leaving it
-// (z or an arrow) repacks first.
+// In grid mode a resize repacks, except on the end (or stop) screen: as the
+// controller, which repacks only while reviewing, the end screen keeps z, and
+// leaving it (z or an arrow) repacks first.
 function onResize() {
   const endScreen = state.index < 0 && state.items.length > 0 && state.repackTimer === null;
   if (gridMode() && !endScreen && (state.repackTimer !== null || gridSizeChanged())) {
@@ -865,22 +868,49 @@ function showNotice(text) {
   ui.message.hidden = false;
 }
 
-// The end of the list. Only with no todo row left in the pass is it the end of the pass,
-// where the next serve is due and Reconnect is offered. Grid mode's list is one batch, so
-// there, as the controller, b moves on while a batch has grid items and s reviews what
-// grids leave out; single mode's list is the whole pass, unless others marked meanwhile.
+function passDone() {
+  return !state.manifest.some((row) => isTodo(state.statuses.get(row.key)));
+}
+
+// Where the todo left in the pass, none of it in the list, is reviewed. Grid mode's list
+// is one batch, so there, as the controller, b moves on while a batch has grid items and
+// s reviews what grids leave out; single mode's list is the whole pass, unless others
+// marked meanwhile.
+function elsewhereHint() {
+  if (!gridMode()) {
+    return RELOAD_SINGLE;
+  }
+  if (gridBatches(state.manifest, state.statuses).size > 0) {
+    return NEXT_BATCH;
+  }
+  return heldBackMessage(state.pass, heldBackCount(state.manifest, state.statuses, null));
+}
+
+// The end of the list, with no todo left in it. Only with no todo row left in the pass is
+// it the end of the pass, where the next serve is due and Reconnect is offered.
 function showEnd() {
-  const todo = state.manifest.filter((row) => isTodo(state.statuses.get(row.key)));
-  if (todo.length === 0) {
+  if (passDone()) {
     state.atEnd = true;
     showNotice("Pass " + state.pass + ": nothing left to review. " + NEXT_SERVE);
-  } else if (!gridMode()) {
-    showNotice(RELOAD_SINGLE);
-  } else if (gridBatches(state.manifest, state.statuses).size > 0) {
-    showNotice(NEXT_BATCH);
   } else {
-    showNotice(heldBackMessage(state.pass, heldBackCount(state.manifest, state.statuses, null)));
+    showNotice(elsewhereHint());
   }
+  render();
+}
+
+// An arrow past either end of the list: a stop sign (as the controller's
+// END_OF_LIST_MESSAGE), from which an arrow goes on round: -> the first item, <- the
+// last. With nothing left in the pass it is the end-of-pass screen instead, as
+// Reconnect is due then.
+function showListEnd() {
+  if (passDone()) {
+    showEnd();
+    return;
+  }
+  const left = countTodo(state.items, state.statuses);
+  const where = gridMode() ? " in this batch - [b] next batch" : " in this list";
+  ui.listEndDetail.textContent = left > 0 ? left + " todo left" + where : elsewhereHint();
+  ui.listEnd.hidden = false;
   render();
 }
 
@@ -891,6 +921,7 @@ function clearStage() {
   ui.grid.hidden = true;
   ui.placeholder.hidden = true;
   ui.message.hidden = true;
+  ui.listEnd.hidden = true;
 }
 
 // The stage's size in device pixels, capped at the largest grid the server packs.
@@ -1031,9 +1062,9 @@ function showGridDrawn(item) {
   state.loaded = true;
 }
 
-// Show item `index` (or the end screen for -1). The dwell starts once the image
-// (or placeholder) has been decoded and painted.
-async function showItem(index) {
+// Show item `index` (or for -1 no item: the end screen, or what `end` shows). The
+// dwell starts once the image (or placeholder) has been decoded and painted.
+async function showItem(index, end = showEnd) {
   const seq = ++state.showSeq;
   state.index = index;
   state.loaded = false;
@@ -1043,7 +1074,7 @@ async function showItem(index) {
   render();
   if (index < 0) {
     setObjectUrl(null);
-    showEnd();
+    end();
     return;
   }
   if (state.items[index].kind === "grid") {
@@ -1255,17 +1286,16 @@ function navigate(step) {
   if (!canAct() || state.items.length === 0) {
     return;
   }
-  let index;
-  if (state.index < 0) {
-    index = step > 0 ? 0 : state.items.length - 1;
-  } else {
-    index = state.index + step;
-    if (index < 0 || index >= state.items.length) {
-      say(step > 0 ? "End of list" : "Start of list");
-      return;
-    }
-  }
   say("");
+  if (state.index < 0) {
+    showOrRepack(step > 0 ? 0 : state.items.length - 1); // round from the end or stop screen
+    return;
+  }
+  const index = state.index + step;
+  if (index < 0 || index >= state.items.length) {
+    showItem(-1, showListEnd).catch(reportError);
+    return;
+  }
   showOrRepack(index);
 }
 

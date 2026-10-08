@@ -30,6 +30,9 @@
   --panel-border: #5a5a5a;
   --input: #101010;
   --invalid: #ff8a80;
+  /* The stop sign at either end of the list: on the stage, dark in either scheme */
+  --stop: #c62828;
+  --stop-fg: #ffffff;
 }
 
 @media (prefers-color-scheme: light) {
@@ -102,6 +105,49 @@ body {
   border: 1px solid var(--border);
   font-size: 1.2rem;
   overflow-wrap: anywhere;
+}
+
+/* The list-end screen: a stop sign over a few lines of text, centred in the
+   stage like a notice and never larger than it */
+#list-end {
+  box-sizing: border-box;
+  max-height: 100%;
+  margin: 1rem;
+  overflow: hidden;
+  text-align: center;
+  font-size: 1.2rem;
+}
+
+#list-end p {
+  margin: 0.4rem 0;
+}
+
+.stop-sign {
+  display: block;
+  width: min(8rem, 25vh);
+  height: min(8rem, 25vh);
+  margin: 0 auto 0.6rem;
+}
+
+.stop-face {
+  fill: var(--stop);
+}
+
+.stop-rim {
+  fill: none;
+  stroke: var(--stop-fg);
+  stroke-width: 3;
+}
+
+.stop-word {
+  font: 700 25px system-ui, sans-serif;
+  fill: var(--stop-fg);
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.stop-title {
+  font-weight: 700;
 }
 
 /* ---- The bar: one row of fixed height (a second, shorter one at or below

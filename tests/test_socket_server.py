@@ -477,6 +477,27 @@ class TestWebFiles(unittest.TestCase):
         self.assertIn("reviewer", used)
         self.assertLessEqual(used, defined)
 
+    def test_list_end_stop_sign(self):
+        # Past either end of the list: a stop sign on the stage (an inline octagon, coloured by the CSS), hidden by default
+        html = (WEB_DIR / "index.html").read_text()
+        stage = re.search(r'(?s)<main id="stage">(.*?)</main>', html)
+        assert stage is not None
+        screen = re.search(r'(?s)<div id="list-end" hidden>(.*?)</div>', stage[1])
+        assert screen is not None
+        octagon = re.search(r'<polygon class="stop-face" points="([^"]+)"', screen[1])
+        assert octagon is not None
+        self.assertEqual(len(octagon[1].split()), 8)
+        self.assertIn('aria-hidden="true"', screen[1])
+        self.assertIn('id="list-end-detail"', screen[1])
+        self.assertNotRegex(screen[1], r"\b(fill|stroke)=")  # colours are the CSS's, light or dark
+        css = (WEB_DIR / "app.css").read_text()
+        for token in ["--stop:", "--stop-fg:", "fill: var(--stop);"]:
+            with self.subTest(token=token):
+                self.assertIn(token, css)
+        script = (WEB_DIR / "app.js").read_text()
+        self.assertNotIn("End of list", script)
+        self.assertNotIn("Start of list", script)
+
     def test_buttons_never_take_focus(self):
         # Enter or Space on a focused button would click it past the key-repeat guard
         buttons = re.findall(r"<button\b[^>]*>", (WEB_DIR / "index.html").read_text())

@@ -779,10 +779,19 @@ forwarding does not work.
    while you mark. In a window about 1400 pixels wide or less the middle part
    gets a row of its own under the buttons. The bar's colour is the current
    item's status, also written in it: grey UNREVIEWED, green CLEAN, red DIRTY,
-   amber FLAGGED (grey too on the end screen and once the page has stopped).
+   amber FLAGGED (grey too on the end and stop-sign screens and once the
+   page has stopped).
    Text too long for its place is cut short; hover over it to read it whole.
    While the help or the name box is open nothing can be marked, and once it
    closes the page waits the 200 ms again before a verdict counts.
+
+   Right past the last item (or Left before the first) shows a stop sign,
+   "End of the list", with how many todo items the list (in grid mode, the
+   batch) still has; press the arrow again to go round to the other end:
+   Right goes to the first item and Left to the last. There is no image on
+   the stop sign, so `c` and `d` do nothing; `z`, `m`, `s`, `b` and `q` work
+   as anywhere. Once nothing in the pass is left to review, the arrows past
+   an end show the "nothing left to review" screen instead.
 
    A verdict counts only once the image has been on screen for 200 ms, so a
    key pressed as an image appears is ignored. An image that cannot be

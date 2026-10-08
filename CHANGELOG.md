@@ -19,8 +19,10 @@
   survives restarts; an invalid value is refused without being printed. The page
   starts with single images, like the viewer's single mode: enter a reviewer
   name, then `c` clean, `d` dirty (the item stays up 200 ms in its new
-  status, then the next), Left/Right to move, `z` to undo (this page's own
-  marks, with one page per server: the undo history is shared).
+  status, then the next), Left/Right to move (past either end a stop sign
+  with the list's todo count, then round to the other end, as the viewer's
+  "End of list"), `z` to undo (this page's own marks, with one page per
+  server: the undo history is shared).
   A verdict counts only once the image has been on screen for 200 ms, an image
   that cannot be loaded takes DIRTY only, and one bar at the bottom holds the
   buttons, the status and the progress, with the messages in its middle
