@@ -1,16 +1,58 @@
-/* A dark neutral surround, so burned-in text in the image is easy to read. */
+/* A dark neutral surround, so burned-in text in the image is easy to read. The
+   stage stays dark in either colour scheme; the bar and the overlays follow it. */
 :root {
   color-scheme: dark;
   --bg: #1a1a1a;
   --stage: #101010;
-  --bar: #262626;
   --fg: #e6e6e6;
-  --muted: #a3a3a3;
   --border: #404040;
-  --clean: #2e7d32;
-  --dirty: #c62828;
-  --flagged: #e07b00;
-  --unreviewed: #5f5f5f;
+  /* The bar takes the current item's status colour (data-status on #bar), with
+     text and buttons chosen per tint for contrast (WCAG AA, 4.5:1 or more) */
+  --neutral: #262626;
+  --neutral-fg: #e6e6e6;
+  --neutral-button: #3a3a3a;
+  --clean: #1d5c22;
+  --clean-fg: #ffffff;
+  --clean-button: #13431a;
+  --dirty: #a01818;
+  --dirty-fg: #ffffff;
+  --dirty-button: #741010;
+  --flagged: #e8a317;
+  --flagged-fg: #111111;
+  --flagged-button: #f6c86a;
+  /* The verdict buttons keep their own colours, darker on their own tint */
+  --clean-verdict: #2e7d32;
+  --dirty-verdict: #c62828;
+  --clean-verdict-on-clean: #2e7d32;
+  --dirty-verdict-on-dirty: #c62828;
+  --panel: #262626;
+  --panel-fg: #e6e6e6;
+  --panel-border: #5a5a5a;
+  --input: #101010;
+  --invalid: #ff8a80;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --border: #b5b5b5;
+    --neutral: #ececec;
+    --neutral-fg: #1a1a1a;
+    --neutral-button: #ffffff;
+    --clean: #2e7d32;
+    --clean-button: #1f5d23;
+    --dirty: #c62828;
+    --dirty-button: #8e1c1c;
+    --clean-verdict-on-clean: #14451a;
+    --dirty-verdict-on-dirty: #6e1212;
+    --flagged: #ffb300;
+    --flagged-button: #ffd666;
+    --panel: #fafafa;
+    --panel-fg: #1a1a1a;
+    --panel-border: #9e9e9e;
+    --input: #ffffff;
+    --invalid: #b3261e;
+  }
 }
 
 [hidden] {
@@ -31,104 +73,8 @@ body {
   font: 15px/1.4 system-ui, sans-serif;
 }
 
-.bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 1rem;
-  padding: 0.5rem 1rem;
-  background: var(--bar);
-}
-
-/* One line, so the stage (and the size grids are packed for) does not change as the header text does */
-header.bar {
-  flex-wrap: nowrap;
-  overflow: hidden;
-  white-space: nowrap;
-  border-bottom: 1px solid var(--border);
-}
-
-footer.bar {
-  border-top: 1px solid var(--border);
-}
-
-/* Shrinks (after the progress and where text) before the badges would be cut, so the scale warning stays in view */
-.reviewer {
-  min-width: 0;
-  flex-shrink: 0.3;
-}
-
-.reviewer input {
-  margin-left: 0.25rem;
-  width: 12rem;
-  min-width: 4rem;
-  max-width: calc(100% - 5rem);
-  padding: 0.2rem 0.4rem;
-  font: inherit;
-  color: var(--fg);
-  background: var(--stage);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-}
-
-.reviewer input:invalid {
-  border-color: var(--flagged);
-}
-
-/* The badges never shrink; the progress and where text are cut short instead */
-#mode,
-#item-status,
-#scale {
-  flex: none;
-}
-
-#progress {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-variant-numeric: tabular-nums;
-}
-
-#item-status {
-  padding: 0.1rem 0.5rem;
-  border-radius: 3px;
-  font-weight: 600;
-  background: var(--unreviewed);
-}
-
-#item-status[data-status="CLEAN"] {
-  background: var(--clean);
-}
-
-#item-status[data-status="DIRTY"] {
-  background: var(--dirty);
-}
-
-#item-status[data-status="FLAGGED"] {
-  background: var(--flagged);
-}
-
-#scale {
-  font-variant-numeric: tabular-nums;
-}
-
-#scale.low {
-  color: #ff6b6b;
-  font-weight: 600;
-}
-
-#mode {
-  font-weight: 600;
-}
-
-#where {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--muted);
-}
-
 #stage {
+  position: relative; /* the overlays float over it, so opening one never resizes it */
   flex: 1;
   min-height: 0;
   display: flex;
@@ -158,59 +104,259 @@ footer.bar {
   overflow-wrap: anywhere;
 }
 
-.controls {
+/* ---- The bar: a row of controls over a line for the status message, both of
+   fixed height, so no text or visibility change resizes the stage (which would
+   repack the grids and clear undo). Nothing wraps; long text is cut short with
+   an ellipsis and its title holds it whole. Sizes are in em, so they follow the
+   bar's own font size whatever the browser's root font size. ---- */
+
+#bar {
+  --tint: var(--neutral);
+  --tint-fg: var(--neutral-fg);
+  --button: var(--neutral-button);
+  --bar-height: 2.8em;
+  --status-height: 1.6em;
+  flex: none;
+  height: calc(var(--bar-height) + var(--status-height));
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
+  flex-direction: column;
+  padding: 0 0.5em;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--tint-fg);
+  background: var(--tint);
+  border-top: 1px solid var(--border);
+}
+
+#bar[data-status="CLEAN"] {
+  --tint: var(--clean);
+  --tint-fg: var(--clean-fg);
+  --button: var(--clean-button);
+  --clean-verdict: var(--clean-verdict-on-clean);
+}
+
+#bar[data-status="DIRTY"] {
+  --tint: var(--dirty);
+  --tint-fg: var(--dirty-fg);
+  --button: var(--dirty-button);
+  --dirty-verdict: var(--dirty-verdict-on-dirty);
+}
+
+#bar[data-status="FLAGGED"] {
+  --tint: var(--flagged);
+  --tint-fg: var(--flagged-fg);
+  --button: var(--flagged-button);
+}
+
+/* What overflows a narrow row is clipped at its right end: "?" first, then the
+   chip (both have keys or matter less); Done and Reconnect sit before them */
+.row {
+  flex: none;
+  height: var(--bar-height);
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.4em;
+  overflow: hidden;
+}
+
+.row > * {
+  flex: none;
+  margin: 0;
+}
+
+/* Its own line, as wide as the bar, so a message stays readable at any width */
+#status {
+  flex: none;
+  height: var(--status-height);
+  margin: 0;
+  line-height: var(--status-height);
 }
 
 button {
-  padding: 0.35rem 0.9rem;
+  padding: 0.25em 0.6em;
   font: inherit;
-  color: var(--fg);
-  background: #333;
-  border: 1px solid var(--border);
+  color: var(--tint-fg, var(--panel-fg));
+  background: var(--button, var(--neutral-button));
+  border: 1px solid currentColor;
   border-radius: 3px;
   cursor: pointer;
 }
 
 button:disabled {
-  opacity: 0.4;
+  opacity: 0.55;
   cursor: default;
 }
 
 #clean:not(:disabled) {
-  background: var(--clean);
+  color: #ffffff;
+  background: var(--clean-verdict);
 }
 
 #dirty:not(:disabled) {
-  background: var(--dirty);
+  color: #ffffff;
+  background: var(--dirty-verdict);
 }
 
-/* Shown only after a lost connection. While hidden it keeps its place, so the
-   footer (and the stage size grids are packed for) does not change as it shows */
-#reconnect {
-  flex: none;
-  border-color: var(--flagged);
+/* The status word: the bar's colour is never the only cue */
+#item-status {
+  padding: 0 0.4em;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-weight: 700;
 }
 
-#reconnect[hidden] {
-  display: inline-block !important;
-  visibility: hidden;
+#scale {
+  padding: 0 0.3em;
+  font-variant-numeric: tabular-nums;
 }
 
-/* One line, so a message never changes the stage's height (and repacks the grids); its title holds the full text */
-#status {
-  flex: 1;
-  min-width: 12rem;
-  min-height: 1.4em; /* the line height: an empty status keeps its line */
-  margin: 0;
+/* Below 100%: the bar's colours inverted, so it stands out on every tint */
+#scale.low {
+  color: var(--tint);
+  background: var(--tint-fg);
+  border-radius: 3px;
+  font-weight: 700;
+}
+
+#mode {
+  font-weight: 600;
+}
+
+/* What may be cut short: the where text first, then the others by their share */
+#mode,
+#progress,
+#where,
+#status,
+#reviewer-chip {
+  min-width: 0;
   overflow: hidden;
-  white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.help {
+#mode {
+  flex: 0 0.3 auto;
+}
+
+#progress {
+  flex: 0 1 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+#where {
+  flex: 0 1000 auto;
+}
+
+#reviewer-chip {
+  flex: 0 2 auto;
+  min-width: 3em;
+  max-width: 12em;
+}
+
+/* Done and Reconnect share one place, as wide as the wider: Reconnect takes it
+   while offered, and showing it never moves or resizes anything */
+.end {
+  display: grid;
+}
+
+.end > button {
+  grid-area: 1 / 1;
+}
+
+.end > [hidden] {
+  display: block !important;
+  visibility: hidden;
+}
+
+/* Narrow windows drop the key hints from the buttons (the help lists the keys)
+   and tighten the spacing, leaving the text more room */
+@media (max-width: 960px) {
+  #bar {
+    padding: 0 0.25em;
+  }
+
+  .row {
+    gap: 0.25em;
+  }
+
+  #bar button {
+    padding: 0.25em 0.4em;
+  }
+
+  #bar .key {
+    display: none;
+  }
+}
+
+/* ---- Overlays: over the stage, never part of its layout ---- */
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.box {
+  box-sizing: border-box;
+  max-width: min(38rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  overflow: auto;
+  padding: 1rem 1.5rem;
+  color: var(--panel-fg);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.box h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.2rem;
+}
+
+.box p {
+  margin: 0.5rem 0;
+}
+
+.name-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+#reviewer {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.4rem;
+  font: inherit;
+  color: var(--panel-fg);
+  background: var(--input);
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+}
+
+#reviewer.invalid {
+  border-color: var(--invalid);
+}
+
+.hint {
+  font-size: 0.9em;
+}
+
+.keys {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 1rem;
   margin: 0;
-  color: var(--muted);
+}
+
+.keys dt {
+  font-weight: 700;
+  font-family: ui-monospace, monospace;
+}
+
+.keys dd {
+  margin: 0;
 }

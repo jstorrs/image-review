@@ -425,11 +425,18 @@ const state = {
   dwellSeq: 0, // bumped by every dwell start or reset, so a stale timer is dropped
   showSeq: 0, // bumped by every showItem, so a stale load is dropped
   objectUrl: null, // the blob URL the <img> shows
+  overlay: null, // the overlay over the stage: null, "help" or "name"; while one is up nothing is judged
 };
 
 const $ = (id) => document.getElementById(id);
 const ui = {
+  bar: $("bar"),
   reviewer: $("reviewer"),
+  nameBox: $("name-box"),
+  nameOk: $("name-ok"),
+  chip: $("reviewer-chip"),
+  help: $("help"),
+  helpButton: $("help-button"),
   progress: $("progress"),
   itemStatus: $("item-status"),
   scale: $("scale"),
@@ -647,15 +654,16 @@ async function requestGrids(body, seq) {
 
 function say(text) {
   ui.status.textContent = text;
-  ui.status.title = text; // the line is cut short to one line, so the stage keeps its height
+  ui.status.title = text; // the bar is one line and cuts it short, so the stage keeps its height
 }
 
 function currentItem() {
   return state.index >= 0 ? state.items[state.index] : null;
 }
 
+// No action while an overlay covers the stage: nothing is judged on an item the reviewer cannot see.
 function canAct() {
-  return state.reviewer !== null && !state.busy && !state.dead && state.pass !== null;
+  return state.reviewer !== null && !state.busy && !state.dead && state.pass !== null && state.overlay === null;
 }
 
 // The request(s) begun in epoch `epoch` are over: clear busy, unless the page
@@ -684,14 +692,15 @@ function render() {
   const item = currentItem();
   if (state.pass !== null) {
     const left = countTodo(state.items, state.statuses);
-    const remaining = left + " / " + state.items.length + " remaining";
+    const remaining = left + " / " + state.items.length + " left";
     const batch =
       gridMode() && state.batch !== null
         ? state.batch + " (" + (state.batches.indexOf(state.batch) + 1) + "/" + state.batches.length + ") · "
         : "";
     ui.progress.textContent = "Pass " + state.pass + " · " + batch + remaining;
+    ui.progress.title = ui.progress.textContent;
   }
-  ui.mode.textContent = gridMode() ? "Grid (" + state.rotation + ")" : "Single";
+  ui.mode.textContent = gridMode() ? "Grid · " + state.rotation : "Single";
   if (item === null) {
     ui.where.textContent = "";
   } else if (item.kind === "grid") {
@@ -699,25 +708,37 @@ function render() {
   } else {
     ui.where.textContent = state.batchOf.get(item.key) + " · " + item.key;
   }
-  const status = item === null ? "" : itemStatus(item, state.statuses) || "";
+  ui.where.title = ui.where.textContent;
+  // The bar takes the item's status colour; neutral on the end screen and once stopped
+  const status = item === null || state.dead ? "" : itemStatus(item, state.statuses) || "";
+  ui.bar.dataset.status = status;
   ui.itemStatus.textContent = status;
-  ui.itemStatus.dataset.status = status;
   ui.itemStatus.hidden = status === "";
   ui.scale.hidden = state.scale === null;
   if (state.scale !== null) {
     // Truncated, so just under 1 never reads 100%; the epsilon keeps float error from dropping a point
-    ui.scale.textContent = Math.floor(state.scale * 100 + 1e-9) + "%";
+    const percent = Math.floor(state.scale * 100 + 1e-9) + "%";
+    ui.scale.textContent = state.scale < 1 ? "⚠ " + percent : percent;
     ui.scale.classList.toggle("low", state.scale < 1);
   }
+  ui.chip.textContent = (state.reviewer === null ? "Name" : state.reviewer) + " ✎";
+  ui.chip.title = state.reviewer === null ? "Set your name" : "Reviewer: " + state.reviewer + " (click to change)";
+  const nameValid = validReviewer(ui.reviewer.value);
+  ui.reviewer.classList.toggle("invalid", !nameValid);
+  ui.nameOk.disabled = !nameValid;
 
-  ui.reviewer.disabled = state.dead;
-  ui.done.disabled = state.waiting;
+  const covered = state.overlay !== null;
+  ui.chip.disabled = state.dead || covered;
+  ui.helpButton.disabled = state.overlay === "name";
+  ui.done.disabled = state.waiting || covered;
   ui.clean.disabled = !canJudge() || !state.loaded;
   ui.dirty.disabled = !canJudge();
   ui.prev.disabled = !canAct() || state.items.length === 0;
   ui.next.disabled = !canAct() || state.items.length === 0;
   ui.undo.disabled = !canAct();
   ui.reconnect.hidden = !canReconnect();
+  ui.reconnect.disabled = covered;
+  ui.done.hidden = !ui.reconnect.hidden; // they share a place in the bar: Reconnect takes it while offered
 }
 
 function nextPaint() {
@@ -781,8 +802,8 @@ function clearDwell() {
 // c/d count only after MIN_DWELL_MS with the item on screen.
 async function startDwell(seq) {
   await nextPaint();
-  if (seq !== state.showSeq || state.dwell !== "none") {
-    return;
+  if (seq !== state.showSeq || state.dwell !== "none" || state.overlay !== null) {
+    return; // (under an overlay: closing it starts the dwell)
   }
   refreshScale();
   if (!itemVisible()) {
@@ -1356,7 +1377,7 @@ async function restart(mode, rotation, nextBatchToo = false) {
   }
   state.statuses = statuses;
   state.marked = [];
-  say(state.reviewer === null ? NAME_NEEDED : "");
+  say(""); // (with no name the name box is up, and blocks every switch)
   await rebuild(mode, rotation, nextBatchToo, null);
 }
 
@@ -1418,7 +1439,7 @@ function takeReview({ pass, manifest, statuses }) {
 // until the reload is in, so no key or button sends a request meanwhile; anything sent
 // before is stale (see call).
 async function reconnect() {
-  if (!canReconnect()) {
+  if (!canReconnect() || state.overlay !== null) {
     return; // not offered, or a Reconnect is already in flight
   }
   const item = currentItem(); // null while a repack is pending, or after a failed Reconnect or q
@@ -1450,7 +1471,7 @@ async function reconnect() {
   takeReview(review);
   state.gridCache = null;
   const moved = state.pass !== before; // after q the old pass is forgotten: always say which
-  say(state.reviewer === null ? NAME_NEEDED : moved ? "Reconnected; now on pass " + state.pass : "Reconnected");
+  say(moved ? "Reconnected; now on pass " + state.pass : "Reconnected"); // (a name is set: the name box blocks r)
   await rebuild(state.mode, state.rotation, false, state.landKey);
 }
 
@@ -1459,7 +1480,7 @@ async function reconnect() {
 // so every request in flight turns stale and nothing more is sent, and frees the images
 // and the review, but keeps the token and the reviewer name for Reconnect.
 function waitForNextServer() {
-  if (state.waiting) {
+  if (state.waiting || state.overlay !== null) {
     return;
   }
   abandonItems(); // also clears the stage
@@ -1476,6 +1497,7 @@ function waitForNextServer() {
   state.batch = null; // the next server starts at its first batch and item: its keys may match these
   state.landKey = null;
   ui.progress.textContent = "";
+  ui.progress.title = "";
   if (state.token === null) {
     render(); // token rejected or none: already stopped, and the page says to open the new URL
     return;
@@ -1511,26 +1533,84 @@ const doUndo = run(undo);
 const doRestart = run(restart);
 const doReconnect = run(reconnect);
 
-// ---- Event wiring ----
+// ---- Overlays: the name box and the help, over the stage ----
 
-function onReviewerInput() {
-  const name = ui.reviewer.value;
-  if (validReviewer(name)) {
-    state.reviewer = name;
-    writeStored("reviewer", name);
-    if (ui.status.textContent === NAME_NEEDED) {
-      say("");
-    }
-  } else {
-    state.reviewer = null;
-    say(NAME_NEEDED);
-  }
+// Open overlay `which` ("help" or "name"): the dwell is cleared, so nothing is
+// judged on an item it covered, and every action waits for it to close.
+function openOverlay(which) {
+  state.overlay = which;
+  ui.help.hidden = which !== "help";
+  ui.nameBox.hidden = which !== "name";
+  clearDwell();
   render();
 }
 
+// Close the overlay and start a fresh dwell for the item under it (none ran while it was up).
+function closeOverlay() {
+  state.overlay = null;
+  ui.help.hidden = true;
+  ui.nameBox.hidden = true;
+  if (document.activeElement === ui.reviewer) {
+    ui.reviewer.blur(); // later keys act on the page
+  }
+  render();
+  if (currentItem() !== null) {
+    startDwell(state.showSeq).catch(reportError);
+  }
+}
+
+function toggleHelp() {
+  if (state.overlay === "help") {
+    closeOverlay();
+  } else if (state.overlay === null) {
+    openOverlay("help");
+  }
+}
+
+function openNameBox() {
+  if (state.overlay !== null) {
+    return;
+  }
+  if (state.reviewer !== null) {
+    ui.reviewer.value = state.reviewer;
+  }
+  openOverlay("name");
+  ui.reviewer.focus();
+}
+
+// The name typed is taken only when valid (else the box stays up).
+function acceptName() {
+  const name = ui.reviewer.value;
+  if (state.overlay !== "name" || !validReviewer(name)) {
+    return;
+  }
+  state.reviewer = name;
+  writeStored("reviewer", name);
+  if (ui.status.textContent === NAME_NEEDED) {
+    say("");
+  }
+  closeOverlay();
+}
+
+// Escape keeps the name there was; with none yet, the box stays up.
+function cancelName() {
+  if (state.overlay !== "name" || state.reviewer === null) {
+    return;
+  }
+  ui.reviewer.value = state.reviewer;
+  closeOverlay();
+}
+
+// ---- Event wiring ----
+
 function onReviewerKey(event) {
-  if (event.key === "Enter" || event.key === "Escape") {
-    ui.reviewer.blur();
+  if (event.isComposing) {
+    return; // an input method's Enter or Escape
+  }
+  if (event.key === "Enter") {
+    acceptName();
+  } else if (event.key === "Escape") {
+    cancelName();
   }
 }
 
@@ -1545,6 +1625,28 @@ function onKey(event) {
   }
   if (event.repeat) {
     return; // a held key acts once: no queue of verdicts, undos or image fetches
+  }
+  if (state.overlay === "name") {
+    // The name box is up and the review waits for it. Focus went elsewhere (a click):
+    // Enter still accepts, and any other key goes back to the field (it lands there).
+    if (key === "Escape") {
+      cancelName();
+    } else if (key === "Enter") {
+      acceptName();
+    } else {
+      ui.reviewer.focus();
+    }
+    return;
+  }
+  if (key === "?" || key === "h") {
+    toggleHelp();
+    return;
+  }
+  if (state.overlay === "help") {
+    if (key === "Escape") {
+      closeOverlay();
+    }
+    return;
   }
   if (arrow) {
     navigate(key === "ArrowRight" ? 1 : -1);
@@ -1579,8 +1681,10 @@ function wire() {
   if (validReviewer(ui.reviewer.value)) {
     state.reviewer = ui.reviewer.value;
   }
-  ui.reviewer.addEventListener("input", onReviewerInput);
+  ui.reviewer.addEventListener("input", render); // marks the name invalid, and OK with it
   ui.reviewer.addEventListener("keydown", onReviewerKey);
+  ui.nameOk.addEventListener("mousedown", (event) => event.preventDefault()); // focus stays in the name
+  ui.nameOk.addEventListener("click", acceptName);
   const buttons = [
     [ui.clean, () => doMark("CLEAN")],
     [ui.dirty, () => doMark("DIRTY")],
@@ -1589,6 +1693,8 @@ function wire() {
     [ui.undo, doUndo],
     [ui.reconnect, doReconnect],
     [ui.done, waitForNextServer],
+    [ui.chip, openNameBox],
+    [ui.helpButton, toggleHelp],
   ];
   for (const [button, action] of buttons) {
     // Never focused (tabindex -1 too), so Enter or Space cannot click one, held, past the repeat guard
@@ -1603,7 +1709,7 @@ function wire() {
   document.addEventListener("keydown", onKey);
   window.addEventListener("resize", onResize); // also catches browser zoom (a devicePixelRatio change)
   if (typeof ResizeObserver === "function") {
-    new ResizeObserver(onResize).observe(ui.stage); // layout changes such as the footer wrapping
+    new ResizeObserver(onResize).observe(ui.stage); // any layout change (the bar itself never resizes it)
   }
   window.addEventListener("hashchange", onHashChange);
   ui.grid.addEventListener("contextlost", onContextLost);
@@ -1612,6 +1718,9 @@ function wire() {
 
 async function start() {
   wire();
+  if (state.reviewer === null) {
+    openNameBox(); // every review control waits for a name
+  }
   if (!state.token) {
     state.dead = true;
     say("No token. Open the URL printed by `image-review serve --socket`.");

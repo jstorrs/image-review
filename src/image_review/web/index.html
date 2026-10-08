@@ -8,32 +8,64 @@
 <script src="/app.js" defer></script>
 </head>
 <body>
-<header class="bar">
-<label class="reviewer">Reviewer <input id="reviewer" type="text" autocomplete="off" spellcheck="false" required></label>
-<span id="mode">Single</span>
-<span id="item-status" hidden></span>
-<span id="scale" hidden title="Display scale: below 100% the image is shrunk and small text may be lost"></span>
-<span id="progress"></span>
-<span id="where"></span>
-</header>
 <main id="stage">
 <img id="image" alt="" hidden>
 <canvas id="grid" width="0" height="0" hidden></canvas>
 <p id="placeholder" class="notice" hidden></p>
 <p id="message" class="notice" hidden></p>
-</main>
-<footer class="bar">
-<div class="controls">
-<button type="button" tabindex="-1" id="prev" disabled>&larr; Previous</button>
-<button type="button" tabindex="-1" id="clean" class="verdict" disabled>Clean (c)</button>
-<button type="button" tabindex="-1" id="dirty" class="verdict" disabled>Dirty (d)</button>
-<button type="button" tabindex="-1" id="next" disabled>Next &rarr;</button>
-<button type="button" tabindex="-1" id="undo" disabled>Undo (z)</button>
-<button type="button" tabindex="-1" id="done">Done (q)</button>
+<div id="name-box" class="overlay" hidden>
+<div class="box" role="dialog" aria-labelledby="name-title">
+<h2 id="name-title">Who is reviewing?</h2>
+<p>Your name (1-64 characters) is recorded with every verdict.</p>
+<div class="name-row">
+<input id="reviewer" type="text" autocomplete="off" spellcheck="false" aria-labelledby="name-title">
+<button type="button" tabindex="-1" id="name-ok">OK</button>
 </div>
-<button type="button" tabindex="-1" id="reconnect" hidden>Reconnect (r)</button>
+<p class="hint">Enter accepts; Escape keeps the current name.</p>
+</div>
+</div>
+<div id="help" class="overlay" hidden>
+<div class="box" tabindex="-1" role="dialog" aria-labelledby="help-title">
+<h2 id="help-title">Keys</h2>
+<dl class="keys">
+<dt>c</dt><dd>Mark the image (or every image in the grid) CLEAN</dd>
+<dt>d</dt><dd>Mark it DIRTY</dd>
+<dt>&larr; &rarr;</dt><dd>Previous / next item, without marking</dd>
+<dt>z</dt><dd>Undo this page's latest mark and show it again</dd>
+<dt>m</dt><dd>Grid mode for the current batch (images may be rotated)</dd>
+<dt>M</dt><dd>Grid mode without rotation</dd>
+<dt>s</dt><dd>Single mode (rereads the list)</dd>
+<dt>b</dt><dd>Grid mode: the next batch with images to review</dd>
+<dt>r</dt><dd>Reconnect, when its button is shown: after a lost connection, after q, or at the end of a pass</dd>
+<dt>q</dt><dd>Done with this server: nothing more is sent; the page waits for the next serve</dd>
+<dt>? h</dt><dd>This help (Escape closes it)</dd>
+</dl>
+<p>The bar's colour is the item's status, also written in it: grey UNREVIEWED, green CLEAN, red DIRTY, amber FLAGGED (grey too on the end screen and while stopped). A scale badge such as &ldquo;&#9888; 46%&rdquo; means the image is shrunk to fit: small burned-in text can be lost, so enlarge the window.</p>
+<p>A verdict counts only once the item has been on screen for a moment; closing this help starts that wait again.</p>
+<p>When the pass is done the page says so: stop serve (Ctrl-C), start the next one, then press Reconnect (r). To move on to the next serve earlier (another batch), press q first. Your marks are saved as you make them.</p>
+</div>
+</div>
+</main>
+<footer id="bar" class="bar" data-status="">
+<div class="row">
+<button type="button" tabindex="-1" id="prev" title="Previous (&larr;)" disabled>&larr;</button>
+<button type="button" tabindex="-1" id="next" title="Next (&rarr;)" disabled>&rarr;</button>
+<button type="button" tabindex="-1" id="clean" class="verdict" disabled>Clean<span class="key"> (c)</span></button>
+<button type="button" tabindex="-1" id="dirty" class="verdict" disabled>Dirty<span class="key"> (d)</span></button>
+<button type="button" tabindex="-1" id="undo" disabled>Undo<span class="key"> (z)</span></button>
+<span id="item-status" hidden></span>
+<span id="scale" hidden title="Display scale: below 100% the image is shrunk and small text may be lost"></span>
+<span class="end">
+<button type="button" tabindex="-1" id="done">Done<span class="key"> (q)</span></button>
+<button type="button" tabindex="-1" id="reconnect" hidden>Reconnect<span class="key"> (r)</span></button>
+</span>
+<span id="mode">Single</span>
+<span id="progress"></span>
+<span id="where"></span>
+<button type="button" tabindex="-1" id="reviewer-chip" title="Reviewer (click to change)"></button>
+<button type="button" tabindex="-1" id="help-button" title="Keys and help (? or h)">?</button>
+</div>
 <p id="status" role="status">loading...</p>
-<p class="help">Keys: c clean &middot; d dirty &middot; &larr;/&rarr; navigate &middot; z undo &middot; m grid &middot; M grid (no rotation) &middot; s single &middot; b next batch (grid) &middot; r reconnect (when shown) &middot; q done (wait for the next serve)</p>
 </footer>
 </body>
 </html>

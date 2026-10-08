@@ -529,12 +529,14 @@ If `--remote` reports "server speaks API vN, this client vM" (or "server is too 
 An experimental alternative to the pygame viewer: a browser on your laptop,
 with nothing installed there but `ssh`. The page starts with single images:
 enter a reviewer name, then `c` clean, `d` dirty, Left/Right to move and `z`
-to undo. `m` (or `M`, no rotation) switches to grid mode for one batch at a
-time, where one verdict covers the whole grid and CLEAN is refused if any
-image in it is already DIRTY or FLAGGED (unless every image in it is DIRTY,
-which reverses that grid's own verdict); `b` moves to the next batch and `s`
-returns to single mode. With one page per server `z` undoes only that page's
-marks; the server's undo history is shared by every client. On the node:
+to undo (`?` lists every key; one bar at the bottom, coloured by the image's
+status, holds the buttons and messages). `m` (or `M`, no rotation) switches to
+grid mode for one batch at a time, where one verdict covers the whole grid and
+CLEAN is refused if any image in it is already DIRTY or FLAGGED (unless every
+image in it is DIRTY, which reverses that grid's own verdict); `b` moves to
+the next batch and `s` returns to single mode. With one page per server `z`
+undoes only that page's marks; the server's undo history is shared by every
+client. On the node:
 
 ```bash
 image-review serve --work-dir ./review_work --socket --via you@login-node

@@ -20,36 +20,41 @@
   starts with single images, like the viewer's single mode: enter a reviewer
   name, then `c` clean, `d` dirty, Left/Right to move, `z` to undo (this
   page's own marks, with one page per server: the undo history is shared).
-  A verdict counts only once the image has been on screen for 200 ms, an
-  image that cannot be loaded takes DIRTY only, and the header shows the
-  display scale, in red below 100%. `m` (rotation `auto`) or `M` (`never`)
-  switches to grid mode, one batch at a time (`b` for the next, `s` back to
-  single mode): the batch's UNREVIEWED images are packed by the server into
-  grids sized to the window, and one `c` or `d` marks every image in the
-  grid, recorded with mode `grid`. CLEAN is refused if any image in the grid
-  is already DIRTY or FLAGGED, unless every image in it is DIRTY (which
-  reverses that grid's own verdict); an image that fails to load follows the
-  grids as a single item; resizing the window repacks the grids and clears
-  undo; a batch over 1000 images needs single mode. After a lost connection
-  the page shows a Reconnect button (or `r`; nothing is retried
-  automatically), which reloads the statuses, rebuilds the current mode with
-  a fresh 200 ms wait and forgets what `z` could undo, so with a fixed socket
+  A verdict counts only once the image has been on screen for 200 ms, an image
+  that cannot be loaded takes DIRTY only, and one bar at the bottom holds the
+  buttons, the status and the progress, with the messages on a line of their
+  own, its colour the item's status (grey UNREVIEWED, green CLEAN, red DIRTY,
+  amber FLAGGED), with the display scale as a "⚠ 46%" badge below 100%. The
+  name is asked for in a box at startup and changed from the bar; `?` (or `h`)
+  shows every key. Nothing can be marked while the help or the name box is
+  open, and a verdict waits 200 ms again once it closes. `m` (rotation `auto`)
+  or `M` (`never`) switches to grid mode, one batch at a time (`b` for the
+  next, `s` back to single mode): the batch's UNREVIEWED images are packed by
+  the server into grids sized to the window, and one `c` or `d` marks every
+  image in the grid, recorded with mode `grid`. CLEAN is refused if any image
+  in the grid is already DIRTY or FLAGGED, unless every image in it is DIRTY
+  (which reverses that grid's own verdict); an image that fails to load
+  follows the grids as a single item; resizing the window repacks the grids
+  and clears undo; a batch over 1000 images needs single mode. After a lost
+  connection the page shows a Reconnect button (or `r`; nothing is retried
+  automatically), which reloads the statuses, rebuilds the current mode with a
+  fresh 200 ms wait and forgets what `z` could undo, so with a fixed socket
   path and `$IMAGE_REVIEW_TOKEN` a server restart needs only Reconnect; a
-  rejected token says to open the new URL. `q` (or the Done button) means
-  done with this server: nothing more is sent and the images are freed, but
-  the tab keeps the token and the name, so after Ctrl-C and the next `serve`
-  in the same shell, Reconnect (also offered once nothing in the pass is
-  left to review; a batch's end in grid mode says `b` or `s` instead, as the
-  viewer does) loads the next batch or pass in the same tab, from its start;
-  closing the tab forgets the token. A tab still open on an earlier serve
-  cannot record a verdict, or undo one, on the next serve's images (keys
-  repeat across work directories): each serve start has its own instance id,
-  which the page sends with every request, and the server refuses a request
-  naming another (412) and records nothing; the page then says the server
-  was restarted or now serves another work directory and offers Reconnect.
-  The socket routes and the page needed no API version bump and do not change
-  the HTTPS API (API v7, below, is for the grid CLEAN refusal).
-  See [SECURITY.md](SECURITY.md) for the limits.
+  rejected token says to open the new URL. `q` (or the Done button) means done
+  with this server: nothing more is sent and the images are freed, but the tab
+  keeps the token and the name, so after Ctrl-C and the next `serve` in the
+  same shell, Reconnect (also offered once nothing in the pass is left to
+  review; a batch's end in grid mode says `b` or `s` instead, as the viewer
+  does) loads the next batch or pass in the same tab, from its start; closing
+  the tab forgets the token. A tab still open on an earlier serve cannot
+  record a verdict, or undo one, on the next serve's images (keys repeat
+  across work directories): each serve start has its own instance id, which
+  the page sends with every request, and the server refuses a request naming
+  another (412) and records nothing; the page then says the server was
+  restarted or now serves another work directory and offers Reconnect. The
+  socket routes and the page needed no API version bump and do not change the
+  HTTPS API (API v7, below, is for the grid CLEAN refusal). See
+  [SECURITY.md](SECURITY.md) for the limits.
 - **Wire API v7: client and server must be upgraded together.** `POST /mark`
   now refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
   FLAGGED in that pass, unless every one is DIRTY, answering 409 and

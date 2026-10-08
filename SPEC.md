@@ -1964,9 +1964,9 @@ canvas box is within half a device pixel of the canvas size), and the dwell
 starts as in single mode once the whole canvas is painted inside the stage. A
 resize to a new device size hides the grid at once and repacks 300 ms after
 the last resize event, landing on the grid holding the previous item's first
-key. The header and the status line are one line each (long text is cut short;
-the status line's `title` holds it whole), so a message never changes the
-stage size and so never repacks.
+key. The bar is one line of fixed height and the overlays float over the
+stage (see *Layout*), so a message, a button shown or hidden, the help or the
+name box never changes the stage size and so never repacks.
 
 A grid verdict covers exactly the grid's drawn keys (any demoted to single
 items are not in it) in one `POST /mark` with `mode: "grid"`; every item
@@ -1995,21 +1995,68 @@ the end screen by `z` or Left/Right at a new size repacks first, landing on
 the grid holding the item that would have been shown, and that repack
 empties the rest of the stack.
 
+- **Layout**: the stage fills the window above one bar at the bottom,
+  of fixed height: a row of controls (`--bar-height`) over a line for the
+  status message (`--status-height`), both in `em` of the bar's font, so
+  they follow its text whatever the browser's root font size. Nothing
+  wraps; long text is cut short with an ellipsis and its `title` holds it
+  whole. The status message has the whole width of the bar to itself, so
+  refusals and errors stay readable at any window width. Narrow windows
+  (960 CSS pixels or less) drop the key hints from the button labels and
+  tighten the spacing. The row, left to right: ← and → (Previous, Next),
+  Clean (c), Dirty (d), Undo (z), the item's status word (UNREVIEWED,
+  CLEAN, DIRTY or FLAGGED; a grid's is `gridStatus`), the scale badge, Done
+  (q), whose place Reconnect (r) takes while it is offered (the place is as
+  wide as the wider of the two, so neither moves anything), the mode
+  ("Single", "Grid · auto" or "Grid · never"), the progress, the item's
+  batch and key (in grid mode "grid (N images)"; cut short first), the
+  reviewer chip ("NAME ✎") and "?" (help). A row too narrow for all of it
+  is clipped at its right end, so "?" and then the chip, which have key
+  equivalents, go first and Done or Reconnect stays in view. The bar's
+  whole background is the item's status colour, from the `data-status`
+  attribute on `#bar`: neutral grey for UNREVIEWED, and also on the end
+  screen, with no item, and once the page has stopped (lost connection,
+  rejected token, Done); green CLEAN, red DIRTY, amber FLAGGED. The colours
+  are CSS custom properties with light and dark variants
+  (`prefers-color-scheme`; the stage stays dark in both), and every tint has
+  its own text and button colours, at least 4.5:1 (WCAG AA) against it;
+  where a verdict button's colour would match the tint (Clean on light
+  CLEAN, Dirty on light DIRTY) it takes a darker shade. Disabled buttons are
+  drawn at 55% opacity. The status word is always written too, so colour is
+  never the only cue.
+- **Overlays**: the help and the name box float over the stage (absolutely
+  positioned, out of its layout) and never change its size; at most one is
+  up. While one is up, `c`, `d`, `z`, Left/Right, `m`/`M`, `s`, `b`, `q` and
+  `r` do nothing, every review button (Done and Reconnect included) and the
+  reviewer chip are disabled, and no dwell runs: opening one clears the
+  dwell, and closing it starts a fresh one for the item under it (painted,
+  then `MIN_DWELL_MS`), so nothing is judged on an image that was covered.
+- **Help**: the "?" button, or `?` or `h` (either case; not on key repeat),
+  opens a list of every key, what the bar's colours and the scale badge
+  mean, and the end-of-pass workflow; Escape, `?`, `h` or the button
+  closes it.
 - **Token**: taken from the fragment into `sessionStorage` (memory if
   storage is blocked) and sent as `Authorization: Bearer` on every API call.
   Pasting a new URL into the tab changes only the fragment, so on a
   `hashchange` to a token fragment the page reloads to take it.
-- **Reviewer**: a required text field, kept in `sessionStorage`. The page
-  accepts 1-64 code points, not all spaces; the server's `parse_reviewer`
-  decides, and a 400 from `/mark` or `/undo` shows "invalid reviewer name".
-  Every review control is disabled until a name is set.
+- **Reviewer**: kept in `sessionStorage`. With no valid name stored, the page
+  opens a centred name box over the stage at startup ("Who is reviewing?",
+  the name field and OK), and every review control is disabled until a name
+  is set. The page accepts 1-64 code points, not all spaces (an invalid name
+  is marked and OK disabled); the server's `parse_reviewer` decides, and a
+  400 from `/mark` or `/undo` shows "invalid reviewer name". Enter (or OK)
+  takes a valid name and stores it; Escape closes the box keeping the
+  current name, only when there is one. The bar then shows it as a chip
+  ("Jane ✎"); clicking the chip opens the box again to change it (disabled
+  once the page has stopped). If focus leaves the field while the box is up
+  (a click elsewhere), Enter still accepts and any other key puts focus
+  back in the field. The name field is the page's only focusable control
+  (the help's scrolling box has `tabindex="-1"`).
 - **Startup**: `GET /current_pass`, `/manifest`, `/statuses?pass=N`. The
   list is the keys whose status is UNREVIEWED or FLAGGED, shuffled
-  (Fisher-Yates); keys stay in it after they are marked. The header shows
-  the mode (Single, or Grid with its rotation), the item's status, its scale,
-  "Pass N · K / T remaining" (K todo of the T listed; in grid mode "Pass N ·
-  BATCH (k/B) · K / T remaining"), and its batch and key (in grid mode "grid
-  (N images)" for a grid).
+  (Fisher-Yates); keys stay in it after they are marked. The bar shows the
+  progress as "Pass N · K / T left" (K todo of the T listed; in grid mode
+  "Pass N · BATCH (k/B) · K / T left"); see *Layout*.
 - **Images**: `GET /image?key=K`. The reply must be `image/jpeg` and end in
   `FF D9` (a truncated body is refused); it becomes a blob URL in an `<img>`,
   awaited with `decode()`, and the previous blob URL is revoked. Any failure
@@ -2021,17 +2068,19 @@ empties the rest of the stack.
   `<img>` fills) change, the page computes the display scale, `min(width /
   naturalWidth, height / naturalHeight) * devicePixelRatio` with the box from
   `getBoundingClientRect()` (screen pixels per image pixel under
-  `object-fit: contain`), and shows it in the header as an integer percent,
-  `floor(scale * 100 + 1e-9)` as in the viewer, red (class `low`) below
-  100%, as the viewer's scale indicator does: small burned-in text can be
-  lost when an image is scaled down. A scale that leaves less than one pixel
-  counts as 0.
+  `object-fit: contain`), and shows it in the bar as an integer percent,
+  `floor(scale * 100 + 1e-9)` as in the viewer. Below 100% it reads "⚠ 46%"
+  in a badge with the bar's colours inverted (class `low`), so it stands out
+  on every tint, as the viewer's scale indicator warns: small burned-in text
+  can be lost when an image is scaled down. A scale that leaves less than
+  one pixel counts as 0.
 - **Dwell**: `c`/`d` and their buttons act only once the image or
   placeholder has been decoded, painted (two animation frames) and on screen
   for `MIN_DWELL_MS` (200 ms); earlier ones are ignored. The dwell is a
   per-item state (`none`, `running`, `over`) set to `over` by a timer started
   after the paint, so no clock comparison can leave it short. It restarts on
-  every item change, including after an undo. An image whose scale is 0 (a
+  every item change, including after an undo, and when an overlay closes
+  (none runs while one is up; see *Overlays*). An image whose scale is 0 (a
   window too small to show it) starts no dwell, and a resize to 0 clears it;
   a resize that shows it again starts a new one.
 - **Marking**: one `POST /mark` with the item's keys and `mode` the display
@@ -2076,12 +2125,14 @@ empties the rest of the stack.
   this server, in any state), in either case, so Caps Lock does not matter;
   `m` (grid, rotation `auto`) and `M` (`never`), told apart by the event's
   Shift state rather than the letter's case, so Caps Lock is safe; and
-  Left/Right. Ignored while the reviewer
-  field has focus, with Ctrl/Alt/Meta, and on key repeat (a held key acts
-  once). The buttons, Reconnect included, never take focus
-  (`tabindex="-1"`, and `mousedown` is cancelled), so Enter or Space cannot
-  click one, held, past the repeat guard; a click on one also takes focus
-  out of the reviewer field, so later keys act on the page.
+  Left/Right; `?` or `h` toggles the help and Escape closes the help or
+  the name box (see *Overlays*, which also lists what an overlay blocks).
+  Ignored while the name field has focus, with Ctrl/Alt/Meta, and on key
+  repeat (a held key acts once). The buttons, Reconnect, the chip and the
+  name box's OK included, never take focus (`tabindex="-1"`, and
+  `mousedown` is cancelled), so Enter or Space cannot click one, held, past
+  the repeat guard; a click on one also takes focus out of the name field,
+  so later keys act on the page.
 - **Errors**: a 401 clears the stored token, shows "token rejected (server
   restarted?) - open the new URL" and disables everything; a 412 (another
   server run answers: see *Unix-socket server*) stops the page as a lost
@@ -2090,8 +2141,8 @@ empties the rest of the stack.
   read it answered changes nothing, and Reconnect loads the new server as
   below; a network failure
   shows "Lost connection — your marks so far are saved on the server", does
-  the same and shows a Reconnect button (its place in the footer is kept
-  while it is hidden, so showing it never resizes the stage). The button is
+  the same and shows a Reconnect button in Done's place (see *Layout*;
+  showing it never moves or resizes anything). The button is
   also shown after `q` (see *Done*) and at the end of the pass (see
   *Marking*), while the page holds a token. Once stopped
   the page sends nothing (a pending repack or `/grids` retry is dropped)
@@ -2117,16 +2168,15 @@ empties the rest of the stack.
   "Reconnected", or "Reconnected; now on pass N" if the current pass
   changed or was forgotten by `q` (the new pass is reviewed); after `q` the
   server may serve another work directory or batch, so grid mode starts
-  afresh at the first batch with grid items and its first grid; with no
-  reviewer name it shows the
-  name prompt instead. A network failure during Reconnect shows "Lost
-  connection" and the button again, a 401 the token-rejected message, and
-  another error a short message with the button; clicks while one is in
-  flight are ignored. Other HTTP errors show a short message with the status
-  and leave the controls usable (at startup the page stops instead, offering
-  Reconnect only after a network failure); nothing is retried automatically
-  but a `/grids` 503 (see grid mode above).
-- **Done** (`q` or the "Done (q)" button, in any state) means done with
+  afresh at the first batch with grid items and its first grid. A network
+  failure during Reconnect shows "Lost connection" and the button again, a 401
+  the token-rejected message, and another error a short message with the
+  button; clicks while one is in flight are ignored. Other HTTP errors show a
+  short message with the status and leave the controls usable (at startup the
+  page stops instead, offering Reconnect only after a network failure);
+  nothing is retried automatically but a `/grids` 503 (see grid mode above).
+- **Done** (`q` or the "Done (q)" button, in any state but while an
+  overlay is up) means done with
   this server: the reviewer stops it with Ctrl-C (the marks are already
   saved), starts the next `serve --socket` on the same socket path and token
   (for the next batch or pass), and presses Reconnect in the same tab. It
@@ -2138,7 +2188,7 @@ empties the rest of the stack.
   and the mode and rotation; the batch and the landing key are forgotten
   too, since another work directory's keys and batch names usually match
   these. Every control is disabled, the Done
-  button and the reviewer field included, but Reconnect is shown; the
+  button and the reviewer chip included, but Reconnect is shown; the
   status line says "Done; waiting for the next serve" and the stage "Done.
   Your marks are saved. Stop serve (Ctrl-C), start the next one, then press
   Reconnect (r)." Reconnect then loads whatever the server serves (see

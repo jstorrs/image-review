@@ -746,11 +746,13 @@ forwarding does not work.
 3. Open the URL in your browser: `http://127.0.0.1:8080/#TOKEN`. The token is
    a password; do not paste the URL into chat or tickets.
 
-4. Type your name in the Reviewer box (1-64 characters; it is recorded with
-   every verdict, as `--reviewer` is for the viewer), then click on the image
-   or press Enter so the keys reach the page. The page starts in single
-   mode, showing the current pass's UNREVIEWED and FLAGGED images one at a
-   time, in random order:
+4. The page first asks "Who is reviewing?": type your name (1-64
+   characters; it is recorded with every verdict, as `--reviewer` is for the
+   viewer) and press Enter. The tab remembers it; the bar at the bottom
+   shows it as "Jane ✎", and clicking that lets you change it (Escape keeps
+   the old name). The page starts in single mode, showing the current pass's
+   UNREVIEWED and FLAGGED images one at a time, in random order. Press `?`
+   (or `h`, or the "?" button) for the list of keys:
 
    | Key | Button | Action |
    |-----|--------|--------|
@@ -764,14 +766,25 @@ forwarding does not work.
    | `b` | -- | Grid mode: the next batch with images to review |
    | `r` | Reconnect | After "Lost connection", after `q` or at the end of a pass: load the review |
    | `q` | Done | Done with this server: the page waits for the next one |
+   | `?` or `h` | ? | Show or hide the help (Escape also closes it) |
+
+   Everything is in one bar at the bottom of the page: a row of buttons and
+   counts, and under it a line for messages (what was marked, refusals,
+   errors). Its colour is the current item's status, also written in it:
+   grey UNREVIEWED, green CLEAN, red DIRTY, amber FLAGGED (grey too on the
+   end screen and once the page has stopped). Text too long for its place
+   is cut short; hover over it to read it whole. While the help or the name
+   box is open nothing can be marked, and once it closes the page waits the
+   200 ms again before a verdict counts.
 
    A verdict counts only once the image has been on screen for 200 ms, so a
    key pressed as an image appears is ignored. An image that cannot be
    loaded shows "Cannot load image: KEY" and can be marked DIRTY but never
-   CLEAN. The header shows the display scale as a percent; below 100%
-   (shown in red) the image is shrunk to fit and small burned-in text can be
-   lost, so enlarge the window or go full screen (browser zoom does not
-   help: it makes the page's text larger and the image's share smaller).
+   CLEAN. The bar shows the display scale as a percent; below 100% it stands
+   out as a badge such as "⚠ 46%": the image is shrunk to fit and small
+   burned-in text can be lost, so enlarge the window or go full screen
+   (browser zoom does not help: it makes the page's text larger and the
+   image's share smaller).
    `z` says "Nothing to undo" once this page has no marks left to undo.
    With one page per server it only
    undoes this page's marks; the server keeps a single undo history, so with

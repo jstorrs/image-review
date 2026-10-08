@@ -486,6 +486,62 @@ class TestWebFiles(unittest.TestCase):
             with self.subTest(tag=tag):
                 self.assertIn('tabindex="-1"', tag)
 
+    def test_only_the_name_field_takes_focus(self):
+        html = (WEB_DIR / "index.html").read_text()
+        self.assertEqual(re.findall(r"<(input|select|textarea|a)\b[^>]*>", html), ["input"])
+        self.assertRegex(html, r'<input id="reviewer"')
+        self.assertNotRegex(html, r'tabindex="(?!-1")')
+
+    def test_bar_has_a_fixed_height(self):
+        # A text or visibility change in the bar must never resize the stage: that repacks the grids and clears undo
+        css = (WEB_DIR / "app.css").read_text()
+        html = (WEB_DIR / "index.html").read_text()
+
+        def rule(selector: str) -> str:
+            found = re.search(r"(?m)^" + re.escape(selector) + r" \{\n(.*?)^\}", css, re.DOTALL)
+            assert found is not None, selector
+            return found[1]
+
+        def declares(block: str, declaration: str) -> None:
+            self.assertRegex(block, r"(?m)^\s+" + re.escape(declaration) + r"(\s*/\*.*\*/)?$")
+
+        # The bar: a row of controls, then the status message on its own line, each of fixed height
+        bar = rule("#bar")
+        for declaration in [
+            "height: calc(var(--bar-height) + var(--status-height));",
+            "flex: none;",
+            "flex-direction: column;",
+            "overflow: hidden;",
+            "white-space: nowrap;",
+        ]:
+            with self.subTest(declaration=declaration):
+                declares(bar, declaration)
+        self.assertRegex(bar, r"--bar-height: [\d.]+em;")  # follows the bar's font size, not the root's
+        row = rule(".row")
+        for declaration in ["height: var(--bar-height);", "flex: none;", "flex-wrap: nowrap;", "overflow: hidden;"]:
+            with self.subTest(declaration=declaration):
+                declares(row, declaration)
+        status = rule("#status")
+        for declaration in ["height: var(--status-height);", "line-height: var(--status-height);", "flex: none;"]:
+            with self.subTest(declaration=declaration):
+                declares(status, declaration)
+        self.assertRegex(
+            html, r'(?s)<footer id="bar"[^>]*>\s*<div class="row">.*</div>\s*<p id="status"[^>]*>[^<]*</p>\s*</footer>'
+        )
+        self.assertNotIn("flex-wrap: wrap", css)
+        cut = rule("#mode,\n#progress,\n#where,\n#status,\n#reviewer-chip")
+        declares(cut, "text-overflow: ellipsis;")
+        declares(cut, "min-width: 0;")
+        # The overlays float over the stage, out of its layout
+        declares(rule(".overlay"), "position: absolute;")
+        declares(rule("#stage"), "position: relative;")
+        # Done and Reconnect share a place that is kept while either is hidden
+        declares(rule(".end > [hidden]"), "visibility: hidden;")
+        for status_name in ["CLEAN", "DIRTY", "FLAGGED"]:
+            with self.subTest(status=status_name):
+                self.assertIn("--tint:", rule(f'#bar[data-status="{status_name}"]'))
+        self.assertIn("@media (prefers-color-scheme: light)", css)
+
     def run_helpers(self, checks: str, data: object = None) -> object:
         """Run `checks` under node with `m`, a context holding app.js's pure helpers (those before the
         "---- Token" section, which touch no DOM), and `data` as parsed JSON; returns what the checks

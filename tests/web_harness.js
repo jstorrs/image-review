@@ -9,7 +9,8 @@ const APP = fs.readFileSync(process.argv[2], "utf8");
 const JPEG = [0xff, 0xd8, 1, 2, 0xff, 0xd9];
 
 // fixedOrder: Math.random stuck near 1, so shuffle keeps the order (grids then go fullest first, stably).
-function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder = false }) {
+// reviewer: the name in sessionStorage at startup (null: none).
+function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder = false, reviewer = "Jane" }) {
   const pending = []; // fetches not yet answered
   const timers = [];
   let clock = 0;
@@ -24,11 +25,15 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
 
   function element(id) {
     const listeners = {};
-    let hidden = false;
+    let hidden = id === "help" || id === "name-box"; // as index.html has them
     return {
       id, textContent: "", title: "", value: "", alt: "", disabled: false, dataset: {}, style: {}, width: 0, height: 0,
       naturalWidth: 100, naturalHeight: 50,
-      classList: { toggle() {} },
+      classes: new Set(),
+      classList: {
+        toggle(name, on) { const el = els[id]; if (on ?? !el.classes.has(name)) el.classes.add(name); else el.classes.delete(name); },
+        contains(name) { return els[id].classes.has(name); },
+      },
       get hidden() { return hidden; },
       set hidden(value) {
         if (id === "grid" && hidden && !value) {
@@ -39,9 +44,10 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
         hidden = value;
       },
       addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
-      fire(type) { (listeners[type] || []).forEach((fn) => fn({})); },
+      fire(type, event = {}) { (listeners[type] || []).forEach((fn) => fn(event)); },
       removeAttribute(name) { removedAttrs.push([id, name]); },
-      blur() {},
+      blur() { if (ctx.document.activeElement === this) ctx.document.activeElement = null; },
+      focus() { ctx.document.activeElement = this; },
       decode: async () => {},
       getContext: () => context,
       getBoundingClientRect() {
@@ -65,12 +71,13 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
       draws.push(bitmap.tag);
     },
   };
-  const ids = ["reviewer", "progress", "item-status", "scale", "where", "mode", "stage", "image", "grid", "placeholder",
-    "message", "status", "clean", "dirty", "prev", "next", "undo", "reconnect", "done"];
+  const ids = ["bar", "reviewer", "name-box", "name-ok", "reviewer-chip", "help", "help-button", "progress", "item-status",
+    "scale", "where", "mode", "stage", "image", "grid", "placeholder", "message", "status", "clean", "dirty", "prev", "next",
+    "undo", "reconnect", "done"];
   const els = Object.fromEntries(ids.map((id) => [id, element(id)]));
   const docListeners = {};
   const winListeners = {};
-  const storage = new Map([["reviewer", "Jane"]]);
+  const storage = new Map(reviewer === null ? [] : [["reviewer", reviewer]]);
 
   function fetch(path, options = {}) {
     if (path === "/grids") {
@@ -121,6 +128,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
     els, draws, bitmaps, grids, posts, unhidden, pending, context, storage, revoked, removedAttrs, shift: 0, bitmapGate: null, reloads: 0,
     instance: "A", // the X-Review-Instance the stub server's replies carry: a test swaps servers by changing it
     get state() { return ctx.__state; },
+    document: ctx.document,
     async respond(path, reply) {
       const i = pending.findIndex((r) => r.path === path);
       assert(i >= 0, "no pending " + path + "; pending: " + pending.map((r) => r.path));
@@ -153,6 +161,8 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
       await settle();
     },
     async click(id) { page.els[id].fire("click"); await settle(); },
+    async nameKey(key) { page.els.reviewer.fire("keydown", { key }); await settle(); }, // a key typed in the name box
+    async typeName(name) { page.els.reviewer.value = name; page.els.reviewer.fire("input"); await settle(); },
     async dwell() { await page.paint(); await page.advance(200); },
     marks() { return posts.filter((post) => post.path === "/mark").map((post) => post.body); },
     async frame() { const f = frames; frames = []; f.forEach((fn) => fn()); await settle(); },
@@ -1139,7 +1149,7 @@ tests["Reconnect in grid mode keeps the batch and the rotation"] = async () => {
   await page.click("reconnect");
   await reload(page, all, 1, rows);
   assert.deepStrictEqual(page.grids.sent.at(-1), { keys: ["d", "e"], width: 800, height: 600, rotation: "never" });
-  assert.strictEqual(page.els.mode.textContent, "Grid (never)");
+  assert.strictEqual(page.els.mode.textContent, "Grid · never");
 };
 
 tests["Reconnect with a repack pending lands on the grid shown at the resize"] = async () => {
@@ -1334,7 +1344,7 @@ async function assertWaiting(page) {
   assert.deepStrictEqual([state.items.length, state.statuses.size, state.marked.length, state.manifest.length],
     [0, 0, 0, 0]);
   assert.strictEqual(state.gridCache, null);
-  for (const id of ["reviewer", "clean", "dirty", "prev", "next", "undo", "done"]) {
+  for (const id of ["reviewer-chip", "clean", "dirty", "prev", "next", "undo", "done"]) {
     assert.strictEqual(els[id].disabled, true, id + " disabled");
   }
   assert.strictEqual(els.reconnect.hidden, false);
@@ -1447,7 +1457,7 @@ tests["Reconnect after q loads the next server's pass, first item, fresh dwell, 
   await page.key("z");
   assert.strictEqual(page.els.status.textContent, "Nothing to undo");
   assert(!page.posts.some((post) => post.path === "/undo"));
-  for (const id of ["reviewer", "undo", "done"]) assert.strictEqual(page.els[id].disabled, false, id);
+  for (const id of ["reviewer-chip", "undo", "done"]) assert.strictEqual(page.els[id].disabled, false, id);
   await page.key("c");
   assert.deepStrictEqual(page.marks()[1], { keys: [key], status: "CLEAN", pass: 2, reviewer: "Jane", mode: "single" });
   assert.strictEqual(page.els.reconnect.hidden, true);
@@ -1890,6 +1900,253 @@ tests["a stale 412 (sent before a Reconnect) leaves the reconnected page alone"]
   assert.strictEqual(page.state.dead, false);
   assert.strictEqual(page.els.status.textContent, status);
   assert.strictEqual(page.els.reconnect.hidden, true);
+};
+
+// ---- The bar, the help and the name box ----
+
+const NAME_NEEDED = "Enter your name (1-64 characters) to start reviewing";
+
+tests["the bar's colour follows the item's status, neutral on the end screen, stopped or waiting"] = async () => {
+  const page = makePage({ manifest, statuses: { a: "FLAGGED", b: "UNREVIEWED", c: "CLEAN" }, fixedOrder: true });
+  const { bar, "item-status": word } = page.els;
+  await page.boot();
+  assert.strictEqual(bar.dataset.status, "FLAGGED");
+  assert.strictEqual(word.textContent, "FLAGGED", "the status is written too, not only coloured");
+  assert.strictEqual(word.hidden, false);
+  await page.dwell();
+  await page.key("d");
+  await page.respond("/mark", page.json(200, { a: "DIRTY" }));
+  assert.strictEqual(bar.dataset.status, "UNREVIEWED");
+  await page.image200("b", [100, 50]);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { b: "CLEAN" }));
+  assert.strictEqual(page.state.index, -1);
+  assert.strictEqual(bar.dataset.status, "", "the end screen is neutral");
+  assert.strictEqual(word.hidden, true);
+  await page.key("ArrowLeft");
+  assert.strictEqual(bar.dataset.status, "CLEAN");
+  await page.image200("b", [100, 50]);
+  await page.key("ArrowLeft");
+  assert.strictEqual(bar.dataset.status, "DIRTY");
+  await page.fail("/image?key=a");
+  assert.strictEqual(page.state.lost, true);
+  assert.strictEqual(bar.dataset.status, "", "stopped: neutral");
+  await page.key("q");
+  assert.strictEqual(page.state.waiting, true);
+  assert.strictEqual(bar.dataset.status, "", "waiting: neutral");
+
+  const grid = makePage({ manifest, statuses });
+  await showPlan(grid);
+  assert.strictEqual(grid.els.bar.dataset.status, "UNREVIEWED");
+  grid.state.statuses.set("b", "DIRTY");
+  grid.els.reviewer.fire("input"); // renders
+  assert.strictEqual(grid.els.bar.dataset.status, "DIRTY", "a grid takes gridStatus");
+  assert.strictEqual(grid.els["item-status"].textContent, "DIRTY");
+};
+
+tests["the scale badge stands out below 100% only"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.dwell();
+  assert.strictEqual(page.els.scale.textContent, "800%");
+  assert.strictEqual(page.els.scale.classList.contains("low"), false);
+  const grid = makePage({ manifest, statuses });
+  await showPlan(grid);
+  await grid.dwell();
+  assert.strictEqual(grid.els.scale.textContent, "⚠ 50%");
+  assert.strictEqual(grid.els.scale.classList.contains("low"), true);
+};
+
+tests["help opens with ?, h, H and its button, and closes with Escape or the same key"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  const { help } = page.els;
+  const opens = [["?", "?"], ["h", "Escape"], ["H", "h"], ["?", "H"], ["h", "?"]];
+  for (const [open, close] of opens) {
+    await page.key(open);
+    assert.strictEqual(help.hidden, false, open + " opens");
+    assert.strictEqual(page.state.overlay, "help");
+    await page.keyRepeat(close);
+    assert.strictEqual(help.hidden, false, "a held key acts once");
+    await page.key(close);
+    assert.strictEqual(help.hidden, true, close + " closes");
+    assert.strictEqual(page.state.overlay, null);
+  }
+  await page.click("help-button");
+  assert.strictEqual(help.hidden, false);
+  await page.click("help-button");
+  assert.strictEqual(help.hidden, true);
+  await page.keyRepeat("h");
+  assert.strictEqual(help.hidden, true, "a repeat does not open it");
+  await page.key("h", false, page.els.reviewer);
+  assert.strictEqual(help.hidden, true, "h typed into the name is a letter");
+};
+
+// Every review key and button, none of which may act while an overlay is up.
+async function tryEverything(page) {
+  for (const key of ["c", "d", "z", "ArrowRight", "ArrowLeft", "m", "s", "b", "q", "r"]) await page.key(key);
+  await page.key("M", true);
+  for (const id of ["clean", "dirty", "undo", "prev", "next", "done", "reconnect"]) await page.click(id);
+}
+
+for (const overlay of ["help", "name"]) {
+  tests["while the " + overlay + " overlay is up nothing acts; closing it restarts the dwell"] = async () => {
+    const page = makePage({ manifest, statuses });
+    await page.boot();
+    await page.dwell();
+    assert.strictEqual(page.els.clean.disabled, false);
+    const index = page.state.index;
+    await page.click(overlay === "help" ? "help-button" : "reviewer-chip");
+    assert.strictEqual(page.state.overlay, overlay);
+    assert.strictEqual(page.state.dwell, "none", "the dwell is cleared at once");
+    for (const id of ["clean", "dirty", "undo", "prev", "next", "done", "reviewer-chip"]) {
+      assert.strictEqual(page.els[id].disabled, true, id + " disabled");
+    }
+    assert.strictEqual(page.els["help-button"].disabled, overlay === "name");
+    await tryEverything(page);
+    await page.dwell();
+    await page.resize(500, 400); // a resize under the overlay starts no dwell
+    await page.dwell();
+    assert.strictEqual(page.state.dwell, "none");
+    assert.deepStrictEqual(page.pending, [], "nothing sent");
+    assert.deepStrictEqual(page.posts, []);
+    assert.deepStrictEqual([page.state.index, page.state.mode, page.state.waiting], [index, "single", false]);
+    if (overlay === "help") {
+      await page.key("Escape");
+    } else {
+      await page.nameKey("Escape");
+      assert.strictEqual(page.state.reviewer, "Jane");
+    }
+    assert.strictEqual(page.state.overlay, null);
+    await page.key("c");
+    assert.deepStrictEqual(page.posts, [], "no verdict before a fresh dwell");
+    await page.paint();
+    assert.strictEqual(page.state.dwell, "running");
+    await page.key("d");
+    assert.deepStrictEqual(page.posts, [], "nor while it runs");
+    await page.advance(200);
+    await page.key("d");
+    assert.deepStrictEqual(page.marks().map((m) => m.status), ["DIRTY"]);
+  };
+}
+
+tests["r and Reconnect wait while an overlay is up"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.key("ArrowRight");
+  await page.fail(page.pending[0].path);
+  assert.strictEqual(page.els.reconnect.hidden, false);
+  assert.strictEqual(page.els.done.hidden, true, "Reconnect takes Done's place");
+  await page.key("h");
+  assert.strictEqual(page.els.reconnect.disabled, true);
+  await page.key("r");
+  await page.click("reconnect");
+  assert.deepStrictEqual(page.pending, []);
+  await page.key("h");
+  await page.key("r");
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["/current_pass"]);
+};
+
+tests["startup without a name shows the name box, and nothing is judged until a valid one is set"] = async () => {
+  const page = makePage({ manifest, statuses, reviewer: null });
+  await page.boot();
+  const { reviewer } = page.els;
+  assert.strictEqual(page.els["name-box"].hidden, false);
+  assert.strictEqual(page.state.overlay, "name");
+  assert.strictEqual(page.state.reviewer, null);
+  assert.strictEqual(page.els.status.textContent, NAME_NEEDED);
+  assert.strictEqual(page.els["reviewer-chip"].textContent, "Name ✎");
+  await page.dwell();
+  assert.strictEqual(page.state.dwell, "none");
+  await tryEverything(page);
+  await page.key("Escape");
+  await page.nameKey("Escape");
+  assert.strictEqual(page.state.overlay, "name", "no name to go back to: Escape keeps the box up");
+  for (const name of ["", "   ", "x".repeat(65)]) {
+    await page.typeName(name);
+    assert.strictEqual(page.els["name-ok"].disabled, true, JSON.stringify(name));
+    assert.strictEqual(reviewer.classList.contains("invalid"), true);
+    await page.nameKey("Enter");
+    await page.click("name-ok");
+    assert.strictEqual(page.state.overlay, "name");
+  }
+  assert.strictEqual(page.state.reviewer, null);
+  assert.strictEqual(page.storage.has("reviewer"), false);
+  await page.typeName("Ann");
+  assert.strictEqual(page.els["name-ok"].disabled, false);
+  assert.strictEqual(reviewer.classList.contains("invalid"), false);
+  await page.nameKey("Enter");
+  assert.strictEqual(page.state.overlay, null);
+  assert.strictEqual(page.els["name-box"].hidden, true);
+  assert.strictEqual(page.state.reviewer, "Ann");
+  assert.strictEqual(page.storage.get("reviewer"), "Ann");
+  assert.strictEqual(page.els.status.textContent, "");
+  assert.strictEqual(page.els["reviewer-chip"].textContent, "Ann ✎");
+  assert.deepStrictEqual(page.posts, []);
+  await page.key("c");
+  assert.deepStrictEqual(page.posts, [], "a fresh dwell first");
+  await page.dwell();
+  await page.key("c");
+  assert.deepStrictEqual(page.marks().map((m) => m.reviewer), ["Ann"]);
+};
+
+tests["the name box keeps the keys: focus lost goes back to the field, an IME Enter waits, accepting leaves it"] = async () => {
+  const page = makePage({ manifest, statuses, reviewer: null });
+  await page.boot();
+  const doc = () => page.document;
+  assert.strictEqual(doc().activeElement, page.els.reviewer, "the box opens with the field focused");
+  page.els.reviewer.blur(); // a click elsewhere
+  assert.strictEqual(doc().activeElement, null);
+  await page.key("x");
+  assert.strictEqual(doc().activeElement, page.els.reviewer, "a key typed elsewhere goes back to the field");
+  assert.strictEqual(page.state.overlay, "name");
+  await page.typeName("Ann");
+  page.els.reviewer.fire("keydown", { key: "Enter", isComposing: true });
+  assert.strictEqual(page.state.overlay, "name", "an input method's Enter does not accept");
+  assert.strictEqual(page.state.reviewer, null);
+  page.els.reviewer.blur();
+  await page.key("Enter"); // focus elsewhere: Enter still accepts
+  assert.strictEqual(page.state.overlay, null);
+  assert.strictEqual(page.state.reviewer, "Ann");
+  await page.click("reviewer-chip");
+  assert.strictEqual(doc().activeElement, page.els.reviewer);
+  await page.typeName("Bob");
+  await page.nameKey("Enter");
+  assert.strictEqual(page.state.reviewer, "Bob");
+  assert.notStrictEqual(doc().activeElement, page.els.reviewer, "accepting takes focus out of the field");
+};
+
+tests["the reviewer chip reopens the name box; Escape keeps the old name, OK takes the new one"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  assert.strictEqual(page.state.overlay, null, "a stored name needs no box");
+  assert.strictEqual(page.els["reviewer-chip"].textContent, "Jane ✎");
+  await page.click("reviewer-chip");
+  assert.strictEqual(page.els["name-box"].hidden, false);
+  assert.strictEqual(page.els.reviewer.value, "Jane");
+  assert.strictEqual(page.state.overlay, "name");
+  await page.typeName("Bob");
+  await page.nameKey("Escape");
+  assert.strictEqual(page.state.overlay, null);
+  assert.strictEqual(page.state.reviewer, "Jane");
+  assert.strictEqual(page.els.reviewer.value, "Jane");
+  assert.strictEqual(page.storage.get("reviewer"), "Jane");
+  await page.click("reviewer-chip");
+  await page.typeName(" ");
+  await page.key("Escape"); // focus elsewhere: the page's Escape cancels too
+  assert.strictEqual(page.state.overlay, null);
+  assert.strictEqual(page.state.reviewer, "Jane");
+  await page.click("reviewer-chip");
+  await page.typeName("Bob");
+  await page.click("name-ok");
+  assert.strictEqual(page.state.overlay, null);
+  assert.strictEqual(page.state.reviewer, "Bob");
+  assert.strictEqual(page.storage.get("reviewer"), "Bob");
+  assert.strictEqual(page.els["reviewer-chip"].textContent, "Bob ✎");
+  await page.dwell();
+  await page.key("d");
+  assert.deepStrictEqual(page.marks().map((m) => m.reviewer), ["Bob"]);
 };
 
 (async () => {
