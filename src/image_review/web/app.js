@@ -20,10 +20,13 @@ const REPACK_DELAY_MS = 300; // resize debounce before grids are repacked
 
 const TOKEN_REJECTED = "token rejected (server restarted?) - open the new URL";
 const LOST_CONNECTION = "Lost connection — your marks so far are saved on the server";
-const SESSION_ENDED = "Session ended";
-const SESSION_ENDED_DETAIL =
-  "Session ended. Your marks are saved on the server. Close this tab, and stop the server with Ctrl-C on the " +
-  "node (then the ssh command).";
+// With the same socket path and token, the next serve is loaded in this tab by Reconnect.
+const NEXT_SERVE = "Stop serve (Ctrl-C), start the next one, then press Reconnect (r).";
+const WAITING = "Done; waiting for the next serve";
+const WAITING_DETAIL = "Done. Your marks are saved. " + NEXT_SERVE;
+// The end of a list with todo left elsewhere in the pass (as controller._end_message, NO_TODO_MESSAGE)
+const NEXT_BATCH = "No todo images remaining - [b] next batch";
+const RELOAD_SINGLE = "No todo images remaining - press [s] to reload the list";
 const NOTHING_TO_UNDO = "Nothing to undo";
 const RECONNECTING = "Reconnecting...";
 const UNLOADABLE_CLEAN = "cannot mark CLEAN: image could not be loaded";
@@ -395,9 +398,10 @@ const state = {
   index: -1, // the current item, or -1 for the end screen
   reviewer: null, // a name that passed validReviewer, or null
   busy: false, // a request is in flight, or the list is loading
-  dead: false, // token rejected or connection lost: nothing more is sent
+  dead: false, // token rejected, connection lost or done (q): nothing more is sent
   lost: false, // stopped by a lost connection: Reconnect is offered
-  ended: false, // the reviewer ended the session (q): everything is freed and nothing more is sent
+  waiting: false, // done with this server (q): stopped and freed, Reconnect loads the next one
+  atEnd: false, // the end-of-pass screen is up (no todo left in the pass): Reconnect is offered
   epoch: 0, // bumped by every stop: a request sent before it changes nothing
   mode: "single",
   rotation: "auto", // grid mode's rotation policy: "auto" or "never"
@@ -438,7 +442,7 @@ const ui = {
   next: $("next"),
   undo: $("undo"),
   reconnect: $("reconnect"),
-  end: $("end"),
+  done: $("done"),
 };
 
 // ---- Requests ----
@@ -457,6 +461,10 @@ function stop(text) {
   state.epoch++;
   state.dead = true;
   state.busy = false;
+  if (state.atEnd) {
+    state.atEnd = false;
+    ui.message.hidden = true; // its hint says to press Reconnect, which a stop may not offer
+  }
   say(text);
   render();
   return new Stopped(text);
@@ -468,9 +476,12 @@ function lose() {
   return stop(LOST_CONNECTION);
 }
 
-// Whether a Reconnect may be tried: after a lost connection, with a token.
+// Whether a Reconnect may be tried, with a token: after a lost connection, once done with
+// this server (q), or on the end-of-pass screen while idle (the next serve may be up; a
+// reply still due would be dropped, though the server has acted on it).
 function canReconnect() {
-  return state.lost && state.token !== null;
+  const idleEnd = state.atEnd && !state.busy && !state.dead;
+  return state.token !== null && (state.lost || state.waiting || idleEnd);
 }
 
 const epochOf = new WeakMap(); // response -> the epoch its request was sent in
@@ -686,7 +697,7 @@ function render() {
   }
 
   ui.reviewer.disabled = state.dead;
-  ui.end.disabled = state.ended;
+  ui.done.disabled = state.waiting;
   ui.clean.disabled = !canJudge() || !state.loaded;
   ui.dirty.disabled = !canJudge();
   ui.prev.disabled = !canAct() || state.items.length === 0;
@@ -814,16 +825,28 @@ function showNotice(text) {
   ui.message.hidden = false;
 }
 
-function nothingLeft() {
-  return "Pass " + state.pass + ": nothing left to review";
-}
-
+// The end of the list. Only with no todo row left in the pass is it the end of the pass,
+// where the next serve is due and Reconnect is offered. Grid mode's list is one batch, so
+// there, as the controller, b moves on while a batch has grid items and s reviews what
+// grids leave out; single mode's list is the whole pass, unless others marked meanwhile.
 function showEnd() {
-  showNotice(nothingLeft());
+  const todo = state.manifest.filter((row) => isTodo(state.statuses.get(row.key)));
+  if (todo.length === 0) {
+    state.atEnd = true;
+    showNotice("Pass " + state.pass + ": nothing left to review. " + NEXT_SERVE);
+  } else if (!gridMode()) {
+    showNotice(RELOAD_SINGLE);
+  } else if (gridBatches(state.manifest, state.statuses).size > 0) {
+    showNotice(NEXT_BATCH);
+  } else {
+    showNotice(heldBackMessage(state.pass, heldBackCount(state.manifest, state.statuses, null)));
+  }
+  render();
 }
 
 // Hide everything on the stage, so nothing stays up under a new item.
 function clearStage() {
+  state.atEnd = false;
   ui.image.hidden = true;
   ui.grid.hidden = true;
   ui.placeholder.hidden = true;
@@ -1230,8 +1253,7 @@ async function buildGrids(landKey) {
   render();
   const keys = state.batch === null ? [] : gridKeys(state.manifest, state.statuses, state.batch);
   if (keys.length === 0) {
-    const held = heldBackCount(state.manifest, state.statuses, state.batch); // null: every batch
-    showNotice(heldBackMessage(state.pass, held) || nothingLeft());
+    showEnd(); // the pass's end, or what is left elsewhere in it
     return;
   }
   if (keys.length > MAX_GRID_KEYS) {
@@ -1364,21 +1386,24 @@ function takeReview({ pass, manifest, statuses }) {
   state.batchOf = new Map(manifest.map((row) => [row.key, row.batch]));
 }
 
-// After a lost connection, on the reviewer's request only: reload what start()
-// loads and rebuild the current mode's items with a fresh dwell. The server may
-// have restarted or others marked meanwhile, so this page's marks are forgotten
-// (z cannot undo what the page cannot vouch for) and the grids are laid out afresh.
-// Busy from the click until the reload is in, so no key or button sends a
-// request meanwhile; anything sent before the loss is stale (see call).
+// After a lost connection, after q, or on the end-of-pass screen, on the reviewer's
+// request only: reload what start() loads and rebuild the current mode's items with a
+// fresh dwell. The server may have restarted (even on another pass or work directory)
+// or others marked meanwhile, so this page's marks are forgotten (z cannot undo what
+// the page cannot vouch for) and the grids are laid out afresh. Busy from the click
+// until the reload is in, so no key or button sends a request meanwhile; anything sent
+// before is stale (see call).
 async function reconnect() {
   if (!canReconnect()) {
-    return; // not lost, or a Reconnect is already in flight
+    return; // not offered, or a Reconnect is already in flight
   }
-  const item = currentItem(); // null while a repack is pending, or after a failed Reconnect
+  const item = currentItem(); // null while a repack is pending, or after a failed Reconnect or q
   if (item !== null) {
     state.landKey = itemKeys(item)[0]; // kept for a retry should this one fail
   }
+  state.epoch++; // on the end screen, as a stop does: an image or layout fetch still out changes nothing
   state.lost = false;
+  state.waiting = false;
   state.dead = false;
   state.busy = true;
   abandonItems(); // nothing from before the loss stays on screen, nor its dwell
@@ -1400,26 +1425,19 @@ async function reconnect() {
   const before = state.pass;
   takeReview(review);
   state.gridCache = null;
-  const moved = before !== null && state.pass !== before;
+  const moved = state.pass !== before; // after q the old pass is forgotten: always say which
   say(state.reviewer === null ? NAME_NEEDED : moved ? "Reconnected; now on pass " + state.pass : "Reconnected");
   await rebuild(state.mode, state.rotation, false, state.landKey);
 }
 
-// End the session on this page only (the server keeps running; marks are saved as made).
-// Stops the page as a lost connection does, so every request in flight turns stale and
-// nothing more is sent, but offers no Reconnect; then frees the images and forgets the
-// token and the reviewer name.
-function endSession() {
-  if (state.ended) {
+// Done with this server (q): the reviewer stops it (marks are saved as made) and starts
+// the next on the same socket path and token. Stops the page as a lost connection does,
+// so every request in flight turns stale and nothing more is sent, and frees the images
+// and the review, but keeps the token and the reviewer name for Reconnect.
+function waitForNextServer() {
+  if (state.waiting) {
     return;
   }
-  state.ended = true;
-  state.lost = false;
-  state.token = null;
-  state.reviewer = null;
-  writeStored("token", null);
-  writeStored("reviewer", null);
-  ui.reviewer.value = "";
   abandonItems(); // also clears the stage
   leaveGrid();
   setObjectUrl(null); // revokes the blob URL and clears the <img>
@@ -1431,12 +1449,17 @@ function endSession() {
   state.statuses = new Map();
   state.marked = [];
   state.gridCache = null;
+  state.batch = null; // the next server starts at its first batch and item: its keys may match these
+  state.landKey = null;
   ui.progress.textContent = "";
-  if (location.hash !== "") {
-    history.replaceState(null, "", location.pathname);
+  if (state.token === null) {
+    render(); // token rejected or none: already stopped, and the page says to open the new URL
+    return;
   }
-  stop(SESSION_ENDED);
-  showNotice(SESSION_ENDED_DETAIL);
+  state.lost = false;
+  state.waiting = true;
+  stop(WAITING);
+  showNotice(WAITING_DETAIL);
 }
 
 function reportError(error) {
@@ -1516,7 +1539,7 @@ function onKey(event) {
   } else if (key === "r" && canReconnect()) {
     doReconnect(); // only while the Reconnect button is shown
   } else if (key === "q") {
-    endSession(); // in any state
+    waitForNextServer(); // in any state
   }
 }
 
@@ -1541,7 +1564,7 @@ function wire() {
     [ui.next, () => navigate(1)],
     [ui.undo, doUndo],
     [ui.reconnect, doReconnect],
-    [ui.end, endSession],
+    [ui.done, waitForNextServer],
   ];
   for (const [button, action] of buttons) {
     // Never focused (tabindex -1 too), so Enter or Space cannot click one, held, past the repeat guard

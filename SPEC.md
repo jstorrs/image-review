@@ -2015,8 +2015,20 @@ empties the rest of the stack.
   mode (`single`, or `grid` for every item in grid mode), controls disabled
   while it is in flight, never retried. On a 200 the keys are pushed on the
   page's stack of marked keys, the reply updates the status map, and the page
-  moves to the next todo item after the current one, wrapping round; with
-  none left it shows "Pass N: nothing left to review". A 200 whose body
+  moves to the next todo item after the current one, wrapping round. With
+  none left, the end screen says what is next. Only when no manifest row of
+  the pass is todo (UNREVIEWED or FLAGGED) is it the end of the pass: "Pass
+  N: nothing left to review. Stop serve (Ctrl-C), start the next one, then
+  press Reconnect (r)." with the Reconnect button, offered while no request
+  is in flight and the page has not stopped (a stop takes the hint off the
+  stage; see *Errors*). Otherwise, as
+  the controller: in grid mode (whose list is one batch) "No todo images
+  remaining - [b] next batch" while any batch has grid items, else the
+  pass-wide "No grid items for pass N; K FLAGGED/DIRTY images need
+  single-mode review - press [s]"; in single mode (whose list is the whole
+  pass, so only when other clients changed statuses meanwhile) "No todo
+  images remaining - press [s] to reload the list". Entering grid mode, or
+  a repack, with nothing to pack shows the same screen. A 200 whose body
   cannot be parsed (on `/mark` or `/undo`) still counts, since the server has
   acted: the page rereads `/statuses` instead, and stops with "unexpected
   reply from the server; reload the page" if that fails too.
@@ -2037,10 +2049,11 @@ empties the rest of the stack.
   this page's marks only while the page is the server's one client. A
   Reconnect empties the stack (see *Errors*).
 - **Keys**: `c`, `d`, `z`, `s` (single mode), `b` (next batch, grid mode
-  only), `r` (Reconnect, only while its button is shown) and `q` (end the
-  session, in any state), in either case, so Caps Lock does not matter; `m` (grid, rotation `auto`) and `M`
-  (`never`), told apart by the event's Shift state rather than the letter's
-  case, so Caps Lock is safe; and Left/Right. Ignored while the reviewer
+  only), `r` (Reconnect, only while its button is shown) and `q` (done with
+  this server, in any state), in either case, so Caps Lock does not matter;
+  `m` (grid, rotation `auto`) and `M` (`never`), told apart by the event's
+  Shift state rather than the letter's case, so Caps Lock is safe; and
+  Left/Right. Ignored while the reviewer
   field has focus, with Ctrl/Alt/Meta, and on key repeat (a held key acts
   once). The buttons, Reconnect included, never take focus
   (`tabindex="-1"`, and `mousedown` is cancelled), so Enter or Space cannot
@@ -2050,13 +2063,16 @@ empties the rest of the stack.
   restarted?) - open the new URL" and disables everything; a network failure
   shows "Lost connection — your marks so far are saved on the server", does
   the same and shows a Reconnect button (its place in the footer is kept
-  while it is hidden, so showing it never resizes the stage). Once stopped
+  while it is hidden, so showing it never resizes the stage). The button is
+  also shown after `q` (see *Done*) and at the end of the pass (see
+  *Marking*), while the page holds a token. Once stopped
   the page sends nothing (a pending repack or `/grids` retry is dropped)
   until the reviewer presses Reconnect (or `r`); it is never retried
   automatically. The reply, body or failure of a request sent before the
   page stopped changes nothing (no statuses, message, item, stack or busy
   state), so a later failure never replaces "token rejected" and never
-  stops a reconnected page. Reconnect hides the button, says
+  stops a reconnected page. Reconnect stops the page first, as a loss does
+  (at the end of the pass too), hides the button, says
   "Reconnecting...", takes the item off screen (its dwell with it), empties
   the stack of marked keys (the server may have restarted, or others marked
   meanwhile) and reloads what startup loads with the stored token and
@@ -2068,7 +2084,10 @@ empties the rest of the stack.
   Reconnect, and the key a pending repack would have landed on), else the
   first. Every item then starts a fresh dwell. The status line says
   "Reconnected", or "Reconnected; now on pass N" if the current pass
-  changed (the new pass is reviewed); with no reviewer name it shows the
+  changed or was forgotten by `q` (the new pass is reviewed); after `q` the
+  server may serve another work directory or batch, so grid mode starts
+  afresh at the first batch with grid items and its first grid; with no
+  reviewer name it shows the
   name prompt instead. A network failure during Reconnect shows "Lost
   connection" and the button again, a 401 the token-rejected message, and
   another error a short message with the button; clicks while one is in
@@ -2076,19 +2095,26 @@ empties the rest of the stack.
   and leave the controls usable (at startup the page stops instead, offering
   Reconnect only after a network failure); nothing is retried automatically
   but a `/grids` 503 (see grid mode above).
-- **End session** (`q` or the "End session (q)" button, in any state, even
-  after a lost connection or a rejected token) ends the session on the page
-  only: the server keeps running (it is stopped with Ctrl-C on the node) and
-  the marks are already saved there. It stops the page as a lost connection
-  does, so every request in flight turns stale and nothing more is sent,
-  but offers no Reconnect. It leaves grid mode (canvas sized to 0, hidden),
-  revokes the image's blob URL and clears the `<img>`, drops the statuses,
-  items and marked keys, forgets the token and the reviewer name (in
-  `sessionStorage` and in memory), disables every control including the
-  reviewer field, clears the URL fragment if any, and shows "Session ended.
-  Your marks are saved on the server. Close this tab, and stop the server
-  with Ctrl-C on the node (then the ssh command)." A reload then shows the
-  "No token" help; pasting a new URL reloads as before.
+- **Done** (`q` or the "Done (q)" button, in any state) means done with
+  this server: the reviewer stops it with Ctrl-C (the marks are already
+  saved), starts the next `serve --socket` on the same socket path and token
+  (for the next batch or pass), and presses Reconnect in the same tab. It
+  stops the page as a lost connection does, so every request in flight
+  turns stale and nothing more is sent. It leaves grid mode (canvas sized to
+  0, hidden), revokes the image's blob URL and clears the `<img>`, and drops
+  the pass, manifest, statuses, items, marked keys and cached layout, but
+  keeps the token and the reviewer name (in `sessionStorage` and in memory)
+  and the mode and rotation; the batch and the landing key are forgotten
+  too, since another work directory's keys and batch names usually match
+  these. Every control is disabled, the Done
+  button and the reviewer field included, but Reconnect is shown; the
+  status line says "Done; waiting for the next serve" and the stage "Done.
+  Your marks are saved. Stop serve (Ctrl-C), start the next one, then press
+  Reconnect (r)." Reconnect then loads whatever the server serves (see
+  *Errors*); a 401 shows the token-rejected message. There is no way to
+  forget the token on the page: closing the tab does (`sessionStorage` is
+  per tab). After a rejected token (or with none) `q` only frees the images
+  and the review, and the page keeps its message.
 
 ## Remote Store (`remote.py`)
 

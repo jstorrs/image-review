@@ -762,8 +762,8 @@ forwarding does not work.
    | `M` | -- | Grid mode without rotating images (rotation `never`) |
    | `s` | -- | Back to single mode |
    | `b` | -- | Grid mode: the next batch with images to review |
-   | `r` | Reconnect | After "Lost connection": load the review again |
-   | `q` | End session | End the session on the page (the server keeps running) |
+   | `r` | Reconnect | After "Lost connection", after `q` or at the end of a pass: load the review |
+   | `q` | Done | Done with this server: the page waits for the next one |
 
    A verdict counts only once the image has been on screen for 200 ms, so a
    key pressed as an image appears is ignored. An image that cannot be
@@ -777,8 +777,11 @@ forwarding does not work.
    undoes this page's marks; the server keeps a single undo history, so with
    a second tab or client it undoes the latest mark from any of them (see
    "Multi-client limits" in [SECURITY.md](SECURITY.md)), and the page warns
-   "Undid another client's mark". When the list is done the page says
-   "Pass N: nothing left to review".
+   "Undid another client's mark". When the whole pass is done the page says
+   "Pass N: nothing left to review" and offers Reconnect for the next
+   server. In grid mode the list is one batch, so at its end the page says
+   "No todo images remaining - [b] next batch" while another batch has
+   grids, or asks for `s` while FLAGGED images remain.
 
    Grid mode works as in the viewer (see "Grid mode" above), one batch at a
    time:
@@ -858,14 +861,33 @@ forwarding does not work.
    command line. After a restart, press Reconnect (or `r`) on the page: the
    forward and the URL are unchanged.
 
-To finish, press `q` (or click End session) on the page: it forgets the
-token and frees the images, and says your marks are saved. It does not stop
-the server. Then stop the server with Ctrl-C on the node, then the ssh
-command, and close the tab. Each start has a new
-token unless `$IMAGE_REVIEW_TOKEN` is set. `--via` only fills in the `-J` part of the printed command; without
-it the command shows `<user>@<login-node>` for you to fill in. `--direct`
-(or `$IMAGE_REVIEW_DIRECT=1`) leaves `-J` out; it cannot be combined with
-`--via` on the command line.
+**Moving on to the next batch or pass.** With the fixed socket path and
+`$IMAGE_REVIEW_TOKEN` exported in the job's shell, one tab and one ssh
+command last the whole job:
+
+1. Finish the pass (the page says "Pass N: nothing left to review", not
+   just the end of a batch) or press `q` (or click Done). `q` stops the
+   page and frees the images; your marks are already saved, and the tab
+   keeps the token and your name. It does not stop the server.
+2. Stop the server with Ctrl-C on the node.
+3. Start the next `image-review serve --socket ...` in the same shell (same
+   `$IMAGE_REVIEW_SOCKET_PATH` and `$IMAGE_REVIEW_TOKEN`), for the next batch
+   or pass.
+4. Press Reconnect (or `r`) on the page. It loads whatever the new server
+   serves, from its first item (in grid mode, the first batch with grids),
+   and says "Reconnected; now on pass N".
+
+If Reconnect says "Lost connection", the new server is not up yet: press it
+again. "token rejected" means the new server has another token: open its URL
+in the tab. When you are finished for the day, stop the server with Ctrl-C,
+then the ssh command, and close the tab: closing it is what forgets the
+token.
+
+Each start has a new token unless `$IMAGE_REVIEW_TOKEN` is set. `--via` only
+fills in the `-J` part of the printed command; without it the command shows
+`<user>@<login-node>` for you to fill in. `--direct` (or
+`$IMAGE_REVIEW_DIRECT=1`) leaves `-J` out; it cannot be combined with `--via`
+on the command line.
 
 **Batch mode.** Under `sbatch` stdout is not a terminal, so the URL is
 written to `~/.image-review/browser-<host>-<pid>.txt` (mode 0600) and removed
