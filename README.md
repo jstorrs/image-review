@@ -1,13 +1,19 @@
 # image-review
 
-CLI tool for reviewing medical (DICOM) and general images for burned-in
-Protected Health Information (PHI).
+A command-line tool for reviewing medical (DICOM) and general images for
+burned-in Protected Health Information (PHI).
 
-Provides a three-phase workflow:
+The workflow has four steps:
 
-1. **Preprocess** raw DICOM/image files into normalized JPG batches
-2. **Review** images interactively in a fullscreen viewer (single or grid mode)
-3. **Status** reporting on review progress
+1. **Preprocess** raw DICOM and image files into normalized JPG batches.
+2. **Review** the images interactively in a fullscreen viewer, in single or
+   grid mode.
+3. **Status** reports on review progress.
+4. **Export** writes the allowlist of files that may be released.
+
+To review images that stay on an HPC cluster, `serve` the work directory
+there and review it from your laptop; see
+[Reviewing on an HPC cluster](#reviewing-on-an-hpc-cluster).
 
 ## Installation
 
@@ -17,8 +23,8 @@ Requires Python >= 3.12.
 pip install '.[all]'          # everything: preprocess, codecs and the viewer
 ```
 
-From a source checkout as above; from a wheel or package index the same extras apply, e.g.
-`pip install 'image-review[all]'`.
+That installs from a source checkout. From a wheel or a package index the same
+extras apply, e.g. `pip install 'image-review[all]'`.
 
 The dependencies are split into extras, so each machine installs only what its
 commands need:
@@ -29,14 +35,19 @@ commands need:
 | `pip install '.[viewer]'` | `review` (local or `--remote`) | pygame-ce, Pillow |
 | `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
 
-On a cluster with a laptop viewer (see [Reviewing on an HPC
-cluster](#reviewing-on-an-hpc-cluster)), install `[preprocess,codecs]` where
-you preprocess, core alone where you only `serve`, and `[viewer]` on the
-laptop (`pip install '.[viewer]'`). A command whose extra is missing exits 1 with
+On a cluster with a laptop viewer (see
+[Reviewing on an HPC cluster](#reviewing-on-an-hpc-cluster)), install
+`[preprocess,codecs]` where you preprocess, core alone where you only `serve`,
+and `[viewer]` on the laptop (`pip install '.[viewer]'`). A command whose
+extra is missing exits 1 with
 `this command needs the <extra> extra: pip install 'image-review[<extra>]'`.
 
+`cryptography` is a core dependency (`serve` uses it for its TLS
+certificate). `review --via` and `status --via` need an OpenSSH client on the
+machine you run them on (built into macOS, Linux and Windows 10+).
+
 **Cluster install without root.** Use a virtual environment in your own
-space; no administrator rights are needed. Get a Python 3.12 or later, either
+space; no administrator rights are needed. Get Python 3.12 or later, either
 from your site's module system (`module load python/3.12` is only an example;
 module names vary by site) or from your own interpreter or `uv`, then:
 
@@ -54,37 +65,35 @@ If the repository is private, the https URL needs credentials (or use an
 Activate the same environment in your `sbatch` scripts. Use the same
 image-review version on the laptop and on the cluster.
 
-Minimum dependency versions (declared in `pyproject.toml`, checked by running
-the test suite on CPython 3.12): click >= 8.2, matplotlib >= 3.7.3,
+**Compressed DICOMs.** JPEG, JPEG Lossless, JPEG-LS, JPEG 2000, HTJ2K and RLE
+DICOMs are decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`
+(the `codecs` extra). Install the codecs wherever you preprocess DICOMs.
+
+- Wheels exist for CPython 3.12 and 3.13 on Linux (x86_64 and aarch64), macOS
+  (Intel and Apple silicon) and Windows (x86_64). On other platforms
+  `python-gdcm` has no wheel and installation may fail.
+- Without the codecs, `preprocess` still runs, but only what pydicom decodes
+  by itself or through Pillow (e.g. RLE, JPEG 2000) renders. Other compressed
+  DICOMs (e.g. JPEG Lossless, JPEG-LS) are listed in `skipped.tsv` as failed,
+  `cannot decode <transfer syntax>: ...`.
+- 12-bit JPEG Extended files cannot be decoded even with the codecs (the only
+  decoder is GPL-licensed and is not used). They are listed in `skipped.tsv`
+  as `cannot decode JPEG Extended (Process 2 and 4): ...`.
+
+**Minimum dependency versions** (declared in `pyproject.toml` and checked by
+running the test suite on CPython 3.12): click >= 8.2, matplotlib >= 3.7.3,
 numpy >= 1.26, pydicom >= 3.0, Pillow >= 10.3 except 11.x (which misdecodes
 multi-frame MPO JPEGs), scikit-image >= 0.22, scipy >= 1.11.2, tqdm >= 4.60,
 pygame-ce >= 2.3.1, cryptography >= 41, python-gdcm >= 3.0.25,
 pylibjpeg >= 2.0, pylibjpeg-openjpeg >= 2.0, and rectpack pinned at 0.2.2
-(unmaintained; grid packing depends on its exact behaviour). rectpack is
-published only as a source distribution: a default `pip install` builds it,
-but an offline or `--only-binary :all:` install needs its sdist or a wheel you
-built beforehand. See [CHANGELOG.md](CHANGELOG.md) for what changed between
-releases.
+(unmaintained; grid packing depends on its exact behavior).
 
-Compressed DICOMs (JPEG, JPEG Lossless, JPEG-LS, JPEG 2000, HTJ2K, RLE) are
-decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`, the `codecs`
-extra. Wheels exist for CPython 3.12 and 3.13 on Linux (x86_64 and
-aarch64), macOS (Intel and Apple silicon) and Windows (x86_64); on other
-platforms `python-gdcm` has no wheel and installation may fail.
-`preprocess` runs without the codecs, but then only what pydicom decodes by
-itself or through Pillow (e.g. RLE, JPEG 2000) renders; other compressed DICOMs
-(e.g. JPEG Lossless, JPEG-LS) are listed in `skipped.tsv` as failed,
-`cannot decode <transfer syntax>: ...`. Install the codecs wherever you
-preprocess DICOMs.
-12-bit JPEG Extended files cannot be decoded even with them (the only decoder
-is GPL-licensed and is not used) and are listed in `skipped.tsv` as
-`cannot decode JPEG Extended (Process 2 and 4): ...`.
+rectpack is published only as a source distribution: a default `pip install`
+builds it, but an offline or `--only-binary :all:` install needs its sdist or
+a wheel you built beforehand. See [CHANGELOG.md](CHANGELOG.md) for what
+changed between releases.
 
-`cryptography` is a core dependency (used by `serve` for its TLS certificate).
-`review --via` and `status --via` need an OpenSSH client on the machine you
-run them on (built into macOS, Linux and Windows 10+).
-
-## Quick Start
+## Quick start
 
 ```bash
 # Preprocess a directory of DICOMs or a ZIP archive
@@ -103,18 +112,28 @@ image-review status
 image-review export --output allowlist.tsv --report report.tsv
 ```
 
-The default work directory is `./review_work`; don't create work directories inside a git checkout (the repo's `.gitignore` excludes them as a safety net).
+The default work directory is `./review_work`. Don't create work directories
+inside a git checkout (the repository's `.gitignore` excludes them as a
+safety net).
 
-Warnings and other diagnostics are logged to stderr as `time LEVEL module: message`.
-Put `-q`/`--quiet` before the command to show only warnings and errors, or
-`-v`/`--verbose` to enable debug messages (currently few: the work directory or
-server opened, the ssh tunnel command, grid packing results), e.g.
-`image-review -q status`. The default shows INFO and up; only `serve` logs at
-INFO (one line per request: peer address, method, path without its query
-string, and status). The server never logs tokens, query strings, image keys,
-source paths or exception messages. Warnings from `review` and `status` do name
-image keys (e.g. an image that cannot be loaded), and `preprocess` warnings
-name the source files that failed, on the machine where preprocess runs.
+## Logging
+
+Warnings and other diagnostics are logged to stderr as
+`time LEVEL module: message`. Put the option before the command, e.g.
+`image-review -q status`:
+
+| Option | Shows |
+|---|---|
+| (default) | INFO and up |
+| `-q`, `--quiet` | Only warnings and errors |
+| `-v`, `--verbose` | Debug messages too (currently few: the work directory or server opened, the ssh tunnel command, grid packing results) |
+
+Only `serve` logs at INFO: one line per request, with the peer address,
+method, path without its query string, and status. The server never logs
+tokens, query strings, image keys, source paths or exception messages.
+Warnings from `review` and `status` do name image keys (e.g. an image that
+cannot be loaded), and `preprocess` warnings name the source files that
+failed, on the machine where `preprocess` runs.
 
 ## Commands
 
@@ -129,41 +148,66 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--jobs N]
 ```
 
-Accepts ZIP files, directories (searched recursively, including ZIP files
-inside them), or individual files. Inputs are recognized by content, not by
-extension: DICOM (including extensionless files like `IM0001` and DICOM
-without the 128-byte preamble), PNG, JPEG, TIFF, BMP, GIF, WebP, JPEG 2000 and
-PNM. Symlinked directories are never entered: a link to an enclosing
-directory or into another SOURCE is ignored, and any other is failed with its
-target, so pass that target as a SOURCE if you want it. The work directory is
-never read as input. DICOM images are
-normalized with adaptive histogram equalization to enhance local contrast
-and a configurable colormap; single-frame colour and palette DICOMs are shown
-as they are. DICOM overlay planes are drawn at maximum brightness, and an
-embedded icon image becomes an extra manifest row whose image id ends in
-`#icon`. Non-DICOM images are converted to RGB, with the same
-contrast enhancement applied to grayscale. Transparent images are shown as
-the composite over mid-gray beside the raw channels with alpha ignored, and
-MPO JPEGs (HDR gain maps, previews) show all their frames side by side.
-Output is organized into batch subdirectories with a `manifest.tsv` index,
-which records for each JPG the SHA-256 of its source file (or ZIP entry) and of
-the JPG itself. Viewing an image checks it against that hash: a JPG changed or
-cut short after preprocessing is shown as an unloadable placeholder (DIRTY
-only), never as an image that could be marked CLEAN. `preprocess.json` beside
-it records the tool and library versions, the resolved SOURCES, the rendering
-parameters and the input counts. Like the manifest, it holds source paths and
-stays in the work directory; the server never sends it.
+Renders each image input to a JPG, in batches, in a new work directory.
+Inputs it cannot render are listed in `skipped.tsv` (see
+[Skipped inputs](#skipped-inputs)).
 
-The work directory must not already exist (an empty directory is fine);
-`preprocess` refuses to write into one that has content, so verdicts can never
-be attached to a replaced image. Choose a new `--work-dir` or remove the old
-one. Output is built in a staging directory next to it
-(`.NAME.partial`, with the access policy's directory mode) and renamed into place only on success, so an
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--batch-size` | 300 | Images per batch (1 or more) |
+| `--work-dir` (alias `--output-dir`) | `./review_work` | Work directory to create |
+| `--colormap` | `inferno` | Matplotlib colormap for rendering |
+| `--access` | `private`; `$IMAGE_REVIEW_ACCESS` | Who may use the work directory; see [Access control](#access-control) |
+| `--allow-skipped` | off | Exit 0 even if some inputs failed to preprocess |
+| `--jobs` | `$SLURM_CPUS_PER_TASK`, else the usable CPUs | Worker processes; see [Parallel rendering](#parallel-rendering) |
+
+**Inputs.** Each SOURCE is a ZIP file, a directory (searched recursively,
+including ZIP files inside it) or an individual file. Inputs are recognized by
+content, not by extension: DICOM (including extensionless files like `IM0001`
+and DICOM without the 128-byte preamble), PNG, JPEG, TIFF, BMP, GIF, WebP,
+JPEG 2000 and PNM. Symlinked directories are never entered: a link to an
+enclosing directory or into another SOURCE is ignored, and any other is
+failed with its target, so pass that target as a SOURCE if you want it. The
+work directory is never read as input.
+
+**Rendering.**
+
+- DICOM images are normalized with adaptive histogram equalization, to
+  enhance local contrast, and a configurable colormap. Single-frame color and
+  palette DICOMs are shown as they are.
+- DICOM overlay planes are drawn at maximum brightness, and an embedded icon
+  image becomes an extra manifest row whose image id ends in `#icon`.
+- Non-DICOM images are converted to RGB, with the same contrast enhancement
+  applied to grayscale.
+- Transparent images are shown as the composite over mid-gray beside the raw
+  channels with alpha ignored.
+- MPO JPEGs (HDR gain maps, previews) show all their frames side by side.
+
+**Output.** Images are written to batch subdirectories with a `manifest.tsv`
+index, which records for each JPG the SHA-256 of its source file (or ZIP
+entry) and of the JPG itself. Viewing an image checks it against that hash: a
+JPG changed or cut short after preprocessing is shown as an unloadable
+placeholder (DIRTY only), never as an image that could be marked CLEAN.
+
+`preprocess.json` beside the manifest records the tool and library versions,
+the resolved SOURCES, the rendering parameters and the input counts. Like the
+manifest, it holds source paths and stays in the work directory; the server
+never sends it.
+
+**A new work directory every time.** The work directory must not already
+exist (an empty directory is fine). `preprocess` refuses to write into one
+that has content, so verdicts can never be attached to a replaced image:
+choose a new `--work-dir` or remove the old one.
+
+Output is built in a staging directory next to it (`.NAME.partial`, with the
+access policy's directory mode) and renamed into place only on success, so an
 interrupted run leaves no work directory behind. If a crash leaves
 `.NAME.partial` behind, the next run says so; remove it and re-run.
 
-**Access control.** A work directory holds PHI (images with burned-in text,
-source paths, verdicts), so it is never world-readable. `--access` (or
+#### Access control
+
+A work directory holds PHI (images with burned-in text, source paths,
+verdicts), so it is never world-readable. `--access` (or
 `$IMAGE_REVIEW_ACCESS`) picks who else may use it:
 
 | `--access` | Directories | Files | Who |
@@ -173,59 +217,81 @@ source paths, verdicts), so it is never world-readable. `--access` (or
 
 Every directory and file `preprocess` creates follows the policy, and so does
 `review.tsv` when verdicts are saved (it recovers the policy from the work
-directory's own mode, so there is nothing to repeat). The tool only sets mode
-bits; it never runs `chgrp`. The work directory's group is whatever the
-filesystem assigns: the parent directory's group if the parent is setgid,
-otherwise your current primary group; a pre-created empty work directory's
-own group and mode are not kept (it is replaced by the staging directory).
-On clusters where everyone's primary group is site-wide (e.g. `users`), create
-the work directory under the study's group-owned setgid project directory, or
-run `sg <group> -c 'image-review preprocess ... --access group'` (or
-`newgrp <group>` first). With `--access group`, `preprocess` prints which Unix
-group got access (`Shared with Unix group 'study' (gid N)`). POSIX default ACLs
-on the parent can add named user/group entries (check with `getfacl`; the tool
-does not manage ACLs), but files never get "other" bits.
+directory's own mode, so there is nothing to repeat).
+
+The tool only sets mode bits; it never runs `chgrp`. The work directory's
+group is whatever the filesystem assigns: the parent directory's group if the
+parent is setgid, otherwise your current primary group. A pre-created empty
+work directory's own group and mode are not kept (it is replaced by the
+staging directory).
+
+- On clusters where everyone's primary group is site-wide (e.g. `users`),
+  create the work directory under the study's group-owned setgid project
+  directory, or run
+  `sg <group> -c 'image-review preprocess ... --access group'` (or
+  `newgrp <group>` first).
+- With `--access group`, `preprocess` prints which Unix group got access
+  (`Shared with Unix group 'study' (gid N)`).
+- POSIX default ACLs on the parent can add named user/group entries (check
+  with `getfacl`; the tool does not manage ACLs), but files never get "other"
+  bits.
+
 `review`, `serve` and `status` print a warning if the work directory or its
 `manifest.tsv` is accessible to other users (e.g. one made by an older
-version); they never change an existing directory's mode: run
-`chmod -R o-rwx <work dir>`. Only one writer (`review` or `serve`) can use a
-work directory at a time: it holds `review.lock` there, and a second writer
-exits with an error naming who holds it (`status` is read-only and always
-works). A team shares a work directory sequentially or splits a study into
-several work directories.
+version). They never change an existing directory's mode: run
+`chmod -R o-rwx <work dir>`.
+
+Only one writer (`review` or `serve`) can use a work directory at a time: it
+holds `review.lock` there, and a second writer exits with an error naming who
+holds it (`status` is read-only and always works). A team shares a work
+directory sequentially or splits a study into several work directories.
+
+#### Skipped inputs
 
 Every input ends up in exactly one of `manifest.tsv` (rendered) or
-`skipped.tsv`, with kind `failed` (e.g. a corrupt file, a `.jpg`/`.png`/...
-or `.zip` whose content is not one, a `.tar.gz` or other non-ZIP archive, an
-`unsupported:` multi-frame DICOM, an unreadable subdirectory, a
-symlinked directory outside the sources, a file named on the command line
-that is not an image, an input whose image id collides with another's, a
-file or ZIP entry whose name, or a directory above it, is not UTF-8 or holds a
-control character such as a newline or U+2028/U+2029, even one that would
-otherwise be ignored; it is listed under an escaped name like `a\x0ab.png` or
-`a\u2028b.png`: rename it) or
-`ignored` (not an image: unrecognized content, macOS AppleDouble files, a
-DICOMDIR index, an empty ZIP). The run finishes with a summary line (`Found N
-inputs: wrote K images in B batches; S skipped (F failed, I ignored; see
-.../skipped.tsv)`) and exits 1 if any input failed, unless `--allow-skipped`
-is given. Check `skipped.tsv` before reviewing: those images will not be
-shown.
+`skipped.tsv`, with one of two kinds:
 
-**Parallel rendering.** `--jobs N` renders inputs in N worker processes
-(default: `$SLURM_CPUS_PER_TASK` when set, else the CPUs the process may use,
-capped by the smallest cgroup v2 CPU quota of the process's cgroup and its
-ancestors, such as a login node's per-user `CPUQuota=` or a container's limit);
-`--jobs 1` renders in the main process. The output is byte-for-byte the same
-for any N; `preprocess.json` records the value. Memory grows with N: the
-main process holds the raw bytes of up to 2 × N inputs and each worker one
-input and its decoded arrays, so lower `--jobs` for very large DICOMs. Workers
-use one BLAS/OpenMP thread each unless you set `OMP_NUM_THREADS` and the like
-yourself. On a
-Slurm cluster request cores with `--cpus-per-task` (e.g. `srun
---cpus-per-task=8 image-review preprocess ...`) and `--jobs` follows. If a
-worker dies (e.g. out of memory), the run fails and leaves no work directory;
-re-run with `--jobs 1` to find the input. Ctrl-C or `scancel` stops the
-workers and removes the staging directory.
+- `failed`, e.g.:
+  - a corrupt file;
+  - a `.jpg`/`.png`/... or `.zip` whose content is not one;
+  - a `.tar.gz` or other non-ZIP archive;
+  - an `unsupported:` multi-frame DICOM;
+  - an unreadable subdirectory;
+  - a symlinked directory outside the sources;
+  - a file named on the command line that is not an image;
+  - an input whose image id collides with another's;
+  - a file or ZIP entry whose name, or a directory above it, is not UTF-8 or
+    holds a control character such as a newline or U+2028/U+2029, even one
+    that would otherwise be ignored. It is listed under an escaped name like
+    `a\x0ab.png` or `a\u2028b.png`: rename it.
+- `ignored` (not an image): unrecognized content, macOS AppleDouble files, a
+  DICOMDIR index, an empty ZIP.
+
+The run finishes with a summary line
+(`Found N inputs: wrote K images in B batches; S skipped (F failed, I ignored; see .../skipped.tsv)`)
+and exits 1 if any input failed, unless `--allow-skipped` is given. Check
+`skipped.tsv` before reviewing: those images will not be shown.
+
+#### Parallel rendering
+
+`--jobs N` renders inputs in N worker processes; `--jobs 1` renders in the
+main process. The default is `$SLURM_CPUS_PER_TASK` when set, else the CPUs
+the process may use, capped by the smallest cgroup v2 CPU quota of the
+process's cgroup and its ancestors (such as a login node's per-user
+`CPUQuota=` or a container's limit).
+
+- The output is byte-for-byte the same for any N; `preprocess.json` records
+  the value.
+- Memory grows with N: the main process holds the raw bytes of up to 2 × N
+  inputs and each worker one input and its decoded arrays, so lower `--jobs`
+  for very large DICOMs.
+- Workers use one BLAS/OpenMP thread each unless you set `OMP_NUM_THREADS`
+  and the like yourself.
+- On a Slurm cluster, request cores with `--cpus-per-task` (e.g.
+  `srun --cpus-per-task=8 image-review preprocess ...`) and `--jobs` follows.
+- If a worker dies (e.g. out of memory), the run fails and leaves no work
+  directory; re-run with `--jobs 1` to find the input. Ctrl-C or `scancel`
+  stops the workers and removes the staging directory.
 
 ### `image-review review`
 
@@ -240,6 +306,28 @@ image-review review [--mode {single,grid}]            [--pass N]
 Opens a fullscreen interactive session. In **grid mode**, images are
 bin-packed into composite grids for fast triage. In **single mode**, images
 are shown one at a time for detailed inspection.
+
+The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
+orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
+verdict). The status word is also written at the left end of the bar. Grids
+are built without DIRTY or FLAGGED images.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--mode` | `single` | Display mode |
+| `--pass` | auto-detected | Pass number, 1 or more |
+| `--batch` | the first batch with images matching the filter | Restrict the session to this batch; `b` at the end of the list never leaves it. An empty or unknown name is rejected (exit 2) with a list of known batches |
+| `--filter` | `unreviewed` | Which images to show; `unreviewed` = images still to do (UNREVIEWED and FLAGGED) |
+| `--rotate` | `auto` | Rotate images 90 degrees in grids; `auto` = only when that saves a grid |
+| `--reviewer` | your login name; `$IMAGE_REVIEW_REVIEWER` | Name recorded with each verdict; see [Recorded verdicts](#recorded-verdicts) |
+| `--work-dir` | `./review_work` | Work directory containing preprocessed data |
+| `--remote` | `$IMAGE_REVIEW_REMOTE` | Review a server started with `image-review serve` instead of a local `--work-dir`; the two are mutually exclusive |
+| `--via` | `$IMAGE_REVIEW_VIA` | Reach that server through an SSH tunnel via a login node, e.g. `--via user@login.cluster`; requires `--remote` |
+
+For `--remote` and `--via`, see
+[Reviewing on an HPC cluster](#reviewing-on-an-hpc-cluster).
+
+#### Keys and gamepad
 
 | Key | Action |
 |-----|--------|
@@ -259,8 +347,9 @@ are shown one at a time for detailed inspection.
 | `f` | Toggle fullscreen |
 | `q` / Escape | Quit |
 
-A gamepad works too, through SDL's game controller mappings, which give every
-supported pad the same Xbox-style layout whatever its labels say:
+A gamepad (Xbox-style controllers included) works too, through SDL's game
+controller mappings, which give every supported pad the same Xbox-style
+layout whatever its labels say. The help screen also shows the mappings.
 
 | Button | Action |
 |--------|--------|
@@ -275,73 +364,73 @@ autoplay. A pad SDL has no mapping for is not supported; you can supply one
 in SDL's mapping format through the `SDL_GAMECONTROLLERCONFIG` environment
 variable (one mapping per line).
 
-`c` and `d` (and B and Y) are ignored for 200 ms after an image or grid appears, so a verdict
-only applies to an item you have seen.
+`c` and `d` (and B and Y) are ignored for 200 ms after an image or grid
+appears, so a verdict only applies to an item you have seen.
+
+#### Undo
 
 `z` undoes your most recent mark, a single image or a whole grid, and returns
-to that item so you can mark it again (after the same 200 ms). Pressing it again
-undoes the mark before that, and so on. Only marks you made in this session
-since the last mode switch (`s`, `m`, `M`) can be undone; beyond them `z` says
-"Nothing to undo". The history lives in memory only and is gone when you quit.
-After a lost connection `z` does nothing; only `q` (or Start) works. An undo appends rows to `review.tsv`
-(`mode` `undo`) that restore each image's previous verdict and pass, or, for an
-image that had none, mark it `UNREVIEWED` again (a tombstone).
+to that item so you can mark it again (after the same 200 ms). Pressing it
+again undoes the mark before that, and so on.
 
-At the end of a batch, `b` moves on to the next batch without restarting. The
-end screen says "End of list", or in todo-only navigation "No todo images
+- Only marks you made in this session since the last mode switch (`s`, `m`,
+  `M`) can be undone; beyond them `z` says "Nothing to undo".
+- The history lives in memory only and is gone when you quit. It does not
+  carry over to a new batch opened with `b`.
+- After a lost connection `z` does nothing; only `q` (or Start) works.
+- An undo appends rows to `review.tsv` (`mode` `undo`) that restore each
+  image's previous verdict and pass, or, for an image that had none, mark it
+  `UNREVIEWED` again (a tombstone).
+
+#### End of a batch
+
+At the end of a batch, `b` moves on to the next batch without restarting.
+The end screen says "End of list", or in todo-only navigation "No todo images
 remaining" (or "No more todo images this way" when todo images are left in
 the other direction; Left/Right wrap round to the others), with the batch's
-todo count when it is not 0. `b`
-re-reads the current pass (keeping `--pass` if given) and the statuses, then
-opens the next batch, in sorted order, that still has todo images in the
+todo count when it is not 0.
+
+`b` re-reads the current pass (keeping `--pass` if given) and the statuses,
+then opens the next batch, in sorted order, that still has todo images in the
 current mode, at its first item. The search goes round once, so batches you
 skipped earlier (or images skipped in this one) come back. Under
-`--filter clean` or `all` an image is todo until you have marked it in this
-session, and again if it becomes UNREVIEWED or FLAGGED. When the pass changes
-(the last pass ended with DIRTY images) the search starts again from the first
-batch, and the info bar says "Now pass N". With `--batch`, `b` stays in that
-batch: it reloads it while it has todo images, then says "Batch NAME done for
-pass N". When nothing is left it says "All batches done for pass N", or, under
-the default `--filter unreviewed` when the pass has just ended, "Pass P
-complete - nothing to review in pass N"; "(current pass is M)" is added when
-`--pass` differs from the current pass. In grid mode it instead counts the
-FLAGGED/DIRTY images grids leave out and asks you to press `s`, which opens
-the first batch holding one in single mode. `q` quits. The undo history does
-not carry over to the new batch.
+`--filter clean` or `all`, an image is todo until you have marked it in this
+session, and again if it becomes UNREVIEWED or FLAGGED.
 
-The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
-orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
-verdict). The status word is also written at the left end of the bar. Grids are built without DIRTY or FLAGGED images.
+- When the pass changes (the last pass ended with DIRTY images), the search
+  starts again from the first batch, and the info bar says "Now pass N".
+- With `--batch`, `b` stays in that batch: it reloads it while it has todo
+  images, then says "Batch NAME done for pass N".
+- When nothing is left it says "All batches done for pass N", or, under the
+  default `--filter unreviewed` when the pass has just ended, "Pass P
+  complete - nothing to review in pass N". "(current pass is M)" is added
+  when `--pass` differs from the current pass. In grid mode, when nothing is
+  left, it instead counts the FLAGGED/DIRTY images grids leave out and asks
+  you to press `s`, which opens the first batch holding one in single mode.
+  `q` quits.
 
-`--pass` must be 1 or more. `--batch` defaults to the first batch with images
-matching the filter; an empty or unknown batch name is rejected (exit 2) with a
-list of known batches. It restricts the session to that batch: `b` at the end
-of the list never leaves it.
+#### Recorded verdicts
 
-Every verdict is saved to `review.tsv` in the work directory with who gave it
-and how: the columns are `image_id`, `batch`, `status`, `pass_number`,
-`timestamp`, `reviewer`, `mode` (`single`, `grid`, or `undo` for a row written
-by `z`), `grid_size` (how many images the one keypress covered) and
-`tool_version`. `status` is `CLEAN` or `DIRTY`, or `UNREVIEWED` in an undo row
-that returns an image to never-reviewed. `--reviewer NAME` (or
-`$IMAGE_REVIEW_REVIEWER`) sets the reviewer name, by default your login name;
-it must be 1-64 printable characters, not all spaces (no tabs or newlines),
-else the command exits 2. The name is an unauthenticated claim made by the client, recorded as
-given; nothing verifies it, also with `--remote`. A `review.tsv` from an older
-version (five columns) is upgraded in place the first time `review` or `serve`
-opens it, with the new columns left empty for its existing rows. Older
-image-review versions cannot read the upgraded file, so everyone sharing a
-work directory should upgrade together. Likewise, versions before wire API v5
-(before undo) reject a `review.tsv` that holds undo rows, so upgrade everyone
-sharing a work directory before anyone presses `z`.
+Every verdict is saved to `review.tsv` in the work directory, with who gave
+it and how. The columns are `image_id`, `batch`, `status`, `pass_number`,
+`timestamp`, `reviewer`, `mode` (`single`, `grid`, or `undo` for a row
+written by `z`), `grid_size` (how many images the one keypress covered) and
+`tool_version`. `status` is `CLEAN` or `DIRTY`, or `UNREVIEWED` in an undo
+row that returns an image to never-reviewed.
 
-Xbox-style controllers are also supported (see help screen for mappings).
+`--reviewer NAME` (or `$IMAGE_REVIEW_REVIEWER`) sets the reviewer name, by
+default your login name. It must be 1-64 printable characters, not all
+spaces (no tabs or newlines), else the command exits 2. The name is an
+unauthenticated claim made by the client, recorded as given; nothing
+verifies it, also with `--remote`.
 
-`--remote` (or `$IMAGE_REVIEW_REMOTE`) reviews a server started with
-`image-review serve` instead of a local `--work-dir`; the two are mutually
-exclusive. `--via` (or `$IMAGE_REVIEW_VIA`) reaches that server through an SSH
-tunnel via a login node, e.g. `--via user@login.cluster`; it requires
-`--remote`. See [Reviewing on an HPC cluster](#reviewing-on-an-hpc-cluster).
+**Upgrade everyone sharing a work directory together.** A `review.tsv` from
+an older version (five columns) is upgraded in place the first time `review`
+or `serve` opens it, with the new columns left empty for its existing rows.
+Older image-review versions cannot read the upgraded file. Likewise,
+versions before wire API v5 (before undo) reject a `review.tsv` that holds
+undo rows, so upgrade everyone sharing a work directory before anyone presses
+`z`.
 
 ### `image-review status`
 
@@ -351,7 +440,8 @@ image-review status [--check] [--work-dir DIR | --remote CONNECTION_STRING [--vi
 
 Prints overall and per-batch counts of CLEAN / DIRTY / UNREVIEWED / FLAGGED
 images. FLAGGED means marked DIRTY in an earlier pass and not yet re-reviewed
-in the current one, so after pass 1 completes its DIRTY images show as FLAGGED:
+in the current one, so after pass 1 completes its DIRTY images show as
+FLAGGED:
 
 ```
 Overall: 6 images (pass 2)
@@ -361,17 +451,24 @@ Overall: 6 images (pass 2)
   FLAGGED:         2
 ```
 
-If preprocess skipped any inputs it also prints
-`Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`;
-failed inputs were never shown, so they are not part of the counts above.
-`--remote` and `--via` work as for `review`.
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--check` | off | Set the exit status by whether the review is finished (see below) |
+| `--work-dir` | `./review_work` | Work directory containing preprocessed data |
+| `--remote` | `$IMAGE_REVIEW_REMOTE` | As for `review` |
+| `--via` | `$IMAGE_REVIEW_VIA` | As for `review` |
 
-With `--check` the report is printed as usual and the exit status says whether
-the review is finished, i.e. every image has a verdict: 1 if any image is
-UNREVIEWED or any input `failed` to preprocess; 0 otherwise (ignored inputs do
-not count). FLAGGED images have a DIRTY verdict from an earlier pass, so they
-count as decided: re-review passes are optional. They still show in the report,
-so a second pass remains available. Without `--check`, `status` exits 0.
+If `preprocess` skipped any inputs, `status` also prints
+`Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`.
+Failed inputs were never shown, so they are not part of the counts above.
+
+With `--check`, the report is printed as usual and the exit status says
+whether the review is finished, i.e. every image has a verdict: 1 if any
+image is UNREVIEWED or any input `failed` to preprocess; 0 otherwise (ignored
+inputs do not count). FLAGGED images have a DIRTY verdict from an earlier
+pass, so they count as decided: re-review passes are optional. They still
+show in the report, so a second pass remains available. Without `--check`,
+`status` exits 0.
 
 ### `image-review export`
 
@@ -388,31 +485,47 @@ file whose bytes changed since preprocess, and ZIP containers as a whole
 
 `--report FILE` also writes every other file to a new `FILE`, with its status
 and why. The report is for audit and follow-up (what is left to review, what
-preprocess could not read); never use it to choose what to release, e.g. by
-taking "everything not DIRTY".
+preprocess could not read). **Never use the report to choose what to
+release**, e.g. by taking "everything not DIRTY".
 
-A file is allowlisted only if it was reviewed CLEAN (a DICOM's icon too), the
-manifest has its SHA-256, and no file that is not CLEAN has the same recorded
-hash (`source_sha256`; identical bytes cannot be both clean and dirty, so all copies are denied).
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--work-dir` | `./review_work` | Work directory containing preprocessed data |
+| `--output` | stdout | Write the allowlist to this new file |
+| `--report` | none | Also write every file not allowlisted to this new file |
+| `--allow-live` | off | Export even while a writer (`review` or `serve`) has the work directory open |
+
+**Where to run it.** `image_id`s are source paths and may hold PHI, so
+export runs where the work directory is (e.g. on the cluster). It refuses
+`--remote` and ignores `$IMAGE_REVIEW_REMOTE`.
+
+#### What is allowlisted
+
+A file is allowlisted only if:
+
+- it was reviewed CLEAN (a DICOM's icon too);
+- the manifest has its SHA-256; and
+- no file that is not CLEAN has the same recorded hash (`source_sha256`;
+  identical bytes cannot be both clean and dirty, so all copies are denied).
+
 CLEAN files of a work directory made by an older version, whose manifest has
 no hashes, are never allowlisted: they appear in the report as CLEAN with
 `not allowlisted: ...` in `reason`.
 
-Both files are tab-separated UTF-8 with LF line endings and a header row,
-with no quoting. Export refuses (exit 1, naming the `image_id`, writing
-nothing) if any field of either file (`image_id`, `reviewer`, `reason`, ...),
-even without `--report`, holds a control character (tab, CR, LF and the rest
-of C0, DEL, C1 such as U+0085), U+2028 or U+2029, or starts with `"`, since
-readers could split or merge rows there. A `"` anywhere else is written as is.
+#### File format
 
-Allowlist columns: `source_sha256`, `image_id`, `pass_number`, `timestamp`,
-`reviewer`. Report columns: `image_id`, `status`, `pass_number`, `timestamp`,
-`reviewer`, `reason`, `source_sha256`.
+Both files are tab-separated UTF-8 with LF line endings and a header row,
+with no quoting.
+
+- Allowlist columns: `source_sha256`, `image_id`, `pass_number`,
+  `timestamp`, `reviewer`.
+- Report columns: `image_id`, `status`, `pass_number`, `timestamp`,
+  `reviewer`, `reason`, `source_sha256`.
 
 | Column | Description |
 |--------|-------------|
 | `image_id` | The source file's path, as in `manifest.tsv` / `skipped.tsv`; a file inside a ZIP is `<zip>::<entry>`, one row per entry |
-| `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest; compare it with the file's own before releasing it. In the report, empty for a file that never rendered or a work dir from an older version. It is derived from the file's content, so treat it like the `image_id` |
+| `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest; compare it with the file's own before releasing it. In the report, empty for a file that never rendered or a work directory from an older version. It is derived from the file's content, so treat it like the `image_id` |
 | `status` | (report) `DIRTY`, `UNREVIEWED` (no verdict yet), `NOT_REVIEWED` (preprocess could not render it, or its icon), `IGNORED` (preprocess did not take it for an image, so nobody looked at it), or `CLEAN` for a CLEAN file that was not allowlisted |
 | `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. After an undo they are the undo's time and reviewer. `reviewer` is the reviewer's unverified claim |
 | `reason` | (report) Why the row is not simply the main image's verdict: preprocess's error for a `NOT_REVIEWED` file, `icon DIRTY` / `icon UNREVIEWED` / `icon: <error>` for its icon, `main image missing` (an icon whose file is not in the manifest; the row is then at best `NOT_REVIEWED`), preprocess's reason for an `IGNORED` file, `not allowlisted: ...` for a CLEAN file that was not allowlisted; otherwise empty |
@@ -436,23 +549,32 @@ Allowlist columns: `source_sha256`, `image_id`, `pass_number`, `timestamp`,
 - Export logs one line to stderr: how many files are allowlisted and how many
   of each status are in the report.
 
-`image_id`s are source paths and may hold PHI, so export runs where the work
-directory is (e.g. on the cluster); it refuses `--remote` and ignores
-`$IMAGE_REVIEW_REMOTE`. It writes nothing in the work directory, and it
-refuses (exit 1) while a writer (`review` or `serve`) has the work directory
-open, since verdicts may still change. `--allow-live` exports anyway, with a
-warning. It always refuses a `review.tsv` whose last line was cut short by an
-interrupted write; the next verdict recorded with `review` drops that line.
-`--output` and `--report` never overwrite an existing file, and may not name
-the same file. The report is written first, so a failed allowlist write
-leaves only a report, which releases nothing. Each file is created in one step
-(written to a hidden `.FILE.<random>.tmp` beside it, then linked into place)
-with the work directory's file mode, and for a group work directory its group
-too (0660). If the group cannot be set, the file is made 0600 with a warning.
-The hidden file is removed on every exit except a hard kill (`kill -9`, a node
-crash), which can leave it behind: delete it, as it holds source paths. A
-writer that opens the work directory while export reads it also makes export
-refuse, unless `--allow-live`.
+Export refuses (exit 1, naming the `image_id`, writing nothing) if any field
+of either file (`image_id`, `reviewer`, `reason`, ...), even without
+`--report`, holds a control character (tab, CR, LF and the rest of C0, DEL,
+C1 such as U+0085), U+2028 or U+2029, or starts with `"`, since readers could
+split or merge rows there. A `"` anywhere else is written as is.
+
+#### Refusals and output files
+
+- It writes nothing in the work directory.
+- It refuses (exit 1) while a writer (`review` or `serve`) has the work
+  directory open, since verdicts may still change, and also if a writer opens
+  the work directory while export reads it. `--allow-live` exports anyway,
+  with a warning.
+- It always refuses a `review.tsv` whose last line was cut short by an
+  interrupted write; the next verdict recorded with `review` drops that line.
+- `--output` and `--report` never overwrite an existing file, and may not
+  name the same file.
+- The report is written first, so a failed allowlist write leaves only a
+  report, which releases nothing.
+- Each file is created in one step (written to a hidden `.FILE.<random>.tmp`
+  beside it, then linked into place) with the work directory's file mode, and
+  for a group work directory its group too (0660). If the group cannot be
+  set, the file is made 0600 with a warning.
+- The hidden file is removed on every exit except a hard kill (`kill -9`, a
+  node crash), which can leave it behind: delete it, as it holds source
+  paths.
 
 ### `image-review serve`
 
@@ -462,11 +584,12 @@ image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via USER@
 ```
 
 Serves a work directory over HTTPS (self-signed certificate, bearer token) so
-a remote client can review it without copying the images. Prints a connection
-string (`ir://...`) that grants access: treat it like a password. When stdout
-is not a terminal (e.g. `sbatch`), the string is written to
-`~/.image-review/connection-<host>-<port>.txt` (mode 0600) instead, and the
-file is removed when the server stops.
+a remote client can review it without copying the images.
+
+`serve` prints a connection string (`ir://...`) that grants access: **treat
+it like a password.** When stdout is not a terminal (e.g. `sbatch`), the
+string is written to `~/.image-review/connection-<host>-<port>.txt` (mode
+0600) instead, and the file is removed when the server stops.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -479,29 +602,35 @@ file is removed when the server stops.
 | `--direct` | off; `$IMAGE_REVIEW_DIRECT` | With `--socket`: your laptop can ssh to compute nodes without a jump host; the printed ssh command omits `-J` |
 | `--ssh-host` | this machine's FQDN | With `--socket`: the node name to put in the printed ssh command, for when the node's own FQDN does not resolve from your laptop |
 
-Each start generates a new token (and, over HTTPS, a new certificate).
-With `--socket`, a token in `$IMAGE_REVIEW_TOKEN` (22-256 characters from
+Each start generates a new token (and, over HTTPS, a new certificate). With
+`--socket`, a token in `$IMAGE_REVIEW_TOKEN` (22-256 characters from
 `A-Za-z0-9_-`) is used instead, so the URL survives restarts; it is ignored
 without `--socket`.
-`--socket` and `--socket-path` cannot be combined with `--bind` or `--port`, and
-`--socket-path` must not be empty; `--via` on the command line requires
-`--socket` (an `$IMAGE_REVIEW_VIA` in the environment is ignored without it).
-`--direct` follows the same rule (with `$IMAGE_REVIEW_DIRECT`) and cannot be
-combined with `--via` on the command line. `$IMAGE_REVIEW_SOCKET_PATH` is used
-only with `--socket`; without it, `serve` stays HTTPS over TCP and ignores the
-variable (an empty value counts as unset). `--ssh-host` requires `--socket`,
-takes a host name only (no `user@`), and has no environment variable.
+
+Option rules:
+
+- `--socket` and `--socket-path` cannot be combined with `--bind` or
+  `--port`, and `--socket-path` must not be empty.
+- `$IMAGE_REVIEW_SOCKET_PATH` is used only with `--socket`; without it,
+  `serve` stays HTTPS over TCP and ignores the variable (an empty value
+  counts as unset).
+- `--via` on the command line requires `--socket` (an `$IMAGE_REVIEW_VIA` in
+  the environment is ignored without it).
+- `--direct` follows the same rule (with `$IMAGE_REVIEW_DIRECT`) and cannot
+  be combined with `--via` on the command line.
+- `--ssh-host` requires `--socket`, takes a host name only (no `user@`), and
+  has no environment variable.
 
 ## Reviewing on an HPC cluster
 
 Review images where they are, without copying them off the cluster. The
 server runs on a compute node and the viewer on your laptop. Install
-`[preprocess,codecs]` on the cluster (core alone is enough for a node that only
-runs `serve`, `status` and `export`) and `[viewer]` on the laptop; see
+`[preprocess,codecs]` on the cluster (core alone is enough for a node that
+only runs `serve`, `status` and `export`) and `[viewer]` on the laptop; see
 [Installation](#installation).
 
 ```bash
-# On the cluster: get an interactive compute node and serve the work dir
+# On the cluster: get an interactive compute node and serve the work directory
 salloc ...                      # your site's usual options
 srun --pty bash                 # shell on the allocated node (if salloc leaves you on the login node)
 image-review serve --work-dir ./review_work
@@ -514,68 +643,92 @@ image-review review --remote 'ir://...'
 image-review review --remote 'ir://...' --via user@login-node
 ```
 
-Original files, DICOM headers and source paths stay on the cluster; only the
-preprocessed JPGs (and their batch/file names and review statuses) travel, over
-TLS with a pinned certificate, and are held in the viewer's memory. The
-connection string is a password. [SECURITY.md](SECURITY.md) states the threat
-model and its limits (swap, screenshots, shared nodes and home directories,
-multiple clients). See [TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster)
-for the full workflow and batch jobs.
+Original files, DICOM headers and source paths stay on the cluster. Only the
+preprocessed JPGs (and their batch/file names and review statuses) travel,
+over TLS with a pinned certificate, and are held in the viewer's memory.
+**The connection string is a password.** [SECURITY.md](SECURITY.md) states
+the threat model and its limits (swap, screenshots, shared nodes and home
+directories, multiple clients). See
+[TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster) for the full workflow
+and batch jobs.
 
-If `--remote` reports "server speaks API vN, this client vM" (or "server is too old to report its API version"), install the same image-review version on both machines. This release speaks wire API v7 (the server refuses a grid CLEAN over a DIRTY or FLAGGED image), so upgrade the cluster and the laptop together.
+**Use the same version on both machines.** This release speaks wire API v7
+(the server refuses a grid CLEAN over a DIRTY or FLAGGED image), so upgrade
+the cluster and the laptop together. If `--remote` reports "server speaks API
+vN, this client vM" (or "server is too old to report its API version"),
+install the same image-review version on both machines.
 
 ### Browser review over SSH (experimental)
 
 An experimental alternative to the pygame viewer: a browser on your laptop,
-with nothing installed there but `ssh`. The page starts with single images:
-enter a reviewer name, then `c` clean, `d` dirty, Left/Right to move and `z`
-to undo (`?` lists every key; one bar at the bottom, coloured by the image's
-status, holds the buttons and messages). `m` (or `M`, no rotation) switches to
-grid mode for one batch at a time, where one verdict covers the whole grid and
-CLEAN is refused if any image in it is already DIRTY or FLAGGED (unless every
-image in it is DIRTY, which reverses that grid's own verdict); `b` moves to
-the next batch and `s` returns to single mode. With one page per server `z`
-undoes only that page's marks; the server's undo history is shared by every
-client. On the node:
+with nothing installed there but `ssh`. The traffic is plain HTTP inside the
+ssh tunnel, with no TLS on the node. **Read the experimental section of
+[SECURITY.md](SECURITY.md) first**, and see the
+[tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the steps
+and troubleshooting.
+
+On the node:
 
 ```bash
 image-review serve --work-dir ./review_work --socket --via you@login-node
 ```
 
-If your laptop can reach compute nodes directly (`ssh you@node` works from
-it), add `--direct` instead of `--via`: the printed command then has no `-J`.
-If the node's own name does not work from your laptop, add
-`--ssh-host NAME` with the name that does. It prints an `ssh -N ... -L
-127.0.0.1:8080:/path/to.sock you@node` command
-and an `http://127.0.0.1:8080/#TOKEN` URL (the token is a password). Run the
-ssh command on your laptop, then open the URL. Under `sbatch` the URL is
-written to `~/.image-review/browser-<host>-<pid>.txt` instead. To keep the
-ssh forward across server restarts, give each job a fixed path: `export
-IMAGE_REVIEW_SOCKET_PATH=~/.image-review/ir-$SLURM_JOB_ID.sock` once, then
-`image-review serve --socket --direct` (or pass `--socket-path`). Each start
-makes a new token, so paste the new URL after a restart, unless you also
-`export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16)` inside the job: `serve
---socket` then reuses it and the URL stays the same (see the tutorial). After
-a "Lost connection" the page offers a Reconnect button (or `r`), never
-retrying by itself; with the fixed path and token a server restart needs
+- If your laptop can reach compute nodes directly (`ssh you@node` works from
+  it), add `--direct` instead of `--via`: the printed command then has no
+  `-J`.
+- If the node's own name does not work from your laptop, add
+  `--ssh-host NAME` with the name that does.
+
+`serve` prints an `ssh -N ... -L 127.0.0.1:8080:/path/to.sock you@node`
+command and an `http://127.0.0.1:8080/#TOKEN` URL (**the token is a
+password**). Run the ssh command on your laptop, then open the URL. Under
+`sbatch` the URL is written to `~/.image-review/browser-<host>-<pid>.txt`
+instead.
+
+**Using the page.** The page starts with single images: enter a reviewer
+name, then press `c` clean, `d` dirty, Left/Right to move and `z` to undo
+(`?` lists every key). One bar at the bottom, colored by the image's status,
+holds the buttons and messages.
+
+- `m` (or `M`, no rotation) switches to grid mode for one batch at a time,
+  where one verdict covers the whole grid. CLEAN is refused if any image in
+  the grid is already DIRTY or FLAGGED (unless every image in it is DIRTY,
+  which reverses that grid's own verdict).
+- `b` moves to the next batch and `s` returns to single mode.
+- With one page per server, `z` undoes only that page's marks; the server's
+  undo history is shared by every client.
+
+**Restarts.** To keep the ssh forward across server restarts, give each job a
+fixed socket path (or pass `--socket-path`). Each start makes a new token, so
+paste the new URL after a restart, unless you also export
+`IMAGE_REVIEW_TOKEN` inside the job: `serve --socket` then reuses it and the
+URL stays the same (see the tutorial).
+
+```bash
+# Once per job (re-running the token line makes a new token):
+export IMAGE_REVIEW_SOCKET_PATH=~/.image-review/ir-$SLURM_JOB_ID.sock
+export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16)   # optional: keeps the URL
+
+# Each start (after a restart, re-run only this line):
+image-review serve --socket --direct                # or --via you@login-node
+```
+
+After a "Lost connection" the page offers a Reconnect button (or `r`), never
+retrying by itself. With the fixed path and token, a server restart needs
 nothing more, and `q` (done) followed by Ctrl-C, the next `serve` in the same
-shell and Reconnect moves the same tab on to the next batch or pass. The
-traffic is plain HTTP inside the ssh tunnel, with no TLS on the node; read
-the experimental section of [SECURITY.md](SECURITY.md) first, and the
-[tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the
-steps and troubleshooting.
+shell and Reconnect moves the same tab on to the next batch or pass.
 
-## Multi-Pass Workflow
+## Multi-pass workflow
 
-1. **Pass 1** (grid triage): Mark grids CLEAN or DIRTY. Err toward DIRTY.
-2. **Pass 2** (single review): Only images marked DIRTY in pass 1 are shown,
-   as FLAGGED (orange status bar). Inspect individually. Grid mode skips
+1. **Pass 1** (grid triage): mark grids CLEAN or DIRTY. Err toward DIRTY.
+2. **Pass 2** (single review): only images marked DIRTY in pass 1 are shown,
+   as FLAGGED (orange status bar). Inspect them individually. Grid mode skips
    FLAGGED and DIRTY images, so a grid keypress cannot clear them.
-3. **Pass 3+**: Repeat on the shrinking DIRTY pool until confident.
+3. **Pass 3+**: repeat on the shrinking DIRTY pool until confident.
 
-Sessions are resumable -- quitting saves all progress. The batch and pass
-number are auto-detected when not specified. Press `b` at the end of a batch to
-move on to the next one, and into the next pass once this one is done (not
+Sessions are resumable: quitting saves all progress. The batch and pass
+number are auto-detected when not specified. Press `b` at the end of a batch
+to move on to the next one, and into the next pass once this one is done (not
 with `--batch`, which keeps you in that batch).
 
 ## Contributing
