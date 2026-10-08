@@ -1707,12 +1707,13 @@ malformed reply or a 404.
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 409 | `POST /mark`: CLEAN with `mode: "grid"` on keys holding a DIRTY or FLAGGED status in that pass, unless every key is DIRTY (`status.grid_clean_refused`); body `{"error": "grid holds a DIRTY or FLAGGED image"}` (no keys); nothing is recorded |
+| 412 | Socket mode only: an API request other than `GET /version` and `GET /current_pass` without exactly one `X-Review-Instance` header equal to this server run's (see *Unix-socket server*); body `{"error": "the page was loaded from another serve; reconnect"}`; nothing is read, recorded or packed |
 | 500 | Any unexpected store failure; only the exception class name is logged |
 | 503 | Socket mode: `POST /grids` while another `/grids` request is being computed; retry later |
 
-400, 401, 500 and unknown-route 404 replies send `Connection: close`, because
-a request body may be unread; an image 404, a `/mark` 409 and a `/grids` 503
-(sent after the body is read) keep the connection open.
+400, 401, 412, 500 and unknown-route 404 replies send `Connection: close`,
+because a request body may be unread; an image 404, a `/mark` 409 and a
+`/grids` 503 (sent after the body is read) keep the connection open.
 
 The 409 check runs under the store lock, so no other mark can land between
 it and the write. It reads `store.statuses(pass)` for the request's pass,
@@ -1853,6 +1854,28 @@ none of the new headers. The public routes needed no `API_VERSION` bump and
 do not change the HTTPS API: they exist only in socket mode, which the
 versioned pygame client cannot reach, and the page is served by the same
 server it calls. (v7 is for the grid CLEAN refusal on `/mark`.)
+
+Each `UnixReviewServer` start draws an instance id, `token_urlsafe(16)`. It
+names the server run and is not an access secret, but it is never logged.
+Every socket-mode response, stdlib error pages and the public files included,
+carries it as `X-Review-Instance`. Every API request except `GET /version`
+and `GET /current_pass` (where the page's first load and its Reconnect start)
+must carry exactly one `X-Review-Instance` request header equal to it;
+otherwise the server answers 412 with `{"error": "the page was loaded from
+another serve; reconnect"}`, closes the connection, and reads, records and
+packs nothing (an unknown route is 412 too, not 404). The check runs after
+the `Host` check and the token check, so a client without the token gets the
+same 400 or 401 as before and learns nothing from a 412; the public files
+need no header. The reason is the documented workflow: the socket path and
+token are often fixed per job (`$IMAGE_REVIEW_SOCKET_PATH`,
+`$IMAGE_REVIEW_TOKEN`), so an ssh forward and an open tab outlive a serve
+that is stopped and restarted on the next work directory, batch or pass, and
+keys (`batch_NNN/img_NNNNN.jpg`) repeat across work directories. Without the
+check a tab left showing image A would, after the restart, send its verdict
+for A's key to the new server, which would record it against an image nobody
+saw (every key of a stale grid in grid mode), and its reads would mix the two
+servers. TLS mode sends no such header and requires none; it needed no
+`API_VERSION` bump, since only the page served by this server calls it.
 
 `POST /grids` (socket mode only; over TLS it is an unknown path, 404, and a
 body on it is refused with 400 as on any bodyless route) lays out images into
@@ -2060,7 +2083,12 @@ empties the rest of the stack.
   click one, held, past the repeat guard; a click on one also takes focus
   out of the reviewer field, so later keys act on the page.
 - **Errors**: a 401 clears the stored token, shows "token rejected (server
-  restarted?) - open the new URL" and disables everything; a network failure
+  restarted?) - open the new URL" and disables everything; a 412 (another
+  server run answers: see *Unix-socket server*) stops the page as a lost
+  connection does, with "The server was restarted or now serves another
+  work directory. Press Reconnect (r) to load it.": the verdict, undo or
+  read it answered changes nothing, and Reconnect loads the new server as
+  below; a network failure
   shows "Lost connection — your marks so far are saved on the server", does
   the same and shows a Reconnect button (its place in the footer is kept
   while it is hidden, so showing it never resizes the stage). The button is
@@ -2076,10 +2104,13 @@ empties the rest of the stack.
   "Reconnecting...", takes the item off screen (its dwell with it), empties
   the stack of marked keys (the server may have restarted, or others marked
   meanwhile) and reloads what startup loads with the stored token and
-  reviewer name; until that reload is in, every control is busy, so no key
-  or button sends a request. It then rebuilds the current mode: single
-  mode's todo list, reshuffled; in grid mode the current batch and rotation
-  (as `m` keeps the batch), laid out afresh by `/grids` and landing on the
+  reviewer name. Startup and Reconnect read `/current_pass` first and keep
+  the `X-Review-Instance` of its reply, which every later request sends (a
+  reply without it is an unexpected reply); until that reload is in, every
+  control is busy, so no key or button sends a request. It then rebuilds
+  the current mode: single mode's todo list, reshuffled; in grid mode the
+  current batch and rotation (as `m` keeps the batch), laid out afresh by
+  `/grids` and landing on the
   grid holding the previous item's first key (kept across a failed
   Reconnect, and the key a pending repack would have landed on), else the
   first. Every item then starts a fresh dwell. The status line says

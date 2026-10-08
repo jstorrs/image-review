@@ -41,8 +41,13 @@
   in the same shell, Reconnect (also offered once nothing in the pass is
   left to review; a batch's end in grid mode says `b` or `s` instead, as the
   viewer does) loads the next batch or pass in the same tab, from its start;
-  closing the tab forgets the token. The
-  socket routes and the page needed no API version bump and do not change
+  closing the tab forgets the token. A tab still open on an earlier serve
+  cannot record a verdict, or undo one, on the next serve's images (keys
+  repeat across work directories): each serve start has its own instance id,
+  which the page sends with every request, and the server refuses a request
+  naming another (412) and records nothing; the page then says the server
+  was restarted or now serves another work directory and offers Reconnect.
+  The socket routes and the page needed no API version bump and do not change
   the HTTPS API (API v7, below, is for the grid CLEAN refusal).
   See [SECURITY.md](SECURITY.md) for the limits.
 - **Wire API v7: client and server must be upgraded together.** `POST /mark`

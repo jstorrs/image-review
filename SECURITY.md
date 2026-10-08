@@ -141,6 +141,21 @@ default mode; use it only where you accept the points below.
   Do not put the token on a command line (it would show in `ps` and shell
   history). `serve` accepts only 22-256 characters of `A-Za-z0-9_-` (use 128
   random bits) and never prints or logs it except in the URL.
+- **A page belongs to one serve.** With a fixed socket path and
+  `$IMAGE_REVIEW_TOKEN`, the ssh forward and the token outlive a serve
+  restarted on the next work directory, batch or pass, and keys
+  (`batch_NNN/img_NNNNN.jpg`) repeat across work directories. So a tab left
+  showing an image while serve is restarted elsewhere could otherwise send
+  its verdict for that key to the new server, recording CLEAN for an image
+  nobody saw there (every key of a grid). Each serve start therefore draws a
+  random instance id, sent on every reply; the page keeps the one it loaded
+  from and sends it on every request, and the server refuses (412) any API
+  request but `/version` and `/current_pass` that does not carry this
+  server's id (none, a repeated one, or another), reading, recording and
+  packing nothing. The page then stops and asks for
+  Reconnect, which loads the new server from scratch. The id is not a
+  secret (the token is the access control), is checked only after the
+  token, and is never logged.
 - **The laptop side.** The printed command forwards `127.0.0.1:8080` only, and
   the URL names `127.0.0.1`: ssh given a bare `-L 8080:...` also binds `::1`
   and succeeds if either bind works, so another process already on

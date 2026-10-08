@@ -14,12 +14,16 @@ const GRID_ELIGIBLE = new Set(["UNREVIEWED", "CLEAN"]);
 const MAX_GRID_KEYS = 1000; // server.MAX_GRID_KEYS
 const MIN_GRID_SIDE = 256; // server.MIN_GRID_SIDE
 const MAX_GRID_SIDE = 16384; // server.MAX_GRID_SIDE
+const INSTANCE_HEADER = "X-Review-Instance"; // server.INSTANCE_HEADER
 const GRID_IMAGE_FETCHES = 4; // concurrent /image requests while a grid is drawn
 const GRID_RETRY_MS = 2000; // between /grids attempts while the server is busy
 const REPACK_DELAY_MS = 300; // resize debounce before grids are repacked
 
 const TOKEN_REJECTED = "token rejected (server restarted?) - open the new URL";
 const LOST_CONNECTION = "Lost connection — your marks so far are saved on the server";
+// A 412: this page was loaded from an earlier serve (its keys may name another work directory's images).
+const SERVER_CHANGED =
+  "The server was restarted or now serves another work directory. Press Reconnect (r) to load it.";
 // With the same socket path and token, the next serve is loaded in this tab by Reconnect.
 const NEXT_SERVE = "Stop serve (Ctrl-C), start the next one, then press Reconnect (r).";
 const WAITING = "Done; waiting for the next serve";
@@ -389,6 +393,7 @@ function takeToken() {
 
 const state = {
   token: takeToken(),
+  instance: null, // the serve run the review was loaded from (its /current_pass reply's INSTANCE_HEADER)
   pass: null,
   manifest: [], // {key, batch} rows in manifest order
   batches: [], // the manifest's batches, sorted
@@ -491,14 +496,19 @@ function stale() {
   return new Stopped("stale");
 }
 
-// fetch with the token. A 401 or a network failure stops the page; once stopped,
-// nothing is sent until a Reconnect, and a request sent before then changes nothing.
+// fetch with the token and the instance the review was loaded from. A 401 or a
+// network failure stops the page, as does a 412 (another serve now answers, see
+// SERVER_CHANGED); once stopped, nothing is sent until a Reconnect, and a request
+// sent before then changes nothing.
 async function call(path, options = {}) {
   if (state.dead) {
     throw new Stopped("stopped");
   }
   const epoch = state.epoch;
   const headers = { ...options.headers, Authorization: "Bearer " + state.token };
+  if (state.instance !== null) {
+    headers[INSTANCE_HEADER] = state.instance; // /current_pass needs none: a Reconnect starts there
+  }
   let response;
   try {
     response = await fetch(path, { ...options, headers, cache: "no-store" });
@@ -513,6 +523,10 @@ async function call(path, options = {}) {
     state.token = null;
     writeStored("token", null);
     throw stop(TOKEN_REJECTED);
+  }
+  if (response.status === 412) {
+    state.lost = true; // as a lost connection: Reconnect loads the serve now answering
+    throw stop(SERVER_CHANGED);
   }
   return response;
 }
@@ -1370,9 +1384,19 @@ async function rebuild(mode, rotation, nextBatchToo, landKey) {
   await buildGrids(landKey);
 }
 
-// What start() loads: the current pass, the manifest and the pass's statuses.
+// What start() loads: the current pass, the manifest and the pass's statuses. The
+// instance named by the /current_pass reply is sent on every request after it.
 async function loadReview() {
-  const pass = parsePass(await getJson("/current_pass"));
+  const response = await call("/current_pass");
+  if (!response.ok) {
+    throw new HttpError(response.status);
+  }
+  const instance = response.headers.get(INSTANCE_HEADER);
+  const pass = parsePass(await readBody(response, "json"));
+  if (!instance) {
+    throw new BadReply("instance");
+  }
+  state.instance = instance;
   const manifest = parseManifest(await getJson("/manifest"));
   const statuses = parseStatusMap(await getJson("/statuses?pass=" + pass));
   return { pass, manifest, statuses };

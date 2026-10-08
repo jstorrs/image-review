@@ -23,6 +23,7 @@ from image_review import cli
 from image_review.cli import PACKAGE_LOGGER, browser_url, ssh_forward_command
 from image_review.connection import parse_token
 from image_review.server import (
+    INSTANCE_HEADER,
     ReviewServer,
     clear_stale_socket,
     default_socket_path,
@@ -116,15 +117,21 @@ class SocketServerTestCase(unittest.TestCase):
         self.server, self.token, stop = start_unix_server(self.work_dir, self.path)
         self.addCleanup(stop)
 
-    def request(self, method, path, body=None, token="default", host="localhost:8080"):
-        """One request through http.client, with `host` sent exactly as given (http.client would rewrite "::1")."""
+    def request(self, method, path, body=None, token="default", host="localhost:8080", instance="default"):
+        """One request through http.client, with `host` sent exactly as given (http.client would rewrite "::1").
+
+        `instance` is the X-Review-Instance sent: this server's by default, None for none.
+        """
         token = self.token if token == "default" else token
+        instance = self.server.instance if instance == "default" else instance
         conn = UnixHTTPConnection(self.path)
         self.addCleanup(conn.close)
         conn.putrequest(method, path, skip_host=True)
         conn.putheader("Host", host)
         if token is not None:
             conn.putheader("Authorization", f"Bearer {token}")
+        if instance is not None:
+            conn.putheader(INSTANCE_HEADER, instance)
         if body is not None:
             conn.putheader("Content-Length", str(len(body)))
         conn.endheaders(body)
@@ -132,12 +139,20 @@ class SocketServerTestCase(unittest.TestCase):
         return resp, resp.read()
 
     def raw_request(
-        self, method: str, path: str, token: str | None, host: str = "localhost", body: bytes = b""
+        self,
+        method: str,
+        path: str,
+        token: str | None,
+        host: str = "localhost",
+        body: bytes = b"",
+        instance: str | None = None,
     ) -> bytes:
         """Headers and body in one write, so a server that replies early and closes cannot cause EPIPE."""
         lines = [f"{method} {path} HTTP/1.1", f"Host: {host}", f"Content-Length: {len(body)}"]
         if token is not None:
             lines.append(f"Authorization: Bearer {token}")
+        if instance is not None:
+            lines.append(f"{INSTANCE_HEADER}: {instance}")
         return self.raw(("\r\n".join(lines) + "\r\n\r\n").encode() + body)
 
     def raw(self, data: bytes) -> bytes:
@@ -230,6 +245,134 @@ class TestSocketRequests(SocketServerTestCase):
         for text in [*messages, *logs.output]:
             self.assertNotIn(self.token, text)
             self.assertNotIn("Error", text)
+
+
+# The API routes a page loaded from another serve is refused on (ROUTES less /version and /current_pass)
+INSTANCE_ROUTES = [
+    ("GET", "/manifest"),
+    ("GET", "/image?key=batch_001/a.jpg"),
+    ("GET", "/statuses?pass=1"),
+    ("GET", "/skipped"),
+    ("POST", "/mark"),
+    ("POST", "/undo"),
+    ("POST", "/grids"),
+    ("GET", "/nope"),
+    ("DELETE", "/manifest"),
+]
+MARK_A = {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
+UNDO = {"pass": 1, "reviewer": "tester"}
+GRIDS_ALL = {"keys": ["batch_001/a.jpg", "batch_001/b.jpg"], "width": 640, "height": 480, "rotation": "auto"}
+STALE_BODY = {"error": "the page was loaded from another serve; reconnect"}
+
+
+class TestServerInstance(SocketServerTestCase):
+    def review_tsv(self) -> bytes:
+        path = self.work_dir / "review.tsv"
+        return path.read_bytes() if path.exists() else b""
+
+    def test_every_response_names_the_instance(self):
+        instance = self.server.instance
+        self.assertGreaterEqual(len(instance), 16)
+        cases = [
+            self.request("GET", "/current_pass"),
+            self.request("GET", "/manifest"),
+            self.request("GET", "/manifest", instance=None),  # 412
+            self.request("GET", "/current_pass", token=None),  # 401
+            self.request("GET", "/current_pass", host="evil.example"),  # 400
+            self.request("GET", "/app.js", token=None),
+        ]
+        for resp, _ in cases:
+            with self.subTest(status=resp.status):
+                self.assertEqual(resp.getheader(INSTANCE_HEADER), instance)
+        reply = self.raw(b"FOO / HTTP/1.1\r\nHost: localhost\r\n\r\n")  # a stdlib error response
+        self.assertIn(f"\r\n{INSTANCE_HEADER}: {instance}\r\n".encode(), reply)
+
+    def test_each_start_gets_a_new_instance(self):
+        other_dir = temp_dir(self)
+        make_work_dir(other_dir)
+        other, _, stop = start_unix_server(other_dir, socket_dir(self) / "other.sock")
+        self.addCleanup(stop)
+        self.assertNotEqual(other.instance, self.server.instance)
+
+    def test_version_and_current_pass_need_no_instance(self):
+        for instance in (None, "stale"):
+            with self.subTest(instance=instance):
+                resp, data = self.request("GET", "/current_pass", instance=instance)
+                self.assertEqual((resp.status, json.loads(data)), (200, {"pass": 1}))
+                resp, data = self.request("GET", "/version", instance=instance)
+                self.assertEqual(resp.status, 200)
+                self.assertIn("api", json.loads(data))
+
+    def test_other_routes_without_the_instance_are_412(self):
+        before = self.review_tsv()
+        bodies = {"/mark": MARK_A, "/undo": UNDO, "/grids": GRIDS_ALL}
+        wrong = [None, "", "stale", self.server.instance + "x", self.server.instance.upper()]
+        with mock.patch.object(self.server.store, "image_bytes") as image_bytes:
+            for (method, path), instance in itertools.product(INSTANCE_ROUTES, wrong):
+                with self.subTest(method=method, path=path, instance=instance):
+                    body = json.dumps(bodies[path]).encode() if path in bodies else b""
+                    # One write: the 412 closes without reading a body, which http.client could hit with EPIPE
+                    reply = self.raw_request(method, path, self.token, body=body, instance=instance)
+                    head, _, data = reply.partition(b"\r\n\r\n")
+                    self.assertTrue(head.startswith(b"HTTP/1.1 412 "), reply)
+                    self.assertIn(b"\r\nConnection: close\r\n", head)
+                    self.assertEqual(json.loads(data), STALE_BODY)
+            image_bytes.assert_not_called()  # no image read, no grid packed
+        self.assertEqual(self.review_tsv(), before)
+        self.assertEqual(self.server.image_sizes, {})
+
+    def test_a_repeated_instance_header_is_412(self):
+        instance = self.server.instance
+        auth = f"Authorization: Bearer {self.token}\r\n{INSTANCE_HEADER}: {instance}\r\n".encode()
+        headers = b"GET /manifest HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" + auth
+        self.assertTrue(self.raw(headers + b"\r\n").startswith(b"HTTP/1.1 200 "))
+        reply = self.raw(headers + f"{INSTANCE_HEADER}: {instance}\r\n\r\n".encode())
+        self.assertTrue(reply.startswith(b"HTTP/1.1 412 "), reply)
+
+    def test_mark_and_undo_from_a_stale_page_record_nothing(self):
+        resp, _ = self.request("POST", "/mark", body=json.dumps(MARK_A).encode())
+        self.assertEqual(resp.status, 200)
+        before = self.review_tsv()
+        for path, body in [("/mark", {**MARK_A, "status": "DIRTY"}), ("/undo", UNDO)]:
+            with self.subTest(path=path):
+                reply = self.raw_request("POST", path, self.token, body=json.dumps(body).encode(), instance="stale")
+                self.assertTrue(reply.startswith(b"HTTP/1.1 412 "), reply)
+        self.assertEqual(self.review_tsv(), before)
+        resp, data = self.request("GET", "/statuses?pass=1")
+        self.assertEqual(json.loads(data)["batch_001/a.jpg"], "CLEAN")
+
+    def test_with_the_instance_every_route_answers_as_before(self):
+        resp, data = self.request("GET", "/manifest")
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(json.loads(data))
+        self.assertEqual(self.request("GET", "/image?key=batch_001/a.jpg")[0].status, 200)
+        self.assertEqual(self.request("GET", "/skipped")[0].status, 200)
+        self.assertEqual(self.request("POST", "/grids", body=json.dumps(GRIDS_ALL).encode())[0].status, 200)
+        self.assertEqual(self.request("GET", "/nope")[0].status, 404)
+
+    def test_without_the_token_it_is_401_whatever_the_instance(self):
+        for (method, path), token, instance in itertools.product(
+            INSTANCE_ROUTES, (None, "wrong"), (None, "stale", self.server.instance)
+        ):
+            with self.subTest(method=method, path=path, token=token, instance=instance):
+                body = b"{}" if method == "POST" else b""
+                reply = self.raw_request(method, path, token, body=body, instance=instance)
+                head, _, data = reply.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 401 "), reply)
+                self.assertEqual(data, b"")
+
+    def test_bad_host_is_400_before_the_instance(self):
+        resp, data = self.request("GET", "/manifest", host="evil.example", instance=None)
+        self.assertEqual((resp.status, data), (400, b""))
+
+    def test_the_instance_is_never_logged(self):
+        with self.assertLogs(SERVER_LOGGER, "INFO") as logs:
+            self.request("GET", "/current_pass")
+            self.request("GET", "/manifest", instance="stale")
+        messages = [r.getMessage() for r in logs.records]
+        self.assertEqual(messages, ["unix GET /current_pass 200", "unix GET /manifest 412"])
+        for text in logs.output:
+            self.assertNotIn(self.server.instance, text)
 
 
 class TestPublicAssets(SocketServerTestCase):
@@ -452,6 +595,13 @@ class TestWebFiles(unittest.TestCase):
                 found = re.search(rf'^const {name} = "([^"]*)";$', script, re.MULTILINE)
                 assert found is not None, name
                 self.assertEqual(found[1], getattr(controller, name))
+
+    def test_instance_header_name_matches_the_server(self):
+        from image_review.server import INSTANCE_HEADER
+
+        found = re.search(r'^const INSTANCE_HEADER = "([^"]*)";', (WEB_DIR / "app.js").read_text(), re.MULTILINE)
+        assert found is not None
+        self.assertEqual(found[1], INSTANCE_HEADER)
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_grid_eligibility_parity(self):

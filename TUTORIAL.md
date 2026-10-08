@@ -877,6 +877,14 @@ command last the whole job:
    serves, from its first item (in grid mode, the first batch with grids),
    and says "Reconnected; now on pass N".
 
+If you skip step 1 or 4 and keep reviewing in the old tab, nothing goes to
+the wrong images: the new server refuses anything from a page loaded from
+the old one (its keys may name the new work directory's images), so the
+page records nothing, stops and says "The server was restarted or now
+serves another work directory. Press Reconnect (r) to load it." (or "Lost
+connection", if the new server is not up yet). Press Reconnect, and judge
+the images it then shows.
+
 If Reconnect says "Lost connection", the new server is not up yet: press it
 again. "token rejected" means the new server has another token: open its URL
 in the tab. When you are finished for the day, stop the server with Ctrl-C,

@@ -14,7 +14,7 @@ from PIL import Image
 from image_review import server as server_module
 from image_review.grid_packer import pack_into_grids
 from image_review.layout import fit_size
-from image_review.server import BadRequest, parse_grids
+from image_review.server import INSTANCE_HEADER, BadRequest, parse_grids
 from image_review.status import Key
 from tests.fixtures import (
     HAS_AF_UNIX,
@@ -79,11 +79,14 @@ class GridsTestCase(unittest.TestCase):
         self.addCleanup(conn.close)
         return conn
 
-    def post(self, body, token="default", conn=None) -> tuple[http.client.HTTPResponse, bytes]:
+    def post(self, body, token="default", conn=None, instance="default") -> tuple[http.client.HTTPResponse, bytes]:
         token = self.token if token == "default" else token
+        instance = self.server.instance if instance == "default" else instance
         conn = conn or self.connect()
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
+        if instance is not None:
+            headers[INSTANCE_HEADER] = instance
         conn.request("POST", "/grids", body=data, headers=headers)
         resp = conn.getresponse()
         return resp, resp.read()
@@ -149,6 +152,16 @@ class TestValidation(GridsTestCase):
             with self.subTest(token=token):
                 resp, data = self.post({"keys": KEYS, "width": 640, "height": 480, "rotation": "auto"}, token=token)
                 self.assertEqual((resp.status, data), (401, b""))
+
+    def test_a_page_from_another_serve_is_412_before_the_body_is_read(self):
+        store = self.server.store
+        for instance in (None, "stale"):
+            with self.subTest(instance=instance), mock.patch.object(store, "image_bytes") as image_bytes:
+                resp, data = self.post(b"", instance=instance)  # no body: the 412 closes before reading one
+                self.assertEqual(resp.status, 412)
+                self.assertEqual(json.loads(data), {"error": "the page was loaded from another serve; reconnect"})
+                image_bytes.assert_not_called()
+        self.assertEqual(self.server.image_sizes, {})
 
 
 class TestGrids(GridsTestCase):
@@ -313,6 +326,15 @@ class TestOverTls(unittest.TestCase):
     def test_body_on_grids_is_refused(self):
         body = json.dumps({"keys": KEYS, "width": 640, "height": 480, "rotation": "auto"}).encode()
         self.assertEqual(self.post(body), 400)
+
+    def test_no_instance_header_sent_or_required(self):
+        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/manifest", headers={"Authorization": f"Bearer {self.target.token}"})
+        resp = conn.getresponse()
+        resp.read()
+        self.assertEqual(resp.status, 200)
+        self.assertIsNone(resp.getheader(INSTANCE_HEADER))
 
 
 if __name__ == "__main__":

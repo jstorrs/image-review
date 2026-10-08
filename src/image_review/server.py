@@ -480,6 +480,14 @@ CONTENT_SECURITY_POLICY = (
 )
 
 
+# The server run a socket-mode request was meant for (UnixReviewServer.instance), sent on every reply and
+# required on every API request but these two: the page's first load and its Reconnect start there.
+INSTANCE_HEADER = "X-Review-Instance"
+INSTANCE_FREE_ROUTES = frozenset({("GET", "/version"), ("GET", "/current_pass")})
+# A page loaded from an earlier serve (keys collide across work dirs): nothing is read, recorded or packed
+STALE_PAGE = Reply(412, json.dumps({"error": "the page was loaded from another serve; reconnect"}).encode(), close=True)
+
+
 def load_assets() -> dict[str, Reply]:
     """The packaged browser page, read once; request paths never reach the filesystem."""
     web = importlib.resources.files("image_review") / "web"
@@ -523,10 +531,19 @@ class UnixReviewHandler(ReviewHandler):
         super()._handle(method)
 
     def _route(self, method: str) -> Reply:
-        if method == "POST" and self.path.partition("?")[0] == "/grids":  # the query is ignored, as on /mark
+        # After the Host and token checks (in _handle), so a 412 tells nothing to a client without the token.
+        # Any request body is left unread: STALE_PAGE closes the connection.
+        path = self.path.partition("?")[0]
+        if (method, path) not in INSTANCE_FREE_ROUTES and not self._same_instance():
+            return STALE_PAGE
+        if method == "POST" and path == "/grids":  # the query is ignored, as on /mark
             self._check_chunked()  # as ReviewHandler._route; the body is read here, so no _check_body
             return self._grids()
         return super()._route(method)
+
+    def _same_instance(self) -> bool:
+        values = self.headers.get_all(INSTANCE_HEADER, [])
+        return len(values) == 1 and values[0] == self.server.instance
 
     def _grids(self) -> Reply:
         req = parse_grids(self._read_body(), self.server.known_keys)
@@ -543,6 +560,7 @@ class UnixReviewHandler(ReviewHandler):
     def end_headers(self) -> None:
         self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(INSTANCE_HEADER, self.server.instance)
         super().end_headers()
 
 
@@ -551,6 +569,9 @@ class UnixReviewServer(ReviewServer):
 
     def __init__(self, path: Path, store: ReviewStore, token: str, assets: dict[str, Reply]):
         self.assets = assets
+        # Names this server run, so a page loaded from an earlier one on the same path and token is refused
+        # (UnixReviewHandler._route). Not a secret, but never logged.
+        self.instance = secrets.token_urlsafe(16)
         self.grid_slot = threading.Lock()  # held while a /grids request reads sizes and packs
         self.image_sizes: dict[Key, tuple[int, int]] = {}  # header sizes read so far; failures are not kept
         self.address_family = socket.AF_UNIX  # here, not on the class: Windows has no AF_UNIX and must still import
