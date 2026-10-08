@@ -932,7 +932,7 @@ def _announce_socket(
     jump = None if direct else via or f"{user}@<login-node>"
     print("Serving review data over a Unix socket (experimental: browser review over SSH).")
     print("\nOn your laptop, forward a local port to the socket (leave it running):")
-    print(f"  {ssh_forward_command(socket_path, node, user, jump)}")
+    print(f"\n  {ssh_forward_command(socket_path, node, user, jump)}\n")  # set apart, to copy cleanly
     print(f"If port {BROWSER_PORT} is busy on your laptop, change it in -L and in the URL.")
     if from_env:
         print("Using the token from $IMAGE_REVIEW_TOKEN: the URL stays the same across restarts in this shell.")
