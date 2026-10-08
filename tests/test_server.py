@@ -596,9 +596,9 @@ class TestReads(ServerTestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
 
-    def test_api_version_is_6(self):
-        self.assertEqual(API_VERSION, 6)
-        self.assertEqual(self.get_json("/version")["api"], 6)
+    def test_api_version_is_7(self):
+        self.assertEqual(API_VERSION, 7)
+        self.assertEqual(self.get_json("/version")["api"], 7)
 
     def test_skipped_absent_is_zero_counts(self):
         resp, data, _ = self.request("GET", "/skipped")
@@ -728,6 +728,92 @@ class TestMark(ServerTestCase):
         self.assertEqual(resp.status, 400)
 
 
+class TestGridCleanRefusal(ServerTestCase):
+    """/mark refuses a grid CLEAN over a DIRTY or FLAGGED key (status.grid_clean_refused): defence in
+    depth behind the clients' own check, which stale statuses can defeat."""
+
+    def mark(self, keys, status, mode="grid", pass_number=1):
+        return self.post_mark({"keys": keys, "status": status, "pass": pass_number, "reviewer": "r", "mode": mode})
+
+    def recorded(self) -> list[tuple[str, str]]:
+        with open(self.work_dir / "review.tsv", newline="") as f:
+            return [(r["image_id"], r["status"]) for r in csv.DictReader(f, delimiter="\t")]
+
+    def test_grid_clean_over_dirty_key_is_409_and_records_nothing(self):
+        self.assertEqual(self.mark(["batch_001/a.jpg"], "DIRTY", "single")[0].status, 200)
+        before = self.recorded()
+        with self.assertLogs(SERVER_LOGGER, "INFO") as logs:
+            resp, data = self.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN")
+        self.assertEqual(resp.status, 409)
+        self.assertEqual(json.loads(data), {"error": "grid holds a DIRTY or FLAGGED image"})
+        self.assertEqual(self.recorded(), before)
+        self.assertEqual(self.get_json("/statuses?pass=1")["batch_001/b.jpg"], "UNREVIEWED")
+        for text in logs.output:
+            self.assertNotIn("batch_001", text)
+
+    def test_grid_clean_over_flagged_key_is_409(self):
+        self.mark(["batch_001/a.jpg"], "DIRTY", "single")
+        self.mark(["batch_001/b.jpg", "batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
+        before = self.recorded()
+        self.assertEqual(self.get_json("/statuses?pass=2")["batch_001/a.jpg"], "FLAGGED")
+        resp, _ = self.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN", pass_number=2)
+        self.assertEqual(resp.status, 409)
+        self.assertEqual(self.recorded(), before)
+
+    def test_check_uses_the_requests_pass(self):
+        keys = ["batch_001/a.jpg", "batch_001/b.jpg"]
+        self.mark(keys, "DIRTY")
+        before = self.recorded()
+        resp, _ = self.mark(keys, "CLEAN", pass_number=2)  # FLAGGED in pass 2
+        self.assertEqual(resp.status, 409)
+        self.assertEqual(self.recorded(), before)
+        resp, _ = self.mark(keys, "CLEAN", pass_number=1)  # all DIRTY in pass 1: a reversal
+        self.assertEqual(resp.status, 200)
+
+    def test_check_runs_under_the_store_lock(self):
+        lock = self.server.store_lock
+        held = []
+        statuses = self.server.store.statuses
+
+        def recording_statuses(pass_number):
+            held.append(lock.locked())
+            return statuses(pass_number)
+
+        with mock.patch.object(self.server.store, "statuses", side_effect=recording_statuses):
+            resp, _ = self.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(held, [True])
+
+    def test_409_keeps_the_connection_open(self):
+        self.mark(["batch_001/a.jpg"], "DIRTY", "single")
+        body = {"keys": ["batch_001/a.jpg", "batch_001/b.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "r"}
+        resp, _, conn = self.request("POST", "/mark", body=json.dumps({**body, "mode": "grid"}).encode())
+        self.assertEqual(resp.status, 409)
+        self.assertIsNone(resp.getheader("Connection"))
+        conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {self.target.token}"})
+        again = conn.getresponse()
+        self.assertEqual((again.status, json.loads(again.read())), (200, {"pass": 1}))
+
+    def test_all_dirty_grid_may_be_marked_clean(self):
+        keys = ["batch_001/a.jpg", "batch_001/b.jpg"]
+        self.mark(keys, "DIRTY")
+        resp, data = self.mark(keys, "CLEAN")
+        self.assertEqual((resp.status, json.loads(data)), (200, dict.fromkeys(keys, "CLEAN")))
+
+    def test_single_clean_on_flagged_key_is_unchanged(self):
+        # FLAGGED in pass 2: refused as a grid, accepted as a single
+        self.mark(["batch_001/a.jpg"], "DIRTY", "single")
+        self.assertEqual(self.mark(["batch_001/a.jpg"], "CLEAN", "grid", pass_number=2)[0].status, 409)
+        resp, data = self.mark(["batch_001/a.jpg"], "CLEAN", "single", pass_number=2)
+        self.assertEqual((resp.status, json.loads(data)), (200, {"batch_001/a.jpg": "CLEAN"}))
+
+    def test_grid_dirty_over_dirty_key_is_allowed(self):
+        self.mark(["batch_001/a.jpg"], "DIRTY", "single")
+        resp, data = self.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(data), {"batch_001/a.jpg": "DIRTY", "batch_001/b.jpg": "DIRTY"})
+
+
 class TestUndo(ServerTestCase):
     def test_undo_round_trip(self):
         self.post_mark(
@@ -739,7 +825,7 @@ class TestUndo(ServerTestCase):
                 "status": "CLEAN",
                 "pass": 1,
                 "reviewer": "tester",
-                "mode": "grid",
+                "mode": "single",
             }
         )
         resp, data = self.post_undo({"pass": 1, "reviewer": "tester"})

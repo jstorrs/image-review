@@ -9,7 +9,18 @@ import pygame as pg
 from pygame._sdl2 import controller as sdl_controller
 
 from .grid_packer import GridSpec, pack_into_grids
-from .status import TODO_STATUSES, Key, MarkMode, Rotation, Status, Verdict
+from .status import (
+    GRID_ELIGIBLE,
+    TODO_STATUSES,
+    GridCleanRefused,
+    Key,
+    MarkMode,
+    Rotation,
+    Status,
+    Verdict,
+    grid_clean_refused,
+    grid_status,
+)
 from .store import (
     ManifestRow,
     ReviewStore,
@@ -44,10 +55,9 @@ def _dwell_elapsed(shown_at: int | None, now: int) -> bool:
     return shown_at is not None and now - shown_at >= MIN_DWELL_MS
 
 
-# A grid verdict applies to every image in it, so grids only hold images not yet judged
-# DIRTY (this pass) or FLAGGED (DIRTY in another pass): one keypress must never clear those.
-GRID_ELIGIBLE: frozenset[Status] = frozenset({"UNREVIEWED", "CLEAN"})
 GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in single mode"
+# The server's refusal for a left-out single shown in grid mode (sent as a grid mark) that became FLAGGED
+IMAGE_HAS_DIRTY = "image already marked DIRTY in another pass - review it in single mode"
 NOTHING_TO_UNDO = "Nothing to undo"
 UNLOADABLE_CLEAN = "cannot mark CLEAN: image could not be loaded"
 END_OF_LIST_MESSAGE = "End of list"
@@ -57,22 +67,6 @@ NO_TODO_THIS_WAY_MESSAGE = "No more todo images this way"
 
 def _placeholder(key: Key, reason: str) -> pg.Surface:
     return placeholder_surface(f"Cannot load image: {key}\n{reason}\nIt can only be marked DIRTY")
-
-
-def _grid_status(snapshot: dict[Key, Status], keys: tuple[Key, ...]) -> Status:
-    statuses = {snapshot[key] for key in keys}
-    if not statuses <= GRID_ELIGIBLE:
-        return "DIRTY"  # e.g. a key sharing an image_id with one marked DIRTY elsewhere this session
-    if statuses & TODO_STATUSES:
-        return "UNREVIEWED"
-    return "CLEAN"
-
-
-def _grid_clean_refused(snapshot: dict[Key, Status], keys: tuple[Key, ...]) -> bool:
-    """CLEAN on a grid holding a DIRTY or FLAGGED image is refused, unless the whole grid is
-    DIRTY (reversing that grid's own verdict)."""
-    statuses = {snapshot[key] for key in keys}
-    return not statuses <= GRID_ELIGIBLE and statuses != {"DIRTY"}
 
 
 class GridCacheKey(NamedTuple):
@@ -322,7 +316,10 @@ class ReviewSession:
         items.sort(key=lambda item: len(item.keys), reverse=True)
         # Each image left out of the grids (unloadable, or left unpacked) becomes a single image after them:
         # it follows the single-image rules, and _show_current loads it when it is shown, drawing a
-        # placeholder only if that fails
+        # placeholder only if that fails. It is marked with mode "grid", so over a server its CLEAN
+        # follows the grid rule once it is FLAGGED (another client wrote an earlier-pass DIRTY); locally
+        # that cannot arise, as the work dir has one writer and a session's own marks never make a key
+        # DIRTY in another pass
         items += [SingleItem(key) for key in left_out]
         return items
 
@@ -525,7 +522,7 @@ class ReviewSession:
     def _item_status(self, item: ReviewItem) -> Status:
         match item:
             case GridItem(keys=keys):
-                return _grid_status(self._statuses, keys)
+                return grid_status(self._statuses, keys)
             case SingleItem(key=key):
                 return self._statuses[key]
 
@@ -555,12 +552,15 @@ class ReviewSession:
             log.warning("%s: %s", UNLOADABLE_CLEAN, ", ".join(k for k in item.keys if k in self._unloadable))
             self._viewer.set_info(UNLOADABLE_CLEAN)
             return
-        if isinstance(item, GridItem) and status == "CLEAN" and _grid_clean_refused(self._statuses, item.keys):
+        if isinstance(item, GridItem) and status == "CLEAN" and grid_clean_refused(self._statuses, item.keys):
             log.warning("%s", GRID_HAS_DIRTY)
             self._viewer.set_info(GRID_HAS_DIRTY)
             return
         try:
             changed = self.store.mark(list(item.keys), status, self.pass_number, reviewer=self.reviewer, mode=self.mode)
+        except GridCleanRefused:
+            self._grid_clean_refused_by_store(item)
+            return
         except StoreUnavailable as exc:
             self._store_lost(exc)
             return
@@ -570,6 +570,19 @@ class ReviewSession:
         self._viewer.set_status(status)
         pg.time.set_timer(ADVANCE_EVENT, 200, 1)
         self._advance_pending = True
+
+    def _grid_clean_refused_by_store(self, item: ReviewItem):
+        """The server refused a grid-mode CLEAN this client allowed: its statuses were stale (e.g. another
+        client marked a key DIRTY). Show the refusal and re-read the statuses so the item shows them."""
+        message = GRID_HAS_DIRTY if isinstance(item, GridItem) else IMAGE_HAS_DIRTY
+        log.warning("%s", message)
+        try:
+            self._statuses = self.store.statuses(self.pass_number)
+        except StoreUnavailable as exc:
+            self._store_lost(exc)
+            return
+        self._viewer.set_status(self._item_status(item))
+        self._viewer.set_info(message)
 
     def _notify(self, text: str):
         """Show text in the info bar while reviewing, else as the screen's message."""

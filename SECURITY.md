@@ -283,6 +283,16 @@ world-readable.
   fetched, read or verified as a placeholder that accepts DIRTY but refuses
   CLEAN, so an image nobody could see is not cleared by the viewer (see the
   limit above).
+- **Grid CLEAN over DIRTY or FLAGGED images.** One grid verdict covers every
+  image in the grid, so both clients refuse CLEAN on a grid holding an image
+  already DIRTY (this pass) or FLAGGED (DIRTY in an earlier pass), unless
+  every image in it is DIRTY (reversing that grid's own verdict). The server
+  refuses it too: `/mark` checks the store's current statuses under its lock
+  and answers 409, recording nothing, so a client bug, or statuses gone stale
+  because another client marked an image DIRTY meanwhile, cannot clear such
+  an image through a grid. This does not lift the limit above: a `single`
+  mark, from any client holding the token, can still mark any known image
+  CLEAN.
 
 ## Reporting a vulnerability
 

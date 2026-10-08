@@ -208,6 +208,17 @@ class TestSocketRequests(SocketServerTestCase):
         resp, data = self.request("GET", "/statuses?pass=1")
         self.assertEqual(json.loads(data)["batch_001/a.jpg"], "UNREVIEWED")
 
+    def test_grid_clean_over_dirty_key_is_409(self):
+        def mark(keys, status, mode):
+            body = {"keys": keys, "status": status, "pass": 1, "reviewer": "tester", "mode": mode}
+            return self.request("POST", "/mark", body=json.dumps(body).encode())
+
+        self.assertEqual(mark(["batch_001/a.jpg"], "DIRTY", "single")[0].status, 200)
+        resp, data = mark(["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN", "grid")
+        self.assertEqual((resp.status, json.loads(data)), (409, {"error": "grid holds a DIRTY or FLAGGED image"}))
+        resp, data = self.request("GET", "/statuses?pass=1")
+        self.assertEqual(json.loads(data)["batch_001/b.jpg"], "UNREVIEWED")
+
     def test_log_line_uses_unix_peer_and_hides_token(self):
         with self.assertLogs(SERVER_LOGGER, "INFO") as logs:
             self.request("GET", "/current_pass")
@@ -397,7 +408,7 @@ class TestWebFiles(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_grid_status_parity(self):
-        from image_review.controller import _grid_clean_refused, _grid_status
+        from image_review.status import grid_clean_refused, grid_status
 
         cases = [
             dict(zip([f"k{i}" for i in range(n)], combo, strict=True))
@@ -416,7 +427,7 @@ class TestWebFiles(unittest.TestCase):
             cases,
         )
         expected = [
-            [_grid_status(statuses, tuple(statuses)), _grid_clean_refused(statuses, tuple(statuses))]
+            [grid_status(statuses, tuple(statuses)), grid_clean_refused(statuses, tuple(statuses))]
             for statuses in cases
         ]
         self.assertEqual(got, expected)
@@ -425,7 +436,7 @@ class TestWebFiles(unittest.TestCase):
         from image_review import controller
 
         script = (WEB_DIR / "app.js").read_text()
-        for name in ["GRID_HAS_DIRTY", "NOTHING_TO_UNDO", "UNLOADABLE_CLEAN"]:
+        for name in ["GRID_HAS_DIRTY", "IMAGE_HAS_DIRTY", "NOTHING_TO_UNDO", "UNLOADABLE_CLEAN"]:
             with self.subTest(name=name):
                 found = re.search(rf'^const {name} = "([^"]*)";$', script, re.MULTILINE)
                 assert found is not None, name

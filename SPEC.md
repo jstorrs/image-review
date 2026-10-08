@@ -53,7 +53,7 @@ interactively in a fullscreen viewer, and report **status** on review progress.
 ```
 cli.py              Command-line entry point, argument parsing
 preprocess.py       DICOM/image loading and normalization
-status.py           Status, Verdict, MarkMode, Rotation, TODO_STATUSES vocabulary (stdlib only)
+status.py           Status, Verdict, MarkMode, Rotation, TODO_STATUSES vocabulary; GRID_ELIGIBLE, grid_status, grid_clean_refused (stdlib only)
 store.py            ReviewStore Protocol, LocalStore, pure filter/summary functions
 lock.py             The work directory's review.lock: acquire, release, live_writer (stdlib only)
 export.py           Export rows, the allowlist split and their TSV formats: export_rows, split_allowlist, format_allowlist, format_report (stdlib only)
@@ -968,7 +968,12 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 
 ### Types
 
-`Key`, `ImageId`, `Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode` and `Rotation`) are defined in `status.py`.
+`Key`, `ImageId`, `Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode`
+and `Rotation`) are defined in `status.py`, with the grid rules both clients
+and the server apply: `GRID_ELIGIBLE`, `grid_status(snapshot, keys)` and
+`grid_clean_refused(snapshot, keys)` (see *Grid Status Derivation*), and
+`GridCleanRefused`, the exception a store raises when it refuses a grid CLEAN
+by that rule (not a `StoreUnavailable`).
 
 | Name | Description |
 |------|-------------|
@@ -1127,7 +1132,7 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
 - Read screen dimensions, subtract the 50px status bar height
 - A window resize rebuilds the grids (see *Resize rebuild* below)
 - `filter_rows()` for the current pass/batch/filter, then keep only rows whose
-  status is in `controller.GRID_ELIGIBLE` (UNREVIEWED or CLEAN), in every
+  status is in `status.GRID_ELIGIBLE` (UNREVIEWED or CLEAN), in every
   filter including `all`. A grid mark applies to all its images, so one
   keypress must never clear an image already judged DIRTY (this pass) or
   FLAGGED (DIRTY in another pass); those are reviewed in single mode
@@ -1150,17 +1155,34 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
   `SingleItem(key)`. Like a
   single-mode item it is loaded when shown, so a placeholder is drawn only
   then and only if loading fails, and it follows the single-image status rules,
-  not the grid rules. No grid ever holds a key whose pixels it does not show
+  not the grid rules, with one exception: it is marked with mode `grid`, so
+  over a server its CLEAN follows the grid rule once it is FLAGGED (the 409
+  below). That needs another client writing an earlier-pass DIRTY; locally it
+  cannot arise, as the work directory has a single writer and a session's own
+  marks never make a key DIRTY in another pass. No grid ever holds a key whose
+  pixels it does not show
 
 When a grid is marked CLEAN or DIRTY, `store.mark()` is called with all its
 `keys`, and every key in the result is written into the snapshot.
 
 A grid can still come to hold a DIRTY key mid-session, when a key in it shares
 an `image_id` with an image marked DIRTY elsewhere. CLEAN on a grid holding any
-DIRTY or FLAGGED key is refused (no store call; the status bar shows "grid
-contains an image already marked DIRTY - review it in single mode", also
-logged), unless every key in the grid is DIRTY, which reverses that
-grid's own verdict.
+DIRTY or FLAGGED key is refused (`status.grid_clean_refused`; no store call;
+the status bar shows "grid contains an image already marked DIRTY - review it
+in single mode", also logged), unless every key in the grid is DIRTY, which
+reverses that grid's own verdict.
+
+The server applies the same rule to every `POST /mark` with mode `grid` (409,
+see *Error semantics*), so a snapshot gone stale (e.g. another client marked
+a key DIRTY since it was read) cannot record such a CLEAN either.
+`RemoteStore.mark` raises `GridCleanRefused` for the 409; it is not a lost
+connection: the session logs and shows the same refusal (for a left-out
+single, "image already marked DIRTY in another pass - review it in single
+mode"), re-reads the statuses (a `StoreUnavailable` there is a lost
+connection) and repaints the item's status. Nothing is recorded, so the undo
+count is unchanged and there is no auto-advance. `LocalStore` does not check the rule:
+the session refuses a grid before calling it, and a left-out single cannot
+become FLAGGED locally (see above).
 
 If grid mode has no items but the status filter selected rows it left out, the
 session says so instead of implying the review is done: `run()` prints, and a
@@ -1218,7 +1240,8 @@ a placeholder that only takes DIRTY.
 
 ### Grid Status Derivation
 
-A grid's aggregate status is derived from the snapshot statuses of its keys:
+A grid's aggregate status (`status.grid_status`) is derived from the snapshot
+statuses of its keys:
 - Any key not in `GRID_ELIGIBLE` (DIRTY or FLAGGED) -> DIRTY, so such a grid
   is neither shown nor counted as todo
 - Otherwise any UNREVIEWED -> UNREVIEWED
@@ -1642,20 +1665,22 @@ the boundary (`parse_pass`, `parse_mark`, `parse_undo`, `parse_grids`).
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`; both 0 if it has none). Only counts are sent, never `image_id`s or reasons (which contain source paths) |
-| `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`) |
+| `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`). A `grid` CLEAN that `status.grid_clean_refused` refuses against the store's current statuses for `pass` (a key DIRTY or FLAGGED, unless every key is DIRTY) is answered 409 and records nothing; `single` marks and DIRTY verdicts are never refused |
 | `POST /undo` | Body `{"pass": N, "reviewer": str}`, checked as for `/mark`; other fields are ignored. Undoes the server store's latest mark (`ReviewStore.undo`); responds `{key: status, ...}` for every key affected, or `{}` when there is nothing to undo |
 | `POST /grids` | Socket mode only (404 over TLS): grid layouts for the browser client; see *Unix-socket server* |
 
 Only keys and skip counts appear on the wire; original `image_id`s never do.
 
-**API version rule.** `connection.API_VERSION` (an integer, currently 6; v2 added `GET /skipped`;
-v3 added `FLAGGED` to the `Status` vocabulary, which `/statuses` responses
-may contain; `/mark` responses hold only the verdict just recorded; v4 dropped
-`batch` from the `/mark` body, the server taking each key's batch from the
-manifest, and added `reviewer` and `mode`; v5 added `POST /undo`; v6 made
-`GET /skipped` always send counts, never `null`, and refused repeated query
-parameters with 400) is shared by client and server. Any change to request or response shapes, or to
-the `Status` vocabulary, must bump it. Client and server are installed
+**API version rule.** `connection.API_VERSION` (an integer, currently 7; v2
+added `GET /skipped`; v3 added `FLAGGED` to the `Status` vocabulary, which
+`/statuses` responses may contain; `/mark` responses hold only the verdict
+just recorded; v4 dropped `batch` from the `/mark` body, the server taking
+each key's batch from the manifest, and added `reviewer` and `mode`; v5 added
+`POST /undo`; v6 made `GET /skipped` always send counts, never `null`, and
+refused repeated query parameters with 400; v7 made `/mark` refuse a grid
+CLEAN over a DIRTY or FLAGGED key with 409) is shared by client and server.
+Any change to request or response shapes, or to the `Status` vocabulary, must
+bump it. Client and server are installed
 separately, so skew is expected and must fail clearly rather than as a
 malformed reply or a 404.
 
@@ -1666,12 +1691,18 @@ malformed reply or a 404.
 | 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo` (and, in socket mode, `POST /grids`); a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid; `/grids` as described under *Unix-socket server* |
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
+| 409 | `POST /mark`: CLEAN with `mode: "grid"` on keys holding a DIRTY or FLAGGED status in that pass, unless every key is DIRTY (`status.grid_clean_refused`); body `{"error": "grid holds a DIRTY or FLAGGED image"}` (no keys); nothing is recorded |
 | 500 | Any unexpected store failure; only the exception class name is logged |
 | 503 | Socket mode: `POST /grids` while another `/grids` request is being computed; retry later |
 
 400, 401, 500 and unknown-route 404 replies send `Connection: close`, because
-a request body may be unread; an image 404 and a `/grids` 503 (sent after the
-body is read) keep the connection open.
+a request body may be unread; an image 404, a `/mark` 409 and a `/grids` 503
+(sent after the body is read) keep the connection open.
+
+The 409 check runs under the store lock, so no other mark can land between
+it and the write. It reads `store.statuses(pass)` for the request's pass,
+which builds the status of every manifest key in memory: O(manifest size)
+once per grid CLEAN, small beside the synced append the mark itself does.
 
 ### Headers and connection handling
 
@@ -1802,9 +1833,10 @@ default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 and `Referrer-Policy: no-referrer`, besides `Cache-Control: no-store` and
 `X-Content-Type-Options: nosniff`. TLS mode has no public routes and sends
-none of the new headers. `API_VERSION` is unchanged: the public routes exist
-only in socket mode, which the versioned pygame client cannot reach, and the
-page is served by the same server it calls.
+none of the new headers. The public routes needed no `API_VERSION` bump and
+do not change the HTTPS API: they exist only in socket mode, which the
+versioned pygame client cannot reach, and the page is served by the same
+server it calls. (v7 is for the grid CLEAN refusal on `/mark`.)
 
 `POST /grids` (socket mode only; over TLS it is an unknown path, 404, and a
 body on it is refused with 400 as on any bodyless route) lays out images into
@@ -1853,8 +1885,9 @@ One `/grids` request is computed at a time; another arriving meanwhile gets
 503 with the connection kept open, meaning retry later. Packing is not
 cancelled when the client disconnects, so a reloaded page may see 503 until
 the earlier request finishes. Nothing about individual keys is logged.
-`API_VERSION` is unchanged for the same reason as the public routes: `/grids`
-exists only in socket mode, whose page is served by the server it calls.
+`/grids` needed no `API_VERSION` bump for the same reason as the public
+routes: it exists only in socket mode, whose page is served by the server it
+calls.
 
 `default_socket_path()` is `~/.image-review/serve-<short-host>-<pid>.sock`.
 
@@ -1903,10 +1936,15 @@ shown in grid mode, including a left-out or demoted single, is marked with
 only while its canvas is shown with every key drawn and its dwell is over:
 never while it is being drawn or redrawn, hidden by a resize repack, or
 after `contextlost`. CLEAN on a grid holding a DIRTY or FLAGGED image (as
-`controller._grid_clean_refused`: unless every image is DIRTY) is refused
+`status.grid_clean_refused`: unless every image is DIRTY) is refused
 with "grid contains an image already marked DIRTY - review it in single
-mode" and no request; DIRTY is always allowed. A grid holding such an image
-is not todo (its status is DIRTY, as `controller._grid_status`), so the
+mode" and no request; DIRTY is always allowed. If the page's statuses were
+stale and the server refuses the CLEAN instead (409), the page shows the same
+message (for a left-out single that became FLAGGED, which the server refuses
+as a grid mark: "image already marked DIRTY in another pass - review it in
+single mode"), rereads `/statuses` into its status map, pushes nothing on the
+stack of marked keys and stays on the item. A grid holding such an image
+is not todo (its status is DIRTY, as `status.grid_status`), so the
 move after a mark skips it. A resize repack empties the stack of marked keys
 at once, as `controller._rebuild_grids_for_resize` resets its undo count
 (the old items are gone, so `z` then says "Nothing to undo"); a repack due
@@ -2036,9 +2074,10 @@ Any other `OSError` or `HTTPException` raises `RemoteError` immediately.
 **Error mapping**: `RemoteError(StoreUnavailable)` carries `status`, the HTTP
 status when the server answered, else `None`. A non-200 reply raises
 `RemoteError` with that status, except `image_bytes`, where 404 raises
-`KeyError(key)` (an unloadable image, not an outage). Responses are parsed
-strictly (`parse_manifest`, `parse_statuses`, `parse_pass`, `parse_skipped`); malformed
-payloads raise `RemoteError`.
+`KeyError(key)` (an unloadable image, not an outage), and `mark`, where 409
+raises `status.GridCleanRefused` (a refused grid CLEAN, not an outage).
+Responses are parsed strictly (`parse_manifest`, `parse_statuses`,
+`parse_pass`, `parse_skipped`); malformed payloads raise `RemoteError`.
 
 **`image_bytes_many`**: fetches distinct keys concurrently on an 8-worker
 pool; a `KeyError` (404) is warned about and omitted, like `LocalStore`; any

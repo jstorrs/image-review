@@ -40,7 +40,17 @@ from .connection import (
     parse_reviewer,
 )
 from .layout import GridPlan, is_rotated, jpeg_size, plan_grids
-from .status import MARK_MODES, ROTATIONS, VERDICTS, Key, MarkMode, Rotation, Verdict, parse_choice
+from .status import (
+    MARK_MODES,
+    ROTATIONS,
+    VERDICTS,
+    Key,
+    MarkMode,
+    Rotation,
+    Verdict,
+    grid_clean_refused,
+    parse_choice,
+)
 from .store import ReviewStore
 
 log = logging.getLogger(__name__)
@@ -252,6 +262,10 @@ def json_reply(payload) -> Reply:
     return Reply(200, json.dumps(payload).encode())
 
 
+# /mark's refusal of a grid CLEAN over a DIRTY or FLAGGED key (status.grid_clean_refused); nothing is recorded
+GRID_CLEAN_REFUSED = Reply(409, json.dumps({"error": "grid holds a DIRTY or FLAGGED image"}).encode())
+
+
 class ReviewHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = HANDLER_TIMEOUT_SECONDS
@@ -352,6 +366,12 @@ class ReviewHandler(BaseHTTPRequestHandler):
             case ("POST", "/mark"):
                 req = parse_mark(self._read_body(), self.server.known_keys)
                 with lock:
+                    if req.mode == "grid" and req.status == "CLEAN":
+                        # The clients refuse this first; their statuses may be stale. statuses() is
+                        # O(manifest) in memory, once per grid CLEAN.
+                        snapshot = store.statuses(req.pass_number)
+                        if grid_clean_refused(snapshot, tuple(req.keys)):
+                            return GRID_CLEAN_REFUSED
                     changed = store.mark(req.keys, req.status, req.pass_number, reviewer=req.reviewer, mode=req.mode)
                 return json_reply(changed)
             case ("POST", "/undo"):

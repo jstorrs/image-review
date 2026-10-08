@@ -517,7 +517,7 @@ model and its limits (swap, screenshots, shared nodes and home directories,
 multiple clients). See [TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster)
 for the full workflow and batch jobs.
 
-If `--remote` reports "server speaks API vN, this client vM" (or "server is too old to report its API version"), install the same image-review version on both machines.
+If `--remote` reports "server speaks API vN, this client vM" (or "server is too old to report its API version"), install the same image-review version on both machines. This release speaks wire API v7 (the server refuses a grid CLEAN over a DIRTY or FLAGGED image), so upgrade the cluster and the laptop together.
 
 ### Browser review over SSH (experimental)
 

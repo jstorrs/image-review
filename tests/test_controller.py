@@ -16,6 +16,7 @@ from image_review.controller import (
     ADVANCE_EVENT,
     AUTOPLAY_EVENT,
     GRID_HAS_DIRTY,
+    IMAGE_HAS_DIRTY,
     MIN_DWELL_MS,
     NO_TODO_MESSAGE,
     NOTHING_TO_UNDO,
@@ -30,6 +31,7 @@ from image_review.controller import (
 )
 from image_review.grid_packer import pack_into_grids
 from image_review.layout import fit_size
+from image_review.status import GridCleanRefused
 from image_review.store import (
     LocalStore,
     ManifestRow,
@@ -218,6 +220,47 @@ class TestSession(SessionTestCase):
             s._mark("CLEAN")
         mark.assert_not_called()
         set_info.assert_called_once_with(GRID_HAS_DIRTY)
+
+    def test_store_refusal_of_grid_clean_is_not_an_outage(self):
+        # A RemoteStore raises GridCleanRefused on the server's 409; the statuses are then re-read
+        s = ReviewSession(self.store, reviewer="tester", mode="grid")
+        s._items = [GridItem(keys=("batch_001/a.jpg", "batch_001/b.jpg"), surface=pg.Surface((1, 1)), source_scale=1.0)]
+        s._cursor = 0
+        with (
+            mock.patch.object(self.store, "mark", side_effect=GridCleanRefused("refused")),
+            mock.patch.object(self.store, "statuses", return_value={**s._statuses, "batch_001/a.jpg": "DIRTY"}),
+            mock.patch("sys.stderr"),
+        ):
+            s._mark("CLEAN")
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertEqual(s._viewer._info, GRID_HAS_DIRTY)
+        self.assertEqual(s._statuses["batch_001/a.jpg"], "DIRTY")
+        self.assertEqual(s._viewer._status, "DIRTY", "the item's status is repainted")
+        self.assertEqual(s._undoable, 0)
+        self.assertFalse(s._advance_pending)
+        with (
+            mock.patch.object(self.store, "mark", side_effect=GridCleanRefused("refused")),
+            mock.patch.object(self.store, "statuses", side_effect=store_module.StoreUnavailable("down")),
+            mock.patch("sys.stderr"),
+        ):
+            s._statuses["batch_001/a.jpg"] = "UNREVIEWED"
+            s._mark("CLEAN")
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
+
+    def test_store_refusal_of_a_left_out_single_names_the_image(self):
+        # A left-out single in grid mode is sent as a grid mark; once FLAGGED the server refuses its CLEAN
+        s = ReviewSession(self.store, reviewer="tester", mode="grid")
+        s._items = [SingleItem("batch_001/a.jpg")]
+        s._cursor = 0
+        with (
+            mock.patch.object(self.store, "mark", side_effect=GridCleanRefused("refused")),
+            mock.patch.object(self.store, "statuses", return_value={**s._statuses, "batch_001/a.jpg": "FLAGGED"}),
+            mock.patch("sys.stderr"),
+        ):
+            s._mark("CLEAN")
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertEqual(s._viewer._info, IMAGE_HAS_DIRTY)
+        self.assertEqual(s._viewer._status, "FLAGGED")
 
     def test_flagged_is_orange(self):
         s = ReviewSession(self.store, reviewer="tester", mode="single")

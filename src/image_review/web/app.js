@@ -9,7 +9,7 @@ const STATUSES = new Set(["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]);
 const MIN_DWELL_MS = 200;
 const MAX_REVIEWER_LENGTH = 64;
 // A grid verdict covers every image in it, so grids hold only images not yet judged DIRTY or
-// FLAGGED (controller.GRID_ELIGIBLE); with the todo filter that leaves UNREVIEWED.
+// FLAGGED (status.GRID_ELIGIBLE); with the todo filter that leaves UNREVIEWED.
 const GRID_ELIGIBLE = new Set(["UNREVIEWED", "CLEAN"]);
 const MAX_GRID_KEYS = 1000; // server.MAX_GRID_KEYS
 const MIN_GRID_SIDE = 256; // server.MIN_GRID_SIDE
@@ -24,6 +24,8 @@ const NOTHING_TO_UNDO = "Nothing to undo";
 const UNLOADABLE_CLEAN = "cannot mark CLEAN: image could not be loaded";
 const NAME_NEEDED = "Enter your name (1-" + MAX_REVIEWER_LENGTH + " characters) to start reviewing";
 const GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in single mode";
+// The server's refusal for a left-out single in grid mode (sent as a grid mark) that became FLAGGED.
+const IMAGE_HAS_DIRTY = "image already marked DIRTY in another pass - review it in single mode";
 const COMPUTING_GRIDS = "Computing grids...";
 const SERVER_BUSY = "Server busy computing grids; retrying";
 const BATCH_TOO_LARGE = "Batch too large for grid mode; use single mode [s]";
@@ -68,7 +70,7 @@ function itemStatus(item, statuses) {
   return item.kind === "grid" ? gridStatus(item.keys, statuses) : statuses.get(item.key);
 }
 
-// As controller._grid_status: DIRTY if any image is not grid-eligible, else
+// As status.grid_status: DIRTY if any image is not grid-eligible, else
 // UNREVIEWED while any is todo, else CLEAN.
 function gridStatus(keys, statuses) {
   const found = new Set(keys.map((key) => statuses.get(key)));
@@ -78,8 +80,8 @@ function gridStatus(keys, statuses) {
   return [...found].some(isTodo) ? "UNREVIEWED" : "CLEAN";
 }
 
-// As controller._grid_clean_refused: CLEAN on a grid holding a DIRTY or FLAGGED
-// image is refused, unless the whole grid is DIRTY.
+// As status.grid_clean_refused: CLEAN on a grid holding a DIRTY or FLAGGED
+// image is refused, unless the whole grid is DIRTY. The server refuses it too (409).
 function gridCleanRefused(keys, statuses) {
   const found = new Set(keys.map((key) => statuses.get(key)));
   const eligible = [...found].every((status) => GRID_ELIGIBLE.has(status));
@@ -1028,6 +1030,13 @@ async function mark(verdict) {
       reviewer: state.reviewer,
       mode: state.mode,
     });
+    if (response.status === 409) {
+      // The server refused a grid-mode CLEAN this page allowed (its statuses were stale, e.g. another
+      // client marked a key DIRTY): nothing was recorded, so no undo entry; reread every status.
+      say(item.kind === "grid" ? GRID_HAS_DIRTY : IMAGE_HAS_DIRTY);
+      applyStatuses(parseStatusMap(await getJson("/statuses?pass=" + state.pass)));
+      return;
+    }
     if (!response.ok) {
       say(response.status === 400 ? "invalid reviewer name" : "mark failed (HTTP " + response.status + ")");
       return;

@@ -19,7 +19,7 @@ import pygame as pg
 
 from image_review.cli import status_report
 from image_review.connection import RemoteTarget, is_int_at_least, package_version
-from image_review.controller import ReviewSession, UIState
+from image_review.controller import GRID_HAS_DIRTY, ReviewSession, UIState
 from image_review.remote import (
     ApiMismatch,
     FingerprintMismatch,
@@ -33,6 +33,7 @@ from image_review.remote import (
     parse_version,
 )
 from image_review.server import Reply, ReviewHandler
+from image_review.status import GridCleanRefused
 from image_review.store import LocalStore, ManifestRow, SkippedCounts, StoreUnavailable
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server, temp_dir
 
@@ -103,12 +104,20 @@ class TestRoundTrips(RemoteTestCase):
 
     def test_undo_equals_local(self):
         mark(self.store, [KEYS[0]], "DIRTY")
-        self.store.mark([KEYS[0], KEYS[1]], "CLEAN", 1, reviewer="tester", mode="grid")
+        self.store.mark([KEYS[0], KEYS[1]], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "DIRTY", KEYS[1]: "UNREVIEWED"})
         self.assertEqual(self.store.statuses(1), self.local_copy().statuses(1))
         self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "UNREVIEWED"})
         self.assertEqual(self.store.undo(1, reviewer="tester"), {})
         self.assertEqual(set(self.local_copy().statuses(1).values()), {"UNREVIEWED"})
+
+    def test_grid_clean_refused_is_not_a_lost_connection(self):
+        mark(self.store, [KEYS[0]], "DIRTY")
+        with self.assertRaises(GridCleanRefused) as ctx:
+            self.store.mark([KEYS[0], KEYS[1]], "CLEAN", 1, reviewer="tester", mode="grid")
+        self.assertNotIsInstance(ctx.exception, StoreUnavailable)
+        self.assertEqual(self.local_copy().statuses(1)[KEYS[1]], "UNREVIEWED")
+        self.assertEqual(mark(self.store, [KEYS[1]], "CLEAN"), {KEYS[1]: "CLEAN"}, "the connection is still usable")
 
     def test_mark_whose_reply_is_lost_is_not_resent(self):
         real_send = ReviewHandler._send
@@ -477,11 +486,11 @@ class TestCli(RemoteTestCase):
         self.assertNotIn("Traceback", result.output)
 
     def test_api_mismatch_message(self):
-        with mock.patch("image_review.remote.API_VERSION", 7):
+        with mock.patch("image_review.remote.API_VERSION", 8):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
         self.assertIn(
-            "server speaks API v6, this client v7; install the same image-review version on both machines",
+            "server speaks API v7, this client v8; install the same image-review version on both machines",
             result.output,
         )
         self.assertNotIn(self.target.token, result.output)
@@ -504,8 +513,14 @@ class TestCli(RemoteTestCase):
 
     def test_check_api(self):
         self.store.check_api()
-        with mock.patch("image_review.remote.API_VERSION", 7), self.assertRaises(ApiMismatch):
+        with mock.patch("image_review.remote.API_VERSION", 8), self.assertRaises(ApiMismatch):
             self.store.check_api()
+
+    def test_v6_server_is_refused(self):
+        # v7 added /mark's 409; a v6 server would record a grid CLEAN over a DIRTY key
+        with mock.patch("image_review.server.API_VERSION", 6), self.assertRaises(ApiMismatch) as ctx:
+            self.store.check_api()
+        self.assertIn("server speaks API v6, this client v7", str(ctx.exception))
 
     def test_status_envvar(self):
         result = self.invoke("status", env={"IMAGE_REVIEW_REMOTE": self.target.to_uri(), "IMAGE_REVIEW_VIA": None})
@@ -607,6 +622,29 @@ class TestSession(RemoteTestCase):
         self.assertEqual(s._statuses[key], "DIRTY")
         self.assertEqual(self.local_copy().statuses(1)[key], "DIRTY")
         self.assertEqual(self.recorded_audit(), {("tester", "single")})
+
+    def test_grid_clean_refused_by_server_shows_the_refusal(self):
+        s = ReviewSession(self.store, reviewer="tester", mode="grid")
+        s._cursor = 0
+        keys = s._items[0].keys
+        self.assertGreater(len(keys), 1)
+        mark(self.store, [keys[0]], "DIRTY")  # another client, after this session read the statuses
+        self.assertEqual(s._statuses[keys[0]], "UNREVIEWED")
+        undoable = s._undoable
+        with self.assertLogs("image_review.controller", "WARNING") as logs:
+            s._mark("CLEAN")
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertEqual(s._viewer._info, GRID_HAS_DIRTY)
+        self.assertNotIn("Lost connection", "\n".join(logs.output))
+        self.assertEqual(s._statuses[keys[0]], "DIRTY", "statuses re-read")
+        self.assertEqual(s._item_status(s._items[0]), "DIRTY")
+        self.assertEqual(s._viewer._status, "DIRTY", "the item's status is repainted")
+        self.assertEqual(s._undoable, undoable)
+        self.assertFalse(s._advance_pending)
+        self.assertEqual(self.local_copy().statuses(1)[keys[-1]], "UNREVIEWED")
+        with mock.patch.object(self.store, "mark") as store_mark, mock.patch("sys.stderr"):
+            s._mark("CLEAN")
+        store_mark.assert_not_called()  # now refused before any request
 
     def assert_no_repaint(self, s: ReviewSession):
         """The outage message stays: the loop's next refresh does not paint over it."""

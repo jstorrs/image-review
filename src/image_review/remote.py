@@ -15,7 +15,7 @@ from typing import Self, get_args
 from urllib.parse import urlencode
 
 from .connection import API_VERSION, RemoteTarget, cert_fingerprint, is_int_at_least
-from .status import Key, MarkMode, Status, Verdict
+from .status import GridCleanRefused, Key, MarkMode, Status, Verdict
 from .store import (
     ManifestRow,
     SkippedCounts,
@@ -258,7 +258,12 @@ class RemoteStore:
         self, keys: list[Key], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
     ) -> dict[Key, Status]:
         payload = {"keys": keys, "status": status, "pass": pass_number, "reviewer": reviewer, "mode": mode}
-        return parse_statuses(self._call("POST", "/mark", payload, idempotent=False))
+        try:
+            return parse_statuses(self._call("POST", "/mark", payload, idempotent=False))
+        except RemoteError as e:
+            if e.status == 409:  # a grid CLEAN over a DIRTY or FLAGGED key: nothing recorded, not an outage
+                raise GridCleanRefused("server refused CLEAN on a grid holding a DIRTY or FLAGGED image") from e
+            raise
 
     def undo(self, pass_number: int, *, reviewer: str) -> dict[Key, Status]:
         payload = {"pass": pass_number, "reviewer": reviewer}

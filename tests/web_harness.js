@@ -461,6 +461,48 @@ tests["a grid of only DIRTY images may be marked CLEAN again"] = async () => {
   assert.deepStrictEqual(page.marks().map((m) => m.status), ["DIRTY", "CLEAN"]);
 };
 
+tests["a 409 on grid CLEAN shows the refusal, rereads the statuses, and keeps no undo entry"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await showPlan(page);
+  await page.dwell();
+  const index = page.state.index;
+  await page.key("c"); // this page's statuses are stale: another client marked b DIRTY
+  assert.strictEqual(page.marks().length, 1);
+  await page.respond("/mark", page.json(409, { error: "grid holds a DIRTY or FLAGGED image" }));
+  await page.respond("/statuses?pass=1", page.json(200, { ...statuses, b: "DIRTY" }));
+  assert.strictEqual(page.els.status.textContent,
+    "grid contains an image already marked DIRTY - review it in single mode");
+  assert.strictEqual(page.state.statuses.get("b"), "DIRTY", "statuses resynced");
+  assert.deepStrictEqual(plain(page.state.marked), [], "no undo entry");
+  assert.strictEqual(page.state.index, index, "no advance");
+  assert.strictEqual(page.state.busy, false);
+  await page.key("c");
+  assert.strictEqual(page.marks().length, 1, "the resynced statuses refuse CLEAN locally");
+  await page.key("d");
+  assert.deepStrictEqual(page.marks()[1].status, "DIRTY", "DIRTY is still allowed");
+};
+
+tests["a 409 on a left-out single's CLEAN in grid mode names the image, not a grid"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, LEFT_OUT));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.dwell();
+  await page.key("d");
+  await page.respond("/mark", page.json(200, { a: "DIRTY", b: "DIRTY" }));
+  await page.image200("c", [100, 50]);
+  await page.dwell();
+  await page.key("c"); // c became FLAGGED: another client wrote an earlier-pass DIRTY
+  assert.deepStrictEqual(page.marks()[1], { keys: ["c"], status: "CLEAN", pass: 1, reviewer: "Jane", mode: "grid" });
+  await page.respond("/mark", page.json(409, { error: "grid holds a DIRTY or FLAGGED image" }));
+  await page.respond("/statuses?pass=1", page.json(200, { a: "DIRTY", b: "DIRTY", c: "FLAGGED" }));
+  assert.strictEqual(page.els.status.textContent,
+    "image already marked DIRTY in another pass - review it in single mode");
+  assert.strictEqual(page.state.statuses.get("c"), "FLAGGED");
+  assert.deepStrictEqual(plain(page.state.marked), [["a", "b"]], "no undo entry for the refusal");
+};
+
 tests["no grid verdict before the dwell is over or while the canvas is hidden"] = async () => {
   const page = makePage({ manifest, statuses });
   await page.boot();

@@ -26,12 +26,23 @@
   is already DIRTY or FLAGGED, unless every image in it is DIRTY (which
   reverses that grid's own verdict); an image that fails to load follows the
   grids as a single item; resizing the window repacks the grids and clears
-  undo; a batch over 1000 images needs single mode. The default HTTPS mode
-  and the pygame client are unchanged.
+  undo; a batch over 1000 images needs single mode. The socket routes and the
+  page needed no API version bump and do not change the HTTPS API (API v7,
+  below, is for the grid CLEAN refusal).
   See [SECURITY.md](SECURITY.md) for the limits.
+- **Wire API v7: client and server must be upgraded together.** `POST /mark`
+  now refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
+  FLAGGED in that pass, unless every one is DIRTY, answering 409 and
+  recording nothing. Both clients already refused it, but only against their
+  own copy of the statuses, which can be stale (another client may have
+  marked an image DIRTY meanwhile). The viewer and the browser page show
+  "grid contains an image already marked DIRTY - review it in single mode"
+  and re-read the statuses; the viewer does not treat the 409 as a lost
+  connection. A v7 client refuses a v6 server, and a v6 client a v7 server.
 - **Experimental:** in socket mode, `POST /grids` returns grid layouts
   computed with the viewer's own packing code, for the browser page's grid
-  mode. Socket mode only; the HTTPS API and its version are unchanged.
+  mode. Socket mode only; it does not change the HTTPS API and needed no API
+  version bump.
 - **Requirements:** rectpack (still pinned at 0.2.2) moved from the `viewer`
   extra to the core dependencies, with the grid layout code (`layout.py`), so
   that `serve` lays out browser grids with the same code as the viewer.
