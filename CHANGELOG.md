@@ -13,7 +13,10 @@
   without a jump host, and omits `-J`. `--ssh-host NAME` sets the node name
   it prints, for sites where the node's own FQDN does not work from the
   laptop. `$IMAGE_REVIEW_SOCKET_PATH` sets the socket path, with
-  `--socket` (alone it is ignored). The page
+  `--socket` (alone it is ignored). `$IMAGE_REVIEW_TOKEN`
+  (22-256 characters from `A-Za-z0-9_-`, generated inside the job, e.g. with
+  `openssl rand -hex 16`) is reused as the token with `--socket`, so the URL
+  survives restarts; an invalid value is refused without being printed. The page
   starts with single images, like the viewer's single mode: enter a reviewer
   name, then `c` clean, `d` dirty, Left/Right to move, `z` to undo (this
   page's own marks, with one page per server: the undo history is shared).

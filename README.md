@@ -480,6 +480,9 @@ file is removed when the server stops.
 | `--ssh-host` | this machine's FQDN | With `--socket`: the node name to put in the printed ssh command, for when the node's own FQDN does not resolve from your laptop |
 
 Each start generates a new token (and, over HTTPS, a new certificate).
+With `--socket`, a token in `$IMAGE_REVIEW_TOKEN` (22-256 characters from
+`A-Za-z0-9_-`) is used instead, so the URL survives restarts; it is ignored
+without `--socket`.
 `--socket` and `--socket-path` cannot be combined with `--bind` or `--port`, and
 `--socket-path` must not be empty; `--via` on the command line requires
 `--socket` (an `$IMAGE_REVIEW_VIA` in the environment is ignored without it).
@@ -547,9 +550,11 @@ ssh command on your laptop, then open the URL. Under `sbatch` the URL is
 written to `~/.image-review/browser-<host>-<pid>.txt` instead. To keep the
 ssh forward across server restarts, give each job a fixed path: `export
 IMAGE_REVIEW_SOCKET_PATH=~/.image-review/ir-$SLURM_JOB_ID.sock` once, then
-`image-review serve --socket --direct` (or pass `--socket-path`), and paste the
-new URL after each restart (see the tutorial). The traffic is
-plain HTTP inside the ssh tunnel, with no TLS on the node; read the
+`image-review serve --socket --direct` (or pass `--socket-path`). Each start
+makes a new token, so paste the new URL after a restart, unless you also
+`export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16)` inside the job: `serve
+--socket` then reuses it and the URL stays the same (see the tutorial). The
+traffic is plain HTTP inside the ssh tunnel, with no TLS on the node; read the
 experimental section of [SECURITY.md](SECURITY.md) first, and the
 [tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the steps and
 troubleshooting.

@@ -752,7 +752,18 @@ mode, and so is a `--direct` that comes only from `$IMAGE_REVIEW_DIRECT`; with
 comes only from `$IMAGE_REVIEW_SOCKET_PATH` is ignored in TCP mode (it does not
 imply `--socket`) and is used with `--socket`; one on the command line
 overrides it. An empty environment value is unset (click drops it), so
-`--socket` then uses the default path. An invalid
+`--socket` then uses the default path.
+
+`$IMAGE_REVIEW_TOKEN` (read with `os.environ`, not a click option) is used
+only in socket mode and ignored, unparsed, in TCP mode. Empty is unset. A
+value goes through `connection.parse_token`: 22-256 characters from
+`A-Za-z0-9_-`, no surrounding whitespace (refused, not stripped); an invalid
+one exits 1 as a `ClickException` naming the variable and the rule, never the
+value, before the work directory is opened. It is passed to
+`make_unix_server(store, path, token)` (None generates `token_urlsafe(16)`),
+so the URL is the same on every start in that shell. Then the output adds
+one line, "Using the token from $IMAGE_REVIEW_TOKEN: the URL stays the same
+across restarts in this shell."; the URL itself is shown as below. An invalid
 `--via`, an invalid `--ssh-host` (empty, a leading `-`, an `@`, or anything
 outside letters, digits and `. _ : [ ] -`; `parse_ssh_host`), a
 `ValueError` (bad or busy path), an `OSError` from binding or from
@@ -1808,7 +1819,8 @@ literal `unix` (`accept` gives no peer address there).
 
 ### Unix-socket server (experimental)
 
-`make_unix_server(store, path) -> (UnixReviewServer, token)` serves the same
+`make_unix_server(store, path, token=None) -> (UnixReviewServer, token)`
+(a given, parsed `Token` is used as is; None generates `token_urlsafe(16)`) serves the same
 API as plain HTTP on a Unix domain socket, for a browser reaching it through
 `ssh -L PORT:PATH node`. TLS is not used; ssh provides the transport. The path
 is made absolute and must fit `sun_path` (108 bytes, 104 on macOS) and contain

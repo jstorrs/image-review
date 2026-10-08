@@ -120,11 +120,27 @@ default mode; use it only where you accept the points below.
 - **The token is in the URL fragment**, which the browser never sends to the
   server. The page keeps it in per-tab `sessionStorage` and rewrites it out
   of the tab's history entry. It can still stay in browser history and
-  autocomplete, and in the clipboard. It stops working when the server stops.
-  Treat the URL like a password. When stdout is not a terminal it is written
+  autocomplete, and in the clipboard. By default it stops working when the
+  server stops. Treat the URL like a password. When stdout is not a terminal it is written
   to `~/.image-review/browser-<host>-<pid>.txt` (0600, removed on exit), with
   the same exposure as the connection file above. Browser extensions that
   can read all sites can read the token and the images.
+- **A reused token** (`$IMAGE_REVIEW_TOKEN`, socket mode only) no longer dies
+  at a restart, only when the job's shell ends. `serve` writes it to disk
+  only in the 0600 URL file when stdout is not a terminal (removed on exit);
+  a copy of that file (e.g. in a home snapshot) stays valid for the whole
+  job. It lives in that shell's environment, which you and root can read (on
+  Linux, via `/proc`). Generate it inside the job (the `srun` shell or the
+  batch script), not before submitting. `sbatch` copies the submit
+  environment (by default `--export=ALL`), which slurmctld stores with the
+  job, and with `AccountingStoreFlags=job_env` `sacct --env-vars` shows it.
+  A token exported before `salloc` would outlive the job in your login shell
+  and be reused by the next job. In a batch script, generate the token
+  there; never paste a literal value, because Slurm stores the script (and
+  with `AccountingStoreFlags=job_script`, `sacct --batch-script` shows it).
+  Do not put the token on a command line (it would show in `ps` and shell
+  history). `serve` accepts only 22-256 characters of `A-Za-z0-9_-` (use 128
+  random bits) and never prints or logs it except in the URL.
 - **The laptop side.** The printed command forwards `127.0.0.1:8080` only, and
   the URL names `127.0.0.1`: ssh given a bare `-L 8080:...` also binds `::1`
   and succeeds if either bind works, so another process already on

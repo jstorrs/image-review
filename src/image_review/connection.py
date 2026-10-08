@@ -4,7 +4,7 @@ import importlib.metadata
 import ipaddress
 import re
 from dataclasses import dataclass, field
-from typing import TypeGuard
+from typing import NewType, TypeGuard
 from urllib.parse import parse_qsl, urlsplit
 
 # Wire API version, shared by client and server. Any change to request/response
@@ -12,6 +12,8 @@ from urllib.parse import parse_qsl, urlsplit
 API_VERSION = 7
 
 MAX_REVIEWER_LENGTH = 64
+MIN_TOKEN_LENGTH = 22  # 128 bits as base64url; 32 hex characters also pass
+MAX_TOKEN_LENGTH = 256
 
 _FP_PATTERN = re.compile(r"sha256:([0-9a-f]{64})")
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
@@ -48,6 +50,21 @@ def parse_reviewer(value: object) -> str:
             f"reviewer must be 1-{MAX_REVIEWER_LENGTH} printable characters, not all spaces (no tabs, newlines or control characters)"
         )
     return value
+
+
+Token = NewType("Token", str)  # a token that passed parse_token (or was generated)
+
+
+def parse_token(raw: str) -> Token:
+    """An access token supplied by the operator: letters, digits, `_` and `-`, 22-256 characters.
+
+    Surrounding whitespace is refused, not stripped. The message never contains the value. ValueError otherwise.
+    """
+    if not MIN_TOKEN_LENGTH <= len(raw) <= MAX_TOKEN_LENGTH or not _TOKEN_PATTERN.fullmatch(raw):
+        raise ValueError(
+            f"must be {MIN_TOKEN_LENGTH}-{MAX_TOKEN_LENGTH} characters from A-Z a-z 0-9 _ - (no spaces or newlines)"
+        )
+    return Token(raw)
 
 
 def cert_fingerprint(der: bytes) -> str:

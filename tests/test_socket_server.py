@@ -11,6 +11,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from unittest import mock
 import image_review
 from image_review import cli
 from image_review.cli import PACKAGE_LOGGER, browser_url, ssh_forward_command
+from image_review.connection import parse_token
 from image_review.server import (
     ReviewServer,
     clear_stale_socket,
@@ -751,6 +753,34 @@ class TestPrivateFile(unittest.TestCase):
             self.assertEqual(list((home / ".image-review").iterdir()), [])
 
 
+class TestParseToken(unittest.TestCase):
+    def test_accepted(self):
+        for raw in ("0123456789abcdef0123456789abcdef", "A" * 22, "a-_" * 8, "x" * 256):
+            with self.subTest(length=len(raw)):
+                self.assertEqual(parse_token(raw), raw)
+
+    def test_rejected_without_echoing_the_value(self):
+        good = "0123456789abcdef0123456789abcdef"
+        cases = {
+            "too short": "a" * 21,
+            "empty": "",
+            "too long": "a" * 257,
+            "plus": good[:-1] + "+",
+            "slash": good[:-1] + "/",
+            "equals": good[:-1] + "=",
+            "inner space": good[:10] + " " + good[11:],
+            "leading space": " " + good,
+            "trailing space": good + " ",
+            "trailing newline": good + "\n",
+            "non-ascii": good[:-1] + "\u00e9",
+        }
+        for name, raw in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(ValueError) as cm:
+                    parse_token(raw)
+                self.assertNotIn(raw.strip() or "\0", str(cm.exception))
+
+
 class Tty(io.StringIO):
     def isatty(self):
         return True
@@ -971,6 +1001,119 @@ class TestServeSocketCommand(unittest.TestCase):
         without_socket = self.serve(env={"IMAGE_REVIEW_SOCKET_PATH": ""})
         self.assertEqual(without_socket.exit_code, 0, without_socket.output)
         self.assertNotIn("experimental", without_socket.output)
+
+    def test_token_from_environment_is_used_and_kept_across_restarts(self):
+        token = "0123456789abcdef0123456789abcdef"
+        urls = []
+        replies = []
+
+        def fake_serve(server, *a, **k):
+            (url_file,) = self.dir.glob("browser-*.txt")
+            urls.append(url_file.read_text().strip())
+            sock = next(self.dir.glob("serve-*.sock"))
+            server.timeout = 10
+            for bearer in (token, "f" * 32):
+                worker = threading.Thread(target=server.handle_request, daemon=True)
+                worker.start()
+                conn = UnixHTTPConnection(sock)
+                conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {bearer}"})
+                resp = conn.getresponse()
+                resp.read()
+                conn.close()
+                worker.join()
+                replies.append(resp.status)
+            raise KeyboardInterrupt
+
+        for _ in range(2):
+            with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+                result = invoke_cli(
+                    "serve", "--work-dir", str(self.work), "--socket", env={"IMAGE_REVIEW_TOKEN": token}
+                )
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Using the token from $IMAGE_REVIEW_TOKEN", result.output)
+            self.assertNotIn(token, result.output)
+        self.assertEqual(urls, [browser_url(token)] * 2)
+        self.assertEqual(replies, [200, 401, 200, 401])
+
+    def test_token_from_environment_in_the_tty_url(self):
+        token = "A" * 22
+        with mock.patch("sys.stdout", Tty()) as out, mock.patch.dict(os.environ):
+            for name in CLEAN_ENV:
+                os.environ.pop(name, None)
+            os.environ["IMAGE_REVIEW_TOKEN"] = token
+            with mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt):
+                cli.cli.main(["serve", "--work-dir", str(self.work), "--socket"], standalone_mode=False)
+        self.assertIn(f"\n{browser_url(token)}\n", out.getvalue())
+        self.assertEqual(out.getvalue().count(token), 1)
+
+    def test_invalid_token_from_environment_is_refused(self):
+        for bad in ("short", "a" * 21 + "+", " " + "a" * 30, "a" * 300):
+            with self.subTest(length=len(bad)):
+                result = self.serve("--socket", env={"IMAGE_REVIEW_TOKEN": bad})
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("$IMAGE_REVIEW_TOKEN", result.output)
+                self.assertIn("A-Z a-z 0-9", result.output)
+                self.assertNotIn(bad.strip(), result.output)
+                self.assertNotIn("Traceback", result.output)
+                self.assertFalse(self.dir.exists() and list(self.dir.iterdir()))
+                self.assertFalse((self.work / "review.lock").exists())
+
+    def test_token_from_environment_ignored_without_socket(self):
+        token = "0123456789abcdef0123456789abcdef"
+        seen = []
+
+        def fake_serve(server, *a, **k):
+            seen.append(type(server).__name__)
+            self.assertNotEqual(getattr(server, "token", None), token)
+            raise KeyboardInterrupt
+
+        for value in (token, "not a valid token"):  # ignored, so not even parsed
+            with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+                result = invoke_cli("serve", "--work-dir", str(self.work), env={"IMAGE_REVIEW_TOKEN": value})
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertNotIn(value, result.output)
+            self.assertNotIn("IMAGE_REVIEW_TOKEN", result.output)
+            leftovers = [p.read_text() for p in self.dir.iterdir()] if self.dir.exists() else []
+            self.assertFalse(any(value in text for text in leftovers))
+        self.assertEqual(seen, ["ReviewServer"] * 2)
+
+    def test_empty_token_from_environment_counts_as_unset(self):
+        result = self.serve("--socket", env={"IMAGE_REVIEW_TOKEN": ""})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("IMAGE_REVIEW_TOKEN", result.output)
+
+    def test_no_token_in_environment_gives_a_fresh_one_each_start(self):
+        urls = []
+
+        def fake_serve(server, *a, **k):
+            (url_file,) = self.dir.glob("browser-*.txt")
+            urls.append(url_file.read_text().strip())
+            raise KeyboardInterrupt
+
+        for _ in range(2):
+            with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+                result = invoke_cli("serve", "--work-dir", str(self.work), "--socket")
+            self.assertNotIn("IMAGE_REVIEW_TOKEN", result.output)
+        self.assertEqual(len(urls), 2)
+        self.assertNotEqual(urls[0], urls[1])
+
+    def test_token_from_environment_is_never_logged(self):
+        # cli.log_to swaps the package logger's handlers, so assertLogs would not see serve's records:
+        # check what the command emitted instead
+        token = "0123456789abcdef0123456789abcdef"
+        with mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt):
+            result = invoke_cli(
+                "-v", "serve", "--work-dir", str(self.work), "--socket", env={"IMAGE_REVIEW_TOKEN": token}
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn(token, result.output)
+        self.assertNotIn(token, result.stderr)
+
+    def test_invalid_token_is_refused_before_the_work_dir_is_opened(self):
+        with mock.patch.object(cli, "open_local_store") as opened:
+            result = self.serve("--socket", env={"IMAGE_REVIEW_TOKEN": "short"})
+        self.assertEqual(result.exit_code, 1, result.output)
+        opened.assert_not_called()
 
     def test_busy_path_is_refused_and_leaves_the_first_server(self):
         path = self.home / "busy.sock"

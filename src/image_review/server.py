@@ -34,6 +34,7 @@ from cryptography.x509.oid import NameOID
 from .connection import (
     API_VERSION,
     RemoteTarget,
+    Token,
     cert_fingerprint,
     is_int_at_least,
     package_version,
@@ -729,14 +730,16 @@ def default_socket_path() -> Path:
     return private_dir() / f"serve-{safe_name(short_host())}-{os.getpid()}.sock"
 
 
-def make_unix_server(store: ReviewStore, path: Path) -> tuple[UnixReviewServer, str]:
+def make_unix_server(store: ReviewStore, path: Path, token: Token | None = None) -> tuple[UnixReviewServer, str]:
     """Create the Unix-socket server; returns (server, token). Raises ValueError for a bad or busy path,
     OSError if binding fails.
+
+    `token` is a parsed one (`connection.parse_token`) to reuse; None generates a fresh one.
 
     No socket file is left behind on failure.
     """
     path = parse_socket_path(path)
     clear_stale_socket(path)
-    token = secrets.token_urlsafe(16)
+    token = Token(secrets.token_urlsafe(16)) if token is None else token
     server = UnixReviewServer(path, store, token, load_assets())
     return server, token

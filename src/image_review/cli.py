@@ -18,7 +18,7 @@ import click
 
 from .access import Access, access_of, modes, world_access_warning
 from .atomic import write_new_file
-from .connection import RemoteTarget, parse_reviewer
+from .connection import RemoteTarget, Token, parse_reviewer, parse_token
 from .export import ExportRow, ExportStatus, format_allowlist, format_report, split_allowlist
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
 from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on
@@ -730,7 +730,11 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via, direct, ssh_host)
 
     --socket (experimental) serves plain HTTP on a Unix socket instead, for a
     browser on your laptop reached through `ssh -L`; the URL, which contains
-    the token, is handled the same way.
+    the token, is handled the same way. With --socket, a token in
+    $IMAGE_REVIEW_TOKEN (22-256 characters from A-Za-z0-9_-) is used instead of
+    a fresh one, so the URL stays the same across restarts: generate it inside
+    the job, e.g. export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16). It is
+    ignored without --socket.
     """
     from .tunnel import parse_ssh_host, parse_via
 
@@ -768,6 +772,12 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via, direct, ssh_host)
             ssh_host = parse_ssh_host(ssh_host)
         except ValueError as e:
             raise click.ClickException(f"Invalid --ssh-host: {e}")
+    token: Token | None = None
+    if socket_mode and (raw_token := os.environ.get("IMAGE_REVIEW_TOKEN")):  # empty counts as unset
+        try:
+            token = parse_token(raw_token)
+        except ValueError as e:  # the message never holds the value
+            raise click.ClickException(f"Invalid $IMAGE_REVIEW_TOKEN: {e}")
 
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
@@ -775,7 +785,7 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via, direct, ssh_host)
         with interrupt_on(*TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
             store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
             if socket_mode:
-                server, announce = _serve_socket(store, socket_path, via, direct, ssh_host, stack)
+                server, announce = _serve_socket(store, socket_path, token, via, direct, ssh_host, stack)
             else:
                 server, announce = _serve_tls(store, bind, port, stack)
             announce(stack)
@@ -814,6 +824,7 @@ def _serve_tls(
 def _serve_socket(
     store: LocalStore,
     socket_path: str | None,
+    token: Token | None,
     via: str | None,
     direct: bool,
     ssh_host: str | None,
@@ -821,7 +832,8 @@ def _serve_socket(
 ) -> tuple["ReviewServer", Callable[[contextlib.ExitStack], None]]:
     """Bind the Unix-socket server; returns it and the function that announces how to connect.
 
-    Failures become ClickExceptions. The announced path is the absolute one that was bound.
+    `token` is the operator's parsed one, or None for a fresh one. Failures become ClickExceptions.
+    The announced path is the absolute one that was bound.
     """
     from .server import default_socket_path, make_unix_server
 
@@ -830,13 +842,16 @@ def _serve_socket(
     except OSError as e:  # ~/.image-review is not ours, or cannot be created
         raise click.ClickException(f"Cannot use ~/.image-review: {e}")
     try:
-        server, token = make_unix_server(store, requested)
+        server, bound_token = make_unix_server(store, requested, token)
     except ValueError as e:  # bad or busy path; nothing was left behind
         raise click.ClickException(str(e))
     except OSError as e:
         raise click.ClickException(f"Cannot listen on socket {requested}: {e}")
     _close_with(stack, server, store)
-    return server, functools.partial(_announce_socket, Path(str(server.server_address)), token, via, direct, ssh_host)
+    announce = functools.partial(
+        _announce_socket, Path(str(server.server_address)), bound_token, token is not None, via, direct, ssh_host
+    )
+    return server, announce
 
 
 def _announce(target: RemoteTarget, stack: contextlib.ExitStack) -> None:
@@ -895,6 +910,7 @@ def ssh_forward_command(socket_path: Path, node: str, user: str, jump: str | Non
 def _announce_socket(
     socket_path: Path,
     token: str,
+    from_env: bool,
     via: str | None,
     direct: bool,
     ssh_host: str | None,
@@ -903,6 +919,7 @@ def _announce_socket(
     """Tell the operator how to reach the socket: the ssh command (no secret), and the URL, which holds the token.
 
     The URL is printed on a terminal, else written to a private file whose removal is registered on `stack`.
+    `from_env` says the token came from $IMAGE_REVIEW_TOKEN.
     """
     from .server import safe_name, short_host, write_private_file
 
@@ -917,6 +934,8 @@ def _announce_socket(
     print("\nOn your laptop, forward a local port to the socket (leave it running):")
     print(f"  {ssh_forward_command(socket_path, node, user, jump)}")
     print(f"If port {BROWSER_PORT} is busy on your laptop, change it in -L and in the URL.")
+    if from_env:
+        print("Using the token from $IMAGE_REVIEW_TOKEN: the URL stays the same across restarts in this shell.")
     if sys.stdout.isatty():
         print("\nThen open this URL. It contains an access token; treat it like a password.\n")
         print(url)

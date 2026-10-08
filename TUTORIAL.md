@@ -823,14 +823,34 @@ forwarding does not work.
    variable.)
 
    Leave the ssh command running. While the server is stopped the page says
-   "Lost connection"; after a restart it says "token rejected", and you
-   paste the new URL (each start has a new token) into the same tab. Use a
+   "Lost connection"; after a restart with a fresh token (none exported) it
+   says "token rejected", and you paste the new URL into the same tab. Use a
    per-job name such as `$SLURM_JOB_ID`, not one shared between jobs: on a
    home directory shared between nodes, a second job with the same path
    would take over the first one's socket. (Not yet tested on a cluster.)
 
+   To keep the URL too, give the job one token and export it as
+   `$IMAGE_REVIEW_TOKEN`; `serve --socket` then reuses it on every start in
+   that shell. Generate it inside the job, in the `srun` shell or in the batch
+   script, never before `sbatch` or `salloc`: `sbatch` copies your
+   environment into Slurm's records of the job (which administrators can
+   read), and a token exported before `salloc` would be reused by your next
+   job. Never paste a literal value into a batch script either; Slurm stores
+   the script. Either of these works:
+
+   ```bash
+   export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16)
+   export IMAGE_REVIEW_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+   ```
+
+   It must be 22-256 characters from letters, digits, `_` and `-` (the two
+   commands above give 32); `serve` refuses anything else without printing
+   it, and ignores the variable without `--socket`. Never put the token on a
+   command line. After a restart, reload the page: the forward and the URL
+   are unchanged.
+
 Stop the server with Ctrl-C, then the ssh command. Each start has a new
-token. `--via` only fills in the `-J` part of the printed command; without
+token unless `$IMAGE_REVIEW_TOKEN` is set. `--via` only fills in the `-J` part of the printed command; without
 it the command shows `<user>@<login-node>` for you to fill in. `--direct`
 (or `$IMAGE_REVIEW_DIRECT=1`) leaves `-J` out; it cannot be combined with
 `--via` on the command line.

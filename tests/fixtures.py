@@ -37,6 +37,7 @@ CLEAN_ENV: dict[str, str | None] = {
     "IMAGE_REVIEW_VIA": None,
     "IMAGE_REVIEW_DIRECT": None,
     "IMAGE_REVIEW_SOCKET_PATH": None,
+    "IMAGE_REVIEW_TOKEN": None,
     "IMAGE_REVIEW_ACCESS": None,
     "IMAGE_REVIEW_REVIEWER": None,
 }
