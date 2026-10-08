@@ -542,7 +542,10 @@ If the node's own name does not work from your laptop, add
 127.0.0.1:8080:/path/to.sock you@node` command
 and an `http://127.0.0.1:8080/#TOKEN` URL (the token is a password). Run the
 ssh command on your laptop, then open the URL. Under `sbatch` the URL is
-written to `~/.image-review/browser-<host>-<pid>.txt` instead. The traffic is
+written to `~/.image-review/browser-<host>-<pid>.txt` instead. To keep the
+ssh forward across server restarts, give each job a fixed path, e.g.
+`--socket-path ~/.image-review/ir-$SLURM_JOB_ID.sock`, and paste the new URL
+after each restart (see the tutorial). The traffic is
 plain HTTP inside the ssh tunnel, with no TLS on the node; read the
 experimental section of [SECURITY.md](SECURITY.md) first, and the
 [tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the steps and
