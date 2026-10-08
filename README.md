@@ -474,7 +474,7 @@ file is removed when the server stops.
 | `--bind` | this machine's FQDN | Hostname or IPv4 address to bind and advertise (wildcard addresses are refused) |
 | `--port` | 0 | Port to listen on (0 picks a free port) |
 | `--socket` | off | Experimental: serve plain HTTP on a Unix socket for browser review over SSH, instead of HTTPS over TCP |
-| `--socket-path` | `~/.image-review/serve-<host>-<pid>.sock` | Experimental: the socket path; implies `--socket` |
+| `--socket-path` | `~/.image-review/serve-<host>-<pid>.sock`; `$IMAGE_REVIEW_SOCKET_PATH` | Experimental: the socket path; implies `--socket` on the command line, but the environment variable is used only with `--socket` |
 | `--via` | `$IMAGE_REVIEW_VIA` | With `--socket`: the login node to put in the printed ssh command |
 | `--direct` | off; `$IMAGE_REVIEW_DIRECT` | With `--socket`: your laptop can ssh to compute nodes without a jump host; the printed ssh command omits `-J` |
 | `--ssh-host` | this machine's FQDN | With `--socket`: the node name to put in the printed ssh command, for when the node's own FQDN does not resolve from your laptop |
@@ -484,7 +484,9 @@ Each start generates a new token (and, over HTTPS, a new certificate).
 `--socket-path` must not be empty; `--via` on the command line requires
 `--socket` (an `$IMAGE_REVIEW_VIA` in the environment is ignored without it).
 `--direct` follows the same rule (with `$IMAGE_REVIEW_DIRECT`) and cannot be
-combined with `--via` on the command line. `--ssh-host` requires `--socket`,
+combined with `--via` on the command line. `$IMAGE_REVIEW_SOCKET_PATH` is used
+only with `--socket`; without it, `serve` stays HTTPS over TCP and ignores the
+variable (an empty value counts as unset). `--ssh-host` requires `--socket`,
 takes a host name only (no `user@`), and has no environment variable.
 
 ## Reviewing on an HPC cluster
@@ -543,9 +545,10 @@ If the node's own name does not work from your laptop, add
 and an `http://127.0.0.1:8080/#TOKEN` URL (the token is a password). Run the
 ssh command on your laptop, then open the URL. Under `sbatch` the URL is
 written to `~/.image-review/browser-<host>-<pid>.txt` instead. To keep the
-ssh forward across server restarts, give each job a fixed path, e.g.
-`--socket-path ~/.image-review/ir-$SLURM_JOB_ID.sock`, and paste the new URL
-after each restart (see the tutorial). The traffic is
+ssh forward across server restarts, give each job a fixed path: `export
+IMAGE_REVIEW_SOCKET_PATH=~/.image-review/ir-$SLURM_JOB_ID.sock` once, then
+`image-review serve --socket --direct` (or pass `--socket-path`), and paste the
+new URL after each restart (see the tutorial). The traffic is
 plain HTTP inside the ssh tunnel, with no TLS on the node; read the
 experimental section of [SECURITY.md](SECURITY.md) first, and the
 [tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the steps and

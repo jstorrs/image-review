@@ -714,7 +714,7 @@ image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via DEST 
 | `--bind` | `socket.getfqdn()` | Hostname or IPv4 address to bind and advertise |
 | `--port` | 0 | Port to listen on; 0 picks a free port |
 | `--socket` | off | Experimental: serve on a Unix socket (see below) |
-| `--socket-path` | `default_socket_path()` | Experimental: the socket path; implies `--socket` |
+| `--socket-path` | `default_socket_path()`; `$IMAGE_REVIEW_SOCKET_PATH` | Experimental: the socket path; implies `--socket` on the command line; the environment value is used only with `--socket` |
 | `--via` | `$IMAGE_REVIEW_VIA` | With `--socket`: login node for the printed ssh command; checked with `tunnel.parse_via` |
 | `--direct` | off; `$IMAGE_REVIEW_DIRECT` | With `--socket`: the laptop reaches the node without a jump host; the printed command omits `-J` |
 | `--ssh-host` | `socket.getfqdn()` | With `--socket`: the node name to print as `NODE`; checked with `tunnel.parse_ssh_host`; no environment variable |
@@ -748,7 +748,11 @@ mode, `--ssh-host` without socket mode, and `--direct` (any source) together
 with `--via` given on the command line. A `--via` that comes only from
 `$IMAGE_REVIEW_VIA` is ignored in TCP
 mode, and so is a `--direct` that comes only from `$IMAGE_REVIEW_DIRECT`; with
-`--direct`, an environment `--via` is ignored too. An invalid
+`--direct`, an environment `--via` is ignored too. A `--socket-path` that
+comes only from `$IMAGE_REVIEW_SOCKET_PATH` is ignored in TCP mode (it does not
+imply `--socket`) and is used with `--socket`; one on the command line
+overrides it. An empty environment value is unset (click drops it), so
+`--socket` then uses the default path. An invalid
 `--via`, an invalid `--ssh-host` (empty, a leading `-`, an `@`, or anything
 outside letters, digits and `. _ : [ ] -`; `parse_ssh_host`), a
 `ValueError` (bad or busy path), an `OSError` from binding or from

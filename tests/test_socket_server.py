@@ -923,6 +923,55 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertFalse(self.dir.exists() and list(self.dir.glob("serve-*.sock")))
         self.assertFalse((self.work / "review.lock").exists())
 
+    def test_socket_path_from_environment_with_socket(self):
+        path = self.home / "env.sock"
+        seen = []
+
+        def fake_serve(server, *a, **k):
+            seen.append(stat.S_ISSOCK(path.lstat().st_mode))
+            raise KeyboardInterrupt
+
+        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+            result = invoke_cli(
+                "serve", "--work-dir", str(self.work), "--socket", env={"IMAGE_REVIEW_SOCKET_PATH": str(path)}
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(seen, [True])
+        self.assertIn(f"-L 127.0.0.1:8080:{path} ", result.output)
+        self.assertFalse(path.exists())
+
+    def test_socket_path_from_environment_alone_stays_tcp(self):
+        path = self.home / "env.sock"
+        seen = []
+
+        def fake_serve(server, *a, **k):
+            seen.append(type(server).__name__)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+            result = invoke_cli("serve", "--work-dir", str(self.work), env={"IMAGE_REVIEW_SOCKET_PATH": str(path)})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(seen, ["ReviewServer"])
+        self.assertFalse(path.exists())
+        self.assertNotIn("experimental", result.output)
+
+    def test_socket_path_option_overrides_environment(self):
+        env_path = self.home / "env.sock"
+        path = self.home / "cli.sock"
+        result = self.serve("--socket-path", str(path), env={"IMAGE_REVIEW_SOCKET_PATH": str(env_path)})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"-L 127.0.0.1:8080:{path} ", result.output)
+        self.assertNotIn(str(env_path), result.output)
+
+    def test_empty_socket_path_from_environment_counts_as_unset(self):
+        # click drops empty environment values, so the default path is used (no Path("") = cwd hazard)
+        with_socket = self.serve("--socket", env={"IMAGE_REVIEW_SOCKET_PATH": ""})
+        self.assertEqual(with_socket.exit_code, 0, with_socket.output)
+        self.assertIn(f"-L 127.0.0.1:8080:{self.dir}/serve-", with_socket.output)
+        without_socket = self.serve(env={"IMAGE_REVIEW_SOCKET_PATH": ""})
+        self.assertEqual(without_socket.exit_code, 0, without_socket.output)
+        self.assertNotIn("experimental", without_socket.output)
+
     def test_busy_path_is_refused_and_leaves_the_first_server(self):
         path = self.home / "busy.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

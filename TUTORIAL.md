@@ -811,11 +811,16 @@ forwarding does not work.
    **Tip: keep the tunnel across restarts.** ssh connects to the socket
    only when the browser opens a connection, so a forward to a fixed path
    keeps working when the server is restarted on that path. Give each job
-   its own path instead of the default:
+   its own path instead of the default. Set it once in the job's environment
+   (`serve` uses `$IMAGE_REVIEW_SOCKET_PATH` only with `--socket`):
 
    ```bash
-   image-review serve --work-dir /scratch/me/review_work --socket-path ~/.image-review/ir-$SLURM_JOB_ID.sock --direct
+   export IMAGE_REVIEW_SOCKET_PATH=~/.image-review/ir-$SLURM_JOB_ID.sock
+   image-review serve --work-dir /scratch/me/review_work --socket --direct
    ```
+
+   (`--socket-path PATH` on the command line does the same and overrides the
+   variable.)
 
    Leave the ssh command running. While the server is stopped the page says
    "Lost connection"; after a restart it says "token rejected", and you

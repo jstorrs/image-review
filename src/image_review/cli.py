@@ -698,8 +698,9 @@ def export(work_dir, output, report, allow_live, remote):
 )
 @click.option(
     "--socket-path",
+    envvar="IMAGE_REVIEW_SOCKET_PATH",
     default=None,
-    help="Experimental: the socket path; implies --socket [default: ~/.image-review/serve-HOST-PID.sock].",
+    help="Experimental: the socket path; implies --socket [default: ~/.image-review/serve-HOST-PID.sock]. Also read from $IMAGE_REVIEW_SOCKET_PATH, but only with --socket (alone, the variable does not switch serve into socket mode).",
 )
 @click.option(
     "--via",
@@ -733,10 +734,13 @@ def serve(work_dir, bind, port, socket_mode, socket_path, via, direct, ssh_host)
     """
     from .tunnel import parse_ssh_host, parse_via
 
+    ctx = click.get_current_context()
+    path_from_env = ctx.get_parameter_source("socket_path") is click.core.ParameterSource.ENVIRONMENT
+    if path_from_env and not socket_mode:
+        socket_path = None  # $IMAGE_REVIEW_SOCKET_PATH only means something with --socket
     if socket_path == "":  # e.g. --socket-path "$UNSET"; Path("") would quietly mean the current directory
         raise click.UsageError("--socket-path must not be empty.")
     socket_mode = socket_mode or socket_path is not None
-    ctx = click.get_current_context()
     if socket_mode:
         if bind is not None or ctx.get_parameter_source("port") is not click.core.ParameterSource.DEFAULT:
             raise click.UsageError("--socket and --socket-path cannot be combined with --bind or --port.")
