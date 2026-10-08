@@ -421,6 +421,16 @@ class TestWebFiles(unittest.TestCase):
         ]
         self.assertEqual(got, expected)
 
+    def test_verdict_message_parity(self):
+        from image_review import controller
+
+        script = (WEB_DIR / "app.js").read_text()
+        for name in ["GRID_HAS_DIRTY", "NOTHING_TO_UNDO", "UNLOADABLE_CLEAN"]:
+            with self.subTest(name=name):
+                found = re.search(rf'^const {name} = "([^"]*)";$', script, re.MULTILINE)
+                assert found is not None, name
+                self.assertEqual(found[1], getattr(controller, name))
+
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_grid_eligibility_parity(self):
         from image_review.controller import ReviewSession, next_batch

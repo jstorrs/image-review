@@ -99,9 +99,10 @@ default mode; use it only where you accept the points below.
   carry no PHI or secret and need no token. Every API route needs the token.
   The `Host` header must be `localhost`, `127.0.0.1` or `[::1]` (with an
   optional port), which defends against DNS rebinding. Responses carry a Content-Security-Policy and
-  `Referrer-Policy: no-referrer`. The page reviews single images; it reads
-  the image list and statuses, fetches each image and records verdicts and
-  undos through the same API, with the token.
+  `Referrer-Policy: no-referrer`. The page reviews single images and
+  grids; it reads the image list and statuses, asks for grid layouts,
+  fetches each image and records verdicts and undos through the same API,
+  with the token.
 - **Grid layouts cost the server work.** In socket mode only, `POST /grids`
   lets a token holder make the server read image files (to learn each
   image's size from its header) and run the bin packer. It is bounded to at
@@ -131,10 +132,13 @@ default mode; use it only where you accept the points below.
   the command, keep the explicit address. Other users on the laptop can reach
   `127.0.0.1:8080` while the command runs, but still need the token.
 - **Images** are held in the browser's memory as blob URLs, each revoked
-  once the next item is shown, with the same swap, crash-dump and screenshot
-  caveats as the viewer, plus whatever the browser itself does with its
-  memory and caches. Responses carry `Cache-Control: no-store`, so they
-  should not be written to the disk cache.
+  once the next item is shown. In grid mode each image is decoded to an
+  `ImageBitmap`, drawn into one `<canvas>` and closed once drawn; the canvas
+  holds the grid's pixels until the next grid is drawn, and is cleared and its
+  buffer freed (sized to 0) when the page leaves grid mode. Both carry the
+  same swap, crash-dump and screenshot caveats as the viewer, plus whatever
+  the browser itself does with its memory and caches. Responses carry
+  `Cache-Control: no-store`, so they should not be written to the disk cache.
 - **Stale-socket races.** A server treats a socket whose connect is refused
   as stale and unlinks it. Two servers started at once on one explicit
   `--socket-path` can therefore unlink each other's socket, and on macOS a

@@ -1860,43 +1860,63 @@ exists only in socket mode, whose page is served by the server it calls.
 
 ### Browser client (experimental)
 
-`web/app.js` (plain ES2020, no build step) reviews single images, following
-the pygame client's single mode (see *Single Mode*, *Unloadable Images*,
-*Undo*). It obeys the CSP above: no inline script or style, no `innerHTML`,
-no external URLs; all text goes in with `textContent`.
+`web/app.js` (plain ES2020, no build step) reviews single images and grids,
+following the pygame client (see *Single Mode*, *Grid Mode*, *Unloadable
+Images*, *Undo*). It obeys the CSP above: no inline script or style, no
+`innerHTML`, no external URLs; all text goes in with `textContent`.
 
-Grid mode so far only displays grids: `c`, `d`, `z` and their buttons do
-nothing in it (verdicts arrive in a later change). `m` (rotation `auto`) and
-`M` (`never`) switch to it and `s` back to single mode; each switch rereads
-`/statuses`, empties the stack of marked keys and rebuilds the list. It
-reviews one batch: `m`/`M` stay on the current batch while it has UNREVIEWED
-keys, else take the first in sorted order (by code point, as Python sorts)
-that has; `b` moves to the next that has, wrapping. The batch's UNREVIEWED
-keys go to `POST /grids` in manifest order at the stage's size in device
-pixels, as the *Unix-socket server* contract requires; a batch over
-`MAX_GRID_KEYS`, a stage under 256 device pixels or a batch with none (the
-controller's held-back message) shows a message instead. One `/grids`
-request is in flight at a time (a newer build waits for it, and a stale
-reply is dropped); a 503 shows "Server busy computing grids; retrying" and
-is retried every 2 s while the layout is still wanted. The last layout is
+`m` (rotation `auto`) and `M` (`never`) switch to grid mode and `s` back to
+single mode; each switch rereads `/statuses`, empties the stack of marked keys
+and rebuilds the list. It reviews one batch: `m`/`M` stay on the current batch
+while it has UNREVIEWED keys, else take the first in sorted order (by code
+point, as Python sorts) that has; `b` moves to the next that has, wrapping.
+The batch's UNREVIEWED keys go to `POST /grids` in manifest order at the
+stage's size in device pixels, as the *Unix-socket server* contract requires;
+a batch over `MAX_GRID_KEYS`, a stage under 256 device pixels or a batch with
+none (the controller's held-back message) shows a message instead. One
+`/grids` request is in flight at a time (a newer build waits for it, and a
+stale reply is dropped); a 503 shows "Server busy computing grids; retrying"
+and is retried every 2 s while the layout is still wanted. The last layout is
 cached, keyed as `controller.GridCacheKey` plus the batch, and kept across
-`s`/`m`/`M`; `b` drops it. Items follow `controller._grid_items`,
-reshuffled on every build. Each grid is drawn on a `<canvas>` at one canvas
-pixel per device pixel from `ImageBitmap`s (four `/image` requests at a
-time, no blob URLs); an image that fails to load, or whose decoded size is
-not its `source`, leaves its rectangle black and becomes a single item after
-the grids. The canvas is shown only once every image is settled. If the
-canvas loses its context the grid is taken off screen (dwell cleared) and
-drawn again when the context is restored; a grid whose drawing ends while
-the context is lost has all its keys moved to single items. The scale shown is the grid's
-smallest image scale times the canvas's display scale (taken as exactly 1
-when the canvas box is within half a device pixel of the canvas size), and
-the dwell starts as in single mode once the whole canvas is painted inside
-the stage. A resize to a new device size hides the grid at once and repacks
-300 ms after the last resize event, landing on the grid holding the previous
-item's first key. The header and the status line are one line each (long
-text is cut short; the status line's `title` holds it whole), so a message
-never changes the stage size and so never repacks.
+`s`/`m`/`M`; `b` drops it. Items follow `controller._grid_items`, reshuffled
+on every build. Each grid is drawn on a `<canvas>` at one canvas pixel per
+device pixel from `ImageBitmap`s (four `/image` requests at a time, no blob
+URLs); an image that fails to load, or whose decoded size is not its `source`,
+leaves its rectangle black and becomes a single item after the grids. The
+canvas is shown only once every image is settled. If the canvas loses its
+context the grid is taken off screen (dwell cleared) and drawn again when the
+context is restored; a grid whose drawing ends while the context is lost has
+all its keys moved to single items. The scale shown is the grid's smallest
+image scale times the canvas's display scale (taken as exactly 1 when the
+canvas box is within half a device pixel of the canvas size), and the dwell
+starts as in single mode once the whole canvas is painted inside the stage. A
+resize to a new device size hides the grid at once and repacks 300 ms after
+the last resize event, landing on the grid holding the previous item's first
+key. The header and the status line are one line each (long text is cut short;
+the status line's `title` holds it whole), so a message never changes the
+stage size and so never repacks.
+
+A grid verdict covers exactly the grid's drawn keys (any demoted to single
+items are not in it) in one `POST /mark` with `mode: "grid"`; every item
+shown in grid mode, including a left-out or demoted single, is marked with
+`mode: "grid"`, as `controller._mark` sends its mode. `c`/`d` on a grid count
+only while its canvas is shown with every key drawn and its dwell is over:
+never while it is being drawn or redrawn, hidden by a resize repack, or
+after `contextlost`. CLEAN on a grid holding a DIRTY or FLAGGED image (as
+`controller._grid_clean_refused`: unless every image is DIRTY) is refused
+with "grid contains an image already marked DIRTY - review it in single
+mode" and no request; DIRTY is always allowed. A grid holding such an image
+is not todo (its status is DIRTY, as `controller._grid_status`), so the
+move after a mark skips it. A resize repack empties the stack of marked keys
+at once, as `controller._rebuild_grids_for_resize` resets its undo count
+(the old items are gone, so `z` then says "Nothing to undo"); a repack due
+while a `/mark` or `/undo` is in flight waits for its reply, and a mark
+whose reply arrives after a resize hid the grids is not pushed on the stack
+and moves nowhere. On the end screen a resize does not repack (the
+controller repacks only while reviewing), so `z` still undoes there; leaving
+the end screen by `z` or Left/Right at a new size repacks first, landing on
+the grid holding the item that would have been shown, and that repack
+empties the rest of the stack.
 
 - **Token**: taken from the fragment into `sessionStorage` (memory if
   storage is blocked) and sent as `Authorization: Bearer` on every API call.
@@ -1937,8 +1957,9 @@ never changes the stage size and so never repacks.
   every item change, including after an undo. An image whose scale is 0 (a
   window too small to show it) starts no dwell, and a resize to 0 clears it;
   a resize that shows it again starts a new one.
-- **Marking**: one `POST /mark` with `mode: "single"`, controls disabled
-  while it is in flight, never retried. On a 200 the key is pushed on the
+- **Marking**: one `POST /mark` with the item's keys and `mode` the display
+  mode (`single`, or `grid` for every item in grid mode), controls disabled
+  while it is in flight, never retried. On a 200 the keys are pushed on the
   page's stack of marked keys, the reply updates the status map, and the page
   moves to the next todo item after the current one, wrapping round; with
   none left it shows "Pass N: nothing left to review". A 200 whose body
@@ -1948,15 +1969,17 @@ never changes the stage size and so never repacks.
 - **Navigation**: Left/Right (and buttons) step through the list without
   marking, stopping at its ends; from the end screen they go to the last or
   first item.
-- **Undo**: `z` (and a button), also on the end screen. With an empty
-  stack it says "Nothing to undo" without a request. Otherwise `POST /undo`;
-  `{}` empties the stack and says "Nothing to undo". If the reply holds any
-  key of the entry on top of the stack, it is popped and that item is shown again with a
-  fresh dwell. The server keeps one undo history for every client (see
-  *Concurrency limits*), so with another tab or client marking too the reply
-  can name other keys: the page then leaves the stack alone, says "Undid
-  another client's mark: KEY is STATUS" (up to three keys), and shows the
-  first listed item holding a returned key, if any. So `z` is limited to
+- **Undo**: `z` (and a button), also on the end screen. With an empty stack
+  it says "Nothing to undo" without a request. Otherwise `POST /undo`; `{}`
+  empties the stack and says "Nothing to undo". If the reply holds any key of
+  the entry on top of the stack, it is popped and the item holding those keys
+  is shown again with a fresh dwell (a grid is drawn again from its images).
+  If a repack is pending when the reply arrives, the repack lands on the grid
+  holding the undone keys instead. The server keeps one undo history for every
+  client (see *Concurrency limits*), so with another tab or client marking too
+  the reply can name other keys: the page then leaves the stack alone, says
+  "Undid another client's mark: KEY is STATUS" (up to three keys), and shows
+  the first listed item holding a returned key, if any. So `z` is limited to
   this page's marks only while the page is the server's one client.
 - **Keys**: `c`, `d`, `z`, `s` (single mode) and `b` (next batch, grid mode
   only), in either case, so Caps Lock does not matter; `m` (grid, rotation

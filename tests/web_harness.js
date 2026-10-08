@@ -1,6 +1,6 @@
 "use strict";
 // Runs app.js (path in argv[2]) against a minimal stub DOM and checks grid mode's
-// display rules end to end. Run by tests/test_socket_server.py; exits non-zero on failure.
+// display and verdict rules end to end. Run by tests/test_socket_server.py; exits non-zero on failure.
 const assert = require("assert");
 const fs = require("fs");
 const vm = require("vm");
@@ -16,6 +16,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
   const draws = []; // tags of the bitmaps drawn
   const bitmaps = [];
   const grids = { inFlight: 0, most: 0, sent: [] };
+  const posts = []; // {path, body} of every /mark and /undo
   const unhidden = []; // what the page held each time the canvas was unhidden
 
   function element(id) {
@@ -74,6 +75,9 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
       grids.most = Math.max(grids.most, grids.inFlight);
       grids.sent.push(JSON.parse(options.body));
     }
+    if (path === "/mark" || path === "/undo") {
+      posts.push({ path, body: JSON.parse(options.body) });
+    }
     return new Promise((resolve) => pending.push({ path, resolve }));
   }
   const ctx = {
@@ -103,7 +107,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
     blob: async () => ({ tag, size, arrayBuffer: async () => Uint8Array.from(JPEG).buffer }),
   });
   const page = {
-    els, draws, bitmaps, grids, unhidden, pending, context, shift: 0,
+    els, draws, bitmaps, grids, posts, unhidden, pending, context, shift: 0,
     get state() { return ctx.__state; },
     async respond(path, reply) {
       const i = pending.findIndex((r) => r.path === path);
@@ -119,6 +123,9 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
       (docListeners.keydown || []).forEach((fn) => fn({ key, shiftKey, target: {}, preventDefault() {} }));
       await settle();
     },
+    async click(id) { page.els[id].fire("click"); await settle(); },
+    async dwell() { await page.paint(); await page.advance(200); },
+    marks() { return posts.filter((post) => post.path === "/mark").map((post) => post.body); },
     async frame() { const f = frames; frames = []; f.forEach((fn) => fn()); await settle(); },
     async paint() { await page.frame(); await page.frame(); },
     async advance(ms) {
@@ -179,8 +186,6 @@ tests["grid shown only once every placement settled; failures out of the item fi
   assert.strictEqual(page.state.dwell, "running");
   await page.advance(200);
   assert.strictEqual(page.state.dwell, "over");
-  await page.key("c");
-  assert(!page.pending.some((r) => r.path === "/mark"), "no grid verdicts yet");
 };
 
 tests["a stale bitmap is closed and never drawn"] = async () => {
@@ -362,6 +367,379 @@ tests["a stale dwell start is dropped"] = async () => {
   assert.strictEqual(page.state.dwell, "none", "two frames of the new grid first");
   await page.frame();
   assert.strictEqual(page.state.dwell, "running");
+};
+
+// ---- Verdicts ----
+
+const plain = (value) => JSON.parse(JSON.stringify(value)); // across the vm realm
+const UNREVIEWED = (keys) => Object.fromEntries(keys.map((key) => [key, "UNREVIEWED"]));
+const LEFT_OUT = { grids: [[place("a", 0), place("b", 100)]], left_out: ["c"] };
+
+for (const verdict of ["CLEAN", "DIRTY"]) {
+  tests["grid " + verdict + " sends exactly the drawn keys, mode grid; a demoted single follows as grid"] = async () => {
+    const page = makePage({ manifest, statuses });
+    await page.boot();
+    await page.enterGrid();
+    await page.respond("/grids", page.json(200, PLAN));
+    await page.image200("a", [200, 200]);
+    await page.respond("/image?key=b", page.image("b", [200, 200], 404)); // demoted
+    await page.image200("c", [200, 200]);
+    await page.dwell();
+    await page.key(verdict[0].toLowerCase());
+    assert.deepStrictEqual(page.marks(), [{ keys: ["a", "c"], status: verdict, pass: 1, reviewer: "Jane", mode: "grid" }]);
+    await page.respond("/mark", page.json(200, { a: verdict, c: verdict }));
+    assert.deepStrictEqual(plain(page.state.marked), [["a", "c"]]);
+    assert.strictEqual(page.state.items[page.state.index].key, "b", "on to the next todo item");
+    await page.image200("b", [100, 50]);
+    await page.dwell();
+    await page.key("d");
+    assert.deepStrictEqual(page.marks()[1], { keys: ["b"], status: "DIRTY", pass: 1, reviewer: "Jane", mode: "grid" });
+  };
+}
+
+tests["a left-out single in grid mode marks with mode grid"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, LEFT_OUT));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.dwell();
+  await page.click("clean");
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN" }));
+  await page.image200("c", [100, 50]);
+  await page.dwell();
+  await page.key("c");
+  assert.deepStrictEqual(page.marks().map((m) => [m.keys, m.mode]), [[["a", "b"], "grid"], [["c"], "grid"]]);
+};
+
+tests["single mode sends mode single"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.dwell();
+  const key = page.state.items[0].key;
+  await page.key("c");
+  assert.deepStrictEqual(page.marks(), [{ keys: [key], status: "CLEAN", pass: 1, reviewer: "Jane", mode: "single" }]);
+};
+
+for (const other of ["DIRTY", "FLAGGED"]) {
+  tests["grid CLEAN refused, with no request, once a key is " + other] = async () => {
+    const page = makePage({ manifest, statuses });
+    await page.boot();
+    await page.enterGrid();
+    await page.respond("/grids", page.json(200, TWO_GRIDS)); // [a, b] first (fullest), then [c]
+    for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+    await page.key("ArrowRight");
+    await page.image200("c", [200, 200]);
+    await page.dwell();
+    await page.key("d");
+    await page.respond("/mark", page.json(200, { c: "DIRTY", a: other })); // a shares c's image_id
+    assert.strictEqual(page.state.index, -1, "[a, b] is no longer todo, so skipped");
+    await page.key("ArrowLeft");
+    await page.key("ArrowLeft");
+    for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+    await page.dwell();
+    await page.key("c");
+    await page.click("clean");
+    assert.strictEqual(page.els.status.textContent,
+      "grid contains an image already marked DIRTY - review it in single mode");
+    assert.strictEqual(page.marks().length, 1, "no request for the refused CLEAN");
+    await page.key("d");
+    assert.deepStrictEqual(page.marks()[1].keys, ["a", "b"], "DIRTY is still allowed");
+  };
+}
+
+tests["a grid of only DIRTY images may be marked CLEAN again"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await showPlan(page);
+  await page.dwell();
+  await page.key("d");
+  await page.respond("/mark", page.json(200, { a: "DIRTY", b: "DIRTY", c: "DIRTY" }));
+  await page.key("ArrowLeft");
+  for (const key of ["a", "b", "c"]) await page.image200(key, [200, 200]);
+  await page.dwell();
+  await page.key("c");
+  assert.deepStrictEqual(page.marks().map((m) => m.status), ["DIRTY", "CLEAN"]);
+};
+
+tests["no grid verdict before the dwell is over or while the canvas is hidden"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, PLAN));
+  await page.image200("a", [200, 200]);
+  await page.paint();
+  await page.advance(1000);
+  await page.key("c"); // still drawing: hidden
+  await page.click("dirty");
+  for (const key of ["b", "c"]) await page.image200(key, [200, 200]);
+  await page.paint();
+  await page.advance(100); // dwell running
+  await page.key("c");
+  await page.key("d");
+  assert.strictEqual(page.state.dwell, "running");
+  assert.strictEqual(page.els.clean.disabled, true);
+  assert.strictEqual(page.els.dirty.disabled, true);
+  assert.deepStrictEqual(page.marks(), []);
+  await page.advance(100);
+  assert.strictEqual(page.els.clean.disabled, false);
+  assert.strictEqual(page.els.dirty.disabled, false);
+};
+
+tests["no grid verdict during a resize repack"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await showPlan(page);
+  await page.dwell();
+  await page.resize(500, 300);
+  await page.key("c");
+  await page.advance(1000); // the repack is computing
+  await page.key("d");
+  assert.deepStrictEqual(page.marks(), []);
+  await page.respond("/grids", page.json(200, PLAN));
+  for (const key of ["a", "b", "c"]) await page.image200(key, [200, 200]);
+  await page.key("c"); // shown, but not yet for the dwell
+  assert.deepStrictEqual(page.marks(), []);
+  await page.dwell();
+  await page.key("c");
+  assert.strictEqual(page.marks().length, 1);
+};
+
+tests["no grid verdict after contextlost"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await showPlan(page);
+  await page.dwell();
+  page.els.grid.fire("contextlost");
+  await page.key("c");
+  await page.click("dirty");
+  assert.deepStrictEqual(page.marks(), []);
+};
+
+tests["a double c, or a click and a key, sends one grid mark"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await showPlan(page);
+  await page.dwell();
+  await page.key("c");
+  await page.key("c");
+  await page.click("clean");
+  await page.key("d");
+  assert.strictEqual(page.marks().length, 1);
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN", c: "CLEAN" }));
+  await page.key("c"); // the end screen
+  assert.strictEqual(page.marks().length, 1);
+};
+
+tests["z redraws the marked grid with a fresh dwell and pops the stack"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, TWO_GRIDS));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN" }));
+  await page.image200("c", [200, 200]);
+  await page.dwell();
+  assert.deepStrictEqual(plain(page.state.marked), [["a", "b"]]);
+  await page.key("z");
+  assert.deepStrictEqual(page.posts.map((post) => post.path), ["/mark", "/undo"]);
+  await page.respond("/undo", page.json(200, UNREVIEWED(["a", "b"])));
+  assert.deepStrictEqual(plain(page.state.marked), []);
+  assert.strictEqual(page.els.grid.hidden, true, "redrawn before it shows");
+  await page.key("c");
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  assert.deepStrictEqual(page.unhidden.map((u) => u.keys), [["a", "b"], ["c"], ["a", "b"]]);
+  assert.strictEqual(page.state.dwell, "none");
+  await page.key("c");
+  await page.paint();
+  await page.advance(100);
+  await page.key("c");
+  assert.strictEqual(page.marks().length, 1, "no verdict until the fresh dwell is over");
+  await page.advance(100);
+  await page.key("c");
+  assert.deepStrictEqual(page.marks()[1].keys, ["a", "b"]);
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN" }));
+  assert.deepStrictEqual(plain(page.state.marked), [["a", "b"]]);
+};
+
+tests["z after another client's mark warns and keeps the stack"] = async () => {
+  const page = makePage({ manifest: manifest.concat([{ key: "x", batch: "b2" }]), statuses: { ...statuses, x: "CLEAN" } });
+  await showPlan(page);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN", c: "CLEAN" }));
+  await page.key("z");
+  await page.respond("/undo", page.json(200, { x: "UNREVIEWED" }));
+  assert(page.els.status.textContent.startsWith("Undid another client's mark: x is UNREVIEWED"));
+  assert.deepStrictEqual(plain(page.state.marked), [["a", "b", "c"]]);
+};
+
+tests["a resize repack clears the undo stack"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, TWO_GRIDS));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN" }));
+  await page.resize(500, 300);
+  await page.key("z");
+  assert.strictEqual(page.els.status.textContent, "Nothing to undo", "at once, not only after the debounce");
+  await page.advance(300);
+  assert.deepStrictEqual(page.grids.sent[1].keys, ["c"]);
+  await page.respond("/grids", page.json(200, { grids: [[place("c", 0)]], left_out: [] }));
+  await page.image200("c", [200, 200]);
+  await page.key("z");
+  assert.strictEqual(page.els.status.textContent, "Nothing to undo");
+  assert(!page.posts.some((post) => post.path === "/undo"));
+};
+
+tests["a resize during a grid mark: no undo entry, and the repack waits for the reply"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await showPlan(page);
+  await page.dwell();
+  await page.key("c");
+  await page.resize(500, 300);
+  await page.advance(1000);
+  assert.strictEqual(page.grids.sent.length, 1, "no repack while the mark is out");
+  const shown = page.state.showSeq;
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN", c: "CLEAN" }));
+  assert.deepStrictEqual(plain(page.state.marked), []);
+  assert.strictEqual(page.state.showSeq, shown, "no stale advance");
+  assert.strictEqual(page.els.message.textContent, "Computing grids...");
+  await page.advance(300);
+  assert.strictEqual(page.grids.sent.length, 1, "nothing left to pack");
+  assert.strictEqual(page.els.message.textContent, "Pass 1: nothing left to review");
+  await page.key("z");
+  assert.strictEqual(page.els.status.textContent, "Nothing to undo");
+};
+
+tests["single mode: a FLAGGED image takes CLEAN; a placeholder takes DIRTY only"] = async () => {
+  const page = makePage({ manifest: [{ key: "a", batch: "b1" }], statuses: { a: "FLAGGED" } });
+  await page.boot();
+  await page.dwell();
+  await page.key("c");
+  assert.deepStrictEqual(page.marks().map((m) => [m.keys, m.status]), [[["a"], "CLEAN"]]);
+  const other = makePage({ manifest, statuses });
+  await other.boot();
+  await other.key("ArrowRight");
+  const key = other.state.items[1].key;
+  await other.respond("/image?key=" + key, other.image(key, [100, 50], 404));
+  await other.dwell();
+  assert.strictEqual(other.els.clean.disabled, true);
+  assert.strictEqual(other.els.dirty.disabled, false);
+  await other.key("c");
+  assert.strictEqual(other.els.status.textContent, "cannot mark CLEAN: image could not be loaded");
+  assert.deepStrictEqual(other.marks(), []);
+};
+
+tests["canJudge needs the grid canvas shown and loaded, not only the dwell"] = async () => {
+  for (const spoil of [(page) => { page.els.grid.hidden = true; }, (page) => { page.state.loaded = false; }]) {
+    const page = makePage({ manifest, statuses });
+    await showPlan(page);
+    await page.dwell();
+    assert.strictEqual(page.state.dwell, "over");
+    spoil(page);
+    page.els.reviewer.fire("input"); // renders
+    assert.strictEqual(page.els.clean.disabled, true);
+    assert.strictEqual(page.els.dirty.disabled, true);
+    await page.key("c");
+    await page.key("d");
+    await page.click("dirty");
+    assert.deepStrictEqual(page.marks(), []);
+  }
+};
+
+tests["z redraws the second grid when its mark is undone"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, TWO_GRIDS));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.key("ArrowRight");
+  await page.image200("c", [200, 200]);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { c: "CLEAN" }));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]); // wrapped round to [a, b]
+  await page.key("z");
+  await page.respond("/undo", page.json(200, { c: "UNREVIEWED" }));
+  await page.image200("c", [200, 200]);
+  assert.deepStrictEqual(page.unhidden.map((u) => u.keys), [["a", "b"], ["c"], ["a", "b"], ["c"]]);
+};
+
+// [c] then [a, b] marked, ending on the end screen.
+async function markAllToEnd(page) {
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, TWO_GRIDS));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.key("ArrowRight");
+  await page.image200("c", [200, 200]);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { c: "CLEAN" }));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN" }));
+  assert.strictEqual(page.state.index, -1);
+}
+
+tests["a resize on the end screen keeps z; the undo repacks and lands on the undone grid"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await markAllToEnd(page);
+  await page.resize(500, 300);
+  await page.advance(1000);
+  assert.strictEqual(page.grids.sent.length, 1, "no repack on the end screen");
+  assert.deepStrictEqual(plain(page.state.marked), [["c"], ["a", "b"]]);
+  await page.key("z");
+  await page.respond("/undo", page.json(200, { a: "UNREVIEWED", b: "UNREVIEWED" }));
+  assert.strictEqual(page.els.status.textContent, "Undone: grid of 2 images");
+  assert.deepStrictEqual(plain(page.state.marked), [], "the repack empties the rest of the stack");
+  await page.advance(300);
+  assert.deepStrictEqual(page.grids.sent[1], { keys: ["a", "b"], width: 1000, height: 600, rotation: "auto" });
+  await page.respond("/grids", page.json(200, { grids: [[place("b", 0)], [place("a", 0)]], left_out: [] }));
+  await page.image200("a", [200, 200]);
+  assert.deepStrictEqual(page.unhidden.at(-1).keys, ["a"], "lands on the grid holding the undone keys");
+  await page.key("z");
+  assert.strictEqual(page.els.status.textContent, "Nothing to undo");
+  assert.strictEqual(page.posts.filter((post) => post.path === "/undo").length, 1);
+};
+
+tests["leaving the end screen after a resize repacks first"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await markAllToEnd(page);
+  await page.resize(500, 300);
+  await page.key("ArrowRight");
+  assert(!page.pending.some((r) => r.path.startsWith("/image")), "no grid drawn at the old size");
+  await page.advance(300);
+  assert.strictEqual(page.grids.sent.length, 1, "nothing left to pack");
+  assert.strictEqual(page.els.message.textContent, "Pass 1: nothing left to review");
+};
+
+tests["a resize during /undo: the repack waits, then lands on the undone grid"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, TWO_GRIDS));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN" }));
+  await page.image200("c", [200, 200]);
+  await page.key("z");
+  await page.resize(500, 300);
+  await page.advance(1000);
+  assert.strictEqual(page.grids.sent.length, 1, "no repack while the undo is out");
+  await page.respond("/undo", page.json(200, { a: "UNREVIEWED", b: "UNREVIEWED" }));
+  assert.strictEqual(page.els.status.textContent, "Undone: grid of 2 images");
+  assert.deepStrictEqual(plain(page.state.marked), []);
+  await page.advance(300);
+  assert.deepStrictEqual(page.grids.sent[1].keys, ["a", "b", "c"]);
+  const plan = { grids: [[place("c", 0), place("b", 100)], [place("a", 0)]], left_out: [] };
+  await page.respond("/grids", page.json(200, plan));
+  await page.image200("a", [200, 200]);
+  assert.deepStrictEqual(page.unhidden.at(-1).keys, ["a"], "the undone keys, not the grid shown at the resize");
 };
 
 (async () => {

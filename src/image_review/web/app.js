@@ -1,8 +1,7 @@
 "use strict";
 
 // Image review in the browser (experimental). The pygame client is the reference:
-// see SPEC.md, "Browser client (experimental)". Grid mode only displays grids so
-// far: its verdicts arrive in a later version.
+// see SPEC.md, "Browser client (experimental)".
 
 const TOKEN_HASH = /^#([A-Za-z0-9_-]+)$/;
 const TODO_STATUSES = new Set(["UNREVIEWED", "FLAGGED"]);
@@ -24,7 +23,7 @@ const LOST_CONNECTION = "Lost connection — your marks so far are saved on the 
 const NOTHING_TO_UNDO = "Nothing to undo";
 const UNLOADABLE_CLEAN = "cannot mark CLEAN: image could not be loaded";
 const NAME_NEEDED = "Enter your name (1-" + MAX_REVIEWER_LENGTH + " characters) to start reviewing";
-const GRID_VERDICTS_LATER = "Grid verdicts arrive in a later version; press [s] for single mode";
+const GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in single mode";
 const COMPUTING_GRIDS = "Computing grids...";
 const SERVER_BUSY = "Server busy computing grids; retrying";
 const BATCH_TOO_LARGE = "Batch too large for grid mode; use single mode [s]";
@@ -585,8 +584,13 @@ function canAct() {
   return state.reviewer !== null && !state.busy && !state.dead && state.pass !== null;
 }
 
+// A grid counts only while its canvas is up with every key it covers drawn.
 function canJudge() {
-  return canAct() && currentItem() !== null && state.dwell === "over";
+  const item = currentItem();
+  if (!canAct() || item === null || state.dwell !== "over") {
+    return false;
+  }
+  return item.kind !== "grid" || (state.loaded && !ui.grid.hidden);
 }
 
 function gridMode() {
@@ -624,11 +628,11 @@ function render() {
   }
 
   ui.reviewer.disabled = state.dead;
-  ui.clean.disabled = gridMode() || !canJudge() || !state.loaded;
-  ui.dirty.disabled = gridMode() || !canJudge();
+  ui.clean.disabled = !canJudge() || !state.loaded;
+  ui.dirty.disabled = !canJudge();
   ui.prev.disabled = !canAct() || state.items.length === 0;
   ui.next.disabled = !canAct() || state.items.length === 0;
-  ui.undo.disabled = gridMode() || !canAct();
+  ui.undo.disabled = !canAct();
 }
 
 function nextPaint() {
@@ -711,8 +715,12 @@ async function startDwell(seq) {
   render();
 }
 
+// In grid mode a resize repacks, except on the end screen: as the controller,
+// which repacks only while reviewing, the end screen keeps z, and leaving it
+// (z or an arrow) repacks first.
 function onResize() {
-  if (gridMode() && (state.repackTimer !== null || gridSizeChanged())) {
+  const endScreen = state.index < 0 && state.items.length > 0 && state.repackTimer === null;
+  if (gridMode() && !endScreen && (state.repackTimer !== null || gridSizeChanged())) {
     scheduleRepack();
     return;
   }
@@ -988,19 +996,28 @@ async function replyStatuses(response) {
   }
 }
 
+// "k1" for a single item, "grid of N images" for a grid.
+function describeKeys(keys) {
+  return keys.length === 1 ? keys[0] : "grid of " + keys.length + " images";
+}
+
+// One verdict on the current item: every key it covers (a grid's drawn keys),
+// sent with the display mode, so a left-out single in grid mode is sent as "grid".
 async function mark(verdict) {
-  if (gridMode()) {
-    say(GRID_VERDICTS_LATER);
-    return;
-  }
   if (!canJudge()) {
     return; // too soon after the item appeared, or busy: ignored, as in the pygame client
+  }
+  const item = currentItem();
+  if (verdict === "CLEAN" && item.kind === "grid" && gridCleanRefused(item.keys, state.statuses)) {
+    say(GRID_HAS_DIRTY);
+    return;
   }
   if (verdict === "CLEAN" && !state.loaded) {
     say(UNLOADABLE_CLEAN);
     return;
   }
-  const keys = itemKeys(currentItem());
+  const keys = itemKeys(item);
+  const build = state.buildSeq; // a resize repack meanwhile drops the items, and with them z
   state.busy = true;
   render();
   try {
@@ -1015,12 +1032,17 @@ async function mark(verdict) {
       say(response.status === 400 ? "invalid reviewer name" : "mark failed (HTTP " + response.status + ")");
       return;
     }
-    state.marked.push(keys); // recorded on the server, whatever the body holds
+    const current = build === state.buildSeq;
+    if (current) {
+      state.marked.push(keys); // recorded on the server, whatever the body holds
+    }
     const { changed } = await replyStatuses(response);
     applyStatuses(changed);
-    say("Marked " + verdict + ": " + keys[0]);
+    say("Marked " + verdict + ": " + describeKeys(keys));
     state.busy = false;
-    showItem(nextTodoIndex(state.items, state.statuses, state.index)).catch(reportError);
+    if (current && build === state.buildSeq) {
+      showItem(nextTodoIndex(state.items, state.statuses, state.index)).catch(reportError);
+    }
   } finally {
     state.busy = false;
     render();
@@ -1030,10 +1052,6 @@ async function mark(verdict) {
 // The server keeps one undo history for every client, so with another page or
 // client marking on the same server, z can undo their latest mark, not ours.
 async function undo() {
-  if (gridMode()) {
-    say(GRID_VERDICTS_LATER);
-    return;
-  }
   if (!canAct()) {
     return;
   }
@@ -1041,6 +1059,7 @@ async function undo() {
     say(NOTHING_TO_UNDO); // this page has made no mark it could show again
     return;
   }
+  const expected = state.marked[state.marked.length - 1]; // a repack meanwhile empties the stack
   state.busy = true;
   render();
   try {
@@ -1049,7 +1068,6 @@ async function undo() {
       say(response.status === 400 ? "invalid reviewer name" : "undo failed (HTTP " + response.status + ")");
       return;
     }
-    const expected = state.marked[state.marked.length - 1];
     const { changed, resynced } = await replyStatuses(response);
     if (changed.size === 0) {
       state.marked = []; // the server's history is gone (e.g. it restarted)
@@ -1058,20 +1076,25 @@ async function undo() {
     }
     applyStatuses(changed);
     let index;
-    if (resynced || expected.some((key) => changed.has(key))) {
+    const own = resynced || expected.some((key) => changed.has(key));
+    if (own) {
       state.marked.pop();
       const covered = new Set(expected); // show again the item this page marked
       index = state.items.findIndex((item) => itemKeys(item).some((key) => covered.has(key)));
-      say("Undone: " + expected[0] + " is " + state.statuses.get(expected[0]));
+      const now = expected.length === 1 ? " is " + state.statuses.get(expected[0]) : "";
+      say("Undone: " + describeKeys(expected) + now);
     } else {
       say("Undid another client's mark: " + describeStatuses(changed));
       index = state.items.findIndex((item) => itemKeys(item).some((key) => changed.has(key)));
     }
     if (index < 0) {
-      return; // nothing in this page's list to show again
+      if (own && state.repackTimer !== null) {
+        state.landKey = expected[0]; // the pending repack lands on the undone keys
+      }
+      return; // nothing in this page's list to show again (e.g. a repack is pending)
     }
     state.busy = false;
-    showItem(index).catch(reportError); // a fresh dwell before any verdict counts
+    showOrRepack(index); // a fresh dwell before any verdict counts
   } finally {
     state.busy = false;
     render();
@@ -1093,6 +1116,17 @@ function navigate(step) {
     }
   }
   say("");
+  showOrRepack(index);
+}
+
+// Show item `index`; in grid mode after a resize on the end screen, repack first
+// and land on its grid (the repack also empties the stack of marked keys).
+function showOrRepack(index) {
+  if (gridMode() && gridSizeChanged()) {
+    state.landKey = itemKeys(state.items[index])[0];
+    scheduleRepack();
+    return;
+  }
   showItem(index).catch(reportError);
 }
 
@@ -1178,13 +1212,18 @@ function scheduleRepack() {
     state.landKey = itemKeys(item)[0];
   }
   abandonItems(); // also cancels the pending repack
+  state.marked = []; // as controller._rebuild_grids_for_resize: the old items are gone
   showNotice(COMPUTING_GRIDS);
   render();
-  state.repackTimer = setTimeout(() => {
+  const repack = () => {
+    if (state.busy) {
+      state.repackTimer = setTimeout(repack, REPACK_DELAY_MS); // pack with the statuses a reply brings
+      return;
+    }
     state.repackTimer = null;
-    state.marked = []; // as controller._rebuild_grids_for_resize: the old items are gone
     buildGrids(state.landKey).catch(reportError);
-  }, REPACK_DELAY_MS);
+  };
+  state.repackTimer = setTimeout(repack, REPACK_DELAY_MS);
 }
 
 function canSwitch() {

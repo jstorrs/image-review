@@ -716,7 +716,7 @@ reconnect with the same string while the server is still running.
 An experimental alternative to the pygame viewer: a browser on your laptop,
 with only `ssh` installed there. The server listens on a Unix socket on the
 compute node and your laptop forwards a local port to it. The page reviews
-single images (there is no grid mode yet).
+single images or, in grid mode, packed grids of a batch's images.
 [SECURITY.md](SECURITY.md#experimental-browser-review-over-a-unix-socket)
 lists the differences from the HTTPS mode (plain HTTP on the node, a URL that
 holds the token) and the questions to ask your HPC administrator if
@@ -748,15 +748,20 @@ forwarding does not work.
 
 4. Type your name in the Reviewer box (1-64 characters; it is recorded with
    every verdict, as `--reviewer` is for the viewer), then click on the image
-   or press Enter so the keys reach the page. The page shows the current
-   pass's UNREVIEWED and FLAGGED images one at a time, in random order:
+   or press Enter so the keys reach the page. The page starts in single
+   mode, showing the current pass's UNREVIEWED and FLAGGED images one at a
+   time, in random order:
 
    | Key | Button | Action |
    |-----|--------|--------|
    | `c` | Clean | Mark the image CLEAN and move on |
    | `d` | Dirty | Mark the image DIRTY and move on |
    | Right / Left | Next / Previous | Move through the list without marking |
-   | `z` | Undo | Undo the latest mark and show that image again |
+   | `z` | Undo | Undo the latest mark and show that image (or grid) again |
+   | `m` | -- | Grid mode for the current batch (rotation `auto`) |
+   | `M` | -- | Grid mode without rotating images (rotation `never`) |
+   | `s` | -- | Back to single mode |
+   | `b` | -- | Grid mode: the next batch with images to review |
 
    A verdict counts only once the image has been on screen for 200 ms, so a
    key pressed as an image appears is ignored. An image that cannot be
@@ -772,6 +777,26 @@ forwarding does not work.
    "Multi-client limits" in [SECURITY.md](SECURITY.md)), and the page warns
    "Undid another client's mark". When the list is done the page says
    "Pass N: nothing left to review".
+
+   Grid mode works as in the viewer (see "Grid mode" above), one batch at a
+   time:
+
+   - One verdict covers every image in the grid: look at all of them before
+     pressing `c`. `d` marks them all DIRTY.
+   - CLEAN is refused ("grid contains an image already marked DIRTY") if any
+     image in the grid is already DIRTY or FLAGGED, unless every image in it
+     is DIRTY (which reverses that grid's own verdict); review it in single
+     mode.
+   - Grids hold only UNREVIEWED images; FLAGGED ones need single mode. An
+     image that fails to load or decode leaves a black gap and follows the
+     grids as a single item, as do images that did not fit a grid. These
+     single items are judged one at a time.
+   - Resizing the window repacks the grids for the new size and clears undo:
+     `z` then says "Nothing to undo". On the "nothing left to review" screen
+     `z` still works after a resize; the grids are repacked when you leave
+     that screen.
+   - A batch of more than 1000 images is too large for the browser's grid
+     mode; review it in single mode (`s`).
 
    Your marks so far are always saved on the server. If the tunnel drops,
    the page says "Lost connection": run the same ssh command again and

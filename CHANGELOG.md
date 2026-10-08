@@ -13,23 +13,30 @@
   without a jump host, and omits `-J`. `--ssh-host NAME` sets the node name
   it prints, for sites where the node's own FQDN does not work from the
   laptop. The page
-  reviews single images, like the viewer's single mode: enter a reviewer
+  starts with single images, like the viewer's single mode: enter a reviewer
   name, then `c` clean, `d` dirty, Left/Right to move, `z` to undo (this
   page's own marks, with one page per server: the undo history is shared).
   A verdict counts only once the image has been on screen for 200 ms, an
   image that cannot be loaded takes DIRTY only, and the header shows the
-  display scale, in red below 100%. There is no grid mode yet. The default
-  HTTPS mode and the pygame client are unchanged.
+  display scale, in red below 100%. `m` (rotation `auto`) or `M` (`never`)
+  switches to grid mode, one batch at a time (`b` for the next, `s` back to
+  single mode): the batch's UNREVIEWED images are packed by the server into
+  grids sized to the window, and one `c` or `d` marks every image in the
+  grid, recorded with mode `grid`. CLEAN is refused if any image in the grid
+  is already DIRTY or FLAGGED, unless every image in it is DIRTY (which
+  reverses that grid's own verdict); an image that fails to load follows the
+  grids as a single item; resizing the window repacks the grids and clears
+  undo; a batch over 1000 images needs single mode. The default HTTPS mode
+  and the pygame client are unchanged.
   See [SECURITY.md](SECURITY.md) for the limits.
 - **Experimental:** in socket mode, `POST /grids` returns grid layouts
-  computed with the viewer's own packing code, for the browser page's
-  coming grid mode (which does not use it yet). Socket mode only; the
-  HTTPS API and its version are unchanged.
+  computed with the viewer's own packing code, for the browser page's grid
+  mode. Socket mode only; the HTTPS API and its version are unchanged.
 - **Requirements:** rectpack (still pinned at 0.2.2) moved from the `viewer`
   extra to the core dependencies, with the grid layout code (`layout.py`), so
-  that `serve` can later lay out browser grids with the same code as the
-  viewer. rectpack has no wheel: an offline or `--only-binary` install needs
-  its sdist.
+  that `serve` lays out browser grids with the same code as the viewer.
+  rectpack has no wheel: an offline or `--only-binary` install needs its
+  sdist.
 
 ## 0.3.0
 
