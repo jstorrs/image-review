@@ -40,7 +40,11 @@ body {
   background: var(--bar);
 }
 
+/* One line, so the stage (and the size grids are packed for) does not change as the header text does */
 header.bar {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  white-space: nowrap;
   border-bottom: 1px solid var(--border);
 }
 
@@ -48,9 +52,17 @@ footer.bar {
   border-top: 1px solid var(--border);
 }
 
+/* Shrinks (after the progress and where text) before the badges would be cut, so the scale warning stays in view */
+.reviewer {
+  min-width: 0;
+  flex-shrink: 0.3;
+}
+
 .reviewer input {
   margin-left: 0.25rem;
   width: 12rem;
+  min-width: 4rem;
+  max-width: calc(100% - 5rem);
   padding: 0.2rem 0.4rem;
   font: inherit;
   color: var(--fg);
@@ -63,7 +75,17 @@ footer.bar {
   border-color: var(--flagged);
 }
 
+/* The badges never shrink; the progress and where text are cut short instead */
+#mode,
+#item-status,
+#scale {
+  flex: none;
+}
+
 #progress {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-variant-numeric: tabular-nums;
 }
 
@@ -95,9 +117,15 @@ footer.bar {
   font-weight: 600;
 }
 
+#mode {
+  font-weight: 600;
+}
+
 #where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--muted);
-  overflow-wrap: anywhere;
 }
 
 #stage {
@@ -106,6 +134,7 @@ footer.bar {
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
   background: var(--stage);
 }
 
@@ -113,6 +142,12 @@ footer.bar {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+/* Drawn at device pixels; app.js sets its CSS size to match, so it is never scaled here */
+#grid {
+  display: block;
+  flex: none;
 }
 
 .notice {
@@ -152,10 +187,15 @@ button:disabled {
   background: var(--dirty);
 }
 
+/* One line, so a message never changes the stage's height (and repacks the grids); its title holds the full text */
 #status {
   flex: 1;
   min-width: 12rem;
+  min-height: 1.4em; /* the line height: an empty status keeps its line */
   margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .help {

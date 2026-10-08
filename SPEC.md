@@ -1862,8 +1862,41 @@ exists only in socket mode, whose page is served by the server it calls.
 
 `web/app.js` (plain ES2020, no build step) reviews single images, following
 the pygame client's single mode (see *Single Mode*, *Unloadable Images*,
-*Undo*). There is no grid mode. It obeys the CSP above: no inline script or
-style, no `innerHTML`, no external URLs; all text goes in with `textContent`.
+*Undo*). It obeys the CSP above: no inline script or style, no `innerHTML`,
+no external URLs; all text goes in with `textContent`.
+
+Grid mode so far only displays grids: `c`, `d`, `z` and their buttons do
+nothing in it (verdicts arrive in a later change). `m` (rotation `auto`) and
+`M` (`never`) switch to it and `s` back to single mode; each switch rereads
+`/statuses`, empties the stack of marked keys and rebuilds the list. It
+reviews one batch: `m`/`M` stay on the current batch while it has UNREVIEWED
+keys, else take the first in sorted order (by code point, as Python sorts)
+that has; `b` moves to the next that has, wrapping. The batch's UNREVIEWED
+keys go to `POST /grids` in manifest order at the stage's size in device
+pixels, as the *Unix-socket server* contract requires; a batch over
+`MAX_GRID_KEYS`, a stage under 256 device pixels or a batch with none (the
+controller's held-back message) shows a message instead. One `/grids`
+request is in flight at a time (a newer build waits for it, and a stale
+reply is dropped); a 503 shows "Server busy computing grids; retrying" and
+is retried every 2 s while the layout is still wanted. The last layout is
+cached, keyed as `controller.GridCacheKey` plus the batch, and kept across
+`s`/`m`/`M`; `b` drops it. Items follow `controller._grid_items`,
+reshuffled on every build. Each grid is drawn on a `<canvas>` at one canvas
+pixel per device pixel from `ImageBitmap`s (four `/image` requests at a
+time, no blob URLs); an image that fails to load, or whose decoded size is
+not its `source`, leaves its rectangle black and becomes a single item after
+the grids. The canvas is shown only once every image is settled. If the
+canvas loses its context the grid is taken off screen (dwell cleared) and
+drawn again when the context is restored; a grid whose drawing ends while
+the context is lost has all its keys moved to single items. The scale shown is the grid's
+smallest image scale times the canvas's display scale (taken as exactly 1
+when the canvas box is within half a device pixel of the canvas size), and
+the dwell starts as in single mode once the whole canvas is painted inside
+the stage. A resize to a new device size hides the grid at once and repacks
+300 ms after the last resize event, landing on the grid holding the previous
+item's first key. The header and the status line are one line each (long
+text is cut short; the status line's `title` holds it whole), so a message
+never changes the stage size and so never repacks.
 
 - **Token**: taken from the fragment into `sessionStorage` (memory if
   storage is blocked) and sent as `Authorization: Bearer` on every API call.
@@ -1876,8 +1909,10 @@ style, no `innerHTML`, no external URLs; all text goes in with `textContent`.
 - **Startup**: `GET /current_pass`, `/manifest`, `/statuses?pass=N`. The
   list is the keys whose status is UNREVIEWED or FLAGGED, shuffled
   (Fisher-Yates); keys stay in it after they are marked. The header shows
-  "Pass N · K / T remaining" (K todo of the T listed), the item's status,
-  and its batch and key.
+  the mode (Single, or Grid with its rotation), the item's status, its scale,
+  "Pass N · K / T remaining" (K todo of the T listed; in grid mode "Pass N ·
+  BATCH (k/B) · K / T remaining"), and its batch and key (in grid mode "grid
+  (N images)" for a grid).
 - **Images**: `GET /image?key=K`. The reply must be `image/jpeg` and end in
   `FF D9` (a truncated body is refused); it becomes a blob URL in an `<img>`,
   awaited with `decode()`, and the previous blob URL is revoked. Any failure
@@ -1885,9 +1920,9 @@ style, no `innerHTML`, no external URLs; all text goes in with `textContent`.
   KEY", which can be marked DIRTY but never CLEAN ("cannot mark CLEAN: image
   could not be loaded", no request).
 - **Scale**: after each paint, on every window resize (which includes a
-  browser zoom) and whenever a `ResizeObserver` sees the `<img>` box change,
-  the page computes the display scale, `min(width / naturalWidth, height /
-  naturalHeight) * devicePixelRatio` with the box from
+  browser zoom) and whenever a `ResizeObserver` sees the stage (which the
+  `<img>` fills) change, the page computes the display scale, `min(width /
+  naturalWidth, height / naturalHeight) * devicePixelRatio` with the box from
   `getBoundingClientRect()` (screen pixels per image pixel under
   `object-fit: contain`), and shows it in the header as an integer percent,
   `floor(scale * 100 + 1e-9)` as in the viewer, red (class `low`) below
@@ -1923,8 +1958,10 @@ style, no `innerHTML`, no external URLs; all text goes in with `textContent`.
   another client's mark: KEY is STATUS" (up to three keys), and shows the
   first listed item holding a returned key, if any. So `z` is limited to
   this page's marks only while the page is the server's one client.
-- **Keys**: `c`, `d`, `z` (either case, so Caps Lock does not matter) and
-  Left/Right. Ignored while the reviewer field has focus, with
+- **Keys**: `c`, `d`, `z`, `s` (single mode) and `b` (next batch, grid mode
+  only), in either case, so Caps Lock does not matter; `m` (grid, rotation
+  `auto`) and `M` (`never`), told apart by the event's Shift state rather
+  than the letter's case, so Caps Lock is safe; and Left/Right. Ignored while the reviewer field has focus, with
   Ctrl/Alt/Meta, and on key repeat (a held key acts once). The five buttons
   never take focus (`tabindex="-1"`, and `mousedown` is cancelled), so Enter
   or Space cannot click one, held, past the repeat guard; a click on one
@@ -1934,7 +1971,7 @@ style, no `innerHTML`, no external URLs; all text goes in with `textContent`.
   connection — your marks so far are saved on the server" and does the same.
   Other HTTP errors show a short message with the status and leave the
   controls usable (at startup the page stops instead); nothing is retried
-  automatically.
+  automatically but a `/grids` 503 (see grid mode above).
 
 ## Remote Store (`remote.py`)
 

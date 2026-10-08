@@ -10,13 +10,15 @@
 <body>
 <header class="bar">
 <label class="reviewer">Reviewer <input id="reviewer" type="text" autocomplete="off" spellcheck="false" required></label>
-<span id="progress"></span>
+<span id="mode">Single</span>
 <span id="item-status" hidden></span>
 <span id="scale" hidden title="Display scale: below 100% the image is shrunk and small text may be lost"></span>
+<span id="progress"></span>
 <span id="where"></span>
 </header>
 <main id="stage">
 <img id="image" alt="" hidden>
+<canvas id="grid" width="0" height="0" hidden></canvas>
 <p id="placeholder" class="notice" hidden></p>
 <p id="message" class="notice" hidden></p>
 </main>
@@ -29,7 +31,7 @@
 <button type="button" tabindex="-1" id="undo" disabled>Undo (z)</button>
 </div>
 <p id="status" role="status">loading...</p>
-<p class="help">Keys: c clean &middot; d dirty &middot; &larr;/&rarr; navigate &middot; z undo</p>
+<p class="help">Keys: c clean &middot; d dirty &middot; &larr;/&rarr; navigate &middot; z undo &middot; m grid &middot; M grid (no rotation) &middot; s single &middot; b next batch (grid)</p>
 </footer>
 </body>
 </html>
