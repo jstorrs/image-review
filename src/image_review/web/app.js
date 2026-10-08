@@ -20,6 +20,10 @@ const REPACK_DELAY_MS = 300; // resize debounce before grids are repacked
 
 const TOKEN_REJECTED = "token rejected (server restarted?) - open the new URL";
 const LOST_CONNECTION = "Lost connection — your marks so far are saved on the server";
+const SESSION_ENDED = "Session ended";
+const SESSION_ENDED_DETAIL =
+  "Session ended. Your marks are saved on the server. Close this tab, and stop the server with Ctrl-C on the " +
+  "node (then the ssh command).";
 const NOTHING_TO_UNDO = "Nothing to undo";
 const RECONNECTING = "Reconnecting...";
 const UNLOADABLE_CLEAN = "cannot mark CLEAN: image could not be loaded";
@@ -393,6 +397,7 @@ const state = {
   busy: false, // a request is in flight, or the list is loading
   dead: false, // token rejected or connection lost: nothing more is sent
   lost: false, // stopped by a lost connection: Reconnect is offered
+  ended: false, // the reviewer ended the session (q): everything is freed and nothing more is sent
   epoch: 0, // bumped by every stop: a request sent before it changes nothing
   mode: "single",
   rotation: "auto", // grid mode's rotation policy: "auto" or "never"
@@ -433,6 +438,7 @@ const ui = {
   next: $("next"),
   undo: $("undo"),
   reconnect: $("reconnect"),
+  end: $("end"),
 };
 
 // ---- Requests ----
@@ -680,6 +686,7 @@ function render() {
   }
 
   ui.reviewer.disabled = state.dead;
+  ui.end.disabled = state.ended;
   ui.clean.disabled = !canJudge() || !state.loaded;
   ui.dirty.disabled = !canJudge();
   ui.prev.disabled = !canAct() || state.items.length === 0;
@@ -1398,6 +1405,40 @@ async function reconnect() {
   await rebuild(state.mode, state.rotation, false, state.landKey);
 }
 
+// End the session on this page only (the server keeps running; marks are saved as made).
+// Stops the page as a lost connection does, so every request in flight turns stale and
+// nothing more is sent, but offers no Reconnect; then frees the images and forgets the
+// token and the reviewer name.
+function endSession() {
+  if (state.ended) {
+    return;
+  }
+  state.ended = true;
+  state.lost = false;
+  state.token = null;
+  state.reviewer = null;
+  writeStored("token", null);
+  writeStored("reviewer", null);
+  ui.reviewer.value = "";
+  abandonItems(); // also clears the stage
+  leaveGrid();
+  setObjectUrl(null); // revokes the blob URL and clears the <img>
+  ui.image.alt = "";
+  state.pass = null;
+  state.manifest = [];
+  state.batches = [];
+  state.batchOf = new Map();
+  state.statuses = new Map();
+  state.marked = [];
+  state.gridCache = null;
+  ui.progress.textContent = "";
+  if (location.hash !== "") {
+    history.replaceState(null, "", location.pathname);
+  }
+  stop(SESSION_ENDED);
+  showNotice(SESSION_ENDED_DETAIL);
+}
+
 function reportError(error) {
   if (error instanceof Stopped) {
     return; // the page already says why
@@ -1474,6 +1515,8 @@ function onKey(event) {
     doRestart("grid", state.rotation, true);
   } else if (key === "r" && canReconnect()) {
     doReconnect(); // only while the Reconnect button is shown
+  } else if (key === "q") {
+    endSession(); // in any state
   }
 }
 
@@ -1498,6 +1541,7 @@ function wire() {
     [ui.next, () => navigate(1)],
     [ui.undo, doUndo],
     [ui.reconnect, doReconnect],
+    [ui.end, endSession],
   ];
   for (const [button, action] of buttons) {
     // Never focused (tabindex -1 too), so Enter or Space cannot click one, held, past the repeat guard

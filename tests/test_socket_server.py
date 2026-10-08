@@ -338,6 +338,7 @@ class TestWebFiles(unittest.TestCase):
         # Enter or Space on a focused button would click it past the key-repeat guard
         buttons = re.findall(r"<button\b[^>]*>", (WEB_DIR / "index.html").read_text())
         self.assertIn("reconnect", " ".join(buttons))
+        self.assertIn("end", " ".join(buttons))
         for tag in buttons:
             with self.subTest(tag=tag):
                 self.assertIn('tabindex="-1"', tag)

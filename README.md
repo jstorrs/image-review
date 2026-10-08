@@ -556,7 +556,7 @@ makes a new token, so paste the new URL after a restart, unless you also
 --socket` then reuses it and the URL stays the same (see the tutorial). After
 a "Lost connection" the page offers a Reconnect button (or `r`), never
 retrying by itself; with the fixed path and token a server restart needs
-nothing more. The traffic is plain HTTP inside the ssh tunnel, with no TLS on
+nothing more. `q` ends the session on the page (the server keeps running). The traffic is plain HTTP inside the ssh tunnel, with no TLS on
 the node; read the experimental section of [SECURITY.md](SECURITY.md) first,
 and the [tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the
 steps and troubleshooting.

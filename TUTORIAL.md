@@ -763,6 +763,7 @@ forwarding does not work.
    | `s` | -- | Back to single mode |
    | `b` | -- | Grid mode: the next batch with images to review |
    | `r` | Reconnect | After "Lost connection": load the review again |
+   | `q` | End session | End the session on the page (the server keeps running) |
 
    A verdict counts only once the image has been on screen for 200 ms, so a
    key pressed as an image appears is ignored. An image that cannot be
@@ -857,7 +858,10 @@ forwarding does not work.
    command line. After a restart, press Reconnect (or `r`) on the page: the
    forward and the URL are unchanged.
 
-Stop the server with Ctrl-C, then the ssh command. Each start has a new
+To finish, press `q` (or click End session) on the page: it forgets the
+token and frees the images, and says your marks are saved. It does not stop
+the server. Then stop the server with Ctrl-C on the node, then the ssh
+command, and close the tab. Each start has a new
 token unless `$IMAGE_REVIEW_TOKEN` is set. `--via` only fills in the `-J` part of the printed command; without
 it the command shows `<user>@<login-node>` for you to fill in. `--direct`
 (or `$IMAGE_REVIEW_DIRECT=1`) leaves `-J` out; it cannot be combined with

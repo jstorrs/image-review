@@ -18,6 +18,8 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
   const bitmaps = [];
   const grids = { inFlight: 0, most: 0, sent: [] };
   const posts = []; // {path, body} of every /mark and /undo
+  const revoked = []; // blob URLs revoked
+  const removedAttrs = []; // [element id, attribute] of each removeAttribute
   const unhidden = []; // what the page held each time the canvas was unhidden
 
   function element(id) {
@@ -38,7 +40,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
       },
       addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
       fire(type) { (listeners[type] || []).forEach((fn) => fn({})); },
-      removeAttribute() {},
+      removeAttribute(name) { removedAttrs.push([id, name]); },
       blur() {},
       decode: async () => {},
       getContext: () => context,
@@ -64,7 +66,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
     },
   };
   const ids = ["reviewer", "progress", "item-status", "scale", "where", "mode", "stage", "image", "grid", "placeholder",
-    "message", "status", "clean", "dirty", "prev", "next", "undo", "reconnect"];
+    "message", "status", "clean", "dirty", "prev", "next", "undo", "reconnect", "end"];
   const els = Object.fromEntries(ids.map((id) => [id, element(id)]));
   const docListeners = {};
   const winListeners = {};
@@ -84,11 +86,11 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
   const ctx = {
     window: { devicePixelRatio: dpr, addEventListener: (t, fn) => (winListeners[t] ||= []).push(fn) },
     document: { activeElement: null, getElementById: (id) => els[id], addEventListener: (t, fn) => (docListeners[t] ||= []).push(fn) },
-    location: { hash: "#TOKEN", pathname: "/", reload() {} },
+    location: { hash: "#TOKEN", pathname: "/", reload() { page.reloads++; } },
     history: { replaceState() {} },
     sessionStorage: { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v), removeItem: (k) => storage.delete(k) },
     fetch,
-    URL: { createObjectURL: () => "blob:x", revokeObjectURL() {} },
+    URL: { createObjectURL: () => "blob:x", revokeObjectURL: (url) => revoked.push(url) },
     requestAnimationFrame: (fn) => frames.push(fn),
     setTimeout: (fn, ms) => { const t = { at: clock + ms, fn }; timers.push(t); return t; },
     clearTimeout: (t) => { const i = timers.indexOf(t); if (i >= 0) timers.splice(i, 1); },
@@ -110,7 +112,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
     blob: async () => ({ tag, size, arrayBuffer: async () => Uint8Array.from(JPEG).buffer }),
   });
   const page = {
-    els, draws, bitmaps, grids, posts, unhidden, pending, context, shift: 0, bitmapGate: null,
+    els, draws, bitmaps, grids, posts, unhidden, pending, context, storage, revoked, removedAttrs, shift: 0, bitmapGate: null, reloads: 0,
     get state() { return ctx.__state; },
     async respond(path, reply) {
       const i = pending.findIndex((r) => r.path === path);
@@ -130,12 +132,17 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
     },
     json, image,
     async image200(key, size) { await page.respond("/image?key=" + encodeURIComponent(key), image(key, size)); },
-    async key(key, shiftKey = false) {
-      (docListeners.keydown || []).forEach((fn) => fn({ key, shiftKey, target: {}, preventDefault() {} }));
+    async key(key, shiftKey = false, target = {}) {
+      (docListeners.keydown || []).forEach((fn) => fn({ key, shiftKey, target, preventDefault() {} }));
       await settle();
     },
     async keyRepeat(key) {
       (docListeners.keydown || []).forEach((fn) => fn({ key, repeat: true, target: {}, preventDefault() {} }));
+      await settle();
+    },
+    async hashchange(hash) {
+      ctx.location.hash = hash;
+      (winListeners.hashchange || []).forEach((fn) => fn({}));
       await settle();
     },
     async click(id) { page.els[id].fire("click"); await settle(); },
@@ -1293,6 +1300,137 @@ tests["a grid image decoded after the loss starts no further fetch"] = async () 
   release();
   await page.advance(0);
   assert.deepStrictEqual(page.pending.map((r) => r.path), ["/image?key=c", "/image?key=d"], "e is never asked for");
+};
+
+// ---- End session ----
+
+// Everything the ended page must have let go of, and that nothing is sent or offered.
+async function assertEnded(page) {
+  const { els, state } = page;
+  assert.strictEqual(els.grid.width, 0);
+  assert.strictEqual(els.grid.hidden, true);
+  assert.strictEqual(els.image.hidden, true);
+  assert.strictEqual(els.placeholder.hidden, true);
+  assert.deepStrictEqual(page.removedAttrs.filter(([id]) => id === "image").pop(), ["image", "src"]);
+  assert.strictEqual(state.objectUrl, null);
+  assert.strictEqual(page.storage.has("token"), false);
+  assert.strictEqual(page.storage.has("reviewer"), false);
+  assert.strictEqual(state.token, null);
+  assert.strictEqual(state.reviewer, null);
+  assert.strictEqual(els.reviewer.value, "");
+  assert.deepStrictEqual([state.items.length, state.statuses.size, state.marked.length], [0, 0, 0]);
+  for (const id of ["reviewer", "clean", "dirty", "prev", "next", "undo", "end"]) {
+    assert.strictEqual(els[id].disabled, true, id + " disabled");
+  }
+  assert.strictEqual(els.reconnect.hidden, true);
+  assert.strictEqual(els.message.hidden, false);
+  assert(els.message.textContent.startsWith("Session ended. Your marks are saved on the server."));
+  assert(els.message.textContent.includes("Ctrl-C"));
+  assert.strictEqual(els.status.textContent, "Session ended");
+  const sent = page.pending.length;
+  const posted = page.posts.length;
+  await page.dwell();
+  await page.advance(5000);
+  await page.resize(500, 400);
+  for (const key of ["c", "d", "z", "m", "s", "b", "r", "ArrowRight"]) await page.key(key);
+  assert.strictEqual(page.pending.length, sent, "nothing new is sent");
+  assert.strictEqual(page.posts.length, posted, "nothing is posted");
+}
+
+tests["q ends a single-mode session: stale replies change nothing, all freed"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.dwell();
+  const shown = page.state.items[page.state.index].key;
+  const nextKey = page.state.items[1].key;
+  await page.key("c"); // /mark in flight
+  await page.key("q");
+  assert.deepStrictEqual(page.revoked, ["blob:x"]);
+  await assertEnded(page);
+  await page.respond("/mark", page.json(200, { [shown]: "CLEAN" }));
+  assert.strictEqual(page.state.statuses.size, 0);
+  assert.deepStrictEqual(page.pending.map((r) => r.path), []);
+  assert.strictEqual(page.els.message.hidden, false);
+  assert.strictEqual(page.els.reconnect.hidden, true);
+  assert(nextKey);
+};
+
+tests["q ends a grid-mode session, with grid images in flight"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, PLAN));
+  await page.image200("a", [200, 200]);
+  assert(page.els.grid.width > 0);
+  await page.key("q");
+  assert.strictEqual(page.els.grid.width, 0);
+  await page.image200("b", [200, 200]); // stale
+  await page.advance(5000);
+  assert.deepStrictEqual(page.pending.map((r) => r.path).sort(), ["/image?key=c"], "no new fetch; c was already out");
+  await page.respond("/image?key=c", page.image("c", [200, 200]));
+  assert.strictEqual(page.els.grid.hidden, true);
+  assert.strictEqual(page.els.grid.width, 0);
+  assert(page.bitmaps.every((bitmap) => bitmap.closed), "every decoded bitmap is closed");
+  await assertEnded(page);
+};
+
+tests["q while a grid layout is requested or retrying sends nothing more"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(503, {}));
+  await page.key("q");
+  await page.advance(5000);
+  assert.strictEqual(page.grids.sent.length, 1);
+  await assertEnded(page);
+};
+
+tests["q after a lost connection hides Reconnect and ends"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.dwell();
+  await page.key("c");
+  await page.fail("/mark");
+  assert.strictEqual(page.els.reconnect.hidden, false);
+  await page.key("q");
+  await assertEnded(page);
+  await page.key("r");
+  await page.click("reconnect");
+  assert.deepStrictEqual(page.pending, []);
+};
+
+tests["q after a rejected token, and with no token, ends"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.respond("/current_pass", { status: 401, ok: false });
+  assert.strictEqual(page.state.dead, true);
+  await page.key("q");
+  assert(page.els.message.textContent.startsWith("Session ended."));
+  assert.strictEqual(page.state.ended, true);
+};
+
+tests["q typed into the reviewer field is a letter; Q with Caps Lock ends; a held q ends once"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.key("q", false, page.els.reviewer);
+  assert.strictEqual(page.state.ended, false);
+  await page.keyRepeat("q");
+  assert.strictEqual(page.state.ended, false, "a repeat alone does not end");
+  await page.key("Q");
+  assert.strictEqual(page.state.ended, true);
+  const revoked = page.revoked.length;
+  await page.key("q");
+  await page.keyRepeat("q");
+  assert.strictEqual(page.revoked.length, revoked, "ending again does nothing");
+};
+
+tests["the End session button does the same, and a new token in the URL still reloads"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.click("end");
+  await assertEnded(page);
+  assert.strictEqual(page.els.end.disabled, true);
+  await page.hashchange("#NEWTOKEN");
+  assert.strictEqual(page.reloads, 1, "a new token pasted in still reloads");
 };
 
 (async () => {

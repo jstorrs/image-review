@@ -153,7 +153,9 @@ default mode; use it only where you accept the points below.
   holds the grid's pixels until the next grid is drawn, and is cleared and its
   buffer freed (sized to 0) when the page leaves grid mode. Both carry the
   same swap, crash-dump and screenshot caveats as the viewer, plus whatever
-  the browser itself does with its memory and caches. Responses carry
+  the browser itself does with its memory and caches. Pressing `q` (or
+  closing the tab) forgets the token and the reviewer name and frees the
+  images and the canvas on the page. Responses carry
   `Cache-Control: no-store`, so they should not be written to the disk cache.
 - **Stale-socket races.** A server treats a socket whose connect is refused
   as stale and unlinks it. Two servers started at once on one explicit

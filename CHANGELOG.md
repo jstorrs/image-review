@@ -35,7 +35,9 @@
   automatically), which reloads the statuses, rebuilds the current mode with
   a fresh 200 ms wait and forgets what `z` could undo, so with a fixed socket
   path and `$IMAGE_REVIEW_TOKEN` a server restart needs only Reconnect; a
-  rejected token says to open the new URL. The socket routes and the
+  rejected token says to open the new URL. `q` (or the End session button)
+  ends the session on the page: nothing more is sent, the token and
+  images are forgotten and freed, and the server keeps running. The socket routes and the
   page needed no API version bump and do not change the HTTPS API (API v7,
   below, is for the grid CLEAN refusal).
   See [SECURITY.md](SECURITY.md) for the limits.

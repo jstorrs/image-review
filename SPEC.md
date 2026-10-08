@@ -2037,8 +2037,8 @@ empties the rest of the stack.
   this page's marks only while the page is the server's one client. A
   Reconnect empties the stack (see *Errors*).
 - **Keys**: `c`, `d`, `z`, `s` (single mode), `b` (next batch, grid mode
-  only) and `r` (Reconnect, only while its button is shown), in either case,
-  so Caps Lock does not matter; `m` (grid, rotation `auto`) and `M`
+  only), `r` (Reconnect, only while its button is shown) and `q` (end the
+  session, in any state), in either case, so Caps Lock does not matter; `m` (grid, rotation `auto`) and `M`
   (`never`), told apart by the event's Shift state rather than the letter's
   case, so Caps Lock is safe; and Left/Right. Ignored while the reviewer
   field has focus, with Ctrl/Alt/Meta, and on key repeat (a held key acts
@@ -2076,6 +2076,19 @@ empties the rest of the stack.
   and leave the controls usable (at startup the page stops instead, offering
   Reconnect only after a network failure); nothing is retried automatically
   but a `/grids` 503 (see grid mode above).
+- **End session** (`q` or the "End session (q)" button, in any state, even
+  after a lost connection or a rejected token) ends the session on the page
+  only: the server keeps running (it is stopped with Ctrl-C on the node) and
+  the marks are already saved there. It stops the page as a lost connection
+  does, so every request in flight turns stale and nothing more is sent,
+  but offers no Reconnect. It leaves grid mode (canvas sized to 0, hidden),
+  revokes the image's blob URL and clears the `<img>`, drops the statuses,
+  items and marked keys, forgets the token and the reviewer name (in
+  `sessionStorage` and in memory), disables every control including the
+  reviewer field, clears the URL fragment if any, and shows "Session ended.
+  Your marks are saved on the server. Close this tab, and stop the server
+  with Ctrl-C on the node (then the ssh command)." A reload then shows the
+  "No token" help; pasting a new URL reloads as before.
 
 ## Remote Store (`remote.py`)
 
