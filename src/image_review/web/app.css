@@ -187,6 +187,18 @@ button:disabled {
   background: var(--dirty);
 }
 
+/* Shown only after a lost connection. While hidden it keeps its place, so the
+   footer (and the stage size grids are packed for) does not change as it shows */
+#reconnect {
+  flex: none;
+  border-color: var(--flagged);
+}
+
+#reconnect[hidden] {
+  display: inline-block !important;
+  visibility: hidden;
+}
+
 /* One line, so a message never changes the stage's height (and repacks the grids); its title holds the full text */
 #status {
   flex: 1;

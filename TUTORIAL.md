@@ -762,6 +762,7 @@ forwarding does not work.
    | `M` | -- | Grid mode without rotating images (rotation `never`) |
    | `s` | -- | Back to single mode |
    | `b` | -- | Grid mode: the next batch with images to review |
+   | `r` | Reconnect | After "Lost connection": load the review again |
 
    A verdict counts only once the image has been on screen for 200 ms, so a
    key pressed as an image appears is ignored. An image that cannot be
@@ -799,14 +800,19 @@ forwarding does not work.
      mode; review it in single mode (`s`).
 
    Your marks so far are always saved on the server. If the tunnel drops,
-   the page says "Lost connection": run the same ssh command again and
-   reload the page. If the server was restarted, the old tunnel points at a
-   socket that is gone (the default path includes the server's process id),
-   so the page also says "Lost connection": stop the old ssh command (it
-   holds port 8080, so the new one would fail), run the new command the
-   server printed, and open its new URL (pasting it into the same tab
-   works). The page says "token rejected" only when a restarted server
-   reuses the same `--socket-path`.
+   the page says "Lost connection" and shows a Reconnect button: run the
+   same ssh command again, then press Reconnect (or `r`). The page never
+   retries by itself. Reconnect reloads the statuses and rebuilds the list
+   in the mode you were in (grid mode lands on the grid you were on), forgets
+   which marks `z` could undo ("Nothing to undo" until you mark again) and
+   waits the 200 ms again before a verdict counts. If the server was
+   restarted, the old tunnel points at a socket that is gone (the default
+   path includes the server's process id), so the page also says "Lost
+   connection": stop the old ssh command (it holds port 8080, so the new one
+   would fail), run the new command the server printed, and open its new URL
+   (pasting it into the same tab works). The page says "token rejected -
+   open the new URL" when a restarted server reuses the same socket path
+   with a new token.
 
    **Tip: keep the tunnel across restarts.** ssh connects to the socket
    only when the browser opens a connection, so a forward to a fixed path
@@ -823,11 +829,13 @@ forwarding does not work.
    variable.)
 
    Leave the ssh command running. While the server is stopped the page says
-   "Lost connection"; after a restart with a fresh token (none exported) it
-   says "token rejected", and you paste the new URL into the same tab. Use a
-   per-job name such as `$SLURM_JOB_ID`, not one shared between jobs: on a
-   home directory shared between nodes, a second job with the same path
-   would take over the first one's socket. (Not yet tested on a cluster.)
+   "Lost connection". With a fixed socket path and `$IMAGE_REVIEW_TOKEN`
+   (below), a restart needs only Reconnect; after a restart with a fresh
+   token (none exported) Reconnect says "token rejected", and you paste the
+   new URL into the same tab. Use a per-job name such as `$SLURM_JOB_ID`,
+   not one shared between jobs: on a home directory shared between nodes, a
+   second job with the same path would take over the first one's socket.
+   (Not yet tested on a cluster.)
 
    To keep the URL too, give the job one token and export it as
    `$IMAGE_REVIEW_TOKEN`; `serve --socket` then reuses it on every start in
@@ -846,8 +854,8 @@ forwarding does not work.
    It must be 22-256 characters from letters, digits, `_` and `-` (the two
    commands above give 32); `serve` refuses anything else without printing
    it, and ignores the variable without `--socket`. Never put the token on a
-   command line. After a restart, reload the page: the forward and the URL
-   are unchanged.
+   command line. After a restart, press Reconnect (or `r`) on the page: the
+   forward and the URL are unchanged.
 
 Stop the server with Ctrl-C, then the ssh command. Each start has a new
 token unless `$IMAGE_REVIEW_TOKEN` is set. `--via` only fills in the `-J` part of the printed command; without

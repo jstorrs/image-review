@@ -8,7 +8,8 @@ const vm = require("vm");
 const APP = fs.readFileSync(process.argv[2], "utf8");
 const JPEG = [0xff, 0xd8, 1, 2, 0xff, 0xd9];
 
-function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
+// fixedOrder: Math.random stuck near 1, so shuffle keeps the order (grids then go fullest first, stably).
+function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder = false }) {
   const pending = []; // fetches not yet answered
   const timers = [];
   let clock = 0;
@@ -63,7 +64,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
     },
   };
   const ids = ["reviewer", "progress", "item-status", "scale", "where", "mode", "stage", "image", "grid", "placeholder",
-    "message", "status", "clean", "dirty", "prev", "next", "undo"];
+    "message", "status", "clean", "dirty", "prev", "next", "undo", "reconnect"];
   const els = Object.fromEntries(ids.map((id) => [id, element(id)]));
   const docListeners = {};
   const winListeners = {};
@@ -78,7 +79,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
     if (path === "/mark" || path === "/undo") {
       posts.push({ path, body: JSON.parse(options.body) });
     }
-    return new Promise((resolve) => pending.push({ path, resolve }));
+    return new Promise((resolve, reject) => pending.push({ path, resolve, reject }));
   }
   const ctx = {
     window: { devicePixelRatio: dpr, addEventListener: (t, fn) => (winListeners[t] ||= []).push(fn) },
@@ -92,12 +93,14 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
     setTimeout: (fn, ms) => { const t = { at: clock + ms, fn }; timers.push(t); return t; },
     clearTimeout: (t) => { const i = timers.indexOf(t); if (i >= 0) timers.splice(i, 1); },
     createImageBitmap: async (blob) => {
+      await page.bitmapGate; // a test may hold decoding back
       const bitmap = { tag: blob.tag, width: blob.size[0], height: blob.size[1], closed: false, close() { this.closed = true; } };
       bitmaps.push(bitmap);
       return bitmap;
     },
   };
   vm.createContext(ctx);
+  if (fixedOrder) vm.runInContext("Math.random = () => 0.99;", ctx);
   vm.runInContext(APP + "\n;globalThis.__state = state;", ctx);
 
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
@@ -107,7 +110,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
     blob: async () => ({ tag, size, arrayBuffer: async () => Uint8Array.from(JPEG).buffer }),
   });
   const page = {
-    els, draws, bitmaps, grids, posts, unhidden, pending, context, shift: 0,
+    els, draws, bitmaps, grids, posts, unhidden, pending, context, shift: 0, bitmapGate: null,
     get state() { return ctx.__state; },
     async respond(path, reply) {
       const i = pending.findIndex((r) => r.path === path);
@@ -117,10 +120,22 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2 }) {
       request.resolve(reply);
       await settle();
     },
+    async fail(path) { // the request fails as on a dropped tunnel
+      const i = pending.findIndex((r) => r.path === path);
+      assert(i >= 0, "no pending " + path + "; pending: " + pending.map((r) => r.path));
+      const [request] = pending.splice(i, 1);
+      if (path === "/grids") grids.inFlight--;
+      request.reject(new TypeError("Failed to fetch"));
+      await settle();
+    },
     json, image,
     async image200(key, size) { await page.respond("/image?key=" + encodeURIComponent(key), image(key, size)); },
     async key(key, shiftKey = false) {
       (docListeners.keydown || []).forEach((fn) => fn({ key, shiftKey, target: {}, preventDefault() {} }));
+      await settle();
+    },
+    async keyRepeat(key) {
+      (docListeners.keydown || []).forEach((fn) => fn({ key, repeat: true, target: {}, preventDefault() {} }));
       await settle();
     },
     async click(id) { page.els[id].fire("click"); await settle(); },
@@ -728,7 +743,7 @@ async function markAllToEnd(page) {
 }
 
 tests["a resize on the end screen keeps z; the undo repacks and lands on the undone grid"] = async () => {
-  const page = makePage({ manifest, statuses });
+  const page = makePage({ manifest, statuses, fixedOrder: true }); // [b] stays first: landing on [a] is no chance
   await markAllToEnd(page);
   await page.resize(500, 300);
   await page.advance(1000);
@@ -782,6 +797,502 @@ tests["a resize during /undo: the repack waits, then lands on the undone grid"] 
   await page.respond("/grids", page.json(200, plan));
   await page.image200("a", [200, 200]);
   assert.deepStrictEqual(page.unhidden.at(-1).keys, ["a"], "the undone keys, not the grid shown at the resize");
+};
+
+// ---- Reconnect ----
+
+const LOST = "Lost connection — your marks so far are saved on the server";
+
+// Respond to Reconnect's three loads.
+async function reload(page, current, pass = 1, rows = manifest) {
+  await page.respond("/current_pass", page.json(200, { pass }));
+  await page.respond("/manifest", page.json(200, rows));
+  await page.respond("/statuses?pass=" + pass, page.json(200, current));
+}
+
+tests["a lost connection offers Reconnect; a rejected token does not"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  assert.strictEqual(page.els.reconnect.hidden, true);
+  await page.key("ArrowRight");
+  await page.fail("/image?key=" + page.state.items[1].key);
+  assert.strictEqual(page.els.status.textContent, LOST);
+  assert.strictEqual(page.els.reconnect.hidden, false);
+  const other = makePage({ manifest, statuses });
+  await other.boot();
+  await other.key("ArrowRight");
+  await other.respond("/image?key=" + other.state.items[1].key, other.json(401, {}));
+  assert.strictEqual(other.els.status.textContent, "token rejected (server restarted?) - open the new URL");
+  assert.strictEqual(other.els.reconnect.hidden, true);
+  await other.key("r");
+  await other.click("reconnect");
+  assert.deepStrictEqual(other.pending, [], "nothing sent");
+};
+
+tests["Reconnect in single mode reloads, rebuilds, forgets the marks and waits for a fresh dwell"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.dwell();
+  const first = page.state.items[0].key;
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { [first]: "CLEAN" }));
+  assert.deepStrictEqual(plain(page.state.marked), [[first]]);
+  const shown = page.state.items[page.state.index].key;
+  await page.fail("/image?key=" + shown);
+  await page.click("reconnect");
+  assert.strictEqual(page.els.status.textContent, "Reconnecting...");
+  assert.strictEqual(page.els.reconnect.hidden, true);
+  assert.deepStrictEqual(plain(page.state.marked), []);
+  const other = ["a", "b", "c"].find((key) => key !== first && key !== shown);
+  await reload(page, { [first]: "CLEAN", [shown]: "UNREVIEWED", [other]: "DIRTY" }); // another client marked
+  assert.strictEqual(page.els.status.textContent, "Reconnected");
+  assert.deepStrictEqual(page.state.items.map((item) => item.key), [shown], "the todo list, rebuilt");
+  assert.strictEqual(page.state.statuses.get(other), "DIRTY");
+  await page.image200(shown, [100, 50]);
+  await page.key("c");
+  await page.paint();
+  await page.advance(100);
+  await page.key("d");
+  assert.strictEqual(page.marks().length, 1, "no verdict before a fresh dwell");
+  await page.advance(100);
+  await page.key("z");
+  assert.strictEqual(page.els.status.textContent, "Nothing to undo");
+  assert(!page.posts.some((post) => post.path === "/undo"));
+  await page.key("d");
+  assert.deepStrictEqual(page.marks()[1], { keys: [shown], status: "DIRTY", pass: 1, reviewer: "Jane", mode: "single" });
+  assert.strictEqual(page.els.reconnect.hidden, true);
+};
+
+tests["Reconnect in grid mode redraws, landing on the previous item's grid with a fresh dwell"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, TWO_GRIDS));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.key("ArrowRight");
+  await page.image200("c", [200, 200]);
+  await page.dwell();
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { c: "CLEAN" }));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]); // wrapped round to [a, b]
+  await page.dwell();
+  await page.key("d");
+  await page.fail("/mark");
+  assert.strictEqual(page.els.grid.hidden, false, "the grid stays up while stopped");
+  assert.strictEqual(page.els.clean.disabled, true);
+  await page.click("reconnect");
+  assert.strictEqual(page.els.grid.hidden, true, "taken off screen at once");
+  assert.strictEqual(page.state.dwell, "none");
+  assert.deepStrictEqual(plain(page.state.marked), []);
+  await reload(page, statuses); // another client undid c
+  assert.strictEqual(page.grids.sent.length, 2, "laid out afresh");
+  assert.deepStrictEqual(page.grids.sent[1], { keys: ["a", "b", "c"], width: 800, height: 600, rotation: "auto" });
+  // fullest first puts [b, c] before [a]: landing on [a] is not the default
+  await page.respond("/grids", page.json(200, { grids: [[place("b", 0), place("c", 100)], [place("a", 0)]], left_out: [] }));
+  assert.strictEqual(page.els.grid.hidden, true, "hidden until redrawn");
+  await page.image200("a", [200, 200]);
+  assert.deepStrictEqual(page.unhidden.at(-1), { keys: ["a"], placements: ["a"], images: 0, dwell: "none" });
+  await page.key("d");
+  assert.strictEqual(page.marks().length, 2, "no verdict before a fresh dwell");
+  await page.dwell();
+  await page.key("z");
+  assert.strictEqual(page.els.status.textContent, "Nothing to undo");
+  await page.key("d");
+  assert.deepStrictEqual(page.marks()[2], { keys: ["a"], status: "DIRTY", pass: 1, reviewer: "Jane", mode: "grid" });
+};
+
+tests["Reconnect while the server is still down is lost again; one in flight at a time"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.key("ArrowRight");
+  await page.fail("/image?key=" + page.state.items[1].key);
+  await page.click("reconnect");
+  await page.click("reconnect");
+  await page.key("r");
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["/current_pass"], "one Reconnect in flight");
+  await page.fail("/current_pass");
+  assert.strictEqual(page.els.status.textContent, LOST);
+  assert.strictEqual(page.els.reconnect.hidden, false);
+  assert.deepStrictEqual(page.pending, []);
+  await page.key("r");
+  await reload(page, statuses);
+  assert.strictEqual(page.els.status.textContent, "Reconnected");
+  assert.strictEqual(page.state.items.length, 3);
+};
+
+tests["a Reconnect answered 401 shows token rejected and no button"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.key("ArrowRight");
+  await page.fail("/image?key=" + page.state.items[1].key);
+  await page.click("reconnect");
+  await page.respond("/current_pass", page.json(401, {}));
+  assert.strictEqual(page.els.status.textContent, "token rejected (server restarted?) - open the new URL");
+  assert.strictEqual(page.els.reconnect.hidden, true);
+  await page.key("r");
+  await page.advance(10000);
+  assert.deepStrictEqual(page.pending, []);
+};
+
+tests["a Reconnect to a new pass uses it and says so"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.key("ArrowRight");
+  await page.fail("/image?key=" + page.state.items[1].key);
+  await page.click("reconnect");
+  await reload(page, { a: "UNREVIEWED", b: "CLEAN", c: "CLEAN" }, 2);
+  assert.strictEqual(page.state.pass, 2);
+  assert.strictEqual(page.els.status.textContent, "Reconnected; now on pass 2");
+  assert(page.els.progress.textContent.startsWith("Pass 2 · "));
+  await page.image200("a", [100, 50]);
+  await page.dwell();
+  await page.key("c");
+  assert.strictEqual(page.marks()[0].pass, 2);
+};
+
+tests["r reconnects only while the button is shown, in either case, never on repeat"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.key("r");
+  await page.key("R");
+  assert.deepStrictEqual(page.pending, []);
+  await page.key("ArrowRight");
+  await page.fail("/image?key=" + page.state.items[1].key);
+  await page.keyRepeat("r");
+  assert.deepStrictEqual(page.pending, [], "a held key acts once");
+  await page.key("R");
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["/current_pass"]);
+};
+
+tests["no automatic retry: timers after a loss send nothing"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await showPlan(page);
+  await page.dwell();
+  await page.key("c");
+  await page.resize(500, 300); // a repack waits for the mark's reply
+  await page.fail("/mark");
+  await page.advance(10000);
+  await page.paint();
+  await page.resize(400, 300);
+  await page.advance(10000);
+  page.els.grid.fire("contextrestored");
+  await page.advance(10000);
+  assert.deepStrictEqual(page.pending, []);
+  assert.strictEqual(page.grids.sent.length, 1);
+  assert.strictEqual(page.els.reconnect.hidden, false);
+  await page.click("reconnect");
+  await reload(page, statuses);
+  assert.strictEqual(page.grids.sent.length, 2, "the Reconnect rebuilds the grids");
+  // A repack from the cached layout landing on a left-out single would fetch its image
+  const other = makePage({ manifest, statuses });
+  await other.boot();
+  await other.enterGrid();
+  await other.respond("/grids", other.json(200, LEFT_OUT));
+  for (const key of ["a", "b"]) await other.image200(key, [200, 200]);
+  await other.key("ArrowRight");
+  await other.image200("c", [100, 50]);
+  await other.dwell();
+  await other.key("d");
+  await other.fail("/mark");
+  await other.resize(500, 300);
+  await other.resize(400, 300);
+  await other.advance(10000);
+  assert.deepStrictEqual(other.pending, []);
+};
+
+// Single mode: c on the first item, its reply, then z (/undo out) and the next image's fetch fails.
+async function loseWithUndoOut(page) {
+  await page.boot();
+  await page.dwell();
+  const first = page.state.items[0].key;
+  await page.key("c");
+  await page.respond("/mark", page.json(200, { [first]: "CLEAN" }));
+  const shown = page.state.items[page.state.index].key;
+  await page.key("z");
+  await page.fail("/image?key=" + shown);
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["/undo"]);
+  return first;
+}
+
+tests["a reply to a request sent before the loss changes nothing, before or during Reconnect"] = async () => {
+  const page = makePage({ manifest, statuses });
+  const first = await loseWithUndoOut(page);
+  const marked = plain(page.state.marked);
+  await page.respond("/undo", page.json(200, { [first]: "UNREVIEWED" })); // while stopped
+  assert.strictEqual(page.els.status.textContent, LOST);
+  assert.strictEqual(page.els.reconnect.hidden, false);
+  assert.strictEqual(page.state.statuses.get(first), "CLEAN");
+  assert.deepStrictEqual(plain(page.state.marked), marked);
+  assert.deepStrictEqual(page.pending, [], "nothing sent while stopped");
+  const other = makePage({ manifest, statuses });
+  const key = await loseWithUndoOut(other);
+  await other.click("reconnect");
+  await other.respond("/undo", other.json(200, { [key]: "UNREVIEWED" })); // during the reload
+  assert.strictEqual(other.els.status.textContent, "Reconnecting...");
+  assert.strictEqual(other.state.busy, true);
+  assert.strictEqual(other.state.statuses.get(key), "CLEAN");
+  for (const k of ["m", "s", "z", "ArrowRight", "ArrowLeft", "c", "d"]) await other.key(k);
+  await other.key("M", true);
+  for (const id of ["clean", "dirty", "prev", "next", "undo"]) await other.click(id);
+  assert.deepStrictEqual(other.pending.map((r) => r.path), ["/current_pass"], "no key or button sends a request");
+  await other.respond("/current_pass", other.json(200, { pass: 1 }));
+  await other.key("m");
+  assert.deepStrictEqual(other.pending.map((r) => r.path), ["/manifest"]);
+};
+
+tests["a failure of a request sent before the loss leaves a reconnected page live"] = async () => {
+  const page = makePage({ manifest, statuses });
+  const first = await loseWithUndoOut(page);
+  await page.click("reconnect");
+  await reload(page, { ...statuses, [first]: "CLEAN" });
+  await page.fail("/undo");
+  assert.strictEqual(page.els.status.textContent, "Reconnected");
+  assert.strictEqual(page.state.dead, false);
+  assert.strictEqual(page.els.reconnect.hidden, true);
+  const key = page.state.items[0].key;
+  await page.image200(key, [100, 50]);
+  await page.dwell();
+  await page.key("d");
+  assert.deepStrictEqual(page.marks().at(-1).keys, [key]);
+};
+
+tests["a network failure after a 401 keeps token rejected and offers no Reconnect"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await showPlan(page);
+  page.els.grid.fire("contextlost");
+  page.els.grid.fire("contextrestored"); // three image fetches out
+  await page.respond("/image?key=a", page.json(401, {}));
+  await page.fail("/image?key=b");
+  assert.strictEqual(page.els.status.textContent, "token rejected (server restarted?) - open the new URL");
+  assert.strictEqual(page.els.reconnect.hidden, true);
+  await page.key("r");
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["/image?key=c"], "nothing new sent");
+};
+
+tests["a failed Reconnect keeps the landing grid for the next"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, TWO_GRIDS));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.key("ArrowRight");
+  await page.fail("/image?key=c");
+  await page.click("reconnect");
+  await page.fail("/current_pass");
+  await page.click("reconnect");
+  await reload(page, statuses);
+  await page.respond("/grids", page.json(200, TWO_GRIDS)); // [a, b] first, the fuller
+  await page.image200("c", [200, 200]);
+  assert.deepStrictEqual(page.unhidden.at(-1).keys, ["c"]);
+};
+
+tests["a server error or bad reply during Reconnect shows it and offers Reconnect again"] = async () => {
+  for (const reply of [{ status: 500, ok: false }, { status: 200, ok: true, json: async () => ({}) }]) {
+    const page = makePage({ manifest, statuses });
+    await page.boot();
+    await page.key("ArrowRight");
+    await page.fail("/image?key=" + page.state.items[1].key);
+    await page.click("reconnect");
+    await page.respond("/current_pass", page.json(200, { pass: 1 }));
+    await page.respond("/manifest", { headers: { get: () => "application/json" }, ...reply });
+    assert.strictEqual(page.els.status.textContent, reply.status === 500 ? "server error (HTTP 500)" : "unexpected reply from the server");
+    assert.strictEqual(page.els.reconnect.hidden, false);
+    assert.strictEqual(page.state.busy, false);
+    await page.key("m");
+    assert.deepStrictEqual(page.pending, [], "stopped until a Reconnect");
+    await page.key("r");
+    await reload(page, statuses);
+    assert.strictEqual(page.els.status.textContent, "Reconnected");
+    assert.strictEqual(page.state.items.length, 3);
+  }
+};
+
+tests["Reconnect in grid mode keeps the batch and the rotation"] = async () => {
+  const rows = manifest.concat([{ key: "d", batch: "b2" }, { key: "e", batch: "b2" }]);
+  const all = { ...statuses, d: "UNREVIEWED", e: "UNREVIEWED" };
+  const page = makePage({ manifest: rows, statuses: all });
+  await page.boot();
+  await page.enterGrid(all, true); // M: rotation never, batch b1
+  await page.respond("/grids", page.json(200, PLAN));
+  await page.key("b");
+  await page.respond("/statuses?pass=1", page.json(200, all));
+  const de = { grids: [[place("d", 0), place("e", 100)]], left_out: [] };
+  await page.respond("/grids", page.json(200, de));
+  await page.fail("/image?key=d");
+  await page.click("reconnect");
+  await reload(page, all, 1, rows);
+  assert.deepStrictEqual(page.grids.sent.at(-1), { keys: ["d", "e"], width: 800, height: 600, rotation: "never" });
+  assert.strictEqual(page.els.mode.textContent, "Grid (never)");
+};
+
+tests["Reconnect with a repack pending lands on the grid shown at the resize"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.enterGrid();
+  await page.respond("/grids", page.json(200, TWO_GRIDS));
+  for (const key of ["a", "b"]) await page.image200(key, [200, 200]);
+  await page.key("ArrowRight");
+  await page.image200("c", [200, 200]);
+  await page.dwell();
+  await page.key("d");
+  await page.resize(500, 300); // the repack waits for the mark
+  await page.fail("/mark");
+  await page.advance(1000);
+  await page.click("reconnect");
+  await reload(page, statuses);
+  assert.deepStrictEqual(page.grids.sent.at(-1).width, 1000);
+  await page.respond("/grids", page.json(200, TWO_GRIDS)); // [a, b] first, the fuller
+  await page.image200("c", [200, 200]);
+  assert.deepStrictEqual(page.unhidden.at(-1).keys, ["c"]);
+};
+
+tests["a body that fails mid-read is a lost connection, and Reconnect recovers"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.key("m");
+  await page.respond("/statuses?pass=1", { status: 200, ok: true, headers: { get: () => "application/json" },
+    json: async () => { throw new TypeError("network error"); } });
+  assert.strictEqual(page.els.status.textContent, LOST);
+  assert.strictEqual(page.els.reconnect.hidden, false);
+  await page.key("r");
+  await reload(page, statuses);
+  assert.strictEqual(page.els.status.textContent, "Reconnected");
+};
+
+tests["while stopped, a /grids 503 retry is not sent"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  await page.key("ArrowRight"); // an image out
+  const image = page.pending[0].path;
+  await page.enterGrid();
+  await page.respond("/grids", page.json(503, null));
+  await page.fail(image);
+  assert.strictEqual(page.els.status.textContent, LOST);
+  await page.advance(10000);
+  assert.deepStrictEqual(page.pending, []);
+  assert.strictEqual(page.grids.sent.length, 1);
+};
+
+tests["while stopped, a grid's remaining images are not fetched"] = async () => {
+  const rows = ["a", "b", "c", "d", "e"].map((key) => ({ key, batch: "b1" }));
+  const all = UNREVIEWED(["a", "b", "c", "d", "e"]);
+  const page = makePage({ manifest: rows, statuses: all });
+  await page.boot();
+  await page.enterGrid(all);
+  await page.respond("/grids", page.json(200, { grids: [rows.map((row, i) => place(row.key, i * 100))], left_out: [] }));
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["a", "b", "c", "d"].map((k) => "/image?key=" + k));
+  await page.fail("/image?key=a");
+  await page.image200("b", [200, 200]);
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["/image?key=c", "/image?key=d"], "e is never asked for");
+};
+
+// A 200 JSON reply whose body settles only when told to.
+function lateBody() {
+  let settle;
+  const body = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  return { reply: { status: 200, ok: true, headers: { get: () => "application/json" }, json: () => body }, settle };
+}
+
+tests["a stale reply's status or late body changes nothing"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await loseWithUndoOut(page);
+  await page.click("reconnect");
+  await page.respond("/undo", page.json(401, {})); // sent before the loss
+  assert.strictEqual(page.els.status.textContent, "Reconnecting...");
+  assert.strictEqual(page.state.token, "TOKEN");
+  await reload(page, statuses);
+  assert.strictEqual(page.els.status.textContent, "Reconnected");
+  for (const outcome of ["resolve", "reject"]) {
+    const other = makePage({ manifest, statuses });
+    await other.boot();
+    await other.dwell();
+    const first = other.state.items[0].key;
+    await other.key("c");
+    await other.respond("/mark", other.json(200, { [first]: "CLEAN" }));
+    const shown = other.state.items[other.state.index].key;
+    await other.key("z");
+    const late = lateBody();
+    await other.respond("/undo", late.reply); // headers in, body still coming
+    await other.fail("/image?key=" + shown);
+    await other.click("reconnect");
+    await reload(other, { ...statuses, [first]: "CLEAN" });
+    const marked = plain(other.state.marked);
+    if (outcome === "resolve") late.settle.resolve({ [first]: "UNREVIEWED" });
+    else late.settle.reject(new TypeError("network error"));
+    await other.advance(0);
+    assert.strictEqual(other.els.status.textContent, "Reconnected", outcome);
+    assert.strictEqual(other.state.dead, false, outcome);
+    assert.strictEqual(other.state.statuses.get(first), "CLEAN", outcome);
+    assert.deepStrictEqual(plain(other.state.marked), marked, outcome);
+  }
+};
+
+// Single mode with the first item shown again while the second's fetch is still out, then `act`
+// sends a request; the second image's fetch fails (Lost) and Reconnect is pressed.
+async function loseWithRequestOut(page, act) {
+  await page.boot();
+  const [first, second] = page.state.items.map((item) => item.key);
+  await page.key("ArrowRight");
+  await page.key("ArrowLeft");
+  await page.image200(first, [100, 50]);
+  await page.dwell();
+  await act(page);
+  await page.fail("/image?key=" + second);
+  await page.click("reconnect");
+  return first;
+}
+
+async function assertReloadUntouched(page) {
+  assert.strictEqual(page.state.busy, true);
+  assert.strictEqual(page.els.status.textContent, "Reconnecting...");
+  await page.key("m");
+  await page.key("s");
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["/current_pass"]);
+  assert.deepStrictEqual(plain(page.state.marked), []);
+}
+
+tests["a /mark sent before the loss, answered during Reconnect, leaves the reload alone"] = async () => {
+  const page = makePage({ manifest, statuses });
+  const first = await loseWithRequestOut(page, (p) => p.key("c"));
+  await page.respond("/mark", page.json(200, { [first]: "CLEAN" }));
+  await assertReloadUntouched(page);
+  assert.strictEqual(page.state.statuses.get(first), "UNREVIEWED");
+};
+
+tests["a mode switch sent before the loss, answered during Reconnect, leaves the reload alone"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await loseWithRequestOut(page, (p) => p.key("m"));
+  await page.respond("/statuses?pass=1", page.json(200, statuses));
+  await assertReloadUntouched(page);
+  assert.strictEqual(page.state.mode, "single");
+};
+
+tests["a stop at startup other than a lost connection offers no Reconnect"] = async () => {
+  for (const reply of [{ status: 500, ok: false }, { status: 200, ok: true, json: async () => ({}) }]) {
+    const page = makePage({ manifest, statuses });
+    await page.respond("/current_pass", { headers: { get: () => "application/json" }, ...reply });
+    assert.strictEqual(page.state.dead, true);
+    assert.strictEqual(page.els.reconnect.hidden, true);
+    await page.key("r");
+    await page.click("reconnect");
+    assert.deepStrictEqual(page.pending, []);
+  }
+};
+
+tests["a grid image decoded after the loss starts no further fetch"] = async () => {
+  const rows = ["a", "b", "c", "d", "e"].map((key) => ({ key, batch: "b1" }));
+  const all = UNREVIEWED(["a", "b", "c", "d", "e"]);
+  const page = makePage({ manifest: rows, statuses: all });
+  await page.boot();
+  await page.enterGrid(all);
+  let release;
+  page.bitmapGate = new Promise((resolve) => { release = resolve; });
+  await page.respond("/grids", page.json(200, { grids: [rows.map((row, i) => place(row.key, i * 100))], left_out: [] }));
+  await page.image200("b", [200, 200]); // fetched before the loss, still decoding
+  await page.fail("/image?key=a");
+  release();
+  await page.advance(0);
+  assert.deepStrictEqual(page.pending.map((r) => r.path), ["/image?key=c", "/image?key=d"], "e is never asked for");
 };
 
 (async () => {

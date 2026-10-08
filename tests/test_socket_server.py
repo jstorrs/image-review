@@ -334,6 +334,14 @@ class TestWebFiles(unittest.TestCase):
         self.assertIn("reviewer", used)
         self.assertLessEqual(used, defined)
 
+    def test_buttons_never_take_focus(self):
+        # Enter or Space on a focused button would click it past the key-repeat guard
+        buttons = re.findall(r"<button\b[^>]*>", (WEB_DIR / "index.html").read_text())
+        self.assertIn("reconnect", " ".join(buttons))
+        for tag in buttons:
+            with self.subTest(tag=tag):
+                self.assertIn('tabindex="-1"', tag)
+
     def run_helpers(self, checks: str, data: object = None) -> object:
         """Run `checks` under node with `m`, a context holding app.js's pure helpers (those before the
         "---- Token" section, which touch no DOM), and `data` as parsed JSON; returns what the checks

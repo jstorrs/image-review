@@ -18,9 +18,10 @@ const GRID_IMAGE_FETCHES = 4; // concurrent /image requests while a grid is draw
 const GRID_RETRY_MS = 2000; // between /grids attempts while the server is busy
 const REPACK_DELAY_MS = 300; // resize debounce before grids are repacked
 
-const TOKEN_REJECTED = "token rejected (server restarted?)";
+const TOKEN_REJECTED = "token rejected (server restarted?) - open the new URL";
 const LOST_CONNECTION = "Lost connection — your marks so far are saved on the server";
 const NOTHING_TO_UNDO = "Nothing to undo";
+const RECONNECTING = "Reconnecting...";
 const UNLOADABLE_CLEAN = "cannot mark CLEAN: image could not be loaded";
 const NAME_NEEDED = "Enter your name (1-" + MAX_REVIEWER_LENGTH + " characters) to start reviewing";
 const GRID_HAS_DIRTY = "grid contains an image already marked DIRTY - review it in single mode";
@@ -391,6 +392,8 @@ const state = {
   reviewer: null, // a name that passed validReviewer, or null
   busy: false, // a request is in flight, or the list is loading
   dead: false, // token rejected or connection lost: nothing more is sent
+  lost: false, // stopped by a lost connection: Reconnect is offered
+  epoch: 0, // bumped by every stop: a request sent before it changes nothing
   mode: "single",
   rotation: "auto", // grid mode's rotation policy: "auto" or "never"
   batch: null, // grid mode's batch, or null when no batch has grid items
@@ -429,6 +432,7 @@ const ui = {
   prev: $("prev"),
   next: $("next"),
   undo: $("undo"),
+  reconnect: $("reconnect"),
 };
 
 // ---- Requests ----
@@ -444,6 +448,7 @@ class HttpError extends Error {
 }
 
 function stop(text) {
+  state.epoch++;
   state.dead = true;
   state.busy = false;
   say(text);
@@ -451,15 +456,42 @@ function stop(text) {
   return new Stopped(text);
 }
 
-// fetch with the token. A 401 or a network failure stops the page.
+// A network failure: stop, offering Reconnect (never retried automatically).
+function lose() {
+  state.lost = true;
+  return stop(LOST_CONNECTION);
+}
+
+// Whether a Reconnect may be tried: after a lost connection, with a token.
+function canReconnect() {
+  return state.lost && state.token !== null;
+}
+
+const epochOf = new WeakMap(); // response -> the epoch its request was sent in
+
+// Thrown for a request sent before the page stopped: its reply or failure is old news.
+function stale() {
+  return new Stopped("stale");
+}
+
+// fetch with the token. A 401 or a network failure stops the page; once stopped,
+// nothing is sent until a Reconnect, and a request sent before then changes nothing.
 async function call(path, options = {}) {
+  if (state.dead) {
+    throw new Stopped("stopped");
+  }
+  const epoch = state.epoch;
   const headers = { ...options.headers, Authorization: "Bearer " + state.token };
   let response;
   try {
     response = await fetch(path, { ...options, headers, cache: "no-store" });
   } catch (error) {
-    throw stop(LOST_CONNECTION);
+    throw epoch === state.epoch ? lose() : stale(); // the first stop's message stays
   }
+  if (epoch !== state.epoch) {
+    throw stale();
+  }
+  epochOf.set(response, epoch);
   if (response.status === 401) {
     state.token = null;
     writeStored("token", null);
@@ -470,14 +502,23 @@ async function call(path, options = {}) {
 
 // Read a body; a failure mid-body is a lost connection.
 async function readBody(response, how) {
+  const epoch = epochOf.get(response);
+  let body;
   try {
-    return await response[how]();
+    body = await response[how]();
   } catch (error) {
+    if (epoch !== state.epoch) {
+      throw stale();
+    }
     if (error instanceof SyntaxError) {
       throw new BadReply("JSON");
     }
-    throw stop(LOST_CONNECTION);
+    throw lose();
   }
+  if (epoch !== state.epoch) {
+    throw stale();
+  }
+  return body;
 }
 
 async function getJson(path) {
@@ -586,6 +627,15 @@ function canAct() {
   return state.reviewer !== null && !state.busy && !state.dead && state.pass !== null;
 }
 
+// The request(s) begun in epoch `epoch` are over: clear busy, unless the page
+// stopped meanwhile (busy is then a Reconnect's, or already clear).
+function endBusy(epoch) {
+  if (epoch === state.epoch) {
+    state.busy = false;
+    render();
+  }
+}
+
 // A grid counts only while its canvas is up with every key it covers drawn.
 function canJudge() {
   const item = currentItem();
@@ -635,6 +685,7 @@ function render() {
   ui.prev.disabled = !canAct() || state.items.length === 0;
   ui.next.disabled = !canAct() || state.items.length === 0;
   ui.undo.disabled = !canAct();
+  ui.reconnect.hidden = !canReconnect();
 }
 
 function nextPaint() {
@@ -1020,6 +1071,7 @@ async function mark(verdict) {
   }
   const keys = itemKeys(item);
   const build = state.buildSeq; // a resize repack meanwhile drops the items, and with them z
+  const epoch = state.epoch;
   state.busy = true;
   render();
   try {
@@ -1053,8 +1105,7 @@ async function mark(verdict) {
       showItem(nextTodoIndex(state.items, state.statuses, state.index)).catch(reportError);
     }
   } finally {
-    state.busy = false;
-    render();
+    endBusy(epoch);
   }
 }
 
@@ -1069,6 +1120,7 @@ async function undo() {
     return;
   }
   const expected = state.marked[state.marked.length - 1]; // a repack meanwhile empties the stack
+  const epoch = state.epoch;
   state.busy = true;
   render();
   try {
@@ -1105,8 +1157,7 @@ async function undo() {
     state.busy = false;
     showOrRepack(index); // a fresh dwell before any verdict counts
   } finally {
-    state.busy = false;
-    render();
+    endBusy(epoch);
   }
 }
 
@@ -1225,6 +1276,10 @@ function scheduleRepack() {
   showNotice(COMPUTING_GRIDS);
   render();
   const repack = () => {
+    if (state.dead) {
+      state.repackTimer = null; // a Reconnect rebuilds, landing on state.landKey
+      return;
+    }
     if (state.busy) {
       state.repackTimer = setTimeout(repack, REPACK_DELAY_MS); // pack with the statuses a reply brings
       return;
@@ -1247,26 +1302,33 @@ async function restart(mode, rotation, nextBatchToo = false) {
   if (!canSwitch()) {
     return;
   }
+  const epoch = state.epoch;
   state.busy = true;
   render();
   let statuses;
   try {
     statuses = parseStatusMap(await getJson("/statuses?pass=" + state.pass));
   } finally {
-    state.busy = false;
+    endBusy(epoch);
   }
   state.statuses = statuses;
   state.marked = [];
   say(state.reviewer === null ? NAME_NEEDED : "");
+  await rebuild(mode, rotation, nextBatchToo, null);
+}
+
+// Rebuild the items for `mode` from state.statuses (see restart); a grid build
+// lands on the grid holding `landKey`, else the first.
+async function rebuild(mode, rotation, nextBatchToo, landKey) {
   if (mode === "single") {
     abandonItems();
     leaveGrid();
     state.mode = "single";
-    state.items = singleItems(state.manifest, statuses);
+    state.items = singleItems(state.manifest, state.statuses);
     await showItem(state.items.length > 0 ? 0 : -1);
     return;
   }
-  const withGrids = gridBatches(state.manifest, statuses);
+  const withGrids = gridBatches(state.manifest, state.statuses);
   const accepts = (batch) => withGrids.has(batch);
   if (nextBatchToo) {
     state.gridCache = null;
@@ -1276,7 +1338,64 @@ async function restart(mode, rotation, nextBatchToo = false) {
   }
   state.mode = "grid";
   state.rotation = rotation;
-  await buildGrids(null);
+  await buildGrids(landKey);
+}
+
+// What start() loads: the current pass, the manifest and the pass's statuses.
+async function loadReview() {
+  const pass = parsePass(await getJson("/current_pass"));
+  const manifest = parseManifest(await getJson("/manifest"));
+  const statuses = parseStatusMap(await getJson("/statuses?pass=" + pass));
+  return { pass, manifest, statuses };
+}
+
+function takeReview({ pass, manifest, statuses }) {
+  state.pass = pass;
+  state.statuses = statuses;
+  state.manifest = manifest;
+  state.batches = sortedBatches(manifest);
+  state.batchOf = new Map(manifest.map((row) => [row.key, row.batch]));
+}
+
+// After a lost connection, on the reviewer's request only: reload what start()
+// loads and rebuild the current mode's items with a fresh dwell. The server may
+// have restarted or others marked meanwhile, so this page's marks are forgotten
+// (z cannot undo what the page cannot vouch for) and the grids are laid out afresh.
+// Busy from the click until the reload is in, so no key or button sends a
+// request meanwhile; anything sent before the loss is stale (see call).
+async function reconnect() {
+  if (!canReconnect()) {
+    return; // not lost, or a Reconnect is already in flight
+  }
+  const item = currentItem(); // null while a repack is pending, or after a failed Reconnect
+  if (item !== null) {
+    state.landKey = itemKeys(item)[0]; // kept for a retry should this one fail
+  }
+  state.lost = false;
+  state.dead = false;
+  state.busy = true;
+  abandonItems(); // nothing from before the loss stays on screen, nor its dwell
+  state.marked = [];
+  say(RECONNECTING);
+  render();
+  let review;
+  try {
+    review = await loadReview();
+  } catch (error) {
+    if (!(error instanceof Stopped)) {
+      state.lost = true; // a server error or bad reply: the reviewer may try again
+      stop("");
+      reportError(error);
+    }
+    return; // (a lost connection or rejected token has stopped the page already)
+  }
+  state.busy = false;
+  const before = state.pass;
+  takeReview(review);
+  state.gridCache = null;
+  const moved = before !== null && state.pass !== before;
+  say(state.reviewer === null ? NAME_NEEDED : moved ? "Reconnected; now on pass " + state.pass : "Reconnected");
+  await rebuild(state.mode, state.rotation, false, state.landKey);
 }
 
 function reportError(error) {
@@ -1302,6 +1421,7 @@ function run(action) {
 const doMark = run(mark);
 const doUndo = run(undo);
 const doRestart = run(restart);
+const doReconnect = run(reconnect);
 
 // ---- Event wiring ----
 
@@ -1352,6 +1472,8 @@ function onKey(event) {
     doRestart("single", state.rotation);
   } else if (key === "b" && gridMode()) {
     doRestart("grid", state.rotation, true);
+  } else if (key === "r" && canReconnect()) {
+    doReconnect(); // only while the Reconnect button is shown
   }
 }
 
@@ -1375,6 +1497,7 @@ function wire() {
     [ui.prev, () => navigate(-1)],
     [ui.next, () => navigate(1)],
     [ui.undo, doUndo],
+    [ui.reconnect, doReconnect],
   ];
   for (const [button, action] of buttons) {
     // Never focused (tabindex -1 too), so Enter or Space cannot click one, held, past the repeat guard
@@ -1408,15 +1531,8 @@ async function start() {
   render();
   say("loading...");
   try {
-    const pass = parsePass(await getJson("/current_pass"));
-    const manifest = parseManifest(await getJson("/manifest"));
-    const statuses = parseStatusMap(await getJson("/statuses?pass=" + pass));
-    state.pass = pass;
-    state.statuses = statuses;
-    state.manifest = manifest;
-    state.batches = sortedBatches(manifest);
-    state.batchOf = new Map(manifest.map((row) => [row.key, row.batch]));
-    state.items = singleItems(manifest, statuses);
+    takeReview(await loadReview());
+    state.items = singleItems(state.manifest, state.statuses);
   } catch (error) {
     state.dead = true; // nothing to review without the list
     reportError(error);

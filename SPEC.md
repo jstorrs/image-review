@@ -2034,21 +2034,48 @@ empties the rest of the stack.
   the reply can name other keys: the page then leaves the stack alone, says
   "Undid another client's mark: KEY is STATUS" (up to three keys), and shows
   the first listed item holding a returned key, if any. So `z` is limited to
-  this page's marks only while the page is the server's one client.
-- **Keys**: `c`, `d`, `z`, `s` (single mode) and `b` (next batch, grid mode
-  only), in either case, so Caps Lock does not matter; `m` (grid, rotation
-  `auto`) and `M` (`never`), told apart by the event's Shift state rather
-  than the letter's case, so Caps Lock is safe; and Left/Right. Ignored while the reviewer field has focus, with
-  Ctrl/Alt/Meta, and on key repeat (a held key acts once). The five buttons
-  never take focus (`tabindex="-1"`, and `mousedown` is cancelled), so Enter
-  or Space cannot click one, held, past the repeat guard; a click on one
-  also takes focus out of the reviewer field, so later keys act on the page.
+  this page's marks only while the page is the server's one client. A
+  Reconnect empties the stack (see *Errors*).
+- **Keys**: `c`, `d`, `z`, `s` (single mode), `b` (next batch, grid mode
+  only) and `r` (Reconnect, only while its button is shown), in either case,
+  so Caps Lock does not matter; `m` (grid, rotation `auto`) and `M`
+  (`never`), told apart by the event's Shift state rather than the letter's
+  case, so Caps Lock is safe; and Left/Right. Ignored while the reviewer
+  field has focus, with Ctrl/Alt/Meta, and on key repeat (a held key acts
+  once). The buttons, Reconnect included, never take focus
+  (`tabindex="-1"`, and `mousedown` is cancelled), so Enter or Space cannot
+  click one, held, past the repeat guard; a click on one also takes focus
+  out of the reviewer field, so later keys act on the page.
 - **Errors**: a 401 clears the stored token, shows "token rejected (server
-  restarted?)" and disables everything; a network failure shows "Lost
-  connection — your marks so far are saved on the server" and does the same.
-  Other HTTP errors show a short message with the status and leave the
-  controls usable (at startup the page stops instead); nothing is retried
-  automatically but a `/grids` 503 (see grid mode above).
+  restarted?) - open the new URL" and disables everything; a network failure
+  shows "Lost connection — your marks so far are saved on the server", does
+  the same and shows a Reconnect button (its place in the footer is kept
+  while it is hidden, so showing it never resizes the stage). Once stopped
+  the page sends nothing (a pending repack or `/grids` retry is dropped)
+  until the reviewer presses Reconnect (or `r`); it is never retried
+  automatically. The reply, body or failure of a request sent before the
+  page stopped changes nothing (no statuses, message, item, stack or busy
+  state), so a later failure never replaces "token rejected" and never
+  stops a reconnected page. Reconnect hides the button, says
+  "Reconnecting...", takes the item off screen (its dwell with it), empties
+  the stack of marked keys (the server may have restarted, or others marked
+  meanwhile) and reloads what startup loads with the stored token and
+  reviewer name; until that reload is in, every control is busy, so no key
+  or button sends a request. It then rebuilds the current mode: single
+  mode's todo list, reshuffled; in grid mode the current batch and rotation
+  (as `m` keeps the batch), laid out afresh by `/grids` and landing on the
+  grid holding the previous item's first key (kept across a failed
+  Reconnect, and the key a pending repack would have landed on), else the
+  first. Every item then starts a fresh dwell. The status line says
+  "Reconnected", or "Reconnected; now on pass N" if the current pass
+  changed (the new pass is reviewed); with no reviewer name it shows the
+  name prompt instead. A network failure during Reconnect shows "Lost
+  connection" and the button again, a 401 the token-rejected message, and
+  another error a short message with the button; clicks while one is in
+  flight are ignored. Other HTTP errors show a short message with the status
+  and leave the controls usable (at startup the page stops instead, offering
+  Reconnect only after a network failure); nothing is retried automatically
+  but a `/grids` 503 (see grid mode above).
 
 ## Remote Store (`remote.py`)
 

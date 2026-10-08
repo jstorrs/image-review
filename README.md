@@ -553,11 +553,13 @@ IMAGE_REVIEW_SOCKET_PATH=~/.image-review/ir-$SLURM_JOB_ID.sock` once, then
 `image-review serve --socket --direct` (or pass `--socket-path`). Each start
 makes a new token, so paste the new URL after a restart, unless you also
 `export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16)` inside the job: `serve
---socket` then reuses it and the URL stays the same (see the tutorial). The
-traffic is plain HTTP inside the ssh tunnel, with no TLS on the node; read the
-experimental section of [SECURITY.md](SECURITY.md) first, and the
-[tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the steps and
-troubleshooting.
+--socket` then reuses it and the URL stays the same (see the tutorial). After
+a "Lost connection" the page offers a Reconnect button (or `r`), never
+retrying by itself; with the fixed path and token a server restart needs
+nothing more. The traffic is plain HTTP inside the ssh tunnel, with no TLS on
+the node; read the experimental section of [SECURITY.md](SECURITY.md) first,
+and the [tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the
+steps and troubleshooting.
 
 ## Multi-Pass Workflow
 

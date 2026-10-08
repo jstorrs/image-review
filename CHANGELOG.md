@@ -30,7 +30,12 @@
   is already DIRTY or FLAGGED, unless every image in it is DIRTY (which
   reverses that grid's own verdict); an image that fails to load follows the
   grids as a single item; resizing the window repacks the grids and clears
-  undo; a batch over 1000 images needs single mode. The socket routes and the
+  undo; a batch over 1000 images needs single mode. After a lost connection
+  the page shows a Reconnect button (or `r`; nothing is retried
+  automatically), which reloads the statuses, rebuilds the current mode with
+  a fresh 200 ms wait and forgets what `z` could undo, so with a fixed socket
+  path and `$IMAGE_REVIEW_TOKEN` a server restart needs only Reconnect; a
+  rejected token says to open the new URL. The socket routes and the
   page needed no API version bump and do not change the HTTPS API (API v7,
   below, is for the grid CLEAN refusal).
   See [SECURITY.md](SECURITY.md) for the limits.
