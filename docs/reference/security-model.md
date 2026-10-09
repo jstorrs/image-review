@@ -333,11 +333,5 @@ world-readable.
 
 ## Reporting a vulnerability
 
-Please do not open a public issue for a vulnerability. Report it privately
-through GitHub private vulnerability reporting:
-<https://github.com/jstorrs/image-review/security/advisories/new> (the
-repository owner must enable it in the repository settings; if the link
-reports it is unavailable, contact the owner through
-[github.com/jstorrs](https://github.com/jstorrs) without details). Include the
-version (`image-review --version` or `pip show image-review`), what you
-observed and how to reproduce it. Do not include real PHI in a report.
+Do not report a vulnerability in a public issue. Follow the
+[security policy](https://github.com/jstorrs/image-review/security/policy).

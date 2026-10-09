@@ -80,4 +80,4 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 ## Security issues
 
 Do not report vulnerabilities in a public issue; see
-[the security model](docs/reference/security-model.md#reporting-a-vulnerability).
+[SECURITY.md](SECURITY.md).
