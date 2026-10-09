@@ -17,6 +17,12 @@ dependencies = [
     "rectpack==0.2.2",  # unmaintained, sdist only; grid packing results depend on its exact behaviour
 ]
 
+[project.urls]
+Homepage = "https://github.com/jstorrs/image-review"
+Documentation = "https://jstorrs.github.io/image-review/"
+Changelog = "https://github.com/jstorrs/image-review/blob/main/CHANGELOG.md"
+Issues = "https://github.com/jstorrs/image-review/issues"
+
 [project.optional-dependencies]
 # `preprocess`; without the codecs extra a compressed DICOM is listed in skipped.tsv as "cannot decode <syntax>"
 preprocess = [

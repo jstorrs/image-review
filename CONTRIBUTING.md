@@ -51,6 +51,23 @@ mkdocs build --strict
 glued to the paragraph before it, into errors. Set `NO_MKDOCS_2_WARNING=1` to
 silence Material's MkDocs 2.0 notice.
 
+When writing a page:
+
+- Add a new page to `nav` in `mkdocs.yml`; the strict build fails otherwise.
+- Leave a blank line before every list and code block. GitHub renders a list
+  glued to a paragraph, MkDocs does not; `mkdocs_hooks.py` fails the strict
+  build on it.
+- Link between pages with relative `.md` paths. Link from `docs/` to root
+  files (SECURITY.md, CONTRIBUTING.md) with absolute
+  `https://github.com/jstorrs/image-review/blob/main/...` URLs, since
+  relative links out of `docs/` fail the strict build.
+- CHANGELOG.md is also rendered on the site (`docs/reference/changelog.md`
+  includes it), so it may contain no relative links.
+- Use no MkDocs-only syntax (admonitions, attribute lists): `docs/` is read
+  on GitHub too.
+- Link only to headings made of plain words; GitHub and MkDocs slug them
+  alike.
+
 ## `git blame`
 
 The one-off `ruff format` reformat is listed in `.git-blame-ignore-revs`. To
@@ -65,14 +82,19 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 - **Commits.** An imperative subject line ("Add export refusals", not "Added"
   or "Adds"), then a body in prose that says why the change is needed and what
   it does.
-- **Docs travel with the change.** A change to the CLI or to a file format
-  updates [README.md](README.md), [the local review tutorial](docs/tutorials/local-review.md) and
-  [the specification](docs/reference/specification.md) in the same commit. A change to the security behaviour
-  also updates [the security model](docs/reference/security-model.md).
+- **Docs travel with the change.** A change to the CLI or a file format
+  updates, in the same commit, its page under `docs/commands/` (the single
+  source for options, keys, rules and formats),
+  `docs/reference/work-directory.md` if it changes a work-directory file, any
+  tutorial under `docs/tutorials/` or `docs/quickstart.md` (and the README
+  quick start it mirrors) that shows it, and
+  `docs/reference/specification.md`. A security behaviour change also updates
+  `docs/reference/security-model.md`.
 - **Wire changes bump `API_VERSION`.** Any change to the server's request or
   response shapes, or to the `Status` vocabulary, bumps `API_VERSION` in
   `src/image_review/connection.py`, so a client and server of different
-  versions fail with a clear message. See the API version rule in [the specification](docs/reference/specification.md#endpoints).
+  versions fail with a clear message. See the API version rule in
+  [the specification](docs/reference/specification.md#endpoints).
 - **Changelog.** Add user-visible changes to [CHANGELOG.md](CHANGELOG.md),
   and put anything that needs action from people sharing work directories
   under its *Upgrading* heading.

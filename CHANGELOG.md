@@ -77,6 +77,13 @@
   that `serve` lays out browser grids with the same code as the viewer.
   rectpack has no wheel: an offline or `--only-binary` install needs its
   sdist.
+- **Documentation moved to a site built from `docs/`**, at
+  <https://jstorrs.github.io/image-review/>. `TUTORIAL.md` is now
+  `docs/tutorials/` (local, remote and browser review) plus the command pages,
+  `SPEC.md` is now `docs/reference/specification.md`, and the README's command
+  reference is under `docs/commands/`. `SECURITY.md` is now the
+  vulnerability-reporting policy; the threat model is
+  `docs/reference/security-model.md`.
 
 ## 0.3.0
 

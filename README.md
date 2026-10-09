@@ -11,6 +11,8 @@ The workflow has four steps:
 3. **Status** reports on review progress.
 4. **Export** writes the allowlist of files that may be released.
 
+The documentation is at <https://jstorrs.github.io/image-review/>.
+
 To review images that stay on an HPC cluster, `serve` the work directory
 there and review it from your laptop; see
 [Reviewing on an HPC cluster](docs/tutorials/remote-review.md).
@@ -68,7 +70,23 @@ pygame viewer or, experimentally, a browser. See
 [Browser review over SSH](docs/tutorials/browser-review.md); the
 [security model](docs/reference/security-model.md) states the threat model.
 
+## Documentation
+
+Beyond the pages linked above, the reference section has the
+[work directory](docs/reference/work-directory.md) layout and the
+[specification](docs/reference/specification.md).
+
+## Security
+
+Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes. The
+[security model](docs/reference/security-model.md) states what the tool
+protects and its limits.
+
 ## Contributing
 
 Development setup, the test, lint and type-check commands, and the project's
 conventions are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
