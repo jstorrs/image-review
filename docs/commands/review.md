@@ -30,7 +30,7 @@ are built without DIRTY or FLAGGED images.
 | `--via` | `$IMAGE_REVIEW_VIA` | Reach that server through an SSH tunnel via a login node, e.g. `--via user@login.cluster`; requires `--remote` |
 
 For `--remote` and `--via`, see
-[Reviewing on an HPC cluster](serve.md).
+[Remote review on an HPC cluster](../tutorials/remote-review.md).
 
 ## Keys and gamepad
 

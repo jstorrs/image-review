@@ -29,6 +29,9 @@ nav:
   - Getting started:
       - Installation: install.md
       - Quick start: quickstart.md
+  - Tutorials:
+      - Remote review (HPC): tutorials/remote-review.md
+      - Browser review (experimental): tutorials/browser-review.md
   - Commands:
       - Overview: commands/index.md
       - preprocess: commands/preprocess.md

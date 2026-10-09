@@ -8,6 +8,10 @@ image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via USER@
 Serves a work directory over HTTPS (self-signed certificate, bearer token) so
 a remote client can review it without copying the images.
 
+For the workflow, see the tutorials
+[Remote review on an HPC cluster](../tutorials/remote-review.md) and the
+experimental [Browser review over SSH](../tutorials/browser-review.md).
+
 `serve` prints a connection string (`ir://...`) that grants access: **treat
 it like a password.** When stdout is not a terminal (e.g. `sbatch`), the
 string is written to `~/.image-review/connection-<host>-<port>.txt` (mode

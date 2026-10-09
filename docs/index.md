@@ -18,4 +18,8 @@ straight to [preprocess](commands/preprocess.md), [review](commands/review.md),
 [status](commands/status.md), [export](commands/export.md) or
 [serve](commands/serve.md).
 
+To review images that stay on an HPC cluster, see the tutorials
+[Remote review on an HPC cluster](tutorials/remote-review.md) and the
+experimental [Browser review over SSH](tutorials/browser-review.md).
+
 See the [Changelog](reference/changelog.md) for what changed in each release.

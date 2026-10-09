@@ -4,7 +4,8 @@ image-review handles images that may carry burned-in Protected Health
 Information (PHI). This page is the one place that states what the tool
 protects, against whom, and where its protection ends. The commands are
 described in [the command reference](../commands/index.md) and the file
-formats in [the specification](specification.md).
+formats in [the specification](specification.md). The practical HPC steps are in
+[Remote review](../tutorials/remote-review.md).
 
 ## What is protected, and against whom
 
@@ -210,8 +211,8 @@ control, so do not treat "RAM only" as a guarantee:
 Keep the connection string out of `ps` by putting it in
 `IMAGE_REVIEW_REMOTE` rather than on the command line. To keep it out of shell
 history too, do not type it: use
-`export IMAGE_REVIEW_REMOTE="$(ssh user@login-node cat <file>)"` (see the
-tutorial), or start the line with a space and set `HISTCONTROL=ignorespace`.
+`export IMAGE_REVIEW_REMOTE="$(ssh user@login-node cat <file>)"` (see
+[Batch mode](../tutorials/remote-review.md#4-batch-mode-sbatch)), or start the line with a space and set `HISTCONTROL=ignorespace`.
 
 ## Local disk
 

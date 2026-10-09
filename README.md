@@ -13,7 +13,7 @@ The workflow has four steps:
 
 To review images that stay on an HPC cluster, `serve` the work directory
 there and review it from your laptop; see
-[Reviewing on an HPC cluster](#reviewing-on-an-hpc-cluster).
+[Reviewing on an HPC cluster](docs/tutorials/remote-review.md).
 
 ## Installation
 
@@ -60,100 +60,11 @@ Logging and the options that go before the command are described in the
 
 ## Reviewing on an HPC cluster
 
-Review images where they are, without copying them off the cluster. The
-server runs on a compute node and the viewer on your laptop. Install
-`[preprocess,codecs]` on the cluster (core alone is enough for a node that
-only runs `serve`, `status` and `export`) and `[viewer]` on the laptop; see
-[Installation](#installation).
-
-```bash
-# On the cluster: get an interactive compute node and serve the work directory
-salloc ...                      # your site's usual options
-srun --pty bash                 # shell on the allocated node (if salloc leaves you on the login node)
-image-review serve --work-dir ./review_work
-# or in one step: srun --pty image-review serve --work-dir ./review_work
-
-# On your laptop: paste the command `serve` printed, or
-image-review review --remote 'ir://...'
-
-# If the laptop can only reach the login node:
-image-review review --remote 'ir://...' --via user@login-node
-```
-
-Original files, DICOM headers and source paths stay on the cluster. Only the
-preprocessed JPGs (and their batch/file names and review statuses) travel,
-over TLS with a pinned certificate, and are held in the viewer's memory.
-**The connection string is a password.** [the security model](docs/reference/security-model.md) states
-the threat model and its limits (swap, screenshots, shared nodes and home
-directories, multiple clients). See
-[TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster) for the full workflow
-and batch jobs.
-
-**Use the same version on both machines.** This release speaks wire API v7
-(the server refuses a grid CLEAN over a DIRTY or FLAGGED image), so upgrade
-the cluster and the laptop together. If `--remote` reports "server speaks API
-vN, this client vM" (or "server is too old to report its API version"),
-install the same image-review version on both machines.
-
-### Browser review over SSH (experimental)
-
-An experimental alternative to the pygame viewer: a browser on your laptop,
-with nothing installed there but `ssh`. The traffic is plain HTTP inside the
-ssh tunnel, with no TLS on the node. **Read the experimental section of
-[the security model](docs/reference/security-model.md) first**, and see the
-[tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the steps
-and troubleshooting.
-
-On the node:
-
-```bash
-image-review serve --work-dir ./review_work --socket --via you@login-node
-```
-
-- If your laptop can reach compute nodes directly (`ssh you@node` works from
-  it), add `--direct` instead of `--via`: the printed command then has no
-  `-J`.
-- If the node's own name does not work from your laptop, add
-  `--ssh-host NAME` with the name that does.
-
-`serve` prints an `ssh -N ... -L 127.0.0.1:8080:/path/to.sock you@node`
-command and an `http://127.0.0.1:8080/#TOKEN` URL (**the token is a
-password**). Run the ssh command on your laptop, then open the URL. Under
-`sbatch` the URL is written to `~/.image-review/browser-<host>-<pid>.txt`
-instead.
-
-**Using the page.** The page starts with single images: enter a reviewer
-name, then press `c` clean, `d` dirty, Left/Right to move and `z` to undo
-(`?` lists every key). One bar at the bottom, colored by the image's status,
-holds the buttons and messages.
-
-- `m` (or `M`, no rotation) switches to grid mode for one batch at a time,
-  where one verdict covers the whole grid. CLEAN is refused if any image in
-  the grid is already DIRTY or FLAGGED (unless every image in it is DIRTY,
-  which reverses that grid's own verdict).
-- `b` moves to the next batch and `s` returns to single mode.
-- With one page per server, `z` undoes only that page's marks; the server's
-  undo history is shared by every client.
-
-**Restarts.** To keep the ssh forward across server restarts, give each job a
-fixed socket path (or pass `--socket-path`). Each start makes a new token, so
-paste the new URL after a restart, unless you also export
-`IMAGE_REVIEW_TOKEN` inside the job: `serve --socket` then reuses it and the
-URL stays the same (see the tutorial).
-
-```bash
-# Once per job (re-running the token line makes a new token):
-export IMAGE_REVIEW_SOCKET_PATH=~/.image-review/ir-$SLURM_JOB_ID.sock
-export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16)   # optional: keeps the URL
-
-# Each start (after a restart, re-run only this line):
-image-review serve --socket --direct                # or --via you@login-node
-```
-
-After a "Lost connection" the page offers a Reconnect button (or `r`), never
-retrying by itself. With the fixed path and token, a server restart needs
-nothing more, and `q` (done) followed by Ctrl-C, the next `serve` in the same
-shell and Reconnect moves the same tab on to the next batch or pass.
+Preprocess and `serve` on the cluster, and review from your laptop with the
+pygame viewer or, experimentally, a browser. See
+[Remote review on an HPC cluster](docs/tutorials/remote-review.md) and
+[Browser review over SSH](docs/tutorials/browser-review.md); the
+[security model](docs/reference/security-model.md) states the threat model.
 
 ## Multi-pass workflow
 

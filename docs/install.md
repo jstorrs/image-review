@@ -21,7 +21,7 @@ commands need:
 | `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
 
 On a cluster with a laptop viewer (see
-[Reviewing on an HPC cluster](commands/serve.md)), install
+[Remote review on an HPC cluster](tutorials/remote-review.md)), install
 `[preprocess,codecs]` where you preprocess, core alone where you only `serve`,
 and `[viewer]` on the laptop (`pip install '.[viewer]'`). A command whose
 extra is missing exits 1 with
