@@ -26,5 +26,12 @@ markdown_extensions:
   - mdx_truly_sane_lists: {nested_indent: 2}
 nav:
   - Home: index.md
+  - Commands:
+      - Overview: commands/index.md
+      - preprocess: commands/preprocess.md
+      - review: commands/review.md
+      - status: commands/status.md
+      - export: commands/export.md
+      - serve: commands/serve.md
   - Reference:
       - Changelog: reference/changelog.md
