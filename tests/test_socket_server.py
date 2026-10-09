@@ -43,6 +43,7 @@ from tests.fixtures import (
     socket_dir,
     start_unix_server,
     temp_dir,
+    wait_for_file,
 )
 
 WEB_DIR = Path(image_review.__file__).parent / "web"
@@ -1090,9 +1091,13 @@ class TestServeSocketCommand(unittest.TestCase):
         self.work.mkdir()
         make_work_dir(self.work)
         self.home = socket_dir(self)  # short: the default socket lives under it
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (
+            mock.patch.dict(os.environ, {"HOME": str(self.home)}),
+            # The default socket name holds the host name, ~60 bytes on GitHub's macOS runners: too long for sun_path
+            mock.patch("image_review.server.short_host", return_value="node1"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.dir = self.home / ".image-review"
 
     def serve(self, *args: str, **kwargs):
@@ -1507,6 +1512,8 @@ class TestServeSocketCommand(unittest.TestCase):
                 str(self.work),
                 "--socket-path",
                 str(path),
+                "--ssh-host",  # skips the FQDN lookup, which can be slow on CI runners
+                "node1",
             ],
             env=env,
             stdout=subprocess.PIPE,
@@ -1514,11 +1521,7 @@ class TestServeSocketCommand(unittest.TestCase):
             text=True,
         )
         self.addCleanup(proc.kill)
-        deadline = time.monotonic() + 20
-        while not list(self.dir.glob("browser-*.txt")):
-            self.assertLess(time.monotonic(), deadline, "server never wrote its URL file")
-            self.assertIsNone(proc.poll())
-            time.sleep(0.05)
+        wait_for_file(self, proc, self.dir, "browser-*.txt")
         self.assertTrue(path.exists())
         time.sleep(0.3)  # let serve_forever start
         proc.send_signal(signal.SIGTERM)

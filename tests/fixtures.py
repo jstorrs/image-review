@@ -4,7 +4,9 @@ import http.client
 import io
 import shutil
 import socket
+import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -188,6 +190,17 @@ def socket_dir(testcase: unittest.TestCase) -> Path:
     path = Path(tempfile.mkdtemp(dir="/tmp"))
     testcase.addCleanup(shutil.rmtree, path, ignore_errors=True)
     return path
+
+
+def wait_for_file(testcase: unittest.TestCase, proc: subprocess.Popen, directory: Path, pattern: str) -> None:
+    """Wait for `proc` to create a file matching `pattern` in `directory`; on timeout or exit, fail with its output."""
+    deadline = time.monotonic() + 60  # generous: slow name lookups on CI runners
+    while not list(directory.glob(pattern)):
+        if proc.poll() is not None or time.monotonic() > deadline:
+            proc.kill()
+            out, err = proc.communicate()
+            testcase.fail(f"no {pattern} in {directory} (exit {proc.returncode})\nstdout:\n{out}\nstderr:\n{err}")
+        time.sleep(0.05)
 
 
 def temp_dir(testcase: unittest.TestCase) -> Path:

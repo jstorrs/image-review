@@ -22,7 +22,7 @@ from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, RemoteTarget
 from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
 from image_review.store import LocalStore, load_manifest
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server, temp_dir
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server, temp_dir, wait_for_file
 
 FP = "a" * 64
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
@@ -443,11 +443,7 @@ class TestServeCommand(unittest.TestCase):
         )
         self.addCleanup(proc.kill)
         directory = self.home / ".image-review"
-        deadline = time.monotonic() + 20
-        while not list(directory.glob("connection-*.txt")):
-            self.assertLess(time.monotonic(), deadline, "server never wrote its connection file")
-            self.assertIsNone(proc.poll())
-            time.sleep(0.05)
+        wait_for_file(self, proc, directory, "connection-*.txt")
         time.sleep(0.3)  # let serve_forever start
         proc.send_signal(signal.SIGTERM)
         _, err = proc.communicate(timeout=20)
