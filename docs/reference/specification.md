@@ -41,7 +41,8 @@ interactively in a fullscreen viewer, and report **status** on review progress.
   wheel; each was checked by running the test suite on CPython 3.12. click
   8.2 is needed only by the tests (`CliRunner` with separate stderr).
   `pylibjpeg-libjpeg` is deliberately not used (GPL-3), so 12-bit JPEG
-  Extended (Process 4) and JPEG-LS with 6- or 7-bit samples cannot be decoded
+  Extended (Process 4) and JPEG-LS with 6- or 7-bit samples cannot be decoded.
+
 - The CLI imports an extra's modules only in the command that needs them
   (`cli.requires_extra`). A command whose extra is missing exits 1 with
   `this command needs the <extra> extra: pip install 'image-review[<extra>]'`;
@@ -247,8 +248,8 @@ except that migrating an old-header file (see *`review.tsv`*) writes the new
 file with the policy's `file_mode`.
 `review`, `serve` and local `status` call `world_access_warning`: if the work
 directory or `manifest.tsv` has any other bit, they log a WARNING
-`<path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
-<work dir>`` (group bits alone are silent). Existing directories are
+``<path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
+<work dir>` `` (group bits alone are silent). Existing directories are
 never chmod'ed automatically. A team shares a work directory sequentially
 (one writer at a time, enforced by `review.lock`; see *Concurrency limits*) or
 splits a study into several work directories.
@@ -315,6 +316,7 @@ named `{name}#2` (see *Collisions*). Manifest rows follow discovery order
 (sources in the order given, each walked as above).
 
 **Image IDs** are fully-resolved absolute paths derived from the source:
+
 - ZIP entry: `{absolute_zip_path}::{filename}` (also for a ZIP inside a directory)
 - Directory: absolute path to each file (a symlinked file keeps its link path)
 - Single file: fully-resolved absolute path
@@ -402,6 +404,7 @@ before the crop. A plane that cannot be decoded fails the whole file
 unused bits of PixelData are not drawn.
 
 **Raster preprocessing** (`decode_raster` + `preprocess_raster`, for PNG/JPEG/TIFF/BMP/GIF):
+
 - Decode with Pillow and branch on the image mode, not the channel count
 - Each frame is decoded to float [0, 1]. Several views of one input are
   placed side by side in a single rendered image (one manifest row, one
@@ -571,6 +574,7 @@ unwind like Ctrl-C and remove a half-written output.
 `os.path.realpath`) is a usage error (exit 2), checked before anything is read.
 
 **Refusals** (`ClickException`, exit 1, nothing written):
+
 - `lock.live_writer(work_dir)` finds `review.lock` held by a writer. The lock
   is held unless it names a process of this machine and boot that no longer
   exists (`is_stale`); an unreadable lock counts as held. The message is
@@ -607,6 +611,7 @@ work directory) and calls its `export_rows()`. That applies the pure
 **Split** (`export.split_allowlist(rows) -> (allowed, report)`): each list
 keeps the rows' order, and every row lands in exactly one. A row is allowed
 only if all of these hold:
+
 - its status is `CLEAN` (so every part of the file, icon included, is CLEAN);
 - it has a `source_sha256` (a manifest from before the hash columns has none);
 - no row that is not `CLEAN` has the same `source_sha256`: identical bytes
@@ -639,6 +644,7 @@ all `CLEAN`, with an empty `reason`):
 
 **Parts and folding.** Every distinct `image_id` of the manifest, and of the
 `failed` rows of `skipped.tsv`, is a part:
+
 - It is `NOT_REVIEWED` if `skipped.tsv` has any `failed` row for it, even if
   the manifest lists it too. Repeated rows count once, with the first reason.
   A manifest `image_id` with an `ignored` row (and no `failed` one) is
@@ -684,6 +690,7 @@ NOT_REVIEWED, i IGNORED, c CLEAN not allowlisted)`, one count per
 `ExportStatus` (taken from the `Literal`, so none is left out), CLEAN last. `--report FILE` and
 `--output FILE` are each written by `atomic.write_new_file` (the same helper as
 `review.lock`; see *Concurrency limits*):
+
 1. A unique hidden sibling (`.FILE.<random>.tmp`) is created with
    `O_CREAT|O_EXCL` and mode 0600. For a group work directory it is then given
    the work directory's group (`fchown(fd, -1, gid)`), so it is right even
@@ -1260,6 +1267,7 @@ a placeholder that only takes DIRTY.
 
 A grid's aggregate status (`status.grid_status`) is derived from the snapshot
 statuses of its keys:
+
 - Any key not in `GRID_ELIGIBLE` (DIRTY or FLAGGED) -> DIRTY, so such a grid
   is neither shown nor counted as todo
 - Otherwise any UNREVIEWED -> UNREVIEWED
@@ -1644,7 +1652,7 @@ one `fp=`; a malformed token or fingerprint. `to_uri()` is the inverse.
 
 ## Server (`server.py`)
 
-The threat model these sections implement is summarized in [SECURITY.md](SECURITY.md).
+The threat model these sections implement is summarized in [the security model](security-model.md).
 
 `make_server(store, host, port) -> (ReviewServer, RemoteTarget)` generates a
 token, a certificate, the TLS context and the listening server. It enforces

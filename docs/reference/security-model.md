@@ -1,10 +1,10 @@
-# Security
+# Security model
 
 image-review handles images that may carry burned-in Protected Health
 Information (PHI). This page is the one place that states what the tool
-protects, against whom, and where its protection ends. The commands and file
-formats are described in [README.md](README.md) and [SPEC.md](SPEC.md); the
-practical HPC steps are in [TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster).
+protects, against whom, and where its protection ends. The commands are
+described in [the command reference](../commands/index.md) and the file
+formats in [the specification](specification.md).
 
 ## What is protected, and against whom
 
@@ -186,6 +186,7 @@ default mode; use it only where you accept the points below.
   for example containing `$SLURM_JOB_ID`.
 
 **Questions for your HPC administrator**, if it does not work:
+
 - Can you `ssh` to a compute node where you have a job (`pam_slurm_adopt`)?
 - Is `AllowStreamLocalForwarding` enabled on compute-node sshd (the default;
   `DisableForwarding` must not be set)?
@@ -222,7 +223,7 @@ world-readable.
   `group` creates directories 2770 (setgid) and files 0660 for the work
   directory's Unix group. No file is ever created with "other" bits. The tool
   only sets mode bits: it never runs `chgrp` and never manages ACLs, so the
-  group is whatever the filesystem assigns (see the README for how to get the
+  group is whatever the filesystem assigns (see [Access control](../commands/preprocess.md#access-control) for how to get the
   right one). POSIX default ACLs inherited from the parent directory can grant
   more access than owner or group: check with `getfacl`. Later writers recover the policy from the work directory's own
   mode.

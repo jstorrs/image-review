@@ -67,12 +67,12 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
   it does.
 - **Docs travel with the change.** A change to the CLI or to a file format
   updates [README.md](README.md), [TUTORIAL.md](TUTORIAL.md) and
-  [SPEC.md](SPEC.md) in the same commit. A change to the security behaviour
-  also updates [SECURITY.md](SECURITY.md).
+  [the specification](docs/reference/specification.md) in the same commit. A change to the security behaviour
+  also updates [the security model](docs/reference/security-model.md).
 - **Wire changes bump `API_VERSION`.** Any change to the server's request or
   response shapes, or to the `Status` vocabulary, bumps `API_VERSION` in
   `src/image_review/connection.py`, so a client and server of different
-  versions fail with a clear message. See the API version rule in SPEC.md.
+  versions fail with a clear message. See the API version rule in [the specification](docs/reference/specification.md#endpoints).
 - **Changelog.** Add user-visible changes to [CHANGELOG.md](CHANGELOG.md),
   and put anything that needs action from people sharing work directories
   under its *Upgrading* heading.
@@ -80,4 +80,4 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 ## Security issues
 
 Do not report vulnerabilities in a public issue; see
-[SECURITY.md](SECURITY.md#reporting-a-vulnerability).
+[the security model](docs/reference/security-model.md#reporting-a-vulnerability).

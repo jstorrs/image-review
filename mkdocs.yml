@@ -37,4 +37,6 @@ nav:
       - export: commands/export.md
       - serve: commands/serve.md
   - Reference:
+      - Security model: reference/security-model.md
+      - Specification: reference/specification.md
       - Changelog: reference/changelog.md

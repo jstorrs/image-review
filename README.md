@@ -83,7 +83,7 @@ image-review review --remote 'ir://...' --via user@login-node
 Original files, DICOM headers and source paths stay on the cluster. Only the
 preprocessed JPGs (and their batch/file names and review statuses) travel,
 over TLS with a pinned certificate, and are held in the viewer's memory.
-**The connection string is a password.** [SECURITY.md](SECURITY.md) states
+**The connection string is a password.** [the security model](docs/reference/security-model.md) states
 the threat model and its limits (swap, screenshots, shared nodes and home
 directories, multiple clients). See
 [TUTORIAL.md](TUTORIAL.md#reviewing-on-an-hpc-cluster) for the full workflow
@@ -100,7 +100,7 @@ install the same image-review version on both machines.
 An experimental alternative to the pygame viewer: a browser on your laptop,
 with nothing installed there but `ssh`. The traffic is plain HTTP inside the
 ssh tunnel, with no TLS on the node. **Read the experimental section of
-[SECURITY.md](SECURITY.md) first**, and see the
+[the security model](docs/reference/security-model.md) first**, and see the
 [tutorial](TUTORIAL.md#browser-review-over-ssh-experimental) for the steps
 and troubleshooting.
 

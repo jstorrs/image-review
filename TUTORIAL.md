@@ -717,7 +717,7 @@ An experimental alternative to the pygame viewer: a browser on your laptop,
 with only `ssh` installed there. The server listens on a Unix socket on the
 compute node and your laptop forwards a local port to it. The page reviews
 single images or, in grid mode, packed grids of a batch's images.
-[SECURITY.md](SECURITY.md#experimental-browser-review-over-a-unix-socket)
+[the security model](docs/reference/security-model.md#experimental-browser-review-over-a-unix-socket)
 lists the differences from the HTTPS mode (plain HTTP on the node, a URL that
 holds the token) and the questions to ask your HPC administrator if
 forwarding does not work.
@@ -805,7 +805,7 @@ forwarding does not work.
    With one page per server it only
    undoes this page's marks; the server keeps a single undo history, so with
    a second tab or client it undoes the latest mark from any of them (see
-   "Multi-client limits" in [SECURITY.md](SECURITY.md)), and the page warns
+   "Multi-client limits" in [the security model](docs/reference/security-model.md#the-server-image-review-serve)), and the page warns
    "Undid another client's mark". When the whole pass is done the page says
    "Pass N: nothing left to review" and offers Reconnect for the next
    server. In grid mode the list is one batch, so at its end the page says
@@ -984,7 +984,7 @@ it there if the default does not work from your laptop, e.g. `--ssh-host
 The connection string is a password: anyone holding it can view the images and
 record verdicts while the server runs, so do not paste it into chat or tickets.
 Use one reviewer per server, and remember that a work directory and any export
-hold source paths. [SECURITY.md](SECURITY.md) is the full threat model
+hold source paths. The [security model](docs/reference/security-model.md) is the full threat model
 (what stays on the cluster, what travels, what the viewer cannot control, and
 the local-disk and integrity rules).
 
