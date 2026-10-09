@@ -30,6 +30,7 @@ nav:
       - Installation: install.md
       - Quick start: quickstart.md
   - Tutorials:
+      - Local review: tutorials/local-review.md
       - Remote review (HPC): tutorials/remote-review.md
       - Browser review (experimental): tutorials/browser-review.md
   - Commands:
@@ -40,6 +41,7 @@ nav:
       - export: commands/export.md
       - serve: commands/serve.md
   - Reference:
+      - Work directory: reference/work-directory.md
       - Security model: reference/security-model.md
       - Specification: reference/specification.md
       - Changelog: reference/changelog.md

@@ -46,6 +46,8 @@ inside a git checkout (the repository's `.gitignore` excludes them as a
 safety net).
 
 The quick start is also on its own page: [Quick start](docs/quickstart.md).
+For a walk-through of a whole review on one machine, see the
+[Local review](docs/tutorials/local-review.md) tutorial.
 
 ## Commands
 
@@ -65,19 +67,6 @@ pygame viewer or, experimentally, a browser. See
 [Remote review on an HPC cluster](docs/tutorials/remote-review.md) and
 [Browser review over SSH](docs/tutorials/browser-review.md); the
 [security model](docs/reference/security-model.md) states the threat model.
-
-## Multi-pass workflow
-
-1. **Pass 1** (grid triage): mark grids CLEAN or DIRTY. Err toward DIRTY.
-2. **Pass 2** (single review): only images marked DIRTY in pass 1 are shown,
-   as FLAGGED (orange status bar). Inspect them individually. Grid mode skips
-   FLAGGED and DIRTY images, so a grid keypress cannot clear them.
-3. **Pass 3+**: repeat on the shrinking DIRTY pool until confident.
-
-Sessions are resumable: quitting saves all progress. The batch and pass
-number are auto-detected when not specified. Press `b` at the end of a batch
-to move on to the next one, and into the next pass once this one is done (not
-with `--batch`, which keeps you in that batch).
 
 ## Contributing
 

@@ -12,10 +12,20 @@ Opens a fullscreen interactive session. In **grid mode**, images are
 bin-packed into composite grids for fast triage. In **single mode**, images
 are shown one at a time for detailed inspection.
 
+Grids are packed at review time, sized to your screen resolution, so each
+grid contains as many images as possible. Resizing the window in grid mode
+recomputes the grids for the new size. Images are shuffled at review time to
+counter attention fatigue.
+
 The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
 orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's
 verdict). The status word is also written at the left end of the bar. Grids
 are built without DIRTY or FLAGGED images.
+
+The right end of the bar shows the scale the image is displayed at, e.g. `27%`.
+It is red below 100%: text in the image is smaller than in the original, so
+look closely. In grid mode it is the smallest image's effective scale, counting
+any shrinking done to fit the grid.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -43,7 +53,7 @@ For `--remote` and `--via`, see
 | Left / Right | Navigate |
 | `n` | Jump to next todo item ("No todo images remaining" in the info bar if none) |
 | `u` | Toggle todo-only navigation |
-| Space | Toggle autoplay (any other key stops it) |
+| Space | Toggle autoplay, advancing every 500 ms (any other key stops it and still does its usual job); continue from the help or end-of-list screen |
 | `s` | Single mode |
 | `m` | Grid mode (rotation as set by `--rotate`; default: only when it saves a grid) |
 | `M` | Grid mode (no rotation) |
@@ -65,12 +75,17 @@ layout whatever its labels say. The help screen also shows the mappings.
 | Start | Quit (on any screen) |
 
 B, Y and the D-pad act only on the review screen, and every button stops
-autoplay. A pad SDL has no mapping for is not supported; you can supply one
+autoplay. A pad SDL has no mapping for is not supported (most common pads
+have one); you can supply one
 in SDL's mapping format through the `SDL_GAMECONTROLLERCONFIG` environment
-variable (one mapping per line).
+variable (one mapping per line; tools such as SDL's `controllermap` produce
+one).
 
 `c` and `d` (and B and Y) are ignored for 200 ms after an image or grid
-appears, so a verdict only applies to an item you have seen.
+appears, so a verdict only applies to an item you have seen: press it again
+once you have looked. After a mark, the viewer auto-advances to the next item
+after a short delay (200 ms). Every key and button pressed while grids are
+being computed is dropped, including `q`/Escape and the arrows.
 
 ## Undo
 
@@ -87,23 +102,40 @@ again undoes the mark before that, and so on.
   image's previous verdict and pass, or, for an image that had none, mark it
   `UNREVIEWED` again (a tombstone).
 
+## Todo images
+
+With the default `--filter unreviewed`, "todo" means UNREVIEWED or FLAGGED.
+With `--filter clean` or `--filter all`, every listed image is a re-check, so
+an image is todo until you have marked it in this session (whatever the
+verdict, re-confirming included), and again if it becomes UNREVIEWED or
+FLAGGED (e.g. DIRTY images come back FLAGGED in the next pass); undoing a mark
+makes it todo again. The count starts from the full list and is not
+remembered across restarts.
+
+In grid mode every filter, `all` included, leaves out DIRTY and FLAGGED
+images; if that leaves nothing, it tells you how many images need single-mode
+review. The `n` key jumps to the next todo item and `u` toggles todo-only
+navigation in all filter modes.
+
 ## End of a batch
 
 At the end of a batch, `b` moves on to the next batch without restarting.
 The end screen says "End of list", or in todo-only navigation "No todo images
 remaining" (or "No more todo images this way" when todo images are left in
 the other direction; Left/Right wrap round to the others), with the batch's
-todo count when it is not 0.
+todo count when it is not 0. The help screen shows "batch k/B", the batch's
+position among all batches.
 
 `b` re-reads the current pass (keeping `--pass` if given) and the statuses,
 then opens the next batch, in sorted order, that still has todo images in the
 current mode, at its first item. The search goes round once, so batches you
-skipped earlier (or images skipped in this one) come back. Under
-`--filter clean` or `all`, an image is todo until you have marked it in this
-session, and again if it becomes UNREVIEWED or FLAGGED.
+skipped earlier (or images skipped in this one) come back. What counts as
+todo depends on `--filter`; see [Todo images](#todo-images).
 
-- When the pass changes (the last pass ended with DIRTY images), the search
-  starts again from the first batch, and the info bar says "Now pass N".
+- When the pass changes (the last pass ended with DIRTY images, which come
+  back FLAGGED), the search starts again from the first batch, which in single
+  mode means the first batch with FLAGGED images, and the info bar says "Now
+  pass N".
 - With `--batch`, `b` stays in that batch: it reloads it while it has todo
   images, then says "Batch NAME done for pass N".
 - When nothing is left it says "All batches done for pass N", or, under the
@@ -119,8 +151,9 @@ session, and again if it becomes UNREVIEWED or FLAGGED.
 Every verdict is saved to `review.tsv` in the work directory, with who gave
 it and how. The columns are `image_id`, `batch`, `status`, `pass_number`,
 `timestamp`, `reviewer`, `mode` (`single`, `grid`, or `undo` for a row
-written by `z`), `grid_size` (how many images the one keypress covered) and
-`tool_version`. `status` is `CLEAN` or `DIRTY`, or `UNREVIEWED` in an undo
+written by `z`), `grid_size` (how many images the one keypress covered; 1 in
+single mode) and `tool_version` (the image-review version that wrote the
+row). `status` is `CLEAN` or `DIRTY`, or `UNREVIEWED` in an undo
 row that returns an image to never-reviewed.
 
 `--reviewer NAME` (or `$IMAGE_REVIEW_REVIEWER`) sets the reviewer name, by
@@ -131,7 +164,8 @@ verifies it, also with `--remote`.
 
 **Upgrade everyone sharing a work directory together.** A `review.tsv` from
 an older version (five columns) is upgraded in place the first time `review`
-or `serve` opens it, with the new columns left empty for its existing rows.
+or `serve` opens it, with the new columns left empty for its existing rows;
+`status` reads it as is, without upgrading it.
 Older image-review versions cannot read the upgraded file. Likewise,
 versions before wire API v5 (before undo) reject a `review.tsv` that holds
 undo rows, so upgrade everyone sharing a work directory before anyone presses

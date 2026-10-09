@@ -23,6 +23,9 @@ safety net).
 
 ## Next steps
 
+- [Local review](tutorials/local-review.md): a walk-through of a whole review on one machine.
+- [Remote review on an HPC cluster](tutorials/remote-review.md): review images that stay on the cluster from your laptop.
+- [Browser review over SSH](tutorials/browser-review.md) (experimental): review in a browser, with nothing installed on the laptop but `ssh`.
 - [Installation](install.md): extras, cluster installs and compressed DICOMs.
 - [Commands overview](commands/index.md): logging and the options that go before the command.
 - [preprocess](commands/preprocess.md), [review](commands/review.md), [status](commands/status.md), [export](commands/export.md) and [serve](commands/serve.md): one page per command.

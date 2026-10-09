@@ -50,6 +50,27 @@ with no quoting.
 - Report columns: `image_id`, `status`, `pass_number`, `timestamp`,
   `reviewer`, `reason`, `source_sha256`.
 
+`allowlist.tsv`:
+
+```
+source_sha256  image_id                      pass_number  timestamp                         reviewer
+3f1c...e09a    /data/site_a.zip::001.dcm     1            2026-03-02T10:14:07.512408+00:00  alice
+```
+
+`report.tsv`, everything else:
+
+```
+image_id                      status        pass_number  timestamp                         reviewer  reason                    source_sha256
+/data/site_a.zip::002.dcm     DIRTY         2            2026-03-03T09:01:44.020731+00:00  bob                                 a27b...51c4
+/data/site_a.zip::003.dcm     DIRTY         1            2026-03-02T10:15:30.101266+00:00  alice     icon DIRTY                0d9e...7f30
+/data/site_a.zip::004.dcm     UNREVIEWED                                                                                       c6b2...18de
+/data/site_b/broken.dcm       NOT_REVIEWED                                                           cannot decode pixel data
+/data/site_b/referral.pdf     IGNORED                                                                not an image (unrecognized content)
+```
+
+(Hashes shortened here; each is 64 hex characters. Columns are aligned here
+for reading.)
+
 | Column | Description |
 |--------|-------------|
 | `image_id` | The source file's path, as in `manifest.tsv` / `skipped.tsv`; a file inside a ZIP is `<zip>::<entry>`, one row per entry |
@@ -65,7 +86,7 @@ with no quoting.
   `NOT_REVIEWED`: nobody has looked at them, so treat them as possibly
   containing PHI. This applies even if the manifest also lists them.
 - Inputs preprocess did not take for images (the `ignored` rows of
-  `skipped.tsv`: a PDF, a Word file, a DICOMDIR, ...) are `IGNORED`, one row
+  `skipped.tsv`: a PDF, a text file, a DICOMDIR, ...) are `IGNORED`, one row
   each, after all other rows. Nobody has looked at them, so follow them up.
   An ignored input the manifest also lists is `NOT_REVIEWED` instead.
 - A FLAGGED image (DIRTY in an earlier pass, not yet re-reviewed) is `DIRTY`.
@@ -92,6 +113,7 @@ split or merge rows there. A `"` anywhere else is written as is.
   with a warning.
 - It always refuses a `review.tsv` whose last line was cut short by an
   interrupted write; the next verdict recorded with `review` drops that line.
+  Re-check the last image you reviewed before the crash.
 - `--output` and `--report` never overwrite an existing file, and may not
   name the same file.
 - The report is written first, so a failed allowlist write leaves only a

@@ -24,25 +24,28 @@ Inputs it cannot render are listed in `skipped.tsv` (see
 
 **Inputs.** Each SOURCE is a ZIP file, a directory (searched recursively,
 including ZIP files inside it) or an individual file. Inputs are recognized by
-content, not by extension: DICOM (including extensionless files like `IM0001`
-and DICOM without the 128-byte preamble), PNG, JPEG, TIFF, BMP, GIF, WebP,
-JPEG 2000 and PNM. Symlinked directories are never entered: a link to an
+content, not by extension: DICOM (including extensionless files like `IM0001`,
+common in DICOM exports, and DICOM without the 128-byte preamble), PNG, JPEG,
+TIFF, BMP, GIF, WebP, JPEG 2000 and PNM. So upper-case extensions (`B.DCM`,
+`e.JPG`), `.jpeg`, `.dicom` and `.ima` files are all picked up too.
+
+Word, Excel, PowerPoint and EPUB files are ZIPs, so images embedded in them
+are reviewed too. A ZIP inside a ZIP is not opened, and other archives
+(`.tar.gz`, `.7z`, `.rar`, ...) are not supported: extract them first (both
+are recorded as failed).
+
+Symlinked files are read, but symlinked directories are never entered, so a
+link such as `up -> ..` cannot pull in other patients' studies: a link to an
 enclosing directory or into another SOURCE is ignored, and any other is
 failed with its target, so pass that target as a SOURCE if you want it. The
-work directory is never read as input.
+work directory and its `.NAME.partial` staging directory are never read as
+input, so `image-review preprocess .` with the default `./review_work` is
+safe.
 
-**Rendering.**
-
-- DICOM images are normalized with adaptive histogram equalization, to
-  enhance local contrast, and a configurable colormap. Single-frame color and
-  palette DICOMs are shown as they are.
-- DICOM overlay planes are drawn at maximum brightness, and an embedded icon
-  image becomes an extra manifest row whose image id ends in `#icon`.
-- Non-DICOM images are converted to RGB, with the same contrast enhancement
-  applied to grayscale.
-- Transparent images are shown as the composite over mid-gray beside the raw
-  channels with alpha ignored.
-- MPO JPEGs (HDR gain maps, previews) show all their frames side by side.
+**Rendering.** DICOM images are normalized with adaptive histogram
+equalization, to enhance local contrast, and a configurable colormap; the
+steps, and how other images are shown, are in
+[Rendering pipeline](#rendering-pipeline).
 
 **Output.** Images are written to batch subdirectories with a `manifest.tsv`
 index, which records for each JPG the SHA-256 of its source file (or ZIP
@@ -64,6 +67,25 @@ Output is built in a staging directory next to it (`.NAME.partial`, with the
 access policy's directory mode) and renamed into place only on success, so an
 interrupted run leaves no work directory behind. If a crash leaves
 `.NAME.partial` behind, the next run says so; remove it and re-run.
+
+## Examples
+
+```bash
+# Single ZIP file
+image-review preprocess scans.zip
+
+# Multiple sources
+image-review preprocess batch1.zip batch2.zip /path/to/loose_dicoms/
+
+# Smaller batches, different colormap
+image-review preprocess scans.zip --batch-size 100 --colormap viridis
+
+# Custom output directory
+image-review preprocess scans.zip --work-dir /data/review_session_1
+
+# Render in 8 worker processes (or 1 for the main process only)
+image-review preprocess scans.zip --jobs 8
+```
 
 ## Access control
 
@@ -116,22 +138,87 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
   - a corrupt file;
   - a `.jpg`/`.png`/... or `.zip` whose content is not one;
   - a `.tar.gz` or other non-ZIP archive;
-  - an `unsupported:` multi-frame DICOM;
+  - a ZIP inside a ZIP;
+  - an `unsupported:` multi-frame DICOM, or a DICOM object without pixel
+    data (structured reports, encapsulated PDFs);
   - an unreadable subdirectory;
   - a symlinked directory outside the sources;
-  - a file named on the command line that is not an image;
-  - an input whose image id collides with another's;
+  - a file named on the command line that is not an image, such as
+    `notes.txt`;
+  - an input whose image id would name a different image from another
+    input's (a file literally called `scan.dcm#icon` beside a `scan.dcm` with
+    an icon, a file called `site.zip::a.png` beside `site.zip`, or a ZIP entry
+    called `a.png#2` beside two `a.png` entries): every one of them, with
+    `image_id collides with another input (rename one of them)`, as they
+    would otherwise share one verdict;
   - a file or ZIP entry whose name, or a directory above it, is not UTF-8 or
     holds a control character such as a newline or U+2028/U+2029, even one
     that would otherwise be ignored. It is listed under an escaped name like
     `a\x0ab.png` or `a\u2028b.png`: rename it.
-- `ignored` (not an image): unrecognized content, macOS AppleDouble files, a
-  DICOMDIR index, an empty ZIP.
+- `ignored` (not an image): unrecognized content, macOS AppleDouble files
+  (`._name`) and `__MACOSX/` entries, a DICOMDIR index, an empty ZIP, a
+  symlink to a directory that is already being read. These do not affect the
+  exit status, but glance at them in case something you expected to review
+  is among them.
+
+Each row has a reason, for example `unsupported: multi-frame DICOM (3 frames)`
+or `BadZipFile: File is not a zip file`. `skipped.tsv` contains source paths,
+so treat it as carefully as `manifest.tsv`.
 
 The run finishes with a summary line
-(`Found N inputs: wrote K images in B batches; S skipped (F failed, I ignored; see .../skipped.tsv)`)
-and exits 1 if any input failed, unless `--allow-skipped` is given. Check
-`skipped.tsv` before reviewing: those images will not be shown.
+(`Found N inputs: wrote K images in B batches; S skipped (F failed, I ignored; see .../skipped.tsv)`),
+such as:
+
+```
+Found 1200 inputs: wrote 1195 images in 4 batches; 5 skipped (3 failed, 2 ignored; see review_work/skipped.tsv)
+```
+
+It exits 1 if any input failed, unless `--allow-skipped` is given, so
+scripts notice. Check `skipped.tsv` before reviewing: those images will not
+be shown. Either fix them and preprocess again into a new work directory, or
+accept the result: the work directory has been written and can be reviewed as
+it is (pass `--allow-skipped` up front when a script should treat failed
+inputs as success).
+
+## Rendering pipeline
+
+The DICOM preprocessing pipeline for grayscale (MONOCHROME1/2) images;
+single-frame colour (RGB, YBR) and palette DICOMs are only converted to 8-bit
+RGB and cropped, with no windowing or colormap (overlay planes are drawn in
+white):
+
+1. Converts to float32, corrects photometric interpretation
+2. Compresses intensity outliers (beyond the 1st/99th percentile) into the
+   ends of the range instead of clipping them, so bright burned-in text
+   stays visible. DICOM overlay planes (annotations stored outside the pixel
+   data) are then drawn at maximum brightness
+3. Applies adaptive histogram equalization (CLAHE with 96-pixel tiles)
+4. Strips uniform rows/columns (letterboxing removal)
+5. Applies colormap and saves as JPG
+
+A DICOM with an embedded icon image (a thumbnail stored in the file) gets a
+second row in `manifest.tsv` with the image id ending in `#icon`, so any
+text burned into the thumbnail is reviewed too. If the icon cannot be
+rendered, the main image is still written and `<path>#icon` is listed as
+`failed` in `skipped.tsv`. A DICOM whose overlay cannot be decoded is
+`failed` as a whole. Only single-frame DICOMs (grayscale, colour or palette)
+are rendered for now.
+
+Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
+converted to RGB; 16-bit grayscale keeps its full range), get adaptive
+histogram equalization if grayscale, and are saved as RGB JPGs. Some inputs
+are shown as several views side by side in one image (still one item to
+review):
+
+- **Transparent images**: left is the image composited over mid-gray (so
+  anything drawn only in the alpha channel is visible), right is the raw
+  image with transparency ignored (so anything hidden under transparent
+  pixels is visible). Check both halves.
+- **MPO JPEGs** (HDR gain maps, camera previews embedded in a JPEG): every
+  embedded image, left to right.
+
+Animated PNGs and other multi-frame rasters are listed in `skipped.tsv` as
+unsupported.
 
 ## Parallel rendering
 

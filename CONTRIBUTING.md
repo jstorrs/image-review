@@ -66,7 +66,7 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
   or "Adds"), then a body in prose that says why the change is needed and what
   it does.
 - **Docs travel with the change.** A change to the CLI or to a file format
-  updates [README.md](README.md), [TUTORIAL.md](TUTORIAL.md) and
+  updates [README.md](README.md), [the local review tutorial](docs/tutorials/local-review.md) and
   [the specification](docs/reference/specification.md) in the same commit. A change to the security behaviour
   also updates [the security model](docs/reference/security-model.md).
 - **Wire changes bump `API_VERSION`.** Any change to the server's request or

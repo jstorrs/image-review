@@ -12,6 +12,8 @@ The workflow has four steps:
 4. **Export** writes the allowlist of files that may be released.
 
 To get started, see [Installation](install.md) and the [Quick start](quickstart.md).
+For a walk-through of a whole review on one machine, see the
+[Local review](tutorials/local-review.md) tutorial.
 
 Each command has its own page: see the [commands overview](commands/index.md), or go
 straight to [preprocess](commands/preprocess.md), [review](commands/review.md),
@@ -21,5 +23,8 @@ straight to [preprocess](commands/preprocess.md), [review](commands/review.md),
 To review images that stay on an HPC cluster, see the tutorials
 [Remote review on an HPC cluster](tutorials/remote-review.md) and the
 experimental [Browser review over SSH](tutorials/browser-review.md).
+
+The files in a work directory are described in
+[Work directory](reference/work-directory.md).
 
 See the [Changelog](reference/changelog.md) for what changed in each release.
