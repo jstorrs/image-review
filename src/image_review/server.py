@@ -5,6 +5,7 @@ leave the store; clients only ever see keys (preprocessed paths).
 """
 
 import datetime
+import hashlib
 import hmac
 import importlib.resources
 import ipaddress
@@ -746,9 +747,24 @@ def short_host() -> str:
     return socket.gethostname().split(".")[0]
 
 
-def default_socket_path() -> Path:
-    """~/.image-review/serve-<short-host>-<pid>.sock."""
-    return private_dir() / f"serve-{safe_name(short_host())}-{os.getpid()}.sock"
+def socket_name(host: str, pid: int) -> str:
+    return f"serve-{safe_name(host)}-{pid}.sock"
+
+
+def default_socket_path(directory: Path | None = None, host: str | None = None, pid: int | None = None) -> Path:
+    """~/.image-review/serve-<short-host>-<pid>.sock.
+
+    When that would not fit sun_path, the host part becomes the first 8 hex characters of the host name's sha256:
+    stable, and distinct per node even if names differ only at the end. If even that does not fit, it is returned
+    anyway and `parse_socket_path` reports the length.
+    """
+    directory = private_dir() if directory is None else directory
+    host = short_host() if host is None else host
+    pid = os.getpid() if pid is None else pid
+    path = directory / socket_name(host, pid)
+    if len(os.fsencode(path)) < SUN_PATH_SIZE:
+        return path
+    return directory / socket_name(hashlib.sha256(host.encode()).hexdigest()[:8], pid)
 
 
 def make_unix_server(store: ReviewStore, path: Path, token: Token | None = None) -> tuple[UnixReviewServer, str]:

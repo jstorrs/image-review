@@ -96,6 +96,9 @@ API v7 (upgrade client and server together), and the documentation site. Read
   --allow-skipped": the work directory has already been written, so that
   re-run is refused. It now says to review the work directory as it is, or to
   fix the inputs and preprocess into a new `--work-dir`.
+- `serve --socket` without `--socket-path` no longer fails on a machine with a
+  long host name: when the default socket path would be too long, an
+  8-character hash of the host name replaces the host in the file name.
 
 ### Documentation
 

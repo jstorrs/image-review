@@ -1,4 +1,5 @@
 import getpass
+import hashlib
 import io
 import itertools
 import json
@@ -24,6 +25,7 @@ from image_review.cli import PACKAGE_LOGGER, browser_url, ssh_forward_command
 from image_review.connection import parse_token
 from image_review.server import (
     INSTANCE_HEADER,
+    SUN_PATH_SIZE,
     ReviewServer,
     clear_stale_socket,
     default_socket_path,
@@ -996,6 +998,26 @@ class TestSocketFile(unittest.TestCase):
             path = default_socket_path()
         self.assertEqual(path, home / ".image-review" / f"serve-node1-{os.getpid()}.sock")
         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+
+    def test_default_socket_path_hashes_a_host_too_long_to_fit(self):
+        home = temp_dir(self)
+        host = "h" * 120
+        path = default_socket_path(home, host, 1234)
+        digest = hashlib.sha256(host.encode()).hexdigest()[:8]
+        self.assertEqual(path, home / f"serve-{digest}-1234.sock")
+        self.assertLess(len(os.fsencode(path)), SUN_PATH_SIZE)
+        self.assertEqual(parse_socket_path(path), path)
+
+    def test_default_socket_path_hash_tells_apart_names_differing_at_the_end(self):
+        home = temp_dir(self)
+        self.assertNotEqual(
+            default_socket_path(home, "n" * 80 + "01", 1),
+            default_socket_path(home, "n" * 80 + "02", 1),
+        )
+
+    def test_default_socket_path_keeps_a_host_that_fits(self):
+        home = temp_dir(self)
+        self.assertEqual(default_socket_path(home, "node01", 7), home / "serve-node01-7.sock")
 
 
 class TestBrowserHelpers(unittest.TestCase):

@@ -1940,6 +1940,10 @@ routes: it exists only in socket mode, whose page is served by the server it
 calls.
 
 `default_socket_path()` is `~/.image-review/serve-<short-host>-<pid>.sock`.
+When that path would be `SUN_PATH_SIZE` bytes or more, the host part is replaced
+by the first 8 hex characters of the SHA-256 of the short host name (not a
+truncation, since node names often differ only at the end). If even that does
+not fit, it is returned anyway and `parse_socket_path` raises its usual error.
 
 ### Browser client (experimental)
 

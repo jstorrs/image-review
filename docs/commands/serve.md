@@ -23,7 +23,7 @@ string is written to `~/.image-review/connection-<host>-<port>.txt` (mode
 | `--bind` | this machine's FQDN | Hostname or IPv4 address to bind and advertise (wildcard addresses are refused) |
 | `--port` | 0 | Port to listen on (0 picks a free port) |
 | `--socket` | off | Experimental: serve plain HTTP on a Unix socket for browser review over SSH, instead of HTTPS over TCP |
-| `--socket-path` | `~/.image-review/serve-<host>-<pid>.sock`; `$IMAGE_REVIEW_SOCKET_PATH` | Experimental: the socket path; implies `--socket` on the command line, but the environment variable is used only with `--socket` |
+| `--socket-path` | `~/.image-review/serve-<host>-<pid>.sock` (an 8-character hash replaces a host name too long for the socket path); `$IMAGE_REVIEW_SOCKET_PATH` | Experimental: the socket path; implies `--socket` on the command line, but the environment variable is used only with `--socket` |
 | `--via` | `$IMAGE_REVIEW_VIA` | With `--socket`: the login node to put in the printed ssh command |
 | `--direct` | off; `$IMAGE_REVIEW_DIRECT` | With `--socket`: your laptop can ssh to compute nodes without a jump host; the printed ssh command omits `-J` |
 | `--ssh-host` | this machine's FQDN | With `--socket`: the node name to put in the printed ssh command, for when the node's own FQDN does not resolve from your laptop |
