@@ -13,6 +13,7 @@ batch_*/
 # Build and test artifacts
 *.egg-info/
 build/
+site/
 dist/
 __pycache__/
 .*_cache/

@@ -32,7 +32,10 @@ interactively in a fullscreen viewer, and report **status** on review progress.
   - extra `viewer` (`review`, local or `--remote`): pygame-ce >= 2.3.1,
     Pillow (as above);
   - extra `all` = `preprocess`, `codecs` and `viewer`; extra `dev` = `all`
-    plus ruff, mypy, types-tqdm and coverage (the tests need every extra).
+    plus ruff, mypy, types-tqdm and coverage (the tests need every extra);
+  - extra `docs` (not part of `all` or `dev`): mkdocs, mkdocs-material and
+    mdx-truly-sane-lists, to build the documentation site (`mkdocs build`);
+    no command needs it.
 
   Most minimums are the oldest release with a CPython 3.12
   wheel; each was checked by running the test suite on CPython 3.12. click

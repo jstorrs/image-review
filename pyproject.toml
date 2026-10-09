@@ -47,6 +47,12 @@ dev = [
     "types-tqdm",
     "coverage>=7",
 ]
+# The documentation site (`mkdocs build`); no command needs it
+docs = [
+    "mkdocs>=1.6,<2",  # mkdocs.yml uses 1.6's validation settings; 2.0 drops plugins, hooks and themes
+    "mkdocs-material>=9.7.7,<10",  # 9.7.7 fixes an XSS in search suggestions
+    "mdx-truly-sane-lists>=1.3",  # 2-space nested lists and list content render as on GitHub
+]
 
 [tool.setuptools.package-data]
 image_review = ["fonts/*.ttf", "web/*.html", "web/*.js", "web/*.css"]

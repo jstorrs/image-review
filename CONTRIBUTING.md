@@ -33,6 +33,24 @@ machine.
 check, type check and tests on Linux (`ubuntu-latest`) and macOS
 (`macos-latest`) with Python 3.12 and 3.13.
 
+`.github/workflows/docs.yml` runs `mkdocs build --strict` on every push and
+pull request, and deploys the site to GitHub Pages from `main` only.
+
+## Documentation
+
+The documentation site is built with MkDocs Material from `mkdocs.yml` and
+`docs/`. Install its extra, preview it, and check it builds:
+
+```
+pip install -e '.[docs]'
+mkdocs serve
+mkdocs build --strict
+```
+
+`--strict` turns warnings, including broken links and a list or code block
+glued to the paragraph before it, into errors. Set `NO_MKDOCS_2_WARNING=1` to
+silence Material's MkDocs 2.0 notice.
+
 ## `git blame`
 
 The one-off `ruff format` reformat is listed in `.git-blame-ignore-revs`. To

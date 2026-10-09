@@ -57,8 +57,8 @@
   another (412) and records nothing; the page then says the server was
   restarted or now serves another work directory and offers Reconnect. The
   socket routes and the page needed no API version bump and do not change the
-  HTTPS API (API v7, below, is for the grid CLEAN refusal). See
-  [SECURITY.md](SECURITY.md) for the limits.
+  HTTPS API (API v7, below, is for the grid CLEAN refusal). See the security
+  model in the documentation for the limits.
 - **Wire API v7: client and server must be upgraded together.** `POST /mark`
   now refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
   FLAGGED in that pass, unless every one is DIRTY, answering 409 and
