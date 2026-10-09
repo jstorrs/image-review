@@ -26,6 +26,9 @@ markdown_extensions:
   - mdx_truly_sane_lists: {nested_indent: 2}
 nav:
   - Home: index.md
+  - Getting started:
+      - Installation: install.md
+      - Quick start: quickstart.md
   - Commands:
       - Overview: commands/index.md
       - preprocess: commands/preprocess.md

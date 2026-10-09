@@ -24,7 +24,7 @@ Each machine can instead install only what its commands need:
 | `pip install -e '.[viewer]'` | `review`, including `review --remote` (on your laptop) |
 
 On a cluster without root, install into a virtual environment; see
-[Cluster install without root](README.md#installation) in the README.
+[Cluster install without root](docs/install.md#cluster-install-without-root) in the documentation.
 
 A command whose extra is missing stops with
 `this command needs the <extra> extra: pip install 'image-review[<extra>]'`.

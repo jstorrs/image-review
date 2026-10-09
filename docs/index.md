@@ -11,6 +11,8 @@ The workflow has four steps:
 3. **Status** reports on review progress.
 4. **Export** writes the allowlist of files that may be released.
 
+To get started, see [Installation](install.md) and the [Quick start](quickstart.md).
+
 Each command has its own page: see the [commands overview](commands/index.md), or go
 straight to [preprocess](commands/preprocess.md), [review](commands/review.md),
 [status](commands/status.md), [export](commands/export.md) or
