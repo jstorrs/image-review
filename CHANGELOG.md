@@ -90,6 +90,13 @@ API v7 (upgrade client and server together), and the documentation site. Read
   mode. Socket mode only; it does not change the HTTPS API and needed no API
   version bump.
 
+### Fixes
+
+- When some inputs fail, `preprocess` no longer tells you to "Re-run with
+  --allow-skipped": the work directory has already been written, so that
+  re-run is refused. It now says to review the work directory as it is, or to
+  fix the inputs and preprocess into a new `--work-dir`.
+
 ### Documentation
 
 - **Documentation moved to a site built from `docs/`**, at

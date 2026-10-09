@@ -430,7 +430,8 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, j
     if failed and not allow_skipped:
         raise click.ClickException(
             f"{failed} input(s) failed to preprocess and will not be reviewed; see {result.skipped_path}. "
-            "Re-run with --allow-skipped to accept this."
+            f"{work_dir} was still written: review it as it is, or fix them and preprocess into a new "
+            "--work-dir (--allow-skipped exits 0 when inputs fail)."
         )
 
 

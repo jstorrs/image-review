@@ -1654,6 +1654,8 @@ class PreprocessCliTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Found 7 inputs: wrote 5 images in 1 batches; 2 skipped (2 failed, 0 ignored;", result.output)
         self.assertIn("--allow-skipped", result.output)
+        self.assertIn("preprocess into a new --work-dir", result.output)
+        self.assertNotIn("Re-run", result.output)  # a re-run into the same work directory is refused
         self.assertTrue((self.root / "work" / "manifest.tsv").exists())
         self.assertTrue((self.root / "work" / "skipped.tsv").exists())
 
