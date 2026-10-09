@@ -15,8 +15,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      NO_MKDOCS_2_WARNING: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -27,7 +25,7 @@ jobs:
       - name: Install
         run: python -m pip install -e ".[docs]"
       - name: Build
-        run: mkdocs build --strict
+        run: sphinx-build -W --keep-going -d _doctrees -b html docs site
       # Only main is published; every other push and pull request just proves the site builds
       - uses: actions/upload-pages-artifact@v5
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

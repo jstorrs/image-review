@@ -33,40 +33,43 @@ machine.
 check, type check and tests on Linux (`ubuntu-latest`) and macOS
 (`macos-latest`) with Python 3.12 and 3.13.
 
-`.github/workflows/docs.yml` runs `mkdocs build --strict` on every push and
+`.github/workflows/docs.yml` runs `sphinx-build -W` on every push and
 pull request, and deploys the site to GitHub Pages from `main` only.
 
 ## Documentation
 
-The documentation site is built with MkDocs Material from `mkdocs.yml` and
-`docs/`. Install its extra, preview it, and check it builds:
+The documentation site is built with Sphinx, the MyST Markdown parser and the
+Furo theme, from `docs/conf.py` and `docs/`. Install its extra, preview it, and
+check it builds:
 
 ```
 pip install -e '.[docs]'
-mkdocs serve
-mkdocs build --strict
+sphinx-build -b html docs site
+sphinx-build -E -W --keep-going -b html docs site
 ```
 
-`--strict` turns warnings, including broken links and a list or code block
-glued to the paragraph before it, into errors. Set `NO_MKDOCS_2_WARNING=1` to
-silence Material's MkDocs 2.0 notice.
+Open `site/index.html` to read the preview. `-W` turns warnings, including
+broken links and pages missing from a toctree, into errors. `-E` rereads every
+page; without it a rebuild skips unchanged pages and repeats none of their
+warnings.
 
 When writing a page:
 
-- Add a new page to `nav` in `mkdocs.yml`; the strict build fails otherwise.
-- Leave a blank line before every list and code block. GitHub renders a list
-  glued to a paragraph, MkDocs does not; `mkdocs_hooks.py` fails the strict
-  build on it.
+- Add a new page to a `toctree` in `docs/index.md`; the strict build fails
+  on a page that no toctree lists.
+- Indent anything nested in a list item to the item's content column (three
+  spaces under `1.`, two under `-`). Less is a new paragraph, as on GitHub.
 - Link between pages with relative `.md` paths. Link from `docs/` to root
   files (SECURITY.md, CONTRIBUTING.md) with absolute
   `https://github.com/jstorrs/image-review/blob/main/...` URLs, since
   relative links out of `docs/` fail the strict build.
 - CHANGELOG.md is also rendered on the site (`docs/reference/changelog.md`
   includes it), so it may contain no relative links.
-- Use no MkDocs-only syntax (admonitions, attribute lists): `docs/` is read
-  on GitHub too.
-- Link only to headings made of plain words; GitHub and MkDocs slug them
-  alike.
+- Use no MyST directives or roles other than the toctrees in `docs/index.md`
+  and the changelog include: `docs/` is read on GitHub too.
+- Link to a heading with GitHub's slug (`remote-review.md#4-batch-mode-sbatch`);
+  MyST resolves it, and the strict build fails on a slug that matches no
+  heading.
 
 ## `git blame`
 

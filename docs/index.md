@@ -28,3 +28,42 @@ The files in a work directory are described in
 [Work directory](reference/work-directory.md).
 
 See the [Changelog](reference/changelog.md) for what changed in each release.
+
+```{toctree}
+:hidden:
+:caption: Getting started
+
+install.md
+quickstart.md
+```
+
+```{toctree}
+:hidden:
+:caption: Tutorials
+
+tutorials/local-review.md
+Remote review (HPC) <tutorials/remote-review.md>
+Browser review (experimental) <tutorials/browser-review.md>
+```
+
+```{toctree}
+:hidden:
+:caption: Commands
+
+Overview <commands/index.md>
+preprocess <commands/preprocess.md>
+review <commands/review.md>
+status <commands/status.md>
+export <commands/export.md>
+serve <commands/serve.md>
+```
+
+```{toctree}
+:hidden:
+:caption: Reference
+
+reference/work-directory.md
+reference/security-model.md
+Specification <reference/specification.md>
+reference/changelog.md
+```
