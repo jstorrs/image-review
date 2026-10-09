@@ -150,7 +150,7 @@ class TestValidation(GridsTestCase):
     def test_needs_the_token(self):
         for token in (None, "wrong"):
             with self.subTest(token=token):
-                resp, data = self.post({"keys": KEYS, "width": 640, "height": 480, "rotation": "auto"}, token=token)
+                resp, data = self.post(b"", token=token)  # no body: the 401 closes before reading one
                 self.assertEqual((resp.status, data), (401, b""))
 
     def test_a_page_from_another_serve_is_412_before_the_body_is_read(self):
