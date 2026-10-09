@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
+
+Experimental browser review over SSH (`serve --socket`) with a grid mode, wire
+API v7 (upgrade client and server together), and the documentation site. Read
+**Upgrading** first.
+
+### Upgrading: breaking and behaviour changes
+
+- **Wire API v7: client and server must be upgraded together.** `POST /mark`
+  now refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
+  FLAGGED in that pass, unless every one is DIRTY, answering 409 and
+  recording nothing. Both clients already refused it, but only against their
+  own copy of the statuses, which can be stale (another client may have
+  marked an image DIRTY meanwhile). The viewer and the browser page show
+  "grid contains an image already marked DIRTY - review it in single mode"
+  and re-read the statuses; the viewer does not treat the 409 as a lost
+  connection. A v7 client refuses a v6 server, and a v6 client a v7 server.
+- **Requirements:** rectpack (still pinned at 0.2.2) moved from the `viewer`
+  extra to the core dependencies, with the grid layout code (`layout.py`), so
+  that `serve` lays out browser grids with the same code as the viewer.
+  rectpack has no wheel: an offline or `--only-binary` install needs its
+  sdist.
+
+### CLI
 
 - **Experimental: browser review over SSH.** `image-review
   serve --socket` (or `--socket-path PATH`) serves plain HTTP on a Unix socket
@@ -57,26 +80,18 @@
   another (412) and records nothing; the page then says the server was
   restarted or now serves another work directory and offers Reconnect. The
   socket routes and the page needed no API version bump and do not change the
-  HTTPS API (API v7, below, is for the grid CLEAN refusal). See the security
+  HTTPS API (API v7, above, is for the grid CLEAN refusal). See the security
   model in the documentation for the limits.
-- **Wire API v7: client and server must be upgraded together.** `POST /mark`
-  now refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
-  FLAGGED in that pass, unless every one is DIRTY, answering 409 and
-  recording nothing. Both clients already refused it, but only against their
-  own copy of the statuses, which can be stale (another client may have
-  marked an image DIRTY meanwhile). The viewer and the browser page show
-  "grid contains an image already marked DIRTY - review it in single mode"
-  and re-read the statuses; the viewer does not treat the 409 as a lost
-  connection. A v7 client refuses a v6 server, and a v6 client a v7 server.
+
+### Wire API (remote review)
+
 - **Experimental:** in socket mode, `POST /grids` returns grid layouts
   computed with the viewer's own packing code, for the browser page's grid
   mode. Socket mode only; it does not change the HTTPS API and needed no API
   version bump.
-- **Requirements:** rectpack (still pinned at 0.2.2) moved from the `viewer`
-  extra to the core dependencies, with the grid layout code (`layout.py`), so
-  that `serve` lays out browser grids with the same code as the viewer.
-  rectpack has no wheel: an offline or `--only-binary` install needs its
-  sdist.
+
+### Documentation
+
 - **Documentation moved to a site built from `docs/`**, at
   <https://jstorrs.github.io/image-review/>. `TUTORIAL.md` is now
   `docs/tutorials/` (local, remote and browser review) plus the command pages,
