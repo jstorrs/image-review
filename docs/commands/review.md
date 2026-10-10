@@ -98,9 +98,9 @@ again undoes the mark before that, and so on.
 - The history lives in memory only and is gone when you quit. It does not
   carry over to a new batch opened with `b`.
 - After a lost connection `z` does nothing; only `q` (or Start) works.
-- An undo appends rows to `review.tsv` (`mode` `undo`) that restore each
-  image's previous verdict and pass, or, for an image that had none, mark it
-  `UNREVIEWED` again (a tombstone).
+- An undo appends rows to `review.tsv` that restore each image's previous
+  verdict and pass, or mark it UNREVIEWED again; see
+  [Undo rows](../reference/work-directory.md#undo-rows).
 
 ## Todo images
 
@@ -149,12 +149,9 @@ todo depends on `--filter`; see [Todo images](#todo-images).
 ## Recorded verdicts
 
 Every verdict is saved to `review.tsv` in the work directory, with who gave
-it and how. The columns are `image_id`, `batch`, `status`, `pass_number`,
-`timestamp`, `reviewer`, `mode` (`single`, `grid`, or `undo` for a row
-written by `z`), `grid_size` (how many images the one keypress covered; 1 in
-single mode) and `tool_version` (the image-review version that wrote the
-row). `status` is `CLEAN` or `DIRTY`, or `UNREVIEWED` in an undo
-row that returns an image to never-reviewed.
+it and how: the reviewer, the display mode, how many images the one keypress
+covered and the image-review version. The columns are described in
+[`review.tsv`](../reference/work-directory.md#reviewtsv).
 
 `--reviewer NAME` (or `$IMAGE_REVIEW_REVIEWER`) sets the reviewer name, by
 default your login name. It must be 1-64 printable characters, not all
@@ -162,11 +159,5 @@ spaces (no tabs or newlines), else the command exits 2. The name is an
 unauthenticated claim made by the client, recorded as given; nothing
 verifies it, also with `--remote`.
 
-**Upgrade everyone sharing a work directory together.** A `review.tsv` from
-an older version (five columns) is upgraded in place the first time `review`
-or `serve` opens it, with the new columns left empty for its existing rows;
-`status` reads it as is, without upgrading it.
-Older image-review versions cannot read the upgraded file. Likewise,
-versions before wire API v5 (before undo) reject a `review.tsv` that holds
-undo rows, so upgrade everyone sharing a work directory before anyone presses
-`z`.
+**Upgrade everyone sharing a work directory together.** See
+[Upgrading an older file](../reference/work-directory.md#upgrading-an-older-file).

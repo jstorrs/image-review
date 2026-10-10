@@ -48,15 +48,13 @@ steps, and how other images are shown, are in
 [Rendering pipeline](#rendering-pipeline).
 
 **Output.** Images are written to batch subdirectories with a `manifest.tsv`
-index, which records for each JPG the SHA-256 of its source file (or ZIP
-entry) and of the JPG itself. Viewing an image checks it against that hash: a
-JPG changed or cut short after preprocessing is shown as an unloadable
-placeholder (DIRTY only), never as an image that could be marked CLEAN.
+index, which records the SHA-256 of each JPG and its source, so a JPG changed
+after preprocessing is caught when viewed (see
+[`manifest.tsv`](../reference/work-directory.md#manifesttsv)).
 
-`preprocess.json` beside the manifest records the tool and library versions,
-the resolved SOURCES, the rendering parameters and the input counts. Like the
-manifest, it holds source paths and stays in the work directory; the server
-never sends it.
+`preprocess.json` beside the manifest records how the work directory was
+made; its keys are in
+[`preprocess.json`](../reference/work-directory.md#preprocessjson).
 
 **A new work directory every time.** The work directory must not already
 exist (an empty directory is fine). `preprocess` refuses to write into one
@@ -124,10 +122,10 @@ directory or its `manifest.tsv` is accessible to other users (e.g. one made
 by an older version). They never change an existing directory's mode: run
 `chmod -R o-rwx <work dir>`.
 
-Only one writer (`review` or `serve`) can use a work directory at a time: it
-holds `review.lock` there, and a second writer exits with an error naming who
-holds it (`status` is read-only and always works). A team shares a work
-directory sequentially or splits a study into several work directories.
+Only one writer (`review` or `serve`) can use a work directory at a time
+(see [`review.lock`](../reference/work-directory.md#reviewlock)). A team
+shares a work directory sequentially or splits a study into several work
+directories.
 
 ## Skipped inputs
 

@@ -151,24 +151,23 @@ shared nodes and home directories, and multiple clients.
 - If ssh backgrounds itself (`ForkAfterAuthentication`), remove that option.
 
 **Troubleshooting "work directory is in use":** the message names who holds
-the work directory (user, node, pid, start time) and the lock file
-(`review.lock` in the work directory). Finish or stop that session first. A
-lock is cleared automatically only when the tool can verify that its process is
-gone on the same machine since its last boot. A lock left on another node (for
-example a `serve` job that was killed), or one whose process id has since been
-reused, is not. If you are sure that process is gone (check `squeue`, or
-`ps -p PID` on that node, and compare the start time), delete the lock file by
-hand and run again:
+the work directory (user, node, pid, start time) and the lock file. Finish or
+stop that session first. A lock left on another node, for example by a
+`serve` job that was killed, is not cleared automatically; the rules are in
+[`review.lock`](../reference/work-directory.md#reviewlock). If you are sure
+that process is gone (check `squeue`, or `ps -p PID` on that node, and
+compare the start time), delete the lock file by hand and run again:
 
 ```bash
 rm /scratch/me/review_work/review.lock
 ```
 
 **Troubleshooting "Cannot read work directory":** `review.tsv` or
-`manifest.tsv` is malformed (for example a hand edit left a short row, a
-status other than `CLEAN`/`DIRTY`, a non-numeric pass, or a hash that is not
-64 lowercase hex characters). The message names the file and line. Fix or remove that line and run again; the tool never
-repairs or drops rows on its own.
+`manifest.tsv` is malformed, for example after a hand edit. The message names
+the file and line; fix or remove that line and run again. The tool never
+repairs or drops rows on its own. What a valid file looks like is in
+[`review.tsv`](../reference/work-directory.md#reviewtsv) and
+[`manifest.tsv`](../reference/work-directory.md#manifesttsv).
 
 **Troubleshooting versions:** "server speaks API vN, this client vM" (or
 "server is too old to report its API version") means the laptop and the

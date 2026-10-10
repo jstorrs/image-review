@@ -795,15 +795,8 @@ All state lives in the work directory. `preprocess` creates it atomically
 
 ### `manifest.tsv`
 
-Written by `preprocess`. Tab-separated UTF-8 with `\r\n` line endings, one row per image. A file that is not valid UTF-8 stops the tool.
-
-| Column | Description |
-|--------|-------------|
-| `batch` | Batch subdirectory name (e.g. `batch_001`) |
-| `preprocessed_path` | Relative path to the JPG within the work directory |
-| `image_id` | Unique string identifier (fully-resolved absolute path; `{path}#icon` for a DICOM's embedded icon image) |
-| `source_sha256` | SHA-256 (64 lowercase hex characters) of the source file's bytes, or of the ZIP entry's bytes for `<zip>::<entry>`. One per source: `X` and `X#icon` share it |
-| `jpeg_sha256` | SHA-256 (64 lowercase hex characters) of the JPG's bytes as written |
+Written by `preprocess`. Columns, image-id forms, encoding and the parse
+rules users see are in [`manifest.tsv`](work-directory.md#manifesttsv).
 
 `image_id` (source paths, which may carry patient identifiers) and
 `source_sha256` (derived from PHI content; a digest of a small input can be
@@ -812,13 +805,10 @@ local `export`. Everything else identifies an image by its
 `preprocessed_path`; no hash is ever sent over the wire.
 
 The file is parsed strictly (`store.load_manifest`) when the work directory is
-opened: the header must be exactly the five columns above, or the three
-columns `batch`, `preprocessed_path`, `image_id` of work dirs from older
-versions (which load with both hashes `None`); every row must have as many
-non-empty fields as the header, each hash must be exactly 64 lowercase hex
-characters, and `preprocessed_path` must be unique (the same `image_id` may
-repeat). Any violation stops `review`, `status`, and `serve` with `Cannot read
-work directory: <file>:<line>: <problem>` (exit 1); the file is never repaired.
+opened, and is never repaired. A legacy three-column manifest loads with both
+hashes `None`. A violation is a `ValueError` naming `<file>:<line>` (or the
+byte offset, for a file that is not UTF-8), which the CLI shows as
+`Cannot read work directory: ...` (exit 1).
 
 **Integrity check.** When the manifest records a `jpeg_sha256`,
 `LocalStore.image_bytes` (and so `image_bytes_many`) hashes the bytes it read
@@ -836,17 +826,10 @@ not checked.
 
 ### `preprocess.json`
 
-Written by `preprocess`, in the staging directory with the policy's file mode
-like the other files. One JSON object recording how the work directory was made:
-
-| Key | Description |
-|-----|-------------|
-| `tool_version` | The image-review package version (`"unknown"` if not installed) |
-| `created` | UTC time the run finished, ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) |
-| `sources` | The SOURCES, as resolved absolute paths, in the order given; a path that is not UTF-8 or holds a control character or line separator is escaped like an image_id (see *Source loading*) |
-| `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `access`, `jobs` (recorded only: the output does not depend on it) |
-| `libraries` | Versions of `pydicom`, `numpy`, `scikit-image`, `Pillow`, `matplotlib`, plus `gdcm`, `pylibjpeg`, `openjpeg` when importable |
-| `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored` |
+Written by `preprocess` (`provenance`), in the staging directory with the
+policy's file mode like the other files. Its keys are in
+[`preprocess.json`](work-directory.md#preprocessjson); `sources` are escaped
+like an image_id (see *Source loading*).
 
 It holds source paths, so it is as sensitive as `manifest.tsv`. Nothing reads
 it back and the server never serves it: `/image` serves only keys listed in
@@ -856,13 +839,10 @@ name it.
 ### `skipped.tsv`
 
 Written by `preprocess`, always (header only when nothing was skipped).
-Tab-separated UTF-8 with `\r\n` line endings, one row per input that produced no image. A file that is not valid UTF-8 stops the tool.
-
-| Column | Description |
-|--------|-------------|
-| `image_id` | Source identifier, in the same form as `manifest.tsv` (`{path}#icon` for an icon image that failed to render; or the source path, if a whole source could not be opened; or, for a name that is not UTF-8 or holds a control character or line separator, the name escaped as `\xNN` for a non-UTF-8 byte or ASCII control and `\uNNNN` for any other, see *Source loading*) |
-| `kind` | `failed` (an input that was not rendered; makes the CLI exit 1 unless `--allow-skipped`) or `ignored` (not an input: unrecognized content, AppleDouble, DICOMDIR, a ZIP without files, a symlink to an enclosing directory or to a directory inside a SOURCE, a non-regular file inside a directory) |
-| `reason` | `<ExceptionClass>: <message>`, `unsupported: ...` for inputs this tool does not render, or the `ignored` reason |
+Columns and encoding are in [`skipped.tsv`](work-directory.md#skippedtsv);
+the escaping of bad names and the `ignored` reasons are in *Source loading*.
+It is parsed strictly by `store.load_skipped` (a missing file reads as
+empty).
 
 It contains source paths, so it is as sensitive as `manifest.tsv`. `export`
 makes each `failed` `image_id` `NOT_REVIEWED` with its `reason` (folding an
@@ -872,7 +852,9 @@ covered as `IGNORED` with its `reason` (see *Ignored inputs* under *Parts and fo
 ### `review.lock`
 
 Present while a writer (`review` or `serve`) has the work directory open. JSON
-naming the holder; see *Concurrency limits*.
+naming the holder. Its user-facing rules are in
+[`review.lock`](work-directory.md#reviewlock); the mechanism is in
+*Concurrency limits*.
 
 ### `review.tsv`
 
@@ -887,28 +869,15 @@ of a multi-image mark. A new or empty file gets the header first and is
 (0600 private, 0660 group). Lines end in `\r\n` (Python `csv`'s default, as the file has
 always used); the reader accepts `\n` too.
 
-| Column | Description |
-|--------|-------------|
-| `image_id` | Matches `manifest.tsv` |
-| `batch` | Batch the image belongs to |
-| `status` | `CLEAN` or `DIRTY`; or `UNREVIEWED` in a tombstone (only with `mode` `undo`; see *Undo rows*) |
-| `pass_number` | Integer pass (at least 1) in which this decision was made (an undo row: the restored decision's pass) |
-| `timestamp` | ISO 8601 UTC timestamp |
-| `reviewer` | Who gave the verdict, as the client claims it (`review --reviewer`, default the login name); unauthenticated, recorded as given. Empty in migrated rows (and, in an old five-column file, absent) |
-| `mode` | `single` or `grid` (`status.MarkMode`): the display mode the verdict was given in; `undo` for a row written by an undo (`review_db.RowMode`). Empty in migrated rows |
-| `grid_size` | Integer >= 1: how many keys the one verdict covered (1 in single mode); in an undo row, how many `image_id`s the undo covered. Empty in migrated rows |
-| `tool_version` | `image-review` package version of the writing process (`connection.package_version()`, resolved once per process; `unknown` if not installed). Empty in migrated rows, and possibly cut short or empty in a kept torn last row (see below) |
-
-An `image_id` may repeat; its last row wins. Files written before the log format
-(one row per `image_id`) are already valid logs. The file is parsed strictly:
-it must be UTF-8, the header must be exactly these nine columns or the old first
-five, every row must have as many fields as the header, a `status` of `CLEAN` or
-`DIRTY` (or `UNREVIEWED` with `mode` `undo`; `FLAGGED` never), an integer `pass_number` of at least 1, a non-empty `image_id`, a
-`mode` of `single`, `grid`, `undo` or empty, and a `grid_size` that is empty or an
-integer of at least 1 (`reviewer` and `tool_version` are free text, possibly
-empty). A bad file stops the
-tool with `Cannot read work directory: <file>:<line>: <problem>` instead of
-being skipped or rewritten, so a hand edit cannot silently lose decisions.
+The columns, the last-row-wins rule and the parse rules users see are in
+[`review.tsv`](work-directory.md#reviewtsv). Internally, `mode` holds a
+`status.MarkMode` (`single`, `grid`) or `review_db.RowMode`'s `undo`;
+`tool_version` is `connection.package_version()`, resolved once per process.
+Files written before the log format (one row per `image_id`) are already
+valid logs. The file is parsed strictly (`review_db.parse_log`; `FLAGGED` is
+never a valid `status`), and a bad file is a `ValueError` naming
+`<file>:<line>`, shown as `Cannot read work directory: ...`, never skipped or
+rewritten.
 
 Two crash leftovers are tolerated. An empty file (created, but the first append
 never landed) holds no decisions. An unparseable last line with no line ending
@@ -959,13 +928,9 @@ is a tombstone, so it reads as never reviewed (`UNREVIEWED`, and unseen by
 `current_pass`) until it is marked again. image-review versions before undo
 (wire API v5) reject a file holding undo rows as malformed.
 
-Compatibility: image-review versions before this format cannot read a migrated
-(nine-column) `review.tsv`; teammates sharing a group work directory must all
-upgrade before any of them opens it with `review` or `serve`.
-
-Only images that have been explicitly marked appear in `review.tsv`. An image
-absent from `review.tsv`, or whose last row is a tombstone, is implicitly `UNREVIEWED`. `FLAGGED` is derived when
-reading (see *Pass Logic*) and is never written.
+Compatibility (older versions cannot read a migrated file) is in
+[Upgrading an older file](work-directory.md#upgrading-an-older-file).
+`FLAGGED` is derived when reading (see *Pass Logic*) and is never written.
 
 ### `batch_NNN/img_NNNNN.jpg`
 
