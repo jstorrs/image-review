@@ -46,10 +46,12 @@ One row per image, in the order the inputs were found.
 | `source_sha256` | SHA-256 (64 lowercase hex characters) of the source file's bytes, or of the ZIP entry's bytes. One per source: a DICOM and its icon share it |
 | `jpeg_sha256` | SHA-256 (64 lowercase hex characters) of the JPG as written |
 
-An `image_id` is a fully-resolved absolute path:
+An `image_id` is an absolute path:
 
-- a file, or a file in a directory: its absolute path (a symlinked file keeps
-  its link path);
+- a file named as a SOURCE: its fully-resolved path, so a symlink named on
+  the command line is recorded under its target's path;
+- a file found inside a directory: the resolved directory SOURCE's path plus
+  the names below it, so a symlinked file there keeps its link path;
 - a ZIP entry: `<zip path>::<entry name>`; when several entries share a name,
   the later ones get `#2`, `#3`, ...;
 - a DICOM's embedded icon image: `<path>#icon`, a second row beside the main

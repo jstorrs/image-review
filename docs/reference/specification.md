@@ -123,24 +123,21 @@ propagation to the root logger; third-party loggers are left alone).
 
 ### `image-review preprocess`
 
-```
-image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
-                                            [--work-dir DIR]
-                                            [--colormap NAME]
-                                            [--access {private,group}]
-                                            [--allow-skipped]
-                                            [--jobs N]
-```
+The synopsis, options, defaults and usage errors are in
+[`image-review preprocess`](../commands/preprocess.md).
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `SOURCE` | (required) | One or more ZIP files, directories, or individual files |
-| `--batch-size` | 300 | Maximum images per batch subdirectory (integer >= 1) |
-| `--work-dir` | `./review_work` | Work directory for all output (alias: `--output-dir`); must not exist or be empty |
-| `--colormap` | `inferno` | Matplotlib colormap applied to DICOM grayscale (unknown names exit 2 before any output) |
-| `--access` | `private` | `private` (dirs 0700, files 0600) or `group` (dirs 2770, files 0660); env `IMAGE_REVIEW_ACCESS` |
-| `--allow-skipped` | off | Exit 0 even if some inputs failed (they are still listed in `skipped.tsv`) |
-| `--jobs` | `$SLURM_CPUS_PER_TASK`, else the usable CPUs | Worker processes rendering in parallel (integer >= 1; 0 exits 2 before any output). Resolved when the command runs from the usable CPUs (`len(os.sched_getaffinity(0))` where available, else `os.cpu_count()`, else 1): `$SLURM_CPUS_PER_TASK` capped at the usable CPUs if it is a whole number >= 1 (ASCII or other decimal digits only), else the usable CPUs capped at the smallest cgroup v2 CPU quota `ceil(quota / period)` among the `cpu.max` files of the process's own cgroup (the `0::<path>` line of `/proc/self/cgroup`, under `/sys/fs/cgroup`) and each ancestor up to the mount root, e.g. a login node's per-user `CPUQuota=` on `user-UID.slice`, or a container's quota at its namespace root (`0::/`). `max`, a missing or unreadable file, or an unreadable `/proc/self/cgroup` means no cap at that level; a path outside the cgroup namespace (`..`) reads only the mount root. cgroup v1 quotas are not read |
+The `--jobs` default is resolved when the command runs (`cli.default_jobs`)
+from the usable CPUs (`len(os.sched_getaffinity(0))` where available, else
+`os.cpu_count()`, else 1): `$SLURM_CPUS_PER_TASK` capped at the usable CPUs
+if it is a whole number >= 1 (ASCII or other decimal digits only), else the
+usable CPUs capped at the smallest cgroup v2 CPU quota `ceil(quota / period)`
+among the `cpu.max` files of the process's own cgroup (the `0::<path>` line
+of `/proc/self/cgroup`, under `/sys/fs/cgroup`) and each ancestor up to the
+mount root, e.g. a login node's per-user `CPUQuota=` on `user-UID.slice`, or
+a container's quota at its namespace root (`0::/`). `max`, a missing or
+unreadable file, or an unreadable `/proc/self/cgroup` means no cap at that
+level; a path outside the cgroup namespace (`..`) reads only the mount root.
+cgroup v1 quotas are not read.
 
 The pipeline has three parts: **discovery** (IO) yields one `Candidate`
 (`image_id`, `kind` = `dicom` or `raster`, and its raw
@@ -199,7 +196,8 @@ exists, a previous run did not finish (a crash or kill -9) and the run is
 refused naming it; remove it and re-run. On any error or interrupt
 (including `KeyboardInterrupt`) the staging directory is removed and the work
 directory is never created. There is no `--force`. Existing work directories
-are never modified, so a running `serve` is not affected.
+are never modified (what that means for users is in
+[`image-review preprocess`](../commands/preprocess.md)).
 
 **Access policy** (`access.py`, stdlib only). `run_preprocess(..., access)`
 takes `Access = Literal["private", "group"]` (CLI `--access`, env
@@ -214,12 +212,10 @@ creates every file with `os.open(O_CREAT|O_EXCL, file_mode)` (a POSIX default
 ACL on the parent makes Linux ignore the umask, so the mode is passed
 explicitly; the umask stays as a second guard). Missing parents of the work dir
 are created before the umask is set. If the staging chmod fails the staging dir
-is removed. The policy is only mode bits: no chgrp, no ACL handling (default
-ACLs on the parent can add named user/group entries; check `getfacl`; files
-never get "other" bits). With `--access group` the CLI prints
-`Shared with Unix group '<name>' (gid N)` from the work dir's gid. A
-pre-created empty work dir's group and mode are not kept (it is replaced by the
-staging dir). It is not stored: `access_of(st_mode)` recovers it from an existing
+is removed. The policy is only mode bits; what that means for the group, ACLs
+and a pre-created work directory, and the line `--access group` prints, are in
+[Access control](../commands/preprocess.md#access-control). The policy is not
+stored: `access_of(st_mode)` recovers it from an existing
 work directory (`group` if the group bits are rwx, else
 `private`), and later writers follow it. `ReviewDB` opens `review.tsv` with
 `os.open(O_APPEND | O_CREAT, file_mode)` and, when the file is new or empty and
@@ -228,13 +224,11 @@ it), `fchmod`s it, so a new `review.tsv` is 0600 in a private and 0660 in a
 group work directory. An existing, non-empty file keeps whatever mode it has,
 except that migrating an old-header file (see *`review.tsv`*) writes the new
 file with the policy's `file_mode`.
-`review`, `serve`, `export` and local `status` call `world_access_warning`: if
-the work directory or `manifest.tsv` has any other bit, they log a WARNING
-``<path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
-<work dir>` `` (group bits alone are silent). Existing directories are
-never chmod'ed automatically. A team shares a work directory sequentially
-(one writer at a time, enforced by `review.lock`; see *Concurrency limits*) or
-splits a study into several work directories.
+`review`, `serve`, `export` and local `status` call `world_access_warning`
+when they open the work directory: if it or `manifest.tsv` has any other bit,
+they log its message as a WARNING (the text is in
+[Access control](../commands/preprocess.md#access-control)). Nothing chmods an
+existing directory.
 
 **Source loading.** `discover(sources, exclude)` yields every input,
 classified by content. `run_preprocess` passes the resolved work directory and
@@ -297,11 +291,12 @@ distinct inputs: the first keeps `{zip}::{name}`, later ones get
 named `{name}#2` (see *Collisions*). Manifest rows follow discovery order
 (sources in the order given, each walked as above).
 
-**Image IDs** are fully-resolved absolute paths derived from the source:
-
-- ZIP entry: `{absolute_zip_path}::{filename}` (also for a ZIP inside a directory)
-- Directory: absolute path to each file (a symlinked file keeps its link path)
-- Single file: fully-resolved absolute path
+**Image IDs** are absolute paths derived from the source, in the forms listed
+under [`manifest.tsv`](work-directory.md#manifesttsv). The CLI resolves each
+SOURCE (`Path.resolve()`, symlinks included) before `discover`; paths below a
+directory SOURCE are joined from walked names and never resolved, so a
+symlinked file there keeps its link path (a symlinked directory below a
+SOURCE is never entered, so no file is reached through one).
 
 A DICOM whose `IconImageSequence` (0088,0200) has an item also yields a second
 output row, `{image_id}#icon`, for the embedded thumbnail (item 0, rendered
@@ -414,7 +409,7 @@ unused bits of PixelData are not drawn.
 
 **Error handling**: Every input is accounted for exactly once, in either
 `manifest.tsv` or `skipped.tsv`. Any exception while reading, decoding,
-rendering or JPEG-encoding one input (e.g. an image wider than libjpeg's
+rendering or JPEG-encoding one input (e.g. an image wider or taller than libjpeg's
 65500-pixel limit) becomes a `failed` row in `skipped.tsv` with reason
 `<ExceptionClass>: <message>` (or the `unsupported: ...` message), with tabs
 and runs of other control characters, U+2028/U+2029 and non-UTF-8 bytes (surrogates) replaced by one space, and object reprs such as `<_io.BytesIO object at 0x...>` replaced by `<data>` (so `skipped.tsv` is reproducible); a warning is also logged. A
@@ -437,16 +432,8 @@ are renamed into their batches in discovery order, the rest are deleted, and
 (0-based) goes to `batch_{n // batch_size + 1:03d}/img_{n % batch_size + 1:05d}.jpg`.
 
 **Output**: `manifest.tsv`, `skipped.tsv` (always written, even when
-empty) and `preprocess.json`, plus the summary line
-
-```
-Found N inputs: wrote K images in B batches; S skipped (F failed, I ignored; see WORK_DIR/skipped.tsv)
-```
-
-N counts every discovered item (rendered, failed and ignored).
-
-If any input failed and `--allow-skipped` was not given, the command exits 1
-after writing everything.
+empty) and `preprocess.json`. The summary line and the exit status are in
+[Skipped inputs](../commands/preprocess.md#skipped-inputs).
 
 ### `image-review review`
 

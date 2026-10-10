@@ -17,10 +17,13 @@ Inputs it cannot render are listed in `skipped.tsv` (see
 |--------|---------|-------------|
 | `--batch-size` | 300 | Images per batch (1 or more) |
 | `--work-dir` (alias `--output-dir`) | `./review_work` | Work directory to create |
-| `--colormap` | `inferno` | Matplotlib colormap for rendering |
+| `--colormap` | `inferno` | Matplotlib colormap for DICOM grayscale images |
 | `--access` | `private`; `$IMAGE_REVIEW_ACCESS` | Who may use the work directory; see [Access control](#access-control) |
-| `--allow-skipped` | off | Exit 0 even if some inputs failed to preprocess |
-| `--jobs` | `$SLURM_CPUS_PER_TASK`, else the usable CPUs | Worker processes; see [Parallel rendering](#parallel-rendering) |
+| `--allow-skipped` | off | Exit 0 even if some inputs failed to preprocess (they are still listed in `skipped.tsv`) |
+| `--jobs` | `$SLURM_CPUS_PER_TASK`, else the usable CPUs | Worker processes (1 or more); see [Parallel rendering](#parallel-rendering) |
+
+An unknown `--colormap` name, or `--jobs 0`, is a usage error: the command
+exits 2 before reading any input or creating the work directory.
 
 **Inputs.** Each SOURCE is a ZIP file, a directory (searched recursively,
 including ZIP files inside it) or an individual file. Inputs are recognized by
@@ -28,6 +31,12 @@ content, not by extension: DICOM (including extensionless files like `IM0001`,
 common in DICOM exports, and DICOM without the 128-byte preamble), PNG, JPEG,
 TIFF, BMP, GIF, WebP, JPEG 2000 and PNM. So upper-case extensions (`B.DCM`,
 `e.JPG`), `.jpeg`, `.dicom` and `.ima` files are all picked up too.
+
+HEIF and AVIF files (`.heic`, `.heif`, `.avif`) are recognized too, but they
+render only if the installed Pillow can decode them: Pillow 12 reads AVIF,
+older releases may not, and HEIC needs a Pillow plugin that image-review does
+not load. Otherwise the file is `failed` with Pillow's error, so it is never
+silently dropped.
 
 Word, Excel, PowerPoint and EPUB files are ZIPs, so images embedded in them
 are reviewed too. A ZIP inside a ZIP is not opened, and other archives
@@ -41,6 +50,17 @@ failed with its target, so pass that target as a SOURCE if you want it. The
 work directory and its `.NAME.partial` staging directory are never read as
 input, so `image-review preprocess .` with the default `./review_work` is
 safe.
+
+Each SOURCE is resolved first, symlinks included, so a symlink named on the
+command line is recorded under its target's path. A symlinked file found
+inside a directory keeps its link path.
+
+Inputs are taken in a fixed order, which is the order of `manifest.tsv`:
+SOURCES in the order given; within a directory, names sorted by character
+code at each level (so upper case before lower case), with a directory's
+files before its subdirectories; within a ZIP, entries in the order they are
+stored. A ZIP holding several entries with the same name gives each its own
+image id (see [`manifest.tsv`](../reference/work-directory.md#manifesttsv)).
 
 **Rendering.** DICOM images are normalized with adaptive histogram
 equalization, to enhance local contrast, and a configurable colormap; the
@@ -59,7 +79,8 @@ made; its keys are in
 **A new work directory every time.** The work directory must not already
 exist (an empty directory is fine). `preprocess` refuses to write into one
 that has content, so verdicts can never be attached to a replaced image:
-choose a new `--work-dir` or remove the old one.
+choose a new `--work-dir` or remove the old one. An existing work directory
+is never modified, so a `serve` running on it is not affected.
 
 Output is built in a staging directory next to it (`.NAME.partial`, with the
 access policy's directory mode) and renamed into place only on success, so an
@@ -112,15 +133,22 @@ staging directory).
   `sg <group> -c 'image-review preprocess ... --access group'` (or
   `newgrp <group>` first).
 - With `--access group`, `preprocess` prints which Unix group got access
-  (`Shared with Unix group 'study' (gid N)`).
+  after the summary line (`Shared with Unix group 'study' (gid N)`, or just
+  the gid when the group has no name).
 - POSIX default ACLs on the parent can add named user/group entries (check
   with `getfacl`; the tool does not manage ACLs), but files never get "other"
   bits.
 
-`review`, `serve`, `status` and `export` print a warning if the work
-directory or its `manifest.tsv` is accessible to other users (e.g. one made
-by an older version). They never change an existing directory's mode: run
-`chmod -R o-rwx <work dir>`.
+`review`, `serve`, `export` and `status` on a local work directory log a
+warning if the work directory or its `manifest.tsv` is accessible to all
+users (e.g. one made by an older version):
+
+```
+<path> is accessible to all users (mode NNNN); run `chmod -R o-rwx <work dir>`
+```
+
+Group bits alone do not warn. The commands never change an existing directory's mode:
+run the `chmod` yourself.
 
 Only one writer (`review` or `serve`) can use a work directory at a time
 (see [`review.lock`](../reference/work-directory.md#reviewlock)). A team
@@ -140,6 +168,9 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
   - an `unsupported:` multi-frame DICOM, or a DICOM object without pixel
     data (structured reports, encapsulated PDFs);
   - an unreadable subdirectory;
+  - a rendered image wider or taller than 65500 pixels, libjpeg's limit,
+    with an `OSError` from the JPEG writer (with Pillow 12.3,
+    `OSError: broken data stream when writing image file`);
   - a symlinked directory outside the sources;
   - a file named on the command line that is not an image, such as
     `notes.txt`;
@@ -171,6 +202,8 @@ such as:
 Found 1200 inputs: wrote 1195 images in 4 batches; 5 skipped (3 failed, 2 ignored; see review_work/skipped.tsv)
 ```
 
+N counts every input found: rendered, failed and ignored.
+
 It exits 1 if any input failed, unless `--allow-skipped` is given, so
 scripts notice. Check `skipped.tsv` before reviewing: those images will not
 be shown. Either fix them and preprocess again into a new work directory, or
@@ -199,8 +232,9 @@ second row in `manifest.tsv` with the image id ending in `#icon`, so any
 text burned into the thumbnail is reviewed too. If the icon cannot be
 rendered, the main image is still written and `<path>#icon` is listed as
 `failed` in `skipped.tsv`. A DICOM whose overlay cannot be decoded is
-`failed` as a whole. Only single-frame DICOMs (grayscale, colour or palette)
-are rendered for now.
+`failed` as a whole. Overlays stored in the unused bits of the pixel data,
+rather than in overlay planes, are not drawn. Only single-frame DICOMs
+(grayscale, colour or palette) are rendered for now.
 
 Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
 converted to RGB; 16-bit grayscale keeps its full range), get adaptive
@@ -218,13 +252,17 @@ review):
 Animated PNGs and other multi-frame rasters are listed in `skipped.tsv` as
 unsupported.
 
+Every rendered image, DICOM or not, is saved as a JPG with quality 95 and no
+chroma subsampling, so small text keeps its edges.
+
 ## Parallel rendering
 
 `--jobs N` renders inputs in N worker processes; `--jobs 1` renders in the
-main process. The default is `$SLURM_CPUS_PER_TASK` when set, else the CPUs
-the process may use, capped by the smallest cgroup v2 CPU quota of the
-process's cgroup and its ancestors (such as a login node's per-user
-`CPUQuota=` or a container's limit).
+main process. The default is `$SLURM_CPUS_PER_TASK` when it is a whole
+number of 1 or more, capped at the CPUs the process may use. Otherwise it is
+the CPUs the process may use, capped by the smallest cgroup v2 CPU quota of
+the process's cgroup and its ancestors (such as a login node's per-user
+`CPUQuota=` or a container's limit). cgroup v1 quotas are not read.
 
 - The output is byte-for-byte the same for any N; `preprocess.json` records
   the value.
