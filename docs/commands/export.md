@@ -9,7 +9,8 @@ with `--output`: one row per source file that may be released, and nothing
 else. **Release a file only if both its path and its SHA-256 match a row.**
 Anything not listed is denied: DIRTY, unreviewed, failed and ignored files, a
 file whose bytes changed since preprocess, and ZIP containers as a whole
-(their entries are listed one by one as `<zip>::<entry>`).
+(their entries are listed one by one as `<zip>::<entry>`). A ZIP that cannot
+be opened, or has no file entries, gets one report row under its own path.
 
 `--report FILE` also writes every other file to a new `FILE`, with its status
 and why. The report is for audit and follow-up (what is left to review, what
@@ -25,7 +26,7 @@ release**, e.g. by taking "everything not DIRTY".
 
 **Where to run it.** `image_id`s are source paths and may hold PHI, so
 export runs where the work directory is (e.g. on the cluster). It refuses
-`--remote` and ignores `$IMAGE_REVIEW_REMOTE`.
+`--remote` with a usage error (exit 2) and ignores `$IMAGE_REVIEW_REMOTE`.
 
 ## What is allowlisted
 
@@ -36,9 +37,13 @@ A file is allowlisted only if:
 - no file that is not CLEAN has the same recorded hash (`source_sha256`;
   identical bytes cannot be both clean and dirty, so all copies are denied).
 
-CLEAN files of a work directory made by an older version, whose manifest has
-no hashes, are never allowlisted: they appear in the report as CLEAN with
-`not allowlisted: ...` in `reason`.
+A CLEAN file that is not allowlisted appears in the report, still CLEAN,
+with one of these notes in `reason`:
+
+- `not allowlisted: no source_sha256 (work directory from an older version)`:
+  the manifest has no hash for it. So CLEAN files of a work directory made by
+  an older version are never allowlisted.
+- `not allowlisted: same content as a file that is not CLEAN`.
 
 ## File format
 
@@ -74,10 +79,10 @@ for reading.)
 | Column | Description |
 |--------|-------------|
 | `image_id` | The source file's path, as in `manifest.tsv` / `skipped.tsv`; a file inside a ZIP is `<zip>::<entry>`, one row per entry |
-| `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest; compare it with the file's own before releasing it. In the report, empty for a file that never rendered or a work directory from an older version. It is derived from the file's content, so treat it like the `image_id` |
+| `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest (a DICOM and its icon share it); compare it with the file's own before releasing it. In the report, empty for a file that never rendered (so always for `IGNORED`) or a work directory from an older version. It is derived from the file's content, so treat it like the `image_id` |
 | `status` | (report) `DIRTY`, `UNREVIEWED` (no verdict yet), `NOT_REVIEWED` (preprocess could not render it, or its icon), `IGNORED` (preprocess did not take it for an image, so nobody looked at it), or `CLEAN` for a CLEAN file that was not allowlisted |
-| `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. After an undo they are the undo's time and reviewer. `reviewer` is the reviewer's unverified claim |
-| `reason` | (report) Why the row is not simply the main image's verdict: preprocess's error for a `NOT_REVIEWED` file, `icon DIRTY` / `icon UNREVIEWED` / `icon: <error>` for its icon, `main image missing` (an icon whose file is not in the manifest; the row is then at best `NOT_REVIEWED`), preprocess's reason for an `IGNORED` file, `not allowlisted: ...` for a CLEAN file that was not allowlisted; otherwise empty |
+| `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. Also empty when the main image is `NOT_REVIEWED` (preprocess failed on it or ignored it), even if `review.tsv` has a verdict for it, and when there is no main image. After an [undo](../reference/work-directory.md#undo-rows) they are the undo's time and reviewer, with the pass it restored. `reviewer` is the reviewer's unverified claim, and may be empty in rows from an older version |
+| `reason` | (report) Why the row is not simply the main image's verdict, as `; `-separated notes in this order: preprocess's error or ignored reason for a `NOT_REVIEWED` main image; `main image missing` for an icon whose file is neither in the manifest nor a failed input (the row is then at best `NOT_REVIEWED`), or that file's reason if preprocess ignored it; `icon: <error>` for an icon preprocess could not render, else `icon DIRTY` / `icon UNREVIEWED`; preprocess's reason for an `IGNORED` file; and last, `not allowlisted: ...` for a CLEAN file that was not allowlisted. Otherwise empty |
 
 - A DICOM's embedded icon (`<path>#icon` in the manifest) is folded into its
   file's row: the row is CLEAN only if the image and its icon both are, else
@@ -91,37 +96,80 @@ for reading.)
   An ignored input the manifest also lists is `NOT_REVIEWED` instead.
 - A FLAGGED image (DIRTY in an earlier pass, not yet re-reviewed) is `DIRTY`.
 - Rows follow the manifest's order, then `skipped.tsv`'s (failed, then
-  ignored), one per file.
+  ignored), one per file. Verdicts in `review.tsv` for an `image_id` in
+  neither file are left out.
 - `reviewer` values can start with `=`, `+`, `-` or `@`. Open the files as
   text (e.g. import them as text columns), not by double-clicking them into a
   spreadsheet that would read them as formulas.
-- Export logs one line to stderr: how many files are allowlisted and how many
-  of each status are in the report.
+- Export [logs](index.md#logging) one INFO line to stderr: how many files are
+  allowlisted and how many of each status are in the report, CLEAN last.
+  For example:
 
-Export refuses (exit 1, naming the `image_id`, writing nothing) if any field
-of either file (`image_id`, `reviewer`, `reason`, ...), even without
-`--report`, holds a control character (tab, CR, LF and the rest of C0, DEL,
-C1 such as U+0085), U+2028 or U+2029, or starts with `"`, since readers could
-split or merge rows there. A `"` anywhere else is written as is.
+  ```text
+  2026-10-01T14:03:07+02:00 INFO image_review.cli: 12 files allowlisted; 5 in the report (2 DIRTY, 1 UNREVIEWED, 1 NOT_REVIEWED, 1 IGNORED, 0 CLEAN not allowlisted)
+  ```
+
+Fields are never quoted, so export refuses a field that readers could split
+or merge rows at; see [Refusals](#refusals-and-output-files). A `"` that does
+not start a field is written as is.
 
 ## Refusals and output files
 
 - It writes nothing in the work directory.
-- It refuses (exit 1) while a writer (`review` or `serve`) has the work
-  directory open, since verdicts may still change, and also if a writer opens
-  the work directory while export reads it. `--allow-live` exports anyway,
-  with a warning.
-- It always refuses a `review.tsv` whose last line was cut short by an
-  interrupted write; the next verdict recorded with `review` drops that line.
-  Re-check the last image you reviewed before the crash.
-- `--output` and `--report` never overwrite an existing file, and may not
-  name the same file.
+- It refuses `--remote` with a usage error (exit 2); see *Where to run it*
+  above:
+
+  ```text
+  Error: export does not work with --remote: image_ids stay on the server. Run export on the machine (cluster) holding the work directory, with --work-dir.
+  ```
+
+- It refuses (exit 1) while a writer (`review` or `serve`) holds the work
+  directory's [lock](../reference/work-directory.md#reviewlock), since
+  verdicts may still change. It checks before reading and, if no writer was
+  there, again after, so it also refuses if a writer opens the work
+  directory while export reads it:
+
+  ```text
+  Error: work directory is in use by USER on HOST (pid PID) since STARTED; lock file PATH. If that process is gone, delete PATH by hand. Verdicts may still change; stop the writer and export again, or pass --allow-live.
+  ```
+
+  For a lock that cannot be read or is malformed, the part before
+  "Verdicts" instead says the lock file is unreadable or corrupt, with the
+  same advice.
+
+  `--allow-live` overrides only this refusal: it exports anyway, with a
+  warning.
+- It always refuses (exit 1) a `review.tsv` whose last line was cut short by
+  an interrupted write; the next verdict recorded with `review` (or through
+  `serve`) drops that line. Re-check the last image you reviewed before the
+  crash.
+- It refuses (exit 1) a malformed `skipped.tsv`.
+- It refuses (exit 1, naming the `image_id` and the column, writing nothing)
+  if any field of either file (`image_id`, `reviewer`, `reason`, ...), even
+  without `--report`, holds a control character (tab, CR, LF and the rest of
+  C0, DEL, C1 such as U+0085), U+2028 or U+2029, or starts with `"`, since
+  readers could split or merge rows there.
+- `--output` and `--report` may not name the same file: that is a usage
+  error (exit 2), found before anything is read:
+
+  ```text
+  Error: --report and --output name the same file.
+  ```
+
+- `--output` and `--report` never overwrite an existing file (exit 1):
+
+  ```text
+  Error: FILE already exists; not overwriting it.
+  ```
+
+  A dangling symlink counts as an existing file. Both are checked before
+  either file is written, so no new report is left beside an old allowlist.
 - The report is written first, so a failed allowlist write leaves only a
   report, which releases nothing.
 - Each file is created in one step (written to a hidden `.FILE.<random>.tmp`
   beside it, then linked into place) with the work directory's file mode, and
   for a group work directory its group too (0660). If the group cannot be
   set, the file is made 0600 with a warning.
-- The hidden file is removed on every exit except a hard kill (`kill -9`, a
-  node crash), which can leave it behind: delete it, as it holds source
-  paths.
+- Ctrl-C, SIGTERM and SIGHUP remove the hidden file. Only a hard kill
+  (`kill -9`, a node crash) can leave it behind; see
+  [Leftover temporary files](../reference/work-directory.md#leftover-temporary-files).

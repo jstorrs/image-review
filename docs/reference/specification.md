@@ -514,52 +514,41 @@ skipped counts come from `store.skipped()`, so it works the same over
 image-review export [--work-dir DIR] [--output FILE] [--report FILE] [--allow-live]
 ```
 
-Writes the study's result as an **allowlist** with default deny: the source
-files that may be released, each keyed by its path (`image_id`) and its
-`source_sha256`. A file is released only if both match a row; anything not
-listed (DIRTY, unreviewed, failed, ignored, a ZIP as a whole, a file whose
-bytes changed) is denied. Every other file goes to an optional **report**
-(`--report FILE`), for audit and follow-up; it must never be used to choose
-what to release (e.g. "everything not DIRTY"). Local
-only: the rows name `image_id`s (source paths, possibly PHI), which never leave
-the machine holding the work directory, so export runs there (e.g. on the
-cluster). `--remote` is declared only to be refused with a usage error (exit 2)
-saying so; it has no envvar, so `$IMAGE_REVIEW_REMOTE` is ignored and does not
-get in the way of `--work-dir`. There is no server endpoint for it. The whole
-command runs under `interrupt_on(*TERMINATION_SIGNALS)`, so SIGTERM/SIGHUP
-unwind like Ctrl-C and remove a half-written output.
+Writes the allowlist of releasable files and the optional report of the
+rest. What they hold, how to use them, the exit codes and the main messages
+are in [export](../commands/export.md); this section is the mechanism. Local only:
+`--remote` is declared (hidden) only to be refused with a `UsageError`; it has
+no envvar, so `$IMAGE_REVIEW_REMOTE` is ignored and does not get in the way
+of `--work-dir`. There is no server endpoint for it, so `image_id`s and
+`source_sha256`s never go over the wire. The whole command runs under
+`interrupt_on(*TERMINATION_SIGNALS)`, so SIGTERM/SIGHUP unwind like Ctrl-C and
+remove a half-written output.
 
-`--report` and `--output` naming the same file (compared after
-`os.path.realpath`) is a usage error (exit 2), checked before anything is read.
+Whether `--report` and `--output` name the same file is checked after
+`os.path.realpath`, before anything is read.
 
-**Refusals** (`ClickException`, exit 1, nothing written):
+**Refusals** (`ClickException`, nothing written; the list is in
+[Refusals and output files](../commands/export.md#refusals-and-output-files)):
 
-- `lock.live_writer(work_dir)` finds `review.lock` held by a writer. The lock
-  is held unless it names a process of this machine and boot that no longer
-  exists (`is_stale`); an unreadable lock counts as held. The message is
-  `WorkDirLocked`'s. `--allow-live` overrides this one refusal only, and then
-  logs a WARNING (stderr). The check is made once, at the start.
-- A writer that took the lock while export read the work directory: when
-  there was none at the start, `live_writer` is checked again after
-  `export_rows()`, with the same `--allow-live` override.
-- `review.tsv` ends in a torn line (`ReviewDB.decisions()` raises). This is not
-  overridable. The torn line is dropped by a writer's next append, so the
-  message says to record a verdict with `review` (or through `serve`) and to
-  re-check the last image reviewed.
-- A malformed `skipped.tsv`.
-- A field (any column of the allowlist or the report, even without
-  `--report`, so one unsafe field anywhere refuses the whole export)
-  containing a control character (Unicode category
-  `Cc`: C0 incl. tab, CR and LF, DEL, and C1 incl. U+0085) or U+2028/U+2029,
-  which covers every character `str.splitlines()` breaks at, or starting
-  with `"`, which CSV-aware readers (Python's `csv`, pandas, spreadsheet
-  import) take as the start of a quoted field (`format_allowlist`'s or
-  `format_report`'s `ValueError`, naming the `image_id` with `repr` and the
-  column).
-- `--output FILE` or `--report FILE` already exists (`os.path.lexists`, so a
-  dangling symlink counts), checked before either is written, so no new report
-  is left beside a stale allowlist. `write_new_file`'s `O_EXCL` still refuses
-  one created after the check.
+- `lock.live_writer(work_dir)` returns the `WorkDirLocked` of a held
+  `review.lock`: held unless it names a process of this machine and boot that
+  no longer exists (`is_stale`); an unreadable lock counts as held. It is
+  checked at the start and, when there was no writer then, again after
+  `export_rows()`. The message is `WorkDirLocked`'s, then export's advice
+  (both quoted on the export page).
+  `--allow-live` turns either refusal into a WARNING.
+- `ReviewDB.decisions()` raises on a torn last line of `review.tsv`, and
+  `load_skipped` on a malformed `skipped.tsv`. Neither is overridable.
+- `format_allowlist`'s or `format_report`'s `ValueError`, naming the
+  `image_id` with `repr` and the column, for a field holding a control
+  character (Unicode category `Cc`) or U+2028/U+2029, which covers every
+  character `str.splitlines()` breaks at, or starting with `"`, which
+  CSV-aware readers (Python's `csv`, pandas, spreadsheet import) take as the
+  start of a quoted field. Both texts are built even without `--report`, so
+  one unsafe field anywhere refuses the whole export.
+- `os.path.lexists` finds `--output FILE` or `--report FILE`, before either is
+  written. `write_new_file`'s `O_EXCL` still refuses one created after the
+  check.
 
 Then it opens a read-only `LocalStore` (no lock; nothing is written in the
 work directory) and calls its `export_rows()`. That applies the pure
@@ -567,39 +556,20 @@ work directory) and calls its `export_rows()`. That applies the pure
 `load_skipped`, giving one row per source file (below), which
 `export.split_allowlist` splits into the allowlist and the report.
 
-**Split** (`export.split_allowlist(rows) -> (allowed, report)`): each list
-keeps the rows' order, and every row lands in exactly one. A row is allowed
-only if all of these hold:
+**Split** (`export.split_allowlist(rows) -> (allowed, report)`) implements
+[What is allowlisted](../commands/export.md#what-is-allowlisted). Each list
+keeps the rows' order, and every row lands in exactly one. The allowed rows
+are typed `AllowedRow`, the only rows `format_allowlist` accepts. The
+`source_sha256`s of the rows that are not `CLEAN` are collected first, so a
+denied `CLEAN` row may come before the row that denies it. Its
+`not allowlisted: ...` note is `; `-joined after any existing `reason`.
 
-- its status is `CLEAN` (so every part of the file, icon included, is CLEAN);
-- it has a `source_sha256` (a manifest from before the hash columns has none);
-- no row that is not `CLEAN` has the same `source_sha256`: identical bytes
-  cannot be both clean and dirty, so all copies are denied.
-
-Every other row goes to the report unchanged, except that a denied `CLEAN`
-row stays `CLEAN` and gets `not allowlisted: no source_sha256 (work directory
-from an older version)` or `not allowlisted: same content as a file that is
-not CLEAN` added to its `reason` (after any existing note, `; `-joined). So
-CLEAN files of a work directory without hashes are never allowlisted.
-
-**Formats** (`export.format_allowlist`, `export.format_report`): UTF-8 text,
-a header line, then one line per row. Fields are joined with tabs and every
-line ends in LF. There is no quoting or escaping: fields are written exactly
-as stored (a `"` not at the start included), which the refusals above make
-unambiguous. The allowlist's header is
-`source_sha256 image_id pass_number timestamp reviewer` (`ALLOWLIST_HEADER`);
-the report's is
-`image_id status pass_number timestamp reviewer reason source_sha256`
-(`REPORT_HEADER`). The columns mean the same in both (the allowlist's rows are
-all `CLEAN`, with an empty `reason`):
-
-| Column | Description |
-|--------|-------------|
-| `image_id` | The source file: a path, or `<zip>::<entry>` for a ZIP entry (each entry is its own row; a ZIP that opened and has entries is not a file of the export, but one that cannot be opened or has no file entries gets one row under its own path, from its `skipped.tsv` row). A DICOM's icon is never a row of its own (an `ignored` input whose path ends in `#icon` and that is not a part is a file, see *Ignored inputs*) |
-| `status` | The worst status of the file's parts (below): `DIRTY`, then `NOT_REVIEWED`, then `UNREVIEWED`, then `CLEAN`; or `IGNORED` for an `ignored` input with no parts (below), which nobody looked at |
-| `pass_number`, `timestamp`, `reviewer` | From the latest decision on the main part (`X` itself), as recorded; empty when it has none (`UNREVIEWED`, `NOT_REVIEWED`, `IGNORED`, or no main part). After an undo they come from the undo row (its time and the undoing reviewer; the restored pass). `reviewer` is the client's unauthenticated claim, possibly empty in old rows; it is not sanitized, so it may begin with `=`, `+`, `-` or `@`, and the file must be read as text, not as spreadsheet formulas |
-| `reason` | `; `-joined notes, in this order: the main part's skip reason if it is `NOT_REVIEWED`; `main image missing` if there is no main part and `X` was not ignored (it then counts as a `NOT_REVIEWED` part, so the row is never CLEAN; an ignored `X` gives its ignored reason instead); `icon: <skip reason>` if the icon is `NOT_REVIEWED`, else `icon <STATUS>` if the icon is not `CLEAN`. For an `IGNORED` row, its `ignored` reason. For a `CLEAN` row denied by the split, then its `not allowlisted: ...` note. Empty otherwise (always, in the allowlist) |
-| `source_sha256` | The SHA-256 of the source file (or ZIP entry) recorded in the manifest for `X` or `X#icon` (they share it); a file is released only if its own SHA-256 matches its allowlist row. Empty (so never allowlisted) when the manifest has none: a file that never rendered (only in `skipped.tsv`, so always for `IGNORED`), or a manifest from before the hash columns. It is derived from PHI content and, like `image_id`, appears only in these local files, never over the wire |
+**Formats** (`export.format_allowlist`, `export.format_report`): the columns
+are in [File format](../commands/export.md#file-format). The headers are
+`ALLOWLIST_HEADER` and `REPORT_HEADER`. Fields are joined with tabs, every
+line ends in LF, and there is no quoting or escaping, which the refusals above
+make unambiguous. A row's `source_sha256` is the first one the manifest
+records for `X` or `X#icon`, else empty.
 
 **Parts and folding.** Every distinct `image_id` of the manifest, and of the
 `failed` rows of `skipped.tsv`, is a part:
@@ -641,28 +611,29 @@ Rows come in order of first appearance of their file: manifest order, then
 rows. Decisions for `image_id`s in neither file are left out.
 
 **Output.** Both texts are built and checked before anything is written. The
-report (with `--report`) is written first, then the allowlist, so a failed
-second write leaves only a report, which releases nothing. Without `--output`
-the allowlist's bytes go to stdout's binary stream. Then one INFO line goes to
-stderr: `N files allowlisted; M in the report (d DIRTY, u UNREVIEWED, n
-NOT_REVIEWED, i IGNORED, c CLEAN not allowlisted)`, one count per
-`ExportStatus` (taken from the `Literal`, so none is left out), CLEAN last. `--report FILE` and
-`--output FILE` are each written by `atomic.write_new_file` (the same helper as
-`review.lock`; see *Concurrency limits*):
+report (with `--report`) is written first, then the allowlist. Without
+`--output` the allowlist's bytes go to stdout's binary stream. Then the INFO
+line shown in [File format](../commands/export.md#file-format) goes to stderr,
+one count per `ExportStatus` (taken from the `Literal`, so none is left out),
+CLEAN last. `--report FILE` and `--output FILE` are each written by
+`atomic.write_new_file` (the same helper as `review.lock`; see *Concurrency
+limits*):
 
 1. A unique hidden sibling (`.FILE.<random>.tmp`) is created with
-   `O_CREAT|O_EXCL` and mode 0600. For a group work directory it is then given
+   `O_CREAT|O_EXCL`: mode 0600 when a group is to be set, else the file mode
+   at once (the umask may strip bits). For a group work directory it is given
    the work directory's group (`fchown(fd, -1, gid)`), so it is right even
-   outside the setgid work directory; if that fails, it stays 0600 and a
-   WARNING is logged. Only then is it `fchmod`ed to the work directory's
-   policy file mode (exactly, whatever the umask), and only then written and
-   fsynced, so it is never readable by a group it does not belong to.
+   outside the setgid work directory. Only then is it `fchmod`ed to the work
+   directory's policy file mode (exactly, whatever the umask), and only then
+   written and fsynced, so it is never readable by a group it does not belong
+   to. If `fchown` fails, a WARNING is logged and the file is `fchmod`ed to
+   0600 instead of the policy mode.
 2. The sibling is hard-linked to `FILE`, so `FILE` appears complete or not at
    all. If `FILE` already exists, export refuses (exit 1) and never
    overwrites it.
 3. Where hard links are not supported (`EPERM`, `ENOTSUP`, `ENOSYS`), `FILE`
-   is created directly with `O_EXCL`, the same way (0600, group, mode, then
-   the text). A failed `link` after which `os.path.samefile(sibling, FILE)`
+   is created directly with `O_EXCL`, the same way as the sibling in step 1.
+   A failed `link` after which `os.path.samefile(sibling, FILE)`
    holds (NFS: the link was made but the reply was lost) counts as made.
 
 One `try`/`finally` around creation through the link removes the sibling on
