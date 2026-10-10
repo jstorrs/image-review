@@ -40,15 +40,12 @@ of human reviewers.
   connection string (`ir://...`) can view the images and record verdicts
   while the server runs. Do not paste it into chat or tickets. A new token
   and certificate are generated at each start, so an old string stops working.
-- **Delivery of the connection string.** On a terminal it is printed. When
-  stdout is not a terminal (for example `sbatch`) it is written instead to
-  `~/.image-review/connection-<host>-<port>.txt`: the directory must be owned
-  by you and is tightened to 0700, the file is created 0600, and the file is
-  removed when the server stops. A hard kill can leave it behind; it is
-  replaced by the next server on the same host and port, and you can delete it
-  by hand. Other users cannot read it. The remaining exposure is root on any
-  node that mounts the home directory, backups or snapshots of it, and any
-  process running as you.
+- **Delivery of the connection string.** When stdout is not a terminal, it
+  goes to a 0600 file in `~/.image-review/`, a 0700 directory you own, so
+  other users cannot read it ([HTTPS mode](../commands/serve.md#https-mode)).
+  The remaining exposure is root on any node that mounts the home directory,
+  backups or snapshots of it, and any process running as you. A hard kill
+  leaves the file behind ([Stopping](../commands/serve.md#stopping)).
 - **Binding.** Wildcard addresses (`0.0.0.0`, `::`, empty) are refused; the
   server binds and advertises one named host (default: this machine's FQDN).
 - **Logging.** One INFO line per request: peer address, method, path without
@@ -74,11 +71,11 @@ of human reviewers.
   the client and recorded as given (1-64 printable characters). The server
   does not authenticate it: whoever holds the token can record verdicts under
   any name. Treat the `reviewer` column as unverified.
-- **Single writer.** `serve` and a local `review` each hold `review.lock` in
-  the work directory, so a second writer exits with an error naming the holder.
-  `status` and `export` only read. A lock is reclaimed automatically only when
-  the tool can verify its process is gone on the same machine since its last
-  boot; otherwise it is left for you to delete by hand.
+- **Single writer.** `serve` and a local `review` each hold the work
+  directory's lock, so a second writer exits with an error naming the holder;
+  `status` and `export` only read. A lock the tool cannot prove stale is left
+  for you to delete by hand
+  ([`review.lock`](work-directory.md#reviewlock)).
 - **Multi-client limits.** The server assumes one reviewer per server. Its
   undo stack is a single one, shared by every client, so `z` in one client
   undoes the latest mark from any of them. Each client works from its own
@@ -129,26 +126,26 @@ default mode; use it only where you accept the points below.
   server. The page keeps it in per-tab `sessionStorage` and rewrites it out
   of the tab's history entry. It can still stay in browser history and
   autocomplete, and in the clipboard. By default it stops working when the
-  server stops. Treat the URL like a password. When stdout is not a terminal it is written
-  to `~/.image-review/browser-<host>-<pid>.txt` (0600, removed on exit), with
-  the same exposure as the connection file above. Browser extensions that
+  server stops. Treat the URL like a password. When stdout is not a terminal
+  it goes to `~/.image-review/browser-<short-host>-<pid>.txt`, with the same
+  protection and exposure as the connection file above
+  ([Socket mode](../commands/serve.md#socket-mode)). Browser extensions that
   can read all sites can read the token and the images.
 - **A reused token** (`$IMAGE_REVIEW_TOKEN`, socket mode only) no longer dies
   at a restart, only when the job's shell ends. `serve` writes it to disk
   only in the 0600 URL file when stdout is not a terminal (removed on exit);
   a copy of that file (e.g. in a home snapshot) stays valid for the whole
   job. It lives in that shell's environment, which you and root can read (on
-  Linux, via `/proc`). Generate it inside the job (the `srun` shell or the
-  batch script), not before submitting. `sbatch` copies the submit
-  environment (by default `--export=ALL`), which slurmctld stores with the
-  job, and with `AccountingStoreFlags=job_env` `sacct --env-vars` shows it.
-  A token exported before `salloc` would outlive the job in your login shell
-  and be reused by the next job. In a batch script, generate the token
-  there; never paste a literal value, because Slurm stores the script (and
-  with `AccountingStoreFlags=job_script`, `sacct --batch-script` shows it).
-  Do not put the token on a command line (it would show in `ps` and shell
-  history). `serve` accepts only 22-256 characters of `A-Za-z0-9_-` (use 128
-  random bits) and never prints or logs it except in the URL.
+  Linux, via `/proc`). Generated before submitting, it would leak: `sbatch`
+  copies the submit environment (by default `--export=ALL`), which slurmctld
+  stores with the job, and with `AccountingStoreFlags=job_env`
+  `sacct --env-vars` shows it. A token exported before `salloc` would outlive
+  the job in your login shell and be reused by the next job. A literal value
+  in a batch script leaks too, because Slurm stores the script (and with
+  `AccountingStoreFlags=job_script`, `sacct --batch-script` shows it), and
+  one on a command line shows in `ps` and shell history. `serve` shows it
+  only in the URL, never in an error or log. Use 128 random bits;
+  [Token](../commands/serve.md#token) has the rules and where to generate it.
 - **A page belongs to one serve.** With a fixed socket path and
   `$IMAGE_REVIEW_TOKEN`, the ssh forward and the token outlive a serve
   restarted on the next work directory, batch or pass, and keys
@@ -160,10 +157,10 @@ default mode; use it only where you accept the points below.
   from and sends it on every request, and the server refuses (412) any API
   request but `/version` and `/current_pass` that does not carry this
   server's id (none, a repeated one, or another), reading, recording and
-  packing nothing. The page then stops and asks for
-  Reconnect, which loads the new server from scratch. The id is not a
-  secret (the token is the access control), is checked only after the
-  token, and is never logged.
+  packing nothing, so the tab's reads cannot mix two servers either. The
+  page then stops and asks for Reconnect, which loads the new server from
+  scratch. The id is not a secret (the token is the access control), is
+  checked only after the token, and is never logged.
 - **The laptop side.** The printed command forwards `127.0.0.1:8080` only, and
   the URL names `127.0.0.1`: ssh given a bare `-L 8080:...` also binds `::1`
   and succeeds if either bind works, so another process already on
@@ -226,18 +223,18 @@ history too, do not type it: use
 A work directory holds PHI in several forms, and is never meant to be
 world-readable.
 
-- **Access policy** (`--access`, or `$IMAGE_REVIEW_ACCESS`):
-  `private` (default) creates directories 0700 and files 0600;
-  `group` creates directories 2770 (setgid) and files 0660 for the work
-  directory's Unix group. No file is ever created with "other" bits. The tool
-  only sets mode bits: it never runs `chgrp` and never manages ACLs, so the
-  group is whatever the filesystem assigns (see [Access control](../commands/preprocess.md#access-control) for how to get the
-  right one). POSIX default ACLs inherited from the parent directory can grant
-  more access than owner or group: check with `getfacl`. Later writers recover the policy from the work directory's own
-  mode.
-- **Warnings.** `review`, `serve`, `status` and `export` warn if the work directory or
-  `manifest.tsv` is accessible to other users (for example one made by an old
-  version). They never change an existing directory's mode; run
+- **Access policy.** By default the tool creates work-directory files for
+  the owner only. With `--access group` it creates them readable and writable
+  by the work directory's Unix group (0660 files, 2770 directories). No file
+  is ever created with "other" bits
+  ([Access control](../commands/preprocess.md#access-control)).
+  The tool only sets mode bits: it never runs `chgrp` and never manages ACLs,
+  so the group is whatever the filesystem assigns, and POSIX default ACLs
+  inherited from the parent directory can grant more access than owner or
+  group (check with `getfacl`).
+- **Warnings.** `review`, `serve`, `status` and `export` warn when a local
+  work directory or its `manifest.tsv` is accessible to all users, but never
+  change an existing directory's mode: you run
   `chmod -R o-rwx <work dir>`.
 - **Files that hold PHI:**
   - the batch JPGs, which show whatever text was burned in;
@@ -252,15 +249,10 @@ world-readable.
     `#SBATCH --output`;
   - export files (the allowlist and the report), whose `image_id` column is
     the source path and whose `source_sha256` is derived from file content.
-- **Hidden temporary files.** Each is removed on every exit except a hard
-  kill (`kill -9`, a node crash), which can leave it behind. Delete any you
-  find, since they hold the same data:
-  - `.NAME.partial`: `preprocess`'s staging directory next to the work
-    directory (the next run tells you about it);
-  - `.<file>.<random>.tmp`: the temporary file `export --output` or
-    `--report` writes beside its target;
-  - `.review.tsv.*.tmp`: left by an interrupted `review.tsv` upgrade, inside
-    the work directory; the tool ignores it.
+- **Hidden temporary files** hold the same data as the files they stand in
+  for. A hard kill (`kill -9`, a node crash) can leave them behind; delete
+  any you find
+  ([Leftover temporary files](work-directory.md#leftover-temporary-files)).
 - **git.** The repository's `.gitignore` excludes the usual work-directory
   names as a safety net, but do not create work directories inside a git
   checkout, and never commit one.
@@ -269,13 +261,11 @@ world-readable.
   home directory shared between login and compute nodes (relevant to
   `~/.image-review/`). Put work directories where your site's data policy
   allows PHI.
-- **Export files** (`--output`, `--report`) follow the work directory's file
-  mode and, for a group work directory, its group (0600 if the group cannot be
-  set, with a warning). Neither overwrites an existing file, and they may not
-  name the same file. Both are built and checked before either is written,
-  and the report is written first, so a failed second write leaves only a
-  report, which releases nothing. `export` refuses `--remote`
-  so that source paths never travel.
+- **Export files** (`--output`, `--report`) get the work directory's access,
+  never overwrite an existing file, and a failed write leaves at most a
+  report, which releases nothing
+  ([Refusals and output files](../commands/export.md#refusals-and-output-files)).
+  `export` refuses `--remote` so that source paths never travel.
 
 ## Integrity
 
@@ -295,35 +285,33 @@ world-readable.
   undo appends restoring rows rather than deleting any. The log is plain text
   and is not signed: anyone who can write the work directory can edit it.
 - **Export refusals.** `export` refuses while a writer holds the work
-  directory (unless `--allow-live`, which warns), refuses a `review.tsv` whose
-  last line was cut short, and refuses any field holding a control character,
-  U+2028/U+2029, or starting with `"`, so a reader cannot be made to split or
-  merge rows. Preprocess records an input whose name is not UTF-8 or holds
-  such a character as a `failed` row under an escaped id and cleans such
-  characters out of reasons, so a work dir made by this version never trips
-  this refusal through an image_id or reason (a reviewer name starting with `"`,
-  or a work dir from an earlier version, still can). The check covers the
-  report's rows too, even without `--report`. `export` never overwrites
-  an existing file. `reviewer` values can start
-  with `=`, `+`, `-` or `@`: open the result as text, not by double-clicking it
-  into a spreadsheet.
+  directory (unless `--allow-live`, which exports anyway with a warning),
+  refuses a `review.tsv` whose last line was cut short, and refuses any field
+  holding a control character, U+2028/U+2029, or a leading `"`, so a reader
+  cannot be made to split or merge rows
+  ([Refusals and output files](../commands/export.md#refusals-and-output-files)).
+  Preprocess records an input whose name is not UTF-8 or holds a control
+  character or U+2028/U+2029 as a `failed` row (never rendered, so never
+  reviewed) under an escaped id, and cleans such characters out of reasons,
+  so a work dir made by this version never trips this refusal through an
+  image_id or reason (a reviewer name starting with `"`, or a work dir from
+  an earlier version, still can).
+  `reviewer` values can start with `=`, `+`, `-` or `@`: open the result as
+  text, not by double-clicking it into a spreadsheet.
 - **Allowlist (default deny).** `export`'s main output lists only the files
   that may be released, each by path and source SHA-256; release a file only
-  if both match, and deny everything not listed. A file is listed only if its
-  status is `CLEAN`, the manifest has its hash, and no file that is not
-  `CLEAN` has the same hash (identical bytes cannot be both clean and dirty).
-  A file's status is the worst of its parts (the image and its embedded icon):
-  `DIRTY`, then `NOT_REVIEWED`, then `UNREVIEWED`, then `CLEAN`; it is `CLEAN`
-  only if every part is. A FLAGGED image (DIRTY in an earlier pass, not yet
-  re-reviewed) is `DIRTY`. So these are never listed: inputs that failed to
-  preprocess (`NOT_REVIEWED`), inputs that were not images (a DICOMDIR, a PDF,
-  ...: `IGNORED`), files whose name preprocess recorded under an escaped id
-  (which never matches the real name), CLEAN files of a work directory
-  without hashes, a file changed since preprocess (its hash no longer
-  matches), and a ZIP or directory as a whole (only its entries are listed).
-  Everything else goes to the optional `--report`, for audit and follow-up;
-  it must never be used to choose what to release (e.g. "everything not
-  DIRTY").
+  if both match, and deny everything not listed
+  ([What is allowlisted](../commands/export.md#what-is-allowlisted)). A file
+  is listed only if it, and its embedded icon, were reviewed CLEAN, the
+  manifest has its hash, and no file that is not CLEAN has the same hash
+  (identical bytes cannot be both clean and dirty). So these
+  are never listed: inputs that failed to preprocess, inputs that were not
+  images, files whose name preprocess recorded under an escaped id (which
+  never matches the real name), CLEAN files of a work directory without
+  hashes, a file changed since preprocess (its hash no longer matches), and
+  a ZIP or directory as a whole (only its entries are listed). Everything
+  else goes to the optional `--report`, for audit and follow-up; it must
+  never be used to choose what to release (e.g. "everything not DIRTY").
 - **DIRTY-only placeholders.** The viewer shows an image that cannot be
   fetched, read or verified as a placeholder that accepts DIRTY but refuses
   CLEAN, so an image nobody could see is not cleared by the viewer (see the

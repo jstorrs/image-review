@@ -150,8 +150,8 @@ users (e.g. one made by an older version):
 Group bits alone do not warn. The commands never change an existing directory's mode:
 run the `chmod` yourself.
 
-Only one writer (`review` or `serve`) can use a work directory at a time
-(see [`review.lock`](../reference/work-directory.md#reviewlock)). A team
+A work directory takes one writer at a time (see
+[`review.lock`](../reference/work-directory.md#reviewlock)). A team
 shares a work directory sequentially or splits a study into several work
 directories.
 

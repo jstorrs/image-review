@@ -1678,16 +1678,12 @@ another serve; reconnect"}`, closes the connection, and reads, records and
 packs nothing (an unknown route is 412 too, not 404). The check runs after
 the `Host` check and the token check, so a client without the token gets the
 same 400 or 401 as before and learns nothing from a 412; the public files
-need no header. The reason is the documented workflow: the socket path and
-token are often fixed per job (`$IMAGE_REVIEW_SOCKET_PATH`,
-`$IMAGE_REVIEW_TOKEN`), so an ssh forward and an open tab outlive a serve
-that is stopped and restarted on the next work directory, batch or pass, and
-keys (`batch_NNN/img_NNNNN.jpg`) repeat across work directories. Without the
-check a tab left showing image A would, after the restart, send its verdict
-for A's key to the new server, which would record it against an image nobody
-saw (every key of a stale grid in grid mode), and its reads would mix the two
-servers. TLS mode sends no such header and requires none; it needed no
-`API_VERSION` bump, since only the page served by this server calls it.
+need no header. Why the check exists (a tab and its token outliving a
+restarted serve, with keys that repeat across work directories) is in the
+[security model](security-model.md#experimental-browser-review-over-a-unix-socket),
+under "A page belongs to one serve". TLS mode sends no such header and
+requires none; it needed no `API_VERSION` bump, since only the page served
+by this server calls it.
 
 `POST /grids` (socket mode only; over TLS it is an unknown path, 404, and a
 body on it is refused with 400 as on any bodyless route) lays out images into
