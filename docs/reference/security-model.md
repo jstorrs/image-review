@@ -167,8 +167,10 @@ The points below are its limits.
   server's id (none, a repeated one, or another), reading, recording and
   packing nothing, so the tab's reads cannot mix two servers either. The
   page then stops and asks for Reconnect, which loads the new server from
-  scratch. The id is not a secret (the token is the access control), is
-  checked only after the token, and is never logged.
+  scratch (see
+  [Lost connection and Reconnect](../commands/browser.md#lost-connection-and-reconnect)).
+  The id is not a secret (the token is the access control), is checked only
+  after the token, and is never logged.
 - **The laptop side.** The printed command forwards `127.0.0.1:8080` only, and
   the URL names `127.0.0.1`: ssh given a bare `-L 8080:...` also binds `::1`
   and succeeds if either bind works, so another process already on

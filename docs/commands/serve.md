@@ -20,6 +20,8 @@ it.
 For the workflow, see the tutorials
 [Browser review over SSH](../tutorials/browser-review.md) and
 [Remote review with the Python client (deprecated)](../tutorials/remote-review.md).
+The page it serves, with its keys and screens, is described in
+[The browser page](browser.md).
 
 `serve` prints a URL, or in HTTPS mode a connection string (`ir://...`),
 that grants access: **treat it like a password.** When stdout is not a

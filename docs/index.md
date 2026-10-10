@@ -60,6 +60,7 @@ review <commands/review.md>
 status <commands/status.md>
 export <commands/export.md>
 serve <commands/serve.md>
+browser page <commands/browser.md>
 ```
 
 ```{toctree}

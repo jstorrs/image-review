@@ -5,6 +5,7 @@
 - [`image-review status`](status.md): Report on review progress.
 - [`image-review export`](export.md): Write the allowlist of files that may be released.
 - [`image-review serve`](serve.md): Serve a work directory so it can be reviewed remotely.
+- [The browser page](browser.md): Use the page that `serve` serves for browser review.
 
 ## Logging
 

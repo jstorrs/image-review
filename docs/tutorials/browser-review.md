@@ -65,106 +65,23 @@ In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. See
 3. Open the URL in your browser: `http://127.0.0.1:8080/#TOKEN`. The token is
    a password; do not paste the URL into chat or tickets.
 
-4. The page first asks "Who is reviewing?": type your name (1-64
-   characters; it is recorded with every verdict, as `--reviewer` is for the
-   viewer) and press Enter. The tab remembers it; the bar at the bottom
-   shows it as "Jane ✎", and clicking that lets you change it (Escape keeps
-   the old name). The page starts in single mode, showing the current pass's
-   UNREVIEWED and FLAGGED images one at a time, in random order. Press `?`
-   (or `h`, or the "?" button) for the list of keys:
+4. The page first asks "Who is reviewing?": type your name and press
+   Enter. It is recorded with every verdict, as `--reviewer` is for the
+   viewer. The page then shows the current pass's todo images one at a
+   time. Press `?` for the list of keys: `c` marks an image CLEAN, `d`
+   DIRTY, and `m` switches to grid mode, where one verdict covers a whole
+   grid. [The browser page](../commands/browser.md) describes the keys, the
+   bar, grid mode and every screen and message.
 
-   | Key | Button | Action |
-   |-----|--------|--------|
-   | `c` | Clean | Mark the image CLEAN and move on |
-   | `d` | Dirty | Mark the image DIRTY and move on |
-   | Right / Left | Next / Previous | Move through the list without marking |
-   | `z` | Undo | Undo the latest mark and show that image (or grid) again |
-   | `m` | -- | Grid mode for the current batch (rotation `auto`) |
-   | `M` | -- | Grid mode without rotating images (rotation `never`) |
-   | `s` | -- | Back to single mode |
-   | `b` | -- | Grid mode: the next batch with images to review |
-   | `r` | Reconnect | After "Lost connection", after `q` or at the end of a pass: load the review |
-   | `q` | Done | Done with this server: the page waits for the next one |
-   | `?` or `h` | ? | Show or hide the help (Escape also closes it) |
-
-   Everything is in one bar at the bottom of the page: on the left the review
-   buttons, the status word and the scale; on the right your name, "?" and
-   Done (or Reconnect); in the middle a message (what was undone, refusals,
-   errors) when there is one, otherwise the mode, the progress and the image's
-   batch and key. Your own moves (arrows, marking, switching mode) clear the
-   message; an undo or Reconnect says what it did. After `c` or `d` the image
-   stays up for a moment (200 ms) with the bar in its new colour, then the
-   next one appears and no message is left, so the progress stays in view
-   while you mark. In a window about 1400 pixels wide or less the middle part
-   gets a row of its own under the buttons. The bar's colour is the current
-   item's status, also written in it: grey UNREVIEWED, green CLEAN, red DIRTY,
-   amber FLAGGED (grey too on the end and stop-sign screens and once the
-   page has stopped).
-   Text too long for its place is cut short; hover over it to read it whole.
-   While the help or the name box is open nothing can be marked, and once it
-   closes the page waits the 200 ms again before a verdict counts.
-
-   Right past the last item (or Left before the first) shows a stop sign,
-   "End of the list", with how many todo items the list (in grid mode, the
-   batch) still has; press the arrow again to go round to the other end:
-   Right goes to the first item and Left to the last. There is no image on
-   the stop sign, so `c` and `d` do nothing; `z`, `m`, `s`, `b` and `q` work
-   as anywhere. Once nothing in the pass is left to review, the arrows past
-   an end show the "nothing left to review" screen instead.
-
-   A verdict counts only once the image has been on screen for 200 ms, so a
-   key pressed as an image appears is ignored. An image that cannot be
-   loaded is handled as in the viewer (see
-   [Images that cannot be loaded](../commands/review.md#images-that-cannot-be-loaded)).
-   The bar shows the display scale as a percent; below 100% it stands
-   out as a badge such as "⚠ 46%": the image is shrunk to fit and small
-   burned-in text can be lost, so enlarge the window or go full screen
-   (browser zoom does not help: it makes the page's text larger and the
-   image's share smaller).
-   `z` says "Nothing to undo" once this page has no marks left to undo.
-   With one page per server it only
-   undoes this page's marks; the server keeps a single undo history, so with
-   a second tab or client it undoes the latest mark from any of them (see
-   "Multi-client limits" in [the security model](../reference/security-model.md#the-server-image-review-serve)), and the page warns
-   "Undid another client's mark". When the whole pass is done the page says
-   "Pass N: nothing left to review" and offers Reconnect for the next
-   server. In grid mode the list is one batch, so at its end the page says
-   "No todo images remaining - [b] next batch" while another batch has
-   grids, or asks for `s` while FLAGGED images remain.
-
-   Grid mode works as in the viewer (see the [review](../commands/review.md)
-   page), one batch at a time:
-
-   - One verdict covers every image in the grid: look at all of them before
-     pressing `c`. `d` marks them all DIRTY.
-   - CLEAN can be refused on a grid that already holds a DIRTY or FLAGGED
-     image; review it in single mode. See
-     [Refused CLEAN on a grid](../commands/review.md#refused-clean-on-a-grid).
-   - Grids hold only UNREVIEWED images; FLAGGED ones need single mode. An
-     image that fails to load or decode leaves a black gap and follows the
-     grids as a single item, as do images that did not fit a grid. These
-     single items are judged one at a time.
-   - Resizing the window repacks the grids for the new size and clears undo:
-     `z` then says "Nothing to undo". On the "nothing left to review" screen
-     `z` still works after a resize; the grids are repacked when you leave
-     that screen.
-   - A batch of more than 1000 images is too large for the browser's grid
-     mode; review it in single mode (`s`).
-
-   Your marks so far are always saved on the server. If the tunnel drops,
-   the page says "Lost connection" and shows a Reconnect button: run the
-   same ssh command again, then press Reconnect (or `r`). The page never
-   retries by itself. Reconnect reloads the statuses and rebuilds the list
-   in the mode you were in (grid mode lands on the grid you were on), forgets
-   which marks `z` could undo ("Nothing to undo" until you mark again) and
-   waits the 200 ms again before a verdict counts. If the server was
-   restarted, the old tunnel points at a socket that is gone (the default
-   path includes the server's process id), so the page also says "Lost
-   connection": stop the old ssh command (it holds port 8080, so the new one
-   would fail), run the new command the server printed, and open its new URL
-   (pasting it into the same tab works). The page says "token rejected -
-   open the new URL" when a restarted server reuses the same socket path
-   with a new token.
+   Your marks are saved on the server as you make them. If the tunnel
+   drops, the page stops and offers Reconnect: run the same ssh command
+   again, then press Reconnect (or `r`). If the server was restarted, the
+   old tunnel points at a socket that is gone (the default path includes
+   the server's process id): stop the old ssh command (it holds port 8080,
+   so the new one would fail), run the new command the server printed, and
+   open its new URL (pasting it into the same tab works). See
+   [Lost connection and Reconnect](../commands/browser.md#lost-connection-and-reconnect)
+   for what the page says in each case.
 
    **Tip: keep the tunnel across restarts.** ssh connects to the socket
    only when the browser opens a connection, so a forward to a fixed path
@@ -184,10 +101,12 @@ In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. See
    Leave the ssh command running. While the server is stopped the page says
    "Lost connection". With a fixed socket path and `$IMAGE_REVIEW_TOKEN`
    (below), a restart needs only Reconnect; after a restart with a fresh
-   token (none exported) Reconnect says "token rejected", and you paste the
-   new URL into the same tab. Use a per-job name such as `$SLURM_JOB_ID`,
-   not one shared between jobs: on a home directory shared between nodes, a
-   second job with the same path would take over the first one's socket.
+   token (none exported) the page
+   [rejects the token](../commands/browser.md#lost-connection-and-reconnect),
+   and you paste the new URL into the same tab. Use a per-job name such as
+   `$SLURM_JOB_ID`, not one shared between jobs: on a home directory shared
+   between nodes, a second job with the same path would take over the first
+   one's socket.
 
    To keep the URL too, give the job one token and export it as
    `$IMAGE_REVIEW_TOKEN`; `serve` then reuses it on every start in
@@ -214,31 +133,27 @@ In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. See
 `$IMAGE_REVIEW_TOKEN` exported in the job's shell, one tab and one ssh
 command last the whole job:
 
-1. Finish the pass (the page says "Pass N: nothing left to review", not
-   just the end of a batch) or press `q` (or click Done). `q` stops the
-   page and frees the images; your marks are already saved, and the tab
-   keeps the token and your name. It does not stop the server.
+1. Finish the pass (the page says the pass has nothing left to review, not
+   just the end of a batch; see
+   [End of a pass or batch](../commands/browser.md#end-of-a-pass-or-batch))
+   or press `q` (or click Done; see [Done](../commands/browser.md#done)).
+   Your marks are already saved, and the tab keeps the token and your name.
+   `q` does not stop the server.
 2. Stop the server with Ctrl-C on the node.
 3. Start the next `image-review serve ...` in the same shell (same
    `$IMAGE_REVIEW_SOCKET_PATH` and `$IMAGE_REVIEW_TOKEN`), for the next batch
    or pass.
 4. Press Reconnect (or `r`) on the page. It loads whatever the new server
-   serves, from its first item (in grid mode, the first batch with grids),
-   and says "Reconnected; now on pass N".
+   serves.
 
 If you skip step 1 or 4 and keep reviewing in the old tab, nothing goes to
 the wrong images: the new server refuses anything from a page loaded from
-the old one (its keys may name the new work directory's images), so the
-page records nothing, stops and says "Server restarted or changed work
-directory - press Reconnect (r)" (or "Lost connection", if the new server is
-not up yet). Press Reconnect, and judge
-the images it then shows.
+the old one, and the page stops and asks for Reconnect (see
+[Lost connection and Reconnect](../commands/browser.md#lost-connection-and-reconnect)).
+If Reconnect cannot reach the new server yet, press it again once it is up.
 
-If Reconnect says "Lost connection", the new server is not up yet: press it
-again. "token rejected" means the new server has another token: open its URL
-in the tab. When you are finished for the day, stop the server with Ctrl-C,
-then the ssh command, and close the tab: closing it is what forgets the
-token.
+When you are finished for the day, stop the server with Ctrl-C, then the
+ssh command, and close the tab: closing it is what forgets the token.
 
 For how `--via`, `--direct` and `--ssh-host` shape the printed command, see
 [Socket mode](../commands/serve.md#socket-mode) on the serve page.

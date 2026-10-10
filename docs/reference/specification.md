@@ -1760,8 +1760,10 @@ not fit, it is returned anyway and `parse_socket_path` raises its usual error.
 
 `web/app.js` (plain ES2020, no build step) reviews single images and grids,
 following the pygame client (see *Single Mode*, *Grid Mode*, *Unloadable
-Images*, *Undo*). It obeys the CSP above: no inline script or style, no
-`innerHTML`, no external URLs; all text goes in with `textContent`.
+Images*, *Undo*). Its keys, screens and messages as the reviewer sees them
+are on [The browser page](../commands/browser.md). It obeys the CSP above:
+no inline script or style, no `innerHTML`, no external URLs; all text goes
+in with `textContent`.
 
 `m` (rotation `auto`) and `M` (`never`) switch to grid mode and `s` back to
 single mode; each switch rereads `/statuses`, empties the stack of marked keys
