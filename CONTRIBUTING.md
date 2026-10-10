@@ -71,6 +71,29 @@ When writing a page:
   MyST resolves it, and the strict build fails on a slug that matches no
   heading.
 
+### Which page owns what
+
+State a fact once, on its owner page, and link to it from everywhere else.
+Tutorials tell the story and summarise; they never restate a table or a rule
+list. The specification holds internals and links to the owner pages for the
+rest; together they are enough to rebuild the tool.
+
+| Fact | Owner |
+|---|---|
+| A command's options, defaults, environment variables, exit codes, messages and output | `docs/commands/<command>.md` |
+| Global options, log levels and the log format | `docs/commands/index.md` |
+| Viewer keys, gamepad, screens, passes and todo images | `docs/commands/review.md` |
+| The browser page's keys and screens | `docs/tutorials/browser-review.md` |
+| Work-directory files: columns, encoding, parsing, `review.lock`, leftover files | `docs/reference/work-directory.md` |
+| Skip kinds and example reasons | `docs/commands/preprocess.md` |
+| Allowlist and report format, export refusals | `docs/commands/export.md` |
+| Extras, minimum versions and codec limits | `docs/install.md` |
+| The `dev` and `docs` extras, tooling | this file |
+| Security claims and limits, what is never logged | `docs/reference/security-model.md` |
+| Workflows | `docs/tutorials/` |
+| Algorithms, invariants, the wire API, function contracts | `docs/reference/specification.md` |
+| The quick-start block | `docs/quickstart.md`, mirrored word for word in the README |
+
 ## `git blame`
 
 The one-off `ruff format` reformat is listed in `.git-blame-ignore-revs`. To
@@ -85,14 +108,13 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 - **Commits.** An imperative subject line ("Add export refusals", not "Added"
   or "Adds"), then a body in prose that says why the change is needed and what
   it does.
-- **Docs travel with the change.** A change to the CLI or a file format
-  updates, in the same commit, its page under `docs/commands/` (the single
-  source for options, keys, rules and formats),
-  `docs/reference/work-directory.md` if it changes a work-directory file, any
-  tutorial under `docs/tutorials/` or `docs/quickstart.md` (and the README
-  quick start it mirrors) that shows it, and
-  `docs/reference/specification.md`. A security behaviour change also updates
-  `docs/reference/security-model.md`.
+- **Docs travel with the change.** Each user-facing fact has one owner page
+  (see [Which page owns what](#which-page-owns-what)). A change updates the
+  owner of every fact it changes, in the same commit. Update the
+  specification when internals change (algorithms, invariants, the wire API,
+  function contracts), and other pages only where their summary or link
+  becomes wrong. Before committing, grep `docs/` and the README for the old
+  wording.
 - **Wire changes bump `API_VERSION`.** Any change to the server's request or
   response shapes, or to the `Status` vocabulary, bumps `API_VERSION` in
   `src/image_review/connection.py`, so a client and server of different
