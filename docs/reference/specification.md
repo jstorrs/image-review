@@ -490,32 +490,23 @@ image-review status [--check] [--work-dir DIR | --remote CONNECTION_STRING [--vi
 ```
 
 Same store selection as `review`, but a local store is opened read-only (no
-lock), so `status` works while a writer holds the work directory. Fetches the manifest, the current pass and
-that pass's statuses from the store, then prints overall and per-batch counts
-of each `Status` (pass-aware, computed by the pure `store.summary` /
-`store.batch_summary`), plus the current pass number. The overall block has
-one line each for CLEAN, DIRTY, UNREVIEWED and FLAGGED; the per-batch table
-(printed when there is more than one batch) has columns `Batch Total Clean
-Dirty Unrev Flag`. After a completed pass, images marked DIRTY in it show as
-FLAGGED (not DIRTY) because the current pass is then the next one. Then
-it calls `store.skipped()`; if preprocess skipped anything it prints
-`Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`
-so that a fully reviewed manifest is not mistaken for a complete input set.
-Nothing extra is printed when `skipped.tsv` is absent (work dirs from older
-versions) or has no rows. A malformed `skipped.tsv` (`ValueError`) is a
+lock). The command fetches the manifest, the current pass and that pass's
+statuses from the store and prints the report. The counts come from the pure
+`store.summary` and `store.batch_summary`, which are pass-aware. Then it calls
+`store.skipped()`; a `ValueError` from a malformed `skipped.tsv` becomes a
 `ClickException` (exit 1). Does not start pygame.
-`status` cannot count unloadable images (see *Unloadable Images*): they are
-only discovered when `review` tries to show them, and until marked DIRTY they
-count as UNREVIEWED.
 
-**Exit status**: 0, unless `--check` is given: then, after printing the same
-report, it exits 1 if any image is UNREVIEWED or `skipped.tsv` has any
-`failed` row (`ignored` rows do not count), else 0: a study is finished when
-every image has a verdict. FLAGGED is a DIRTY verdict from an earlier pass, so
-it counts as decided; re-review passes are optional, and FLAGGED images still
-show in the report, so a second pass remains available. It works the same over
-`--remote` (the counts come from `store.skipped()`). Errors
-(bad store, malformed `skipped.tsv`) exit 1 or 2 as without `--check`.
+What the report shows, the FLAGGED status, the Skipped line and what happens
+when `skipped.tsv` is missing or malformed are in
+[status](../commands/status.md). `status` cannot count unloadable images (see
+*Unloadable Images*): they count as UNREVIEWED until marked DIRTY.
+
+**Exit status**: 0, unless `--check` is given. Then it exits 1 if any image is
+UNREVIEWED or `store.skipped()` reports a `failed` row, else 0; the meaning is
+in [Checking from a script](../commands/status.md#checking-from-a-script). The
+skipped counts come from `store.skipped()`, so it works the same over
+`--remote`. Errors (bad store, malformed `skipped.tsv`) exit 1 or 2 as without
+`--check`.
 
 ### `image-review export`
 
