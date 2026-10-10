@@ -11,38 +11,17 @@ and **export** the allowlist of files that may be released.
 ## Requirements
 
 - Python >= 3.12
-- Dependencies, with the minimums declared in `pyproject.toml`, grouped by
-  what needs them:
-  - core (always installed; enough for `serve`, `status`, `export` and every
-    `--help`): click >= 8.2, cryptography >= 41 (`serve`'s TLS certificate),
-    rectpack == 0.2.2 (grid layout, `layout.py`, shared by the viewer and
-    `serve`; unmaintained, pinned because grid packing depends on its exact
-    behaviour);
-  - extra `preprocess`: matplotlib >= 3.7.3, numpy >= 1.26, pydicom >= 3.0,
-    Pillow >= 10.3 except 11.x (11.x misdecodes an MPO frame whose mode
-    differs from the one before), scikit-image >= 0.22, scipy >= 1.11.2,
-    tqdm >= 4.60 (`tqdm.contrib.logging`);
-  - extra `codecs`: the DICOM codecs python-gdcm >= 3.0.25 (JPEG
-    baseline/extended/lossless, JPEG-LS, JPEG 2000, RLE; older releases decode
-    a corrupt JPEG 2000 codestream without an error) and pylibjpeg >= 2.0 +
-    pylibjpeg-openjpeg >= 2.0 (JPEG 2000, HTJ2K). Kept separate from
-    `preprocess`: without it, pydicom decodes only what it can by itself or
-    through Pillow (e.g. RLE, JPEG 2000), and any other compressed DICOM (e.g.
-    JPEG Lossless, JPEG-LS) is `failed` with `cannot decode <transfer syntax
-    name>: ...` (see the DICOM preprocessing pipeline, step 0);
-  - extra `viewer` (`review`, local or `--remote`): pygame-ce >= 2.3.1,
-    Pillow (as above);
-  - extra `all` = `preprocess`, `codecs` and `viewer`; extra `dev` = `all`
-    plus ruff, mypy, types-tqdm and coverage (the tests need every extra);
-  - extra `docs` (not part of `all` or `dev`): sphinx, myst-parser, furo and
-    sphinx-copybutton, to build the documentation site (`sphinx-build`); no
-    command needs it.
-
-  Most minimums are the oldest release with a CPython 3.12
-  wheel; each was checked by running the test suite on CPython 3.12. click
-  8.2 is needed only by the tests (`CliRunner` with separate stderr).
-  `pylibjpeg-libjpeg` is deliberately not used (GPL-3), so 12-bit JPEG
-  Extended (Process 4) and JPEG-LS with 6- or 7-bit samples cannot be decoded.
+- Dependencies are grouped into extras (core, `preprocess`, `codecs`,
+  `viewer`, `all`). The extras, what each command needs and every minimum
+  version are in [Installation](../install.md#choosing-extras) and
+  [Minimum dependency versions](../install.md#minimum-dependency-versions);
+  `pyproject.toml` declares them. The `dev` and `docs` extras are described in
+  [CONTRIBUTING.md](https://github.com/jstorrs/image-review/blob/main/CONTRIBUTING.md).
+  The reasons for the minimums are on the installation page. `codecs`
+  is separate from `preprocess`: without it, any compressed DICOM pydicom
+  cannot decode by itself or through Pillow is `failed` with `cannot decode
+  <transfer syntax name>: ...` (see the DICOM preprocessing pipeline, step
+  0). `pylibjpeg-libjpeg` is deliberately not used (GPL-3).
 
 - The CLI imports an extra's modules only in the command that needs them
   (`cli.requires_extra`). A command whose extra is missing exits 1 with

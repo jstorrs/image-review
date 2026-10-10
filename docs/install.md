@@ -19,6 +19,7 @@ commands need:
 | `pip install .` (core) | `serve`, `status`, `export`, `--help` | click, cryptography, rectpack |
 | `pip install '.[viewer]'` | `review` (local or `--remote`) | pygame-ce, Pillow |
 | `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
+| `pip install '.[all]'` | every command | `preprocess` + `codecs` + `viewer` |
 
 On a cluster with a laptop viewer (see
 [Remote review on an HPC cluster](tutorials/remote-review.md)), install
@@ -68,16 +69,23 @@ DICOMs are decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`
 - 12-bit JPEG Extended files cannot be decoded even with the codecs (the only
   decoder is GPL-licensed and is not used). They are listed in `skipped.tsv`
   as `cannot decode JPEG Extended (Process 2 and 4): ...`.
+- JPEG-LS files with 6- or 7-bit samples cannot be decoded either, for the
+  same reason. They are listed in `skipped.tsv` as `cannot decode <transfer
+  syntax>: ...`.
 
 ## Minimum dependency versions
 
 These are declared in `pyproject.toml` and checked by running the test suite
-on CPython 3.12: click >= 8.2, matplotlib >= 3.7.3,
-numpy >= 1.26, pydicom >= 3.0, Pillow >= 10.3 except 11.x (which misdecodes
-an MPO frame whose mode differs from the one before), scikit-image >= 0.22,
-scipy >= 1.11.2, tqdm >= 4.60, pygame-ce >= 2.3.1, cryptography >= 41, python-gdcm >= 3.0.25,
-pylibjpeg >= 2.0, pylibjpeg-openjpeg >= 2.0, and rectpack pinned at 0.2.2
-(unmaintained; grid packing depends on its exact behavior).
+on CPython 3.12. Most are the oldest release with a CPython 3.12 wheel. click
+8.2 is needed only by the tests (`CliRunner` with separate stderr), and
+python-gdcm 3.0.25 is the first release that reports a corrupt JPEG 2000
+codestream instead of decoding it without an error. The minimums are: click >=
+8.2, matplotlib >= 3.7.3, numpy >= 1.26, pydicom >= 3.0, Pillow >= 10.3 except
+11.x (which misdecodes an MPO frame whose mode differs from the one before),
+scikit-image >= 0.22, scipy >= 1.11.2, tqdm >= 4.60, pygame-ce >= 2.3.1,
+cryptography >= 41, python-gdcm >= 3.0.25, pylibjpeg >= 2.0,
+pylibjpeg-openjpeg >= 2.0, and rectpack pinned at 0.2.2 (unmaintained; grid
+packing depends on its exact behavior).
 
 rectpack is published only as a source distribution: a default `pip install`
 builds it, but an offline or `--only-binary :all:` install needs its sdist or
