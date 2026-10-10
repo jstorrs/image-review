@@ -66,10 +66,10 @@ image-review review --mode grid
 
 Press `c` to mark the image or grid on screen CLEAN and `d` to mark it DIRTY,
 Left/Right to move, `z` to undo your last mark and `q` (or Escape) to quit;
-progress is saved automatically. The status bar shows each image's status:
-green for CLEAN, red for DIRTY, gray for UNREVIEWED and orange for FLAGGED
-(marked DIRTY in an earlier pass; needs a verdict in this one). Every key,
-the gamepad buttons, undo and the end-of-batch screen are described in
+progress is saved automatically. The status bar colour shows each image's
+status; FLAGGED means marked DIRTY in an earlier pass and awaiting a verdict
+in this one. Every key, the status colours, the gamepad buttons, undo and the
+end-of-batch screen are described in
 [Keys and gamepad](../commands/review.md#keys-and-gamepad).
 
 ### Multi-pass workflow
@@ -227,12 +227,14 @@ image-review export --work-dir ./phi_review --output ./phi_review_allowlist.tsv 
   so each grid contains as many images as possible. Marking a grid CLEAN
   clears all of them at once. Reserve single mode for the DIRTY remainder
   (grid mode skips DIRTY and FLAGGED images).
-- **Autoplay**: Press `Space` to start auto-advancing through images at
-  500ms intervals. Press any key to stop (the key still does its usual job). Useful for a quick visual scan.
+- **Autoplay**: `Space` auto-advances through images, which is useful for a
+  quick visual scan.
 - **Gamepad**: A game controller makes long review sessions more
-  comfortable: B marks CLEAN, Y marks DIRTY and the D-pad navigates.
-- **Batch size**: Larger batches mean fewer but denser grids. The default
-  (300) works well for typical DICOM series. Reduce for very large images.
-- **Colormap**: `inferno` (default) provides good contrast for medical
-  images. Try `gray` for a more traditional radiological look, or `viridis`
-  for general-purpose use.
+  comfortable.
+  Both are described in
+  [Keys and gamepad](../commands/review.md#keys-and-gamepad).
+- **Batch size**: Larger batches mean fewer but denser grids. Reduce
+  `--batch-size` for very large images.
+- **Colormap**: Try `--colormap gray` for a more traditional radiological
+  look, or `viridis` for general-purpose use. Both options are in
+  [`image-review preprocess`](../commands/preprocess.md).

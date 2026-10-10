@@ -13,10 +13,6 @@ The workflow has four steps:
 
 The documentation is at <https://jstorrs.github.io/image-review/>.
 
-To review images that stay on an HPC cluster, `serve` the work directory
-there and review it from your laptop; see
-[Reviewing on an HPC cluster](docs/tutorials/remote-review.md).
-
 ## Installation
 
 Requires Python >= 3.12. Install everything with `pip install '.[all]'` from a
@@ -48,33 +44,20 @@ inside a git checkout (the repository's `.gitignore` excludes them as a
 safety net).
 
 The quick start is also on its own page: [Quick start](docs/quickstart.md).
-For a walk-through of a whole review on one machine, see the
-[Local review](docs/tutorials/local-review.md) tutorial.
-
-## Commands
-
-- [`image-review preprocess`](docs/commands/preprocess.md): Turn DICOM and image files into normalized JPG batches.
-- [`image-review review`](docs/commands/review.md): Review the images interactively, in single or grid mode.
-- [`image-review status`](docs/commands/status.md): Report on review progress.
-- [`image-review export`](docs/commands/export.md): Write the allowlist of files that may be released.
-- [`image-review serve`](docs/commands/serve.md): Serve a work directory so it can be reviewed remotely.
-
-Logging and the options that go before the command are described in the
-[commands overview](docs/commands/index.md).
-
-## Reviewing on an HPC cluster
-
-Preprocess and `serve` on the cluster, and review from your laptop with the
-pygame viewer or, experimentally, a browser. See
-[Remote review on an HPC cluster](docs/tutorials/remote-review.md) and
-[Browser review over SSH](docs/tutorials/browser-review.md); the
-[security model](docs/reference/security-model.md) states the threat model.
 
 ## Documentation
 
-Beyond the pages linked above, the reference section has the
-[work directory](docs/reference/work-directory.md) layout and the
-[specification](docs/reference/specification.md).
+- [Local review](docs/tutorials/local-review.md): a walk-through of a whole
+  review on one machine.
+- [Remote review on an HPC cluster](docs/tutorials/remote-review.md) and
+  [Browser review over SSH](docs/tutorials/browser-review.md)
+  (experimental): review images that stay on the cluster, from your laptop.
+- [Commands overview](docs/commands/index.md), with one page each for
+  [preprocess](docs/commands/preprocess.md),
+  [review](docs/commands/review.md), [status](docs/commands/status.md),
+  [export](docs/commands/export.md) and [serve](docs/commands/serve.md).
+- [Work directory](docs/reference/work-directory.md) and the
+  [specification](docs/reference/specification.md).
 
 ## Security
 

@@ -30,8 +30,9 @@ srun --cpus-per-task=8 --mem=16G image-review preprocess /data/scans.zip --work-
 
 In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. Without
 `--cpus-per-task`, `$SLURM_CPUS_PER_TASK` is unset and `--jobs` falls back to
-the CPUs the job may use (its CPU affinity, capped by the smallest cgroup v2 CPU quota of its cgroup and its ancestors). `scancel` (or the time limit) stops the workers and
-leaves no work directory.
+the CPUs the job may use; see
+[Parallel rendering](../commands/preprocess.md#parallel-rendering). `scancel`
+(or the time limit) stops the workers and leaves no work directory.
 
 ## 2. Serve from an interactive session
 
@@ -49,11 +50,10 @@ under batch mode below.
 
 The server binds the node's hostname by default (`--bind` to override;
 wildcard addresses are refused) and picks a free port (`--port` to choose
-one). It prints the connection string plus ready-to-paste client commands:
-
-```
-ir://node042.cluster.example:41733/?token=...&fp=sha256:...
-```
+one). It prints the connection string, which looks like
+`ir://node042.cluster.example:41733/?token=...&fp=sha256:...`, plus
+ready-to-paste client commands; the exact output is in
+[HTTPS mode](../commands/serve.md#https-mode).
 
 Treat the string like a password. Each server start generates a new token and
 certificate, so a string from an earlier run no longer works.
@@ -121,8 +121,8 @@ This assumes your home directory is shared between the login and compute nodes.
 
 Stop the server with Ctrl-C, `scancel`, or by letting the allocation end.
 Progress is saved on the server at every mark. If the connection drops, the
-viewer shows "Lost connection to server - progress saved" and accepts only
-quit: `q`, `Esc`, the gamepad's Start button, or closing the window. Quit, then
+viewer says so and accepts only quit (see
+[Lost connection](../commands/review.md#lost-connection)). Quit, then
 reconnect with the same string while the server is still running.
 
 ## Security
@@ -169,9 +169,8 @@ repairs or drops rows on its own. What a valid file looks like is in
 [`review.tsv`](../reference/work-directory.md#reviewtsv) and
 [`manifest.tsv`](../reference/work-directory.md#manifesttsv).
 
-**Troubleshooting versions:** "server speaks API vN, this client vM" (or
-"server is too old to report its API version") means the laptop and the
-cluster have different image-review versions; install the same image-review
-version on both machines. This release speaks wire API v7 (the server refuses
-a grid CLEAN over a DIRTY or FLAGGED image), so upgrade the cluster and the
-laptop together.
+**Troubleshooting versions:** an API-version message from the viewer means
+the laptop and the cluster have different image-review versions. Install the
+same version on both machines and upgrade them together. The message, and the
+other checks that can stop a connection, are listed under
+[Connecting to a server](../commands/review.md#connecting-to-a-server).

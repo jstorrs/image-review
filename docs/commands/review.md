@@ -149,9 +149,10 @@ in all filter modes.
 
 ### Refused CLEAN on a grid
 
-A grid can still come to hold a DIRTY image mid-session, for example when one
-of its images shares a source file with an image marked DIRTY elsewhere.
-CLEAN on such a grid is refused, and the status bar says "grid contains an
+A grid can still come to hold a DIRTY or FLAGGED image mid-session, for
+example when one of its images shares a source file with an image marked
+DIRTY elsewhere. CLEAN on such a grid is refused, unless every image in it is
+DIRTY (that reverses the grid's own verdict), and the status bar says "grid contains an
 image already marked DIRTY - review it in single mode"; DIRTY is still
 accepted. Over a server, the server applies the same rule, so a CLEAN is
 refused even when another client marked an image DIRTY since your viewer last

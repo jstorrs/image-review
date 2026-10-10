@@ -87,8 +87,9 @@ see [Remote review on an HPC cluster](remote-review.md).
 
    A verdict counts only once the image has been on screen for 200 ms, so a
    key pressed as an image appears is ignored. An image that cannot be
-   loaded shows "Cannot load image: KEY" and can be marked DIRTY but never
-   CLEAN. The bar shows the display scale as a percent; below 100% it stands
+   loaded is handled as in the viewer (see
+   [Images that cannot be loaded](../commands/review.md#images-that-cannot-be-loaded)).
+   The bar shows the display scale as a percent; below 100% it stands
    out as a badge such as "⚠ 46%": the image is shrunk to fit and small
    burned-in text can be lost, so enlarge the window or go full screen
    (browser zoom does not help: it makes the page's text larger and the
@@ -104,15 +105,14 @@ see [Remote review on an HPC cluster](remote-review.md).
    "No todo images remaining - [b] next batch" while another batch has
    grids, or asks for `s` while FLAGGED images remain.
 
-   Grid mode works as in the viewer (see the [review](../commands/review.md) page), one batch at a
-   time:
+   Grid mode works as in the viewer (see the [review](../commands/review.md)
+   page), one batch at a time:
 
    - One verdict covers every image in the grid: look at all of them before
      pressing `c`. `d` marks them all DIRTY.
-   - CLEAN is refused ("grid contains an image already marked DIRTY") if any
-     image in the grid is already DIRTY or FLAGGED, unless every image in it
-     is DIRTY (which reverses that grid's own verdict); review it in single
-     mode.
+   - CLEAN can be refused on a grid that already holds a DIRTY or FLAGGED
+     image; review it in single mode. See
+     [Refused CLEAN on a grid](../commands/review.md#refused-clean-on-a-grid).
    - Grids hold only UNREVIEWED images; FLAGGED ones need single mode. An
      image that fails to load or decode leaves a black gap and follows the
      grids as a single item, as do images that did not fit a grid. These
