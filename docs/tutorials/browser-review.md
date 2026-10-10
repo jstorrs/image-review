@@ -143,7 +143,8 @@ see [Remote review on an HPC cluster](remote-review.md).
    only when the browser opens a connection, so a forward to a fixed path
    keeps working when the server is restarted on that path. Give each job
    its own path instead of the default. Set it once in the job's environment
-   (`serve` uses `$IMAGE_REVIEW_SOCKET_PATH` only with `--socket`):
+   (see the [option rules](../commands/serve.md#option-rules) for when
+   `serve` uses it):
 
    ```bash
    # Once per job:
@@ -152,9 +153,6 @@ see [Remote review on an HPC cluster](remote-review.md).
    # Each start (after a restart, re-run only this line):
    image-review serve --work-dir /scratch/me/review_work --socket --direct
    ```
-
-   (`--socket-path PATH` on the command line does the same and overrides the
-   variable.)
 
    Leave the ssh command running. While the server is stopped the page says
    "Lost connection". With a fixed socket path and `$IMAGE_REVIEW_TOKEN`
@@ -181,9 +179,8 @@ see [Remote review on an HPC cluster](remote-review.md).
    export IMAGE_REVIEW_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
    ```
 
-   It must be 22-256 characters from letters, digits, `_` and `-` (the two
-   commands above give 32); `serve` refuses anything else without printing
-   it, and ignores the variable without `--socket`. Never put the token on a
+   Both commands give 32 characters, which meet the
+   [token rules](../commands/serve.md#token). Never put the token on a
    command line. After a restart, press Reconnect (or `r`) on the page: the
    forward and the URL are unchanged.
 
@@ -217,16 +214,14 @@ in the tab. When you are finished for the day, stop the server with Ctrl-C,
 then the ssh command, and close the tab: closing it is what forgets the
 token.
 
-Each start has a new token unless `$IMAGE_REVIEW_TOKEN` is set. `--via` only
-fills in the `-J` part of the printed command; without it the command shows
-`<user>@<login-node>` for you to fill in. `--direct` (or
-`$IMAGE_REVIEW_DIRECT=1`) leaves `-J` out; it cannot be combined with `--via`
-on the command line.
+For how `--via`, `--direct` and `--ssh-host` shape the printed command, see
+[Socket mode](../commands/serve.md#socket-mode) on the serve page.
 
 **Batch mode.** Under `sbatch` stdout is not a terminal, so the URL is
-written to `~/.image-review/browser-<host>-<pid>.txt` (mode 0600) and removed
-when the server stops. The job output gives the ssh command and the file's
-path; fetch the URL from your laptop (use the absolute path, not `~`):
+written to a private file instead
+([what serve prints](../commands/serve.md#socket-mode)). The job output gives
+the ssh command and the file's path; fetch the URL from your laptop (use the
+absolute path, not `~`):
 
 ```bash
 ssh me@login-node cat /home/me/.image-review/browser-node042-12345.txt

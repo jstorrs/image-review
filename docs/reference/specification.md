@@ -648,16 +648,18 @@ image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via DEST 
                     [--ssh-host NODE]
 ```
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--work-dir` | `./review_work` | Work directory from preprocessing; must exist |
-| `--bind` | `socket.getfqdn()` | Hostname or IPv4 address to bind and advertise |
-| `--port` | 0 | Port to listen on; 0 picks a free port |
-| `--socket` | off | Experimental: serve on a Unix socket (see below) |
-| `--socket-path` | `default_socket_path()`; `$IMAGE_REVIEW_SOCKET_PATH` | Experimental: the socket path; implies `--socket` on the command line; the environment value is used only with `--socket` |
-| `--via` | `$IMAGE_REVIEW_VIA` | With `--socket`: login node for the printed ssh command; checked with `tunnel.parse_via` |
-| `--direct` | off; `$IMAGE_REVIEW_DIRECT` | With `--socket`: the laptop reaches the node without a jump host; the printed command omits `-J` |
-| `--ssh-host` | `socket.getfqdn()` | With `--socket`: the node name to print as `NODE`; checked with `tunnel.parse_ssh_host`; no environment variable |
+The options, the token, the option rules and their exit codes, what `serve`
+prints and how it stops are in [serve](../commands/serve.md); this section is
+the mechanism. `--bind` and `--ssh-host` default to `socket.getfqdn()`,
+`--socket-path` to `default_socket_path()`, `--via` is checked with
+`tunnel.parse_via` and `--ssh-host` with `tunnel.parse_ssh_host`.
+
+The [option rules](../commands/serve.md#option-rules) are `UsageError`s
+raised before the work directory is opened. "`--port` was given" means any
+parameter source but the default. A value that comes only from the
+environment (`$IMAGE_REVIEW_VIA`, `$IMAGE_REVIEW_DIRECT`,
+`$IMAGE_REVIEW_SOCKET_PATH`) is dropped, not refused, where the rules say it
+is ignored; click drops an empty environment value.
 
 Opens a writable `LocalStore` (holding the work dir lock for the server's
 lifetime; `WorkDirLocked` is a `ClickException`, exit 1), calls
@@ -666,74 +668,54 @@ lifetime; `WorkDirLocked` is a `ClickException`, exit 1), calls
 address the server ends up bound to that is unspecified, and a host whose
 connection string would not parse (`RemoteTarget.parse` round trip), raising
 `ValueError` after closing its socket; the command reports these as
-`ClickException`s. Only IPv4 hostnames/addresses are supported.
+`ClickException`s.
 
-**Connection string delivery**: on a TTY, the string and ready-to-paste client
-commands (direct and `--via`) are printed. Otherwise (e.g. `sbatch`)
+**Connection string delivery**: on a TTY the string is printed. Otherwise
 `server.write_connection_file` writes it to
-`~/.image-review/connection-<host>-<port>.txt` (host sanitized to
-`[A-Za-z0-9._-]`; directory created 0700, must be a directory owned by the
-user, tightened to 0700 if looser; file created `O_EXCL|O_NOFOLLOW` with mode
-0600, replacing a stale file), and the printed output gives the path and an
-`ssh ... cat` command for the client.
+`~/.image-review/connection-<host>-<port>.txt` (host through `safe_name`;
+`private_dir()` creates the directory 0700, requires it to be a directory
+owned by the user, and tightens it to 0700 if looser; `write_private_file`
+unlinks a stale file, then creates it `O_EXCL|O_NOFOLLOW` with mode 0600 and
+removes a partly written one).
 
 **Socket mode (experimental)**: `--socket` or `--socket-path` calls
 `server.make_unix_server` (see *Unix-socket server*) at `--socket-path` or
-`default_socket_path()` instead of `make_server`. Refused with exit 2
-(`UsageError`) before the work directory is opened: either option together
-with `--bind` or a `--port` that was given (any parameter source but the
-default), an empty `--socket-path`, and `--via` given on the command line
-without socket mode, `--direct` given on the command line without socket
-mode, `--ssh-host` without socket mode, and `--direct` (any source) together
-with `--via` given on the command line. A `--via` that comes only from
-`$IMAGE_REVIEW_VIA` is ignored in TCP
-mode, and so is a `--direct` that comes only from `$IMAGE_REVIEW_DIRECT`; with
-`--direct`, an environment `--via` is ignored too. A `--socket-path` that
-comes only from `$IMAGE_REVIEW_SOCKET_PATH` is ignored in TCP mode (it does not
-imply `--socket`) and is used with `--socket`; one on the command line
-overrides it. An empty environment value is unset (click drops it), so
-`--socket` then uses the default path.
+`default_socket_path()` instead of `make_server`.
 
-`$IMAGE_REVIEW_TOKEN` (read with `os.environ`, not a click option) is used
-only in socket mode and ignored, unparsed, in TCP mode. Empty is unset. A
-value goes through `connection.parse_token`: 22-256 characters from
-`A-Za-z0-9_-`, no surrounding whitespace (refused, not stripped); an invalid
-one exits 1 as a `ClickException` naming the variable and the rule, never the
-value, before the work directory is opened. It is passed to
-`make_unix_server(store, path, token)` (None generates `token_urlsafe(16)`),
-so the URL is the same on every start in that shell. Then the output adds
-one line, "Using the token from $IMAGE_REVIEW_TOKEN: the URL stays the same
-across restarts in this shell."; the URL itself is shown as below. An invalid
-`--via`, an invalid `--ssh-host` (empty, a leading `-`, an `@`, or anything
-outside letters, digits and `. _ : [ ] -`; `parse_ssh_host`), a
-`ValueError` (bad or busy path), an `OSError` from binding or from
-`~/.image-review`, all exit 1 as `ClickException`s with nothing left behind.
-Output, always: an "experimental" notice and
+`$IMAGE_REVIEW_TOKEN` is read with `os.environ`, not a click option, and only
+in socket mode. A value goes through `connection.parse_token`; its
+`ValueError` never holds the value. It is passed to
+`make_unix_server(store, path, token)` (None generates `token_urlsafe(16)`).
+`--via`, `--ssh-host` and the token are parsed before the work directory is
+opened. An invalid `--via` or `--ssh-host`, a `ValueError` from `make_unix_server`
+(bad or busy path), and an `OSError` from binding or from `~/.image-review`
+all become `ClickException`s with nothing left behind.
+
+The printed ssh command is `ssh_forward_command`:
 `ssh -N -o ExitOnForwardFailure=yes -o ControlPath=none -J VIA -L
-127.0.0.1:PORT:SOCKET USER@NODE` (`VIA` is `--via` or `<user>@<login-node>`;
-with `--direct` the `-J VIA` is omitted;
-`PORT` is `BROWSER_PORT`, 8080; `SOCKET` is the absolute path that was bound;
-`NODE` is `--ssh-host` or else `socket.getfqdn()`; `USER` is
-`getpass.getuser()`, else `<user>`;
-each of `VIA`, the `-L` argument and `USER@NODE` goes through `shlex.quote`,
-so is quoted only when it needs it; the command holds no secret). The forward
-names 127.0.0.1 so ssh does not also bind `::1`, and `ControlPath=none` keeps
-a `ControlPersist` master from outliving the command. On a TTY the URL
-`http://127.0.0.1:8080/#TOKEN` is printed with a warning that it holds a
-token. Otherwise `write_private_file` writes it to
-`~/.image-review/browser-<short-host>-<pid>.txt` (0600, host from
-`server.short_host()`, sanitized as above), and the output gives its path and
-an `ssh LOGIN cat FILE` command (the path quoted twice, as the remote shell
-parses it again; with `--direct`, `LOGIN` is the quoted `USER@NODE`). The
-token is printed nowhere else and never logged. The server's shutdown is
-registered as soon as it is bound and the URL file's removal as soon as it is
-written, so a failure at any later point releases them. The same shutdown rules apply; `server_close` removes the socket and the
-browser file is unlinked too.
+127.0.0.1:PORT:SOCKET USER@NODE`. `VIA` is the `jump` argument: `--via`,
+else `USER@<login-node>`; with `--direct` it is `None` and `-J VIA` is
+omitted. `NODE` is `--ssh-host`, else `socket.getfqdn()`. The user-facing
+description is in [Socket mode](../commands/serve.md#socket-mode).
+`PORT` is `BROWSER_PORT` (8080), `SOCKET`
+is the absolute path that was bound, `USER` is `getpass.getuser()`, else
+`<user>`. Each of `VIA`, the `-L` argument and `USER@NODE` goes through
+`shlex.quote`. The URL is `browser_url(token)`. Off a TTY,
+`write_private_file` writes it to
+`browser-{safe_name(short_host())}-{pid}.txt`, and the printed `cat` path is
+quoted twice, as the remote shell parses it again.
 
-**Shutdown**: SIGINT, SIGTERM and SIGHUP all stop the server (SIGTERM is what
-Slurm sends on `scancel` and at the time limit); a signal that was already
-ignored (e.g. under `nohup`) is left ignored. On exit the socket is closed,
-the store closed (releasing the work dir lock) and the connection file removed.
+**Cleanup**: the option checks and parsing run first. Everything after
+them (opening the store, binding, announcing, serving) runs under
+`interrupt_on(*TERMINATION_SIGNALS)`, installed before the lock is taken, so
+SIGTERM and SIGHUP unwind like Ctrl-C. Cleanup is registered on one
+`ExitStack`: `_close_with` registers the store's close
+(`_close_store_after_marks`, which waits for a mark in flight under
+`server.store_lock`) and then `server_close` as soon as the server is bound,
+and the announced file's removal is registered as soon as it is written. A
+failure at any later point therefore releases them, and they run in reverse:
+the file, the socket (`server_close` also removes a Unix socket file), then
+the store.
 
 ## Data Files
 
