@@ -119,9 +119,9 @@ staging directory).
   with `getfacl`; the tool does not manage ACLs), but files never get "other"
   bits.
 
-`review`, `serve` and `status` print a warning if the work directory or its
-`manifest.tsv` is accessible to other users (e.g. one made by an older
-version). They never change an existing directory's mode: run
+`review`, `serve`, `status` and `export` print a warning if the work
+directory or its `manifest.tsv` is accessible to other users (e.g. one made
+by an older version). They never change an existing directory's mode: run
 `chmod -R o-rwx <work dir>`.
 
 Only one writer (`review` or `serve`) can use a work directory at a time: it

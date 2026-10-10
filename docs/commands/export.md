@@ -64,7 +64,7 @@ image_id                      status        pass_number  timestamp              
 /data/site_a.zip::002.dcm     DIRTY         2            2026-03-03T09:01:44.020731+00:00  bob                                 a27b...51c4
 /data/site_a.zip::003.dcm     DIRTY         1            2026-03-02T10:15:30.101266+00:00  alice     icon DIRTY                0d9e...7f30
 /data/site_a.zip::004.dcm     UNREVIEWED                                                                                       c6b2...18de
-/data/site_b/broken.dcm       NOT_REVIEWED                                                           cannot decode pixel data
+/data/site_b/broken.dcm       NOT_REVIEWED                                                           unsupported: multi-frame DICOM (3 frames)
 /data/site_b/referral.pdf     IGNORED                                                                not an image (unrecognized content)
 ```
 

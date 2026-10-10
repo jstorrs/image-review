@@ -18,9 +18,12 @@ Warnings and other diagnostics are logged to stderr as
 | `-q`, `--quiet` | Only warnings and errors |
 | `-v`, `--verbose` | Debug messages too (currently few: the work directory or server opened, the ssh tunnel command, grid packing results) |
 
-Only `serve` logs at INFO: one line per request, with the peer address,
-method, path without its query string, and status. The server never logs
-tokens, query strings, image keys, source paths or exception messages.
+Only `serve` and `export` log at INFO. `serve` logs one line per request,
+with the peer address, method, path without its query string, and status.
+`export` logs one line with the count of allowlisted and reported files. The
+server's request line and error records never contain tokens, query strings,
+image keys, source paths or exception messages (only exception class names).
+Its startup and work-directory messages can name file paths and parse errors.
 Warnings from `review` and `status` do name image keys (e.g. an image that
 cannot be loaded), and `preprocess` warnings name the source files that
 failed, on the machine where `preprocess` runs.

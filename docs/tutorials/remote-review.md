@@ -121,8 +121,8 @@ This assumes your home directory is shared between the login and compute nodes.
 
 Stop the server with Ctrl-C, `scancel`, or by letting the allocation end.
 Progress is saved on the server at every mark. If the connection drops, the
-viewer shows "Lost connection to server - progress saved" and ignores every
-key but `q`/`Esc`; press `q`, then
+viewer shows "Lost connection to server - progress saved" and accepts only
+quit: `q`, `Esc`, the gamepad's Start button, or closing the window. Quit, then
 reconnect with the same string while the server is still running.
 
 ## Security

@@ -3,9 +3,10 @@
 ## Purpose
 
 `image-review` is a CLI tool for reviewing medical (DICOM) and general images
-for burned-in Protected Health Information (PHI). It provides a three-phase
+for burned-in Protected Health Information (PHI). It provides a four-step
 workflow: **preprocess** raw images into normalized JPGs, **review** them
-interactively in a fullscreen viewer, and report **status** on review progress.
+interactively in a fullscreen viewer, report **status** on review progress,
+and **export** the allowlist of files that may be released.
 
 ## Requirements
 
@@ -125,9 +126,11 @@ propagation to the root logger; third-party loggers are left alone).
   request log, and `export`'s one-line count of allowlisted and reported
   files. Nothing else is logged at INFO, so the default stays quiet
   outside `serve` and `export`.
-- **Never logged by the server**: access tokens, `Authorization` headers,
-  query strings, image keys, `image_id`s and source paths, request bodies, and
-  the messages of exceptions raised while serving (only their class names).
+- **Never logged in the server's request line or error records**: access
+  tokens, `Authorization` headers, query strings, image keys, `image_id`s and
+  source paths, request bodies, and the messages of exceptions raised while
+  serving (only their class names). The server's startup and work-directory
+  messages can name file paths and parse errors.
   Nothing logs a token. Client-side warnings (`review`, `status`) do name image
   keys, and `preprocess` warnings name the failed source file (its
   `image_id`), on the machine where preprocess runs. Client-supplied fields in
@@ -246,8 +249,8 @@ it), `fchmod`s it, so a new `review.tsv` is 0600 in a private and 0660 in a
 group work directory. An existing, non-empty file keeps whatever mode it has,
 except that migrating an old-header file (see *`review.tsv`*) writes the new
 file with the policy's `file_mode`.
-`review`, `serve` and local `status` call `world_access_warning`: if the work
-directory or `manifest.tsv` has any other bit, they log a WARNING
+`review`, `serve`, `export` and local `status` call `world_access_warning`: if
+the work directory or `manifest.tsv` has any other bit, they log a WARNING
 ``<path> is accessible to all users (mode NNNN); run `chmod -R o-rwx
 <work dir>` `` (group bits alone are silent). Existing directories are
 never chmod'ed automatically. A team shares a work directory sequentially
