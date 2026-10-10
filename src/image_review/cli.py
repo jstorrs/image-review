@@ -37,6 +37,15 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 log = logging.getLogger(f"{PACKAGE_LOGGER}.cli")  # not __name__: that is "__main__" under `python -m`
 
+BROWSER_REVIEW_DOCS = "https://jstorrs.github.io/image-review/tutorials/browser-review.html"
+# Deprecation warnings, each logged once per run; {command} is the command's name as invoked.
+SERVE_HTTPS_DEPRECATED = (
+    "{command} over HTTPS (--https, --bind or --port) is deprecated and will be removed in a future release, "
+    "along with review --remote and status --remote: that client must run the same image-review version as the "
+    "server. Plain `image-review {command}` serves browser review instead; its page comes from the server itself, "
+    "so it always matches. See {url}"
+)
+
 # The top-level modules each optional extra (pyproject.toml) provides and the commands import; the core
 # dependencies (click, cryptography, rectpack) are always there. The codecs extra is loaded by pydicom only when needed.
 EXTRA_MODULES: dict[str, frozenset[str]] = {
@@ -101,7 +110,7 @@ def remote_option(f):
         "--remote",
         envvar="IMAGE_REVIEW_REMOTE",
         default=None,
-        help="Review a server started with `image-review serve` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).",
+        help="Review a server started with `image-review serve --https` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).",
     )(f)
 
 
@@ -112,6 +121,11 @@ def via_option(f):
         default=None,
         help="With --remote: reach the server through an SSH tunnel via this login node, e.g. user@login.cluster (also read from $IMAGE_REVIEW_VIA).",
     )(f)
+
+
+def has_unix_sockets() -> bool:
+    """Whether this system has AF_UNIX (not on Windows), which browser review's socket server needs."""
+    return hasattr(socket, "AF_UNIX")
 
 
 def warn_if_world_accessible(work_dir: Path) -> None:
@@ -688,104 +702,114 @@ def export(work_dir, output, report, allow_live, remote):
     help="Work directory containing preprocessed data.",
 )
 @click.option(
-    "--bind", default=None, help="Hostname/IPv4 address to bind and advertise [default: this machine's FQDN]."
-)
-@click.option("--port", type=click.IntRange(0, 65535), default=0, help="Port to listen on (0 picks a free port).")
-@click.option(
-    "--socket",
-    "socket_mode",
+    "--https",
+    "https_mode",
     is_flag=True,
-    help="Experimental: serve plain HTTP on a Unix socket for browser review over SSH, instead of HTTPS over TCP.",
+    help="Deprecated: serve HTTPS over TCP for the `review --remote` client, instead of browser review.",
+)
+@click.option(
+    "--bind",
+    default=None,
+    help="HTTPS mode, deprecated; implies --https. Hostname/IPv4 address to bind and advertise [default: this machine's FQDN].",
+)
+@click.option(
+    "--port",
+    type=click.IntRange(0, 65535),
+    default=0,
+    help="HTTPS mode, deprecated; implies --https. Port to listen on (0 picks a free port).",
 )
 @click.option(
     "--socket-path",
     envvar="IMAGE_REVIEW_SOCKET_PATH",
     default=None,
-    help="Experimental: the socket path; implies --socket [default: ~/.image-review/serve-HOST-PID.sock]. Also read from $IMAGE_REVIEW_SOCKET_PATH, but only with --socket (alone, the variable does not switch serve into socket mode).",
+    help="The socket to serve on [default: ~/.image-review/serve-HOST-PID.sock]; also read from $IMAGE_REVIEW_SOCKET_PATH, which is ignored with --https.",
 )
 @click.option(
     "--via",
     envvar="IMAGE_REVIEW_VIA",
     default=None,
-    help="With --socket: the login node (e.g. user@login.cluster) to put in the printed ssh command (also read from $IMAGE_REVIEW_VIA).",
+    help="The login node (e.g. user@login.cluster) to put in the printed ssh command; not with --https (also read from $IMAGE_REVIEW_VIA, which is ignored with --https).",
 )
 @click.option(
     "--direct",
     envvar="IMAGE_REVIEW_DIRECT",
     is_flag=True,
-    help="With --socket: your laptop reaches compute nodes without a jump host; the printed ssh command omits -J (also read from $IMAGE_REVIEW_DIRECT).",
+    help="Your laptop reaches compute nodes without a jump host; the printed ssh command omits -J. Not with --https (also read from $IMAGE_REVIEW_DIRECT, which is ignored with --https).",
 )
 @click.option(
     "--ssh-host",
     default=None,
-    help="With --socket: the node name to put in the printed ssh command, if its own FQDN does not work from your laptop [default: this machine's FQDN].",
+    help="The node name to put in the printed ssh command, if its own FQDN does not work from your laptop [default: this machine's FQDN]. Not with --https.",
 )
-def serve(work_dir, bind, port, socket_mode, socket_path, via, direct, ssh_host):
-    """Serve a work directory so a remote client can review it.
+def serve(work_dir, https_mode, bind, port, socket_path, via, direct, ssh_host):
+    """Serve a work directory for browser review over SSH.
 
-    By default this is HTTPS over TCP for the `review --remote` client. Images
-    never leave this machine except to a client holding the connection
-    string. The string contains an access token: treat it like a password.
-    When stdout is not a terminal (e.g. sbatch), it is written to a private
-    file under ~/.image-review/ instead of being printed.
+    By default this serves plain HTTP on a Unix socket, for a browser on your
+    laptop reached through `ssh -L`. Images never leave this machine except
+    to a client holding the URL, which contains an access token: treat it
+    like a password. When stdout is not a terminal (e.g. sbatch), the URL is
+    written to a private file under ~/.image-review/ instead of being
+    printed. A token in $IMAGE_REVIEW_TOKEN (22-256 characters from
+    A-Za-z0-9_-) is used instead of a fresh one, so the URL stays the same
+    across restarts: generate it inside the job, e.g.
+    export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16).
 
-    --socket (experimental) serves plain HTTP on a Unix socket instead, for a
-    browser on your laptop reached through `ssh -L`; the URL, which contains
-    the token, is handled the same way. With --socket, a token in
-    $IMAGE_REVIEW_TOKEN (22-256 characters from A-Za-z0-9_-) is used instead of
-    a fresh one, so the URL stays the same across restarts: generate it inside
-    the job, e.g. export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16). It is
-    ignored without --socket.
+    --https (deprecated; also implied by --bind or --port) serves HTTPS over
+    TCP for the `review --remote` client instead, and prints an ir://
+    connection string, handled the same way. $IMAGE_REVIEW_TOKEN,
+    $IMAGE_REVIEW_SOCKET_PATH, $IMAGE_REVIEW_VIA and $IMAGE_REVIEW_DIRECT are
+    ignored in HTTPS mode.
     """
     from .tunnel import parse_ssh_host, parse_via
 
     ctx = click.get_current_context()
-    path_from_env = ctx.get_parameter_source("socket_path") is click.core.ParameterSource.ENVIRONMENT
-    if path_from_env and not socket_mode:
-        socket_path = None  # $IMAGE_REVIEW_SOCKET_PATH only means something with --socket
+
+    def given(name: str) -> bool:
+        return ctx.get_parameter_source(name) is click.core.ParameterSource.COMMANDLINE
+
+    https_mode = https_mode or bind is not None or given("port")
     if socket_path == "":  # e.g. --socket-path "$UNSET"; Path("") would quietly mean the current directory
         raise click.UsageError("--socket-path must not be empty.")
-    socket_mode = socket_mode or socket_path is not None
-    if socket_mode:
-        if bind is not None or ctx.get_parameter_source("port") is not click.core.ParameterSource.DEFAULT:
-            raise click.UsageError("--socket and --socket-path cannot be combined with --bind or --port.")
-    else:
-        if direct and ctx.get_parameter_source("direct") is click.core.ParameterSource.COMMANDLINE:
-            raise click.UsageError("--direct requires --socket.")
-        if ssh_host is not None:
-            raise click.UsageError("--ssh-host requires --socket.")
-        direct = False  # from $IMAGE_REVIEW_DIRECT, which only means something in socket mode
-        if via is not None:
-            if ctx.get_parameter_source("via") is click.core.ParameterSource.COMMANDLINE:
-                raise click.UsageError("--via requires --socket.")
-            via = None  # from $IMAGE_REVIEW_VIA, which is meant for `review`
+    if https_mode:
+        for name in ("socket_path", "via", "direct", "ssh_host"):
+            if given(name):
+                option = "--" + name.replace("_", "-")
+                raise click.UsageError(f"{option} cannot be used in HTTPS mode (--https, --bind or --port).")
+        socket_path, via, direct = None, None, False  # from the environment, which only means something in socket mode
     if direct and via is not None:
-        if ctx.get_parameter_source("via") is click.core.ParameterSource.COMMANDLINE:
+        if given("via"):
             raise click.UsageError("--direct and --via are mutually exclusive.")
         via = None  # from $IMAGE_REVIEW_VIA, which is meant for `review`
+    if not https_mode and not has_unix_sockets():
+        raise click.ClickException(
+            "this system has no Unix sockets; browser review needs one (serve --https is deprecated)"
+        )
     if via is not None:
         try:
             via = parse_via(via)
         except ValueError as e:
-            raise click.ClickException(f"Invalid --via: {e}")
+            source = "--via" if given("via") else "$IMAGE_REVIEW_VIA"
+            raise click.ClickException(f"Invalid {source}: {e}")
     if ssh_host is not None:
         try:
             ssh_host = parse_ssh_host(ssh_host)
         except ValueError as e:
             raise click.ClickException(f"Invalid --ssh-host: {e}")
     token: Token | None = None
-    if socket_mode and (raw_token := os.environ.get("IMAGE_REVIEW_TOKEN")):  # empty counts as unset
+    if not https_mode and (raw_token := os.environ.get("IMAGE_REVIEW_TOKEN")):  # empty counts as unset
         try:
             token = parse_token(raw_token)
         except ValueError as e:  # the message never holds the value
             raise click.ClickException(f"Invalid $IMAGE_REVIEW_TOKEN: {e}")
+    if https_mode:
+        log.warning(SERVE_HTTPS_DEPRECATED.format(command=ctx.info_name, url=BROWSER_REVIEW_DOCS))
 
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
         # Installed before the lock is taken, so every exit path releases it.
         with interrupt_on(*TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
             store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
-            if socket_mode:
+            if not https_mode:
                 server, announce = _serve_socket(store, socket_path, token, via, direct, ssh_host, stack)
             else:
                 server, announce = _serve_tls(store, bind, port, stack)
@@ -931,7 +955,7 @@ def _announce_socket(
     url = browser_url(token)
     node = socket.getfqdn() if ssh_host is None else ssh_host
     jump = None if direct else via or f"{user}@<login-node>"
-    print("Serving review data over a Unix socket (experimental: browser review over SSH).")
+    print("Serving review data over a Unix socket for browser review over SSH.")
     print("\nOn your laptop, forward a local port to the socket (leave it running):")
     print(f"\n  {ssh_forward_command(socket_path, node, user, jump)}\n")  # set apart, to copy cleanly
     print(f"If port {BROWSER_PORT} is busy on your laptop, change it in -L and in the URL.")

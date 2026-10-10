@@ -89,7 +89,7 @@ of human reviewers.
 
 ## Experimental: browser review over a Unix socket
 
-`image-review serve --socket` serves a browser page instead of the pygame
+`image-review serve` serves a browser page instead of the pygame
 client's HTTPS API. It is experimental and has weaker properties than the
 default mode; use it only where you accept the points below.
 

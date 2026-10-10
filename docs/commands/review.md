@@ -42,7 +42,7 @@ grid.
 | `--rotate` | `auto` | Rotate images 90 degrees in grids: `auto` = only when that saves a grid, `always` or `never` |
 | `--reviewer` | your login name; `$IMAGE_REVIEW_REVIEWER` | Name recorded with each verdict; see [Recorded verdicts](#recorded-verdicts) |
 | `--work-dir` | `./review_work` | Work directory containing preprocessed data |
-| `--remote` | `$IMAGE_REVIEW_REMOTE` | Review a server started with `image-review serve` instead of a local `--work-dir`; see [Connecting to a server](#connecting-to-a-server) |
+| `--remote` | `$IMAGE_REVIEW_REMOTE` | Review a server started with `image-review serve --https` instead of a local `--work-dir`; see [Connecting to a server](#connecting-to-a-server) |
 | `--via` | `$IMAGE_REVIEW_VIA` | Reach that server through an SSH tunnel via a login node, e.g. `--via user@login.cluster`; requires `--remote` |
 
 ## Keys and gamepad

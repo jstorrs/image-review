@@ -242,7 +242,7 @@ class WarningTest(unittest.TestCase):
             mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt),
             mock.patch.dict(os.environ, {"HOME": str(self.work.parent)}),
         ):
-            return invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1", env=ENV)
+            return invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1", env=ENV)
 
     def test_warns_for_world_readable_dir(self):
         os.chmod(self.work, 0o755)
@@ -280,7 +280,11 @@ class WarningTest(unittest.TestCase):
                 os.chmod(self.work, mode)
                 os.chmod(self.work / "manifest.tsv", 0o600)
                 self.assertEqual(self.invoke_status().stderr, "")
-                self.assertNotIn("WARNING", self.invoke_serve().stderr)
+                stderr = self.invoke_serve().stderr
+                self.assertNotIn("accessible", stderr)
+                (warning,) = [line for line in stderr.splitlines() if "WARNING" in line]
+                self.assertIn("WARNING image_review.cli: serve over HTTPS", warning)
+                self.assertIn("is deprecated", warning)
                 self.assertIsNone(world_access_warning(self.work))
 
 

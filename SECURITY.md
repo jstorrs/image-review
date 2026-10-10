@@ -24,8 +24,8 @@ Include:
 
 - the version (`image-review --version` or `pip show image-review`);
 - your OS and Python version;
-- the mode: local review, `review --remote`, or browser review with
-  `serve --socket`;
+- the mode: local review, browser review with `serve`, or the deprecated
+  `review --remote`;
 - what you observed;
 - how to reproduce it.
 

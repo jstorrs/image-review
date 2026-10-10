@@ -609,9 +609,8 @@ crash) can leave it behind, holding source paths, to be deleted by hand.
 ### `image-review serve`
 
 ```
-image-review serve [--work-dir DIR] [--bind HOST] [--port N]
-image-review serve [--work-dir DIR] (--socket | --socket-path PATH) [--via DEST | --direct]
-                    [--ssh-host NODE]
+image-review serve [--work-dir DIR] [--socket-path PATH] [--via DEST | --direct] [--ssh-host NODE]
+image-review serve [--work-dir DIR] --https [--bind HOST] [--port N]    # deprecated
 ```
 
 The options, the token, the option rules and their exit codes, what `serve`
@@ -620,12 +619,23 @@ the mechanism. `--bind` and `--ssh-host` default to `socket.getfqdn()`,
 `--socket-path` to `default_socket_path()`, `--via` is checked with
 `tunnel.parse_via` and `--ssh-host` with `tunnel.parse_ssh_host`.
 
-The [option rules](../commands/serve.md#option-rules) are `UsageError`s
-raised before the work directory is opened. "`--port` was given" means any
-parameter source but the default. A value that comes only from the
-environment (`$IMAGE_REVIEW_VIA`, `$IMAGE_REVIEW_DIRECT`,
-`$IMAGE_REVIEW_SOCKET_PATH`) is dropped, not refused, where the rules say it
-is ignored; click drops an empty environment value.
+The mode is HTTPS when `--https` is set or `--bind` or `--port` has the
+parameter source `COMMANDLINE` (so `--port 0` counts); otherwise it is
+socket mode. The [option rules](../commands/serve.md#option-rules) are
+`UsageError`s raised before the work directory is opened and before
+anything is logged; "on the command line" means the parameter source
+`COMMANDLINE`. In HTTPS mode, a value that comes only from the environment
+(`$IMAGE_REVIEW_SOCKET_PATH`, `$IMAGE_REVIEW_VIA`, `$IMAGE_REVIEW_DIRECT`)
+is dropped, not refused, and `$IMAGE_REVIEW_TOKEN` is not read; click drops
+an empty environment value, but still refuses an invalid
+`$IMAGE_REVIEW_DIRECT` while parsing. In socket mode, a missing
+`socket.AF_UNIX` (`cli.has_unix_sockets`) is a `ClickException`, raised after
+the option rules.
+
+In HTTPS mode, after the option rules and the parsing below, and before the
+store opens, `serve` logs `cli.SERVE_HTTPS_DEPRECATED` once through
+`log.warning` on `image_review.cli`, with `{command}` filled from
+`click.get_current_context().info_name`.
 
 Opens a writable `LocalStore` (holding the work dir lock for the server's
 lifetime; `WorkDirLocked` is a `ClickException`, exit 1), calls
@@ -644,9 +654,9 @@ owned by the user, and tightens it to 0700 if looser; `write_private_file`
 unlinks a stale file, then creates it `O_EXCL|O_NOFOLLOW` with mode 0600 and
 removes a partly written one).
 
-**Socket mode (experimental)**: `--socket` or `--socket-path` calls
-`server.make_unix_server` (see *Unix-socket server*) at `--socket-path` or
-`default_socket_path()` instead of `make_server`.
+**Socket mode (experimental)**: `serve` without `--https`, `--bind` or
+`--port` calls `server.make_unix_server` (see *Unix-socket server*) at
+`--socket-path` or `default_socket_path()` instead of `make_server`.
 
 `$IMAGE_REVIEW_TOKEN` is read with `os.environ`, not a click option, and only
 in socket mode. A value goes through `connection.parse_token`; its
@@ -2035,7 +2045,7 @@ empties the rest of the stack.
 - **Done** (`q` or the "Done (q)" button, in any state but while an
   overlay is up) means done with
   this server: the reviewer stops it with Ctrl-C (the marks are already
-  saved), starts the next `serve --socket` on the same socket path and token
+  saved), starts the next `serve` on the same socket path and token
   (for the next batch or pass), and presses Reconnect in the same tab. It
   stops the page as a lost connection does, so every request in flight
   turns stale and nothing more is sent. It leaves grid mode (canvas sized to

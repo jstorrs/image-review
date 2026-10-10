@@ -39,7 +39,8 @@ Errors and warnings cover:
   - a failed server connection;
   - `export --allow-live` overriding a held lock;
   - an `export --output` or `--report` file that could not be given the work
-    directory's group.
+    directory's group;
+  - a deprecated remote path (`serve` over HTTPS).
 
 Only `serve` and `export` log at INFO. `serve` logs one line per request,
 with the peer address, method, path without its query string, and status.
@@ -56,6 +57,6 @@ exactly what is and is not logged.
 
 Logging is separate from command output. Command output is plain text on
 stdout: the `preprocess` summary, the `status` tables, `export`'s allowlist
-TSV, `serve`'s connection-string instructions, and the review session's start
+TSV, `serve`'s connection instructions, and the review session's start
 and "nothing to review" lines. Error messages of failed commands
 (`Error: ...`) go to stderr, with exit 1 or 2.

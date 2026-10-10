@@ -39,12 +39,12 @@ the CPUs the job may use; see
 ```bash
 salloc ...                       # your site's usual options
 srun --pty bash                  # or your site's interactive command
-image-review serve --work-dir /scratch/me/review_work
+image-review serve --https --work-dir /scratch/me/review_work
 ```
 
 On many Slurm sites `salloc` leaves you on the login node, so first get a
 shell on the allocated node (as above), or run `srun --pty image-review serve
---work-dir ...` directly. `--pty` keeps stdout a terminal so the string is
+--https --work-dir ...` directly. `--pty` keeps stdout a terminal so the string is
 printed; plain `srun` without `--pty` takes the connection-file path described
 under batch mode below.
 
@@ -103,7 +103,7 @@ written to the job's output file.
 #SBATCH --output=image-review-%j.out
 
 source /path/to/venv/bin/activate   # or your site's module load
-image-review serve --work-dir /scratch/me/review_work
+image-review serve --https --work-dir /scratch/me/review_work
 ```
 
 Then, on your laptop, copy the absolute path from the job output (do not use

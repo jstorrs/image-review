@@ -356,7 +356,7 @@ class TestServeCommand(unittest.TestCase):
             mock.patch.object(ReviewServer, "serve_forever", fake_serve),
             mock.patch.object(ReviewServer, "server_close", fake_close),
         ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 0, result.output)
         target = RemoteTarget.parse(seen["uri"])
         self.assertNotIn(target.token, result.output)
@@ -376,7 +376,7 @@ class TestServeCommand(unittest.TestCase):
             json.dumps({"host": "node042", "user": "alice", "pid": 1234, "started": "2026-09-30T12:00:00Z"})
         )
         with mock.patch.object(ReviewServer, "serve_forever") as serve_forever:
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 1, result.output)
         serve_forever.assert_not_called()
         for part in ("alice", "node042", "pid 1234", str(lock)):
@@ -391,7 +391,7 @@ class TestServeCommand(unittest.TestCase):
             raise KeyboardInterrupt
 
         with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(seen, [os.getpid()])
         self.assertFalse((self.work / "review.lock").exists())
@@ -428,14 +428,26 @@ class TestServeCommand(unittest.TestCase):
             mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt),
             mock.patch("sys.stdout", Tty()) as out,
         ):
-            code = cli.main(["serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"], standalone_mode=False)
+            code = cli.main(
+                ["serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1"], standalone_mode=False
+            )
         self.assertIn("ir://127.0.0.1:", out.getvalue())
         self.assertIsNone(code)
 
     def test_sigterm_cleans_up_connection_file(self):
         env = {**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"}
         proc = subprocess.Popen(
-            [sys.executable, "-m", "image_review.cli", "serve", "--work-dir", str(self.work), "--bind", "127.0.0.1"],
+            [
+                sys.executable,
+                "-m",
+                "image_review.cli",
+                "serve",
+                "--work-dir",
+                str(self.work),
+                "--https",
+                "--bind",
+                "127.0.0.1",
+            ],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -483,7 +495,7 @@ class TestServeCommand(unittest.TestCase):
             mock.patch("image_review.server.write_connection_file", side_effect=OSError("disk full")),
             mock.patch.object(ReviewServer, "serve_forever") as serve_forever,
         ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Cannot write connection file: disk full", result.output)
         serve_forever.assert_not_called()
@@ -506,7 +518,7 @@ class TestServeCommand(unittest.TestCase):
             mock.patch.object(ReviewServer, "serve_forever", fake_serve),
             mock.patch.object(LocalStore, "close", close),
         ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
+            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(lock_held_at_close[0])  # a handler thread's mark cannot interleave with the release
         self.assertFalse((self.work / "review.lock").exists())

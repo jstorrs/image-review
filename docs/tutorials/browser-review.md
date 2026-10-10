@@ -18,7 +18,7 @@ see [Remote review on an HPC cluster](remote-review.md).
    bash`) and start the server, naming your login node:
 
    ```bash
-   image-review serve --work-dir /scratch/me/review_work --socket --via me@login-node
+   image-review serve --work-dir /scratch/me/review_work --via me@login-node
    ```
 
    If your laptop can ssh to compute nodes directly (`ssh me@<node>` works
@@ -151,7 +151,7 @@ see [Remote review on an HPC cluster](remote-review.md).
    export IMAGE_REVIEW_SOCKET_PATH=~/.image-review/ir-$SLURM_JOB_ID.sock
 
    # Each start (after a restart, re-run only this line):
-   image-review serve --work-dir /scratch/me/review_work --socket --direct
+   image-review serve --work-dir /scratch/me/review_work --direct
    ```
 
    Leave the ssh command running. While the server is stopped the page says
@@ -164,7 +164,7 @@ see [Remote review on an HPC cluster](remote-review.md).
    (Not yet tested on a cluster.)
 
    To keep the URL too, give the job one token and export it as
-   `$IMAGE_REVIEW_TOKEN`; `serve --socket` then reuses it on every start in
+   `$IMAGE_REVIEW_TOKEN`; `serve` then reuses it on every start in
    that shell. Generate it inside the job, in the `srun` shell or in the batch
    script, never before `sbatch` or `salloc`: `sbatch` copies your
    environment into Slurm's records of the job (which administrators can
@@ -193,7 +193,7 @@ command last the whole job:
    page and frees the images; your marks are already saved, and the tab
    keeps the token and your name. It does not stop the server.
 2. Stop the server with Ctrl-C on the node.
-3. Start the next `image-review serve --socket ...` in the same shell (same
+3. Start the next `image-review serve ...` in the same shell (same
    `$IMAGE_REVIEW_SOCKET_PATH` and `$IMAGE_REVIEW_TOKEN`), for the next batch
    or pass.
 4. Press Reconnect (or `r`) on the page. It loads whatever the new server

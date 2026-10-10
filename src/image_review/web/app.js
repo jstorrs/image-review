@@ -1778,7 +1778,7 @@ async function start() {
   }
   if (!state.token) {
     state.dead = true;
-    say("No token. Open the URL printed by `image-review serve --socket`.");
+    say("No token. Open the URL printed by `image-review serve`.");
     render();
     return;
   }

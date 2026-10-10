@@ -2,12 +2,25 @@
 
 ## 0.4.0
 
-Experimental browser review over SSH (`serve --socket`) with a grid mode, wire
+Experimental browser review over SSH (`serve`) with a grid mode, wire
 API v7 (upgrade client and server together), and the documentation site. Read
 **Upgrading** first.
 
 ### Upgrading: breaking and behaviour changes
 
+- **`serve` now serves browser review by default.** Plain `image-review
+  serve` now serves plain HTTP on a Unix socket and prints an ssh command
+  and a URL, not an `ir://` connection string; a batch script running plain
+  `serve` no longer writes `~/.image-review/connection-*.txt`. Add `--https`
+  (or `--bind` or `--port`, which imply it) for the deprecated HTTPS server
+  that `review --remote` needs; it logs a deprecation WARNING.
+  `$IMAGE_REVIEW_SOCKET_PATH`, `$IMAGE_REVIEW_TOKEN`, `$IMAGE_REVIEW_VIA` and
+  `$IMAGE_REVIEW_DIRECT` now take effect on plain `serve`, so a stale export
+  changes what it does, and an invalid `$IMAGE_REVIEW_TOKEN` or
+  `$IMAGE_REVIEW_VIA` now stops it (exit 1). `--via`, `--direct`,
+  `--ssh-host` and `--socket-path` on the command line exit 2 in HTTPS mode.
+  `serve --socket` from pre-release builds is gone (exit 2, no such option):
+  drop it; plain `serve` does the same.
 - **Wire API v7: client and server must be upgraded together.** `POST /mark`
   now refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
   FLAGGED in that pass, unless every one is DIRTY, answering 409 and
@@ -25,23 +38,20 @@ API v7 (upgrade client and server together), and the documentation site. Read
 
 ### CLI
 
-- **Experimental: browser review over SSH.** `image-review
-  serve --socket` (or `--socket-path PATH`) serves plain HTTP on a Unix socket
-  instead of HTTPS over TCP, for a browser on your laptop reached through
-  `ssh -L`. `serve` prints the ssh command and the
-  `http://127.0.0.1:8080/#TOKEN` URL (or, when stdout is not a terminal,
-  writes the URL to a private file under `~/.image-review/`). `--via` (or
-  `$IMAGE_REVIEW_VIA`) fills in the login node of that command; `--direct`
-  (or `$IMAGE_REVIEW_DIRECT`) is for laptops that can ssh to compute nodes
-  without a jump host, and omits `-J`. `--ssh-host NAME` sets the node name
-  it prints, for sites where the node's own FQDN does not work from the
-  laptop. `$IMAGE_REVIEW_SOCKET_PATH` sets the socket path, with
-  `--socket` (alone it is ignored). `$IMAGE_REVIEW_TOKEN`
-  (22-256 characters from `A-Za-z0-9_-`, generated inside the job, e.g. with
-  `openssl rand -hex 16`) is reused as the token with `--socket`, so the URL
-  survives restarts; an invalid value is refused without being printed. The page
-  starts with single images, like the viewer's single mode: enter a reviewer
-  name, then `c` clean, `d` dirty (the item stays up 200 ms in its new
+- **Browser review over SSH.** `image-review serve` serves plain HTTP on a Unix
+  socket, for a browser on your laptop reached through `ssh -L`. `serve` prints
+  the ssh command and the `http://127.0.0.1:8080/#TOKEN` URL (or, when stdout is
+  not a terminal, writes the URL to a private file under `~/.image-review/`).
+  `--via` (or `$IMAGE_REVIEW_VIA`) fills in the login node of that command;
+  `--direct` (or `$IMAGE_REVIEW_DIRECT`) is for laptops that can ssh to compute
+  nodes without a jump host, and omits `-J`. `--ssh-host NAME` sets the node
+  name it prints, for sites where the node's own FQDN does not work from the
+  laptop. `--socket-path` (or `$IMAGE_REVIEW_SOCKET_PATH`) sets the socket path.
+  `$IMAGE_REVIEW_TOKEN` (22-256 characters from `A-Za-z0-9_-`, generated inside
+  the job, e.g. with `openssl rand -hex 16`) is reused as the token in socket
+  mode, so the URL survives restarts; an invalid value is refused without being
+  printed. The page starts with single images, like the viewer's single mode:
+  enter a reviewer name, then `c` clean, `d` dirty (the item stays up 200 ms in its new
   status, then the next), Left/Right to move (past either end a stop sign
   with the list's todo count, then round to the other end, as the viewer's
   "End of list"), `z` to undo (this page's own marks, with one page per
@@ -96,9 +106,10 @@ API v7 (upgrade client and server together), and the documentation site. Read
   --allow-skipped": the work directory has already been written, so that
   re-run is refused. It now says to review the work directory as it is, or to
   fix the inputs and preprocess into a new `--work-dir`.
-- `serve --socket` without `--socket-path` no longer fails on a machine with a
-  long host name: when the default socket path would be too long, an
-  8-character hash of the host name replaces the host in the file name.
+- `serve` in socket mode without `--socket-path` no longer fails on a
+  machine with a long host name: when the default socket path would be too
+  long, an 8-character hash of the host name replaces the host in the file
+  name.
 
 ### Documentation
 
