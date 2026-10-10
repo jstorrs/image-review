@@ -106,7 +106,8 @@ The intended workflow uses repeated passes to build confidence:
    Each subsequent pass shows only the images still DIRTY from the previous
    pass (FLAGGED in the new pass).
 
-The batch and pass number are auto-detected when not specified. Press `b` at
+The batch and the [pass number](../commands/review.md#passes) are
+auto-detected when not specified. Press `b` at
 the end of a batch to move on to the next one, and into the next pass once
 this one is done (not with `--batch`, which keeps you in that batch); see
 [End of a batch](../commands/review.md#end-of-a-batch).

@@ -450,25 +450,14 @@ after writing everything.
 
 ### `image-review review`
 
-```
-image-review review [--mode {single,grid}]            [--pass N]
-                    [--batch BATCH_ID]                 [--work-dir DIR]
-                    [--filter {unreviewed,clean,all}]  [--rotate {auto,always,never}]
-                    [--reviewer NAME]
-                    [--remote CONNECTION_STRING [--via DESTINATION]]
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--mode` | `single` | `single` = one image at a time; `grid` = packed grids |
-| `--pass` | auto-detected | Review pass number (integer >= 1) |
-| `--batch` | first batch with images matching the filter | Restrict to a named batch (e.g. `batch_001`), also for `b` at the end of the list (see *Next Batch*); an empty or unknown name exits 2 listing up to 5 known batches |
-| `--filter` | `unreviewed` | Which images to show: `unreviewed` (images still to do: UNREVIEWED and FLAGGED), `clean`, or `all` |
-| `--rotate` | `auto` | Rotating images 90° in grids: `auto` = only when that needs fewer grids, `always`, or `never` |
-| `--reviewer` | `getpass.getuser()` at run time | Name recorded in the `reviewer` column of every verdict; also read from `$IMAGE_REVIEW_REVIEWER`. Checked by `connection.parse_reviewer` (1-64 characters, all `str.isprintable()`, so no tab, newline or other control character, and not all whitespace); a bad value, or no login name to default to, exits 2. It is the client's unauthenticated claim, recorded as given |
-| `--work-dir` | `./review_work` | Work directory from preprocessing (local review) |
-| `--remote` | (none) | `ir://` connection string of an `image-review serve` process; also read from `$IMAGE_REVIEW_REMOTE` |
-| `--via` | (none) | SSH destination of a login node to tunnel through; requires `--remote`; also read from `$IMAGE_REVIEW_VIA` |
+The synopsis, options and defaults are in
+[`image-review review`](../commands/review.md); the option rules and startup
+error messages are in
+[Connecting to a server](../commands/review.md#connecting-to-a-server).
+`--reviewer` defaults to `getpass.getuser()` at run time and is checked by
+`connection.parse_reviewer` (1-64 characters, all `str.isprintable()`, not
+all whitespace). `--batch` is checked by `unknown_batch_message` against the
+manifest's batches once the store is open.
 
 Opens a store (see below), initializes pygame, creates a `ReviewSession`,
 runs the event loop, then shuts down pygame. pygame starts only after the
@@ -479,23 +468,20 @@ store (and tunnel) is up, so ssh password/MFA prompts keep terminal focus.
 - Without `--remote`: `LocalStore(work_dir)` (writable for `review`, holding
   the work dir lock until the command exits; `read_only=True` for `status`),
   entered as a context manager like `RemoteStore`. `WorkDirLocked` is a
-  `ClickException` (exit 1) with its message. `--via` without `--remote` is a
-  usage error unless it came only from `$IMAGE_REVIEW_VIA`.
-- With `--remote`: `--work-dir` is a usage error (mutually exclusive; if
-  `--remote` came from the environment the message says to unset
-  `IMAGE_REVIEW_REMOTE`). The string is parsed with `RemoteTarget.parse` and
+  `ClickException` (exit 1) with its message. A `--via` whose parameter
+  source is not the environment is a `UsageError`.
+- With `--remote`: `--work-dir` is a `UsageError`, worded by the `--remote`
+  parameter source. The string is parsed with `RemoteTarget.parse` and
   `--via` validated with `parse_via`; either failure is a `ClickException`
-  naming the option. With `--via`, `ssh_tunnel` is entered first and the
-  `RemoteStore` connects to `127.0.0.1:<local port>` instead of the advertised
-  host. The store is closed before the tunnel.
-- Startup failures become `ClickException`s with distinct messages:
-  `TunnelError` (its message); `FingerprintMismatch` (certificate does not
-  match, aborted before credentials were sent; with `--via` also notes another
-  local process may have taken the forwarded port); `RemoteError` with status
-  401 (token rejected), any other status (`returned HTTP N`), or no status
-  (`Cannot reach server`, with a hint about the login node's reachability when
-  `--via` is used and the cause was an OS error).
-- Local behaviour and messages are unchanged.
+  naming the option. `_remote_store` enters `ssh_tunnel` first when `--via`
+  is given, and the `RemoteStore` connects to `127.0.0.1:<local port>`
+  instead of the advertised host; it calls `check_api()` before yielding. The
+  store is closed before the tunnel.
+- Startup failures: `_remote_failure` turns `TunnelError` and `ApiMismatch`
+  (their own messages), `FingerprintMismatch`, and `RemoteError` with status
+  401, any other status, or no status into `ClickException`s. The login-node
+  hint is added only with `--via` when the `RemoteError`'s cause is an
+  `OSError`.
 
 ### `image-review status`
 
@@ -1039,11 +1025,8 @@ WorkDirLocked | None` checks the work dir lock.
 the session's current display mode, to every `store.mark()`, and to every `store.undo()`.
 
 1. Fetch `store.manifest()` (a list of `ManifestRow`)
-2. Determine the pass: `store.current_pass()` if not specified. The store's
-   auto-detection (`ReviewDB.current_pass`) is:
-   - Pass 1 if any image has never been reviewed
-   - Otherwise stays on max(pass_number) if it has unfinished work,
-     or advances to max(pass_number) + 1
+2. Determine the pass: `store.current_pass()` if not specified (the rule is
+   in *Pass Logic*)
 3. Fetch the **status snapshot** `store.statuses(pass)` (key -> status)
 4. Auto-select batch if not specified: pick the first batch (sorted
    alphabetically) that has rows the mode may show (the status filter's rows;
@@ -1080,10 +1063,11 @@ therefore costs one store call and no re-fetch.
 image, marking, restarting a mode, or moving to the next batch is treated as a lost connection, not an
 unloadable image: autoplay and the pending auto-advance are cancelled, the
 status snapshot is left unchanged (a failed mark is not applied), the viewer
-shows "Lost connection to server - progress saved. Press q to quit." and the
-reason is logged (ERROR). The session is then `DISCONNECTED`: only `q`/Esc, the
-gamepad's Start and closing the window do anything (no navigation, mode switch or `z` reaches
-the store again). A failed mode restart or next-batch move clears the item list. Any
+shows the lost-connection screen of
+[Lost connection](../commands/review.md#lost-connection) and the reason is
+logged (ERROR). The session is then `DISCONNECTED`: `_handle_event` passes no
+key to a screen handler, and only quitting acts, so nothing reaches the store
+again. A failed mode restart or next-batch move clears the item list. Any
 other failure to load an image is an unloadable image (see *Unloadable Images*).
 
 ### Single Mode
@@ -1098,9 +1082,10 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
 
 ### Grid Mode
 
-- Display a "Computing grids..." message while packing, updated to
-  "Computing grids... i/N" about every 25 images (via `pack_into_grids`'s
-  `on_progress`; repainted and `pg.event.pump()`ed, which does not consume key events)
+- Display the packing message (see [`image-review review`](../commands/review.md))
+  while packing, with its count updated about every 25 images (via
+  `pack_into_grids`'s `on_progress`; repainted and `pg.event.pump()`ed, which
+  does not consume key events)
 - Read screen dimensions, subtract the 50px status bar height
 - A window resize rebuilds the grids (see *Resize rebuild* below)
 - `filter_rows()` for the current pass/batch/filter, then keep only rows whose
@@ -1140,17 +1125,17 @@ When a grid is marked CLEAN or DIRTY, `store.mark()` is called with all its
 A grid can still come to hold a DIRTY key mid-session, when a key in it shares
 an `image_id` with an image marked DIRTY elsewhere. CLEAN on a grid holding any
 DIRTY or FLAGGED key is refused (`status.grid_clean_refused`; no store call;
-the status bar shows "grid contains an image already marked DIRTY - review it
-in single mode", also logged), unless every key in the grid is DIRTY, which
-reverses that grid's own verdict.
+the status bar shows `controller.GRID_HAS_DIRTY`, also logged), unless every
+key in the grid is DIRTY, which reverses that grid's own verdict. The
+messages are in
+[Refused CLEAN on a grid](../commands/review.md#refused-clean-on-a-grid).
 
 The server applies the same rule to every `POST /mark` with mode `grid` (409,
 see *Error semantics*), so a snapshot gone stale (e.g. another client marked
 a key DIRTY since it was read) cannot record such a CLEAN either.
 `RemoteStore.mark` raises `GridCleanRefused` for the 409; it is not a lost
 connection: the session logs and shows the same refusal (for a left-out
-single, "image already marked DIRTY in another pass - review it in single
-mode"), re-reads the statuses (a `StoreUnavailable` there is a lost
+single, `controller.IMAGE_HAS_DIRTY`), re-reads the statuses (a `StoreUnavailable` there is a lost
 connection) and repaints the item's status. Nothing is recorded, so the undo
 count is unchanged and there is no auto-advance. `LocalStore` does not check the rule:
 the session refuses a grid before calling it, and a left-out single cannot
@@ -1158,10 +1143,10 @@ become FLAGGED locally (see above).
 
 If grid mode has no items but the status filter selected rows it left out, the
 session says so instead of implying the review is done: `run()` prints, and a
-mode restart shows, "No grid items for pass N; K FLAGGED/DIRTY image(s) need(s)
-single-mode review", ending " (--mode single)" in the terminal and " - press
-[s]" on screen (K counts the left-out rows that are todo as in *Todo*, over the
-selected batch, or all batches when none is selected).
+mode restart shows, `_held_back_message` (text in
+[Todo images](../commands/review.md#todo-images)). Its K counts the left-out
+rows that are todo as in *Todo*, over the selected batch, or all batches when
+none is selected.
 
 **Resize rebuild.** A `WINDOWRESIZED` event refits the current item. In grid
 mode, each `refresh_if_needed` (only while reviewing) compares the size held in
@@ -1169,7 +1154,7 @@ the grid cache key (the size the grids were last packed for) with the current
 grid size, and repacks when they differ: one rebuild however many resize events
 a batch holds, none for a resize back to the packed size before the tick, and
 a size change that arrives without a `WINDOWRESIZED` is caught too. The repack
-stops autoplay and a pending advance, shows "Computing grids...", and rebuilds
+stops autoplay and a pending advance, shows the packing message, and rebuilds
 the items (the changed size misses the cache, and the new cache key records the
 size it was packed for, so the next tick repacks only if the window changed
 meanwhile). Queued
@@ -1181,8 +1166,8 @@ packing left the key out of the grids). The dwell restarts, so a verdict never
 lands on a re-composited grid the reviewer has not seen. Undo history is
 cleared, as on a mode switch: the repack drops grids marked DIRTY, so `z` could
 no longer show what it undoes. If nothing is left to show, the session goes to
-the end-of-list state with the held-back message or "End of list - [b] next
-batch", as a mode restart does. If the store is unavailable during the repack
+the end-of-list state with the held-back message or the end-of-list message,
+as a mode restart does. If the store is unavailable during the repack
 the session goes to the lost-connection screen, which is not repainted over.
 Single mode only rescales. A restart (mode switch, `b`, display change) packs
 at the current size, so it leaves nothing to repack.
@@ -1193,10 +1178,12 @@ An image whose bytes are missing (`KeyError`, e.g. a 404 from the server),
 do not match the manifest's `jpeg_sha256` (`ValueError`), or cannot be read or
 decoded is not an outage (see *Store Failures*). A warning
 naming the key is logged, the key is added to the session's
-`_unloadable` set, and the item is shown as a placeholder from
-`viewer.placeholder_surface`: a dark surface reading `Cannot load image: <key>`
-with a short reason ("image could not be fetched" or "image could not be read
-or decoded"; the error itself goes only to the log). Navigation, `n`, todo-only and autoplay treat it
+`_unloadable` set, and the item is shown as a placeholder built by
+`controller._placeholder` with `viewer.placeholder_surface`: the key and a
+short reason, `KeyError` giving the "fetched" reason and any other failure
+the "read or decoded" one (text in
+[Images that cannot be loaded](../commands/review.md#images-that-cannot-be-loaded));
+the error itself goes only to the log. Navigation, `n`, todo-only and autoplay treat it
 like any other item (autoplay does not stop at it), so the cursor always points
 at a real item. A `SingleItem` (every single-mode item, and the item
 for an image left out of the grids in grid mode) is loaded each time it is shown, so the
@@ -1204,11 +1191,10 @@ key joins `_unloadable` before any verdict can count, and a key that loads
 again leaves it. Placeholders are never built up front.
 
 A placeholder can be marked DIRTY but never CLEAN: CLEAN on an item holding
-any unloadable key is refused (no store call; the status bar shows "cannot mark
-CLEAN: image could not be loaded", also logged). DIRTY is recorded
-normally, so the image stops being todo, batch auto-selection moves on and the
-pass can finish; in later passes it is FLAGGED and, if still unloadable, again
-a placeholder that only takes DIRTY.
+any unloadable key is refused (no store call; the status bar shows
+`controller.UNLOADABLE_CLEAN`, also logged), checked before the grid rule.
+DIRTY is recorded normally, so batch auto-selection moves on and the pass can
+finish.
 
 ### Grid Status Derivation
 
@@ -1233,69 +1219,46 @@ so a partly undone grid comes back.
 
 ### Event Loop
 
-The session runs a pygame event loop processing:
+The session runs a pygame event loop. The keys and gamepad buttons, the
+display-select and help screens, the end-of-list screens and their messages
+are in [Keys and gamepad](../commands/review.md#keys-and-gamepad) and
+[End of a batch](../commands/review.md#end-of-a-batch). Internally:
 
-| Event | Action |
-|-------|--------|
-| `c` key / B button | Mark current item CLEAN |
-| `d` key / Y button | Mark current item DIRTY |
-| `z` key | Undo this session's latest mark since the mode started (see *Undo*); also on the end-of-list screen |
-| `b` key | On the end-of-list screen only: move on to the next batch (see *Next Batch*) |
-| Right arrow / D-pad right | Next item |
-| Left arrow / D-pad left | Previous item |
-| Space | Toggle autoplay (500ms auto-advance) |
-| `w` key | Select display (see below) |
-| `f` key | Toggle fullscreen |
-| `n` key | Jump to next todo item |
-| `u` key | Toggle todo-only navigation |
-| `s` key | Switch to single mode |
-| `m` key | Switch to grid mode (the `--rotate` policy, default `auto`) |
-| `M` key (shift+m) | Switch to grid mode (`never` rotate); Shift is read from the key event, not the live keyboard |
-| `h` key | Show help/splash screen |
-| A button | On the splash/help, display-select and end-of-list screens: continue, as Space |
-| `q` / Escape / Start button | Quit (Start in every state, including `DISCONNECTED`) |
-| Window resize | Refit current image; in grid mode also rebuild the grids (see *Resize rebuild*) |
-| Controller added/removed | Hot-plug handling: open or drop the `Controller`; the status bar shows the count |
-
-The display-select screen (`UIState.DISPLAY_SELECT`, opened by `w`) takes `1`-`9` to
-switch display, Space/`h`/A to confirm (in grid mode, rebuilding the grids if the
-display changed), `f` to toggle fullscreen, `s`/`m`/`M` to switch mode, and `q`/Escape to quit; the
-digits do nothing on the ordinary help screen.
+- `_handle_event` quits on `q`/Escape, the Start button or `pg.QUIT` in every
+  state. In any other state than `DISCONNECTED` it then offers a key to
+  `_handle_mode_key` (`s`, `m`, `M`), and otherwise to the current
+  `UIState`'s handler: `REVIEWING`, `SPLASH` (the help screen),
+  `DISPLAY_SELECT` (opened by `w`) or `END_MESSAGE`. `DISCONNECTED` takes no
+  other input (see *Store Failures*).
+- `M` is `pg.K_m` with `KMOD_SHIFT` in the key event's `mod`, not the live
+  keyboard state.
+- `1`-`9` (`pg.K_1`-`pg.K_9`) call `viewer.switch_display` on the
+  display-select screen only. Confirming there restarts grid mode only when
+  the display index differs from the one before `w`.
+- Gamepad buttons go through `_handle_button`: in `REVIEWING`, B, Y and the
+  D-pad map to `c`, `d`, Left and Right (`REVIEW_BUTTON_KEYS`) after stopping
+  autoplay; in every other state A is passed on as Space.
+- `WINDOWRESIZED` refits the current image; in grid mode the grids are
+  rebuilt on the next tick (see *Resize rebuild*).
 
 Gamepads go through SDL's GameController API (`pygame._sdl2.controller`,
 initialised when the session starts), so buttons are numbered by SDL's
 standard layout, with Xbox-style positions: A bottom, B right, Y top. On
 `CONTROLLERDEVICEADDED` the session opens a `Controller(event.device_index)`
 and keeps it in a dict keyed by its joystick instance id; on
-`CONTROLLERDEVICEREMOVED` it drops the one with `event.instance_id`. SDL also
+`CONTROLLERDEVICEREMOVED` it drops the one with `event.instance_id`. Both
+pass the dict's size to `viewer.set_joystick_count`. SDL also
 sends the raw `JOY*` events for these pads, but none are handled, so each pad
 is counted once and a pad's raw button indices never act. A pad with no SDL
-mapping is not supported: it gets no `CONTROLLER*` events and is not counted. A
-mapping can be added through the `SDL_GAMECONTROLLERCONFIG` environment
-variable. B, Y and the D-pad act only while reviewing; A acts only on the
-splash/help, display-select and end-of-list screens; Start quits in every state.
+mapping gets no `CONTROLLER*` events and is not counted.
 
-After marking, the viewer auto-advances to the next item after 200ms.
-Navigation stops at list boundaries with an "End of list - K todo left - [b]
-next batch" message, where K is the batch's todo count; the "K todo left" part
-is left out when K is 0. In todo-only navigation the message is "No todo
-images remaining - [b] next batch" when K is 0, and "No more todo images this
-way - K todo left - [Left/Right] wrap - [b] next batch" when todo items remain
-in the other direction. On that screen Right/Space and Left wrap round to the
-first or last item (in todo-only navigation, the first or last todo item), `s`,
-`m` and `M` switch mode, `z` undoes, `b` moves on to the next batch and
-`q`/Esc quits; `n` does not act there. Pressing `n` on the review screen with no
-todo items left shows "No todo images remaining" in the info bar and stays on
-the current item.
-
-The status bar shows the item's status as a word (CLEAN, DIRTY, UNREVIEWED or
-FLAGGED) at its left edge as well as in the bar colour. The splash and help
-screen also handle `f` (toggle fullscreen).
+After a mark, an `ADVANCE_EVENT` timer (200 ms) advances to the next item.
+Navigation past either end shows `_end_message` (or, in todo-only
+navigation, `_no_todo_message`) in the `END_MESSAGE` state.
 
 On the review screen every key except Space cancels autoplay (and still does
-its normal action, so Right steps once and stops); Space toggles it. Every
-gamepad button cancels it (there is no gamepad autoplay toggle), and still does
-its normal action. Left/Right, the D-pad, `n`, mode switches, `h` and `w` cancel a
+its normal action); every gamepad button cancels it. Left/Right, the D-pad,
+`n`, mode switches, `h` and `w` cancel a
 pending post-mark advance, and so does any change of the current item: the
 advance belongs to the item that was marked, so an `ADVANCE_EVENT` already
 queued when it was cancelled is ignored (`_advance_pending`). The autoplay and
@@ -1305,13 +1268,11 @@ the help, display-select or message screens.
 `run()` alternates two halves: `handle_events(events) -> bool` applies one
 `pg.event.get()` batch (False means quit; events after a quit are dropped) and
 `refresh_if_needed()` repaints. The display only redraws when a dirty flag is
-set, to minimize CPU usage, and only while reviewing: the splash, help,
-display-select and message screens ("End of list", "No items for grid mode",
-"All batches done for pass N", "Lost connection to server ...") are painted once
+set, to minimize CPU usage, and only while reviewing: the help,
+display-select and message screens are painted once
 by the viewer and stay until the state changes. When there are no items (an
-empty mode, or no batch left), the navigation keys leave the message up; only
-`q`/Esc, `s`, `m`, `M`, `z` and `b` act. On the lost
-connection screen only `q`/Esc and Start act (see *Store Failures*).
+empty mode, or no batch left), `_handle_end_key` ignores navigation, so the
+message stays up.
 
 **Verdicts need a seen item.** A verdict (`c`/`d`, B/Y) applies only to
 an item that has been painted and on screen for `MIN_DWELL_MS` (200 ms);
@@ -1333,16 +1294,16 @@ arrows. `_mark` itself is not gated.
 
 ### Undo
 
-`z` (on the review screen, in single and grid mode, and on the "End of list"
+`z` (on the review screen, in single and grid mode, and on the end-of-list
 and other message screens, but not the lost connection screen) first cancels
 autoplay and a pending post-mark advance. The session counts its own
 successful marks since the current mode started (`_undoable`: reset by every
-mode restart, +1 per successful mark, -1 per successful undo). At 0, `z` says
-"Nothing to undo" without calling the store, so it only ever undoes a mark made
+mode restart, +1 per successful mark, -1 per successful undo). At 0, `z` shows
+`controller.NOTHING_TO_UNDO` without calling the store, so it only ever undoes a mark made
 on one of this mode's items. Otherwise it calls `store.undo(pass,
 reviewer=...)`; a `StoreUnavailable` is a lost connection, as for a mark, and a
-`{}` result (the store's history is gone) resets the count and says "Nothing to
-undo". The returned statuses update the snapshot and the todo count. The cursor
+`{}` result (the store's history is gone) resets the count and shows the same
+message. The returned statuses update the snapshot and the todo count. The cursor
 moves to the first item, in this mode's item order, holding any returned key,
 the review screen is shown for it, and its dwell starts again, so `c`/`d` count
 only once the restored item has been on screen for `MIN_DWELL_MS`. Items are
@@ -1352,7 +1313,8 @@ of scope, see *Concurrency limits*) can leave no item holding a returned key;
 the status bar then names up to three of its keys with their new status. `z`
 is not dwell-gated: it only undoes a mark on an item this mode showed, and
 shows that item again before any verdict counts. Key repeat stays off
-(pygame's default), so a held `z` undoes one mark.
+(pygame's default; `pg.key.set_repeat` is never called). What the reviewer
+sees is in [Undo](../commands/review.md#undo).
 
 ### Next Batch
 
@@ -1384,28 +1346,20 @@ with:
   batches) is found.
 
 A found batch becomes the session's batch and its items are rebuilt in the
-current mode as for a mode restart ("Computing grids..." in grid mode,
-`_undoable` reset), from the snapshot `b` just fetched, starting at the first
-item. After a pass change the info bar says "Now pass N". When nothing is found the session drops its items (they may belong to an
-ended pass), resets `_undoable` (so `z` says "Nothing to undo") and shows:
-
-- when the mode holds back todo rows of the status filter (grid mode:
-  FLAGGED and DIRTY; counted over all batches, or the `--batch` one): "No grid
-  items for pass N; K FLAGGED/DIRTY image(s) need(s) single-mode review -
-  press [s]", with the session's batch moved to the first batch holding one
-  (the `--batch` one itself when given), so `s` opens it;
-- otherwise, under `--filter unreviewed` when the pass has just advanced:
-  "Pass P complete - nothing to review in pass N" (with `--batch`, "... in
-  NAME for pass N");
-- otherwise, with `--batch`: "Batch NAME done for pass N";
-- otherwise "All batches done for pass N".
-
-The last three get " (current pass is M)" appended when an explicit `--pass`
-differs from `current_pass()`. `q`/Esc quit. A `StoreUnavailable` from any of
-these calls is a lost connection (see *Store Failures*). The
-splash/help info line shows the batch's position, "batch k/B", among all the
-manifest's batches. There is no gamepad binding for `b`: on the end-of-list screen the gamepad
-only continues (A, as Space) or quits (Start).
+current mode as for a mode restart (`_undoable` reset), from the snapshot `b`
+just fetched, starting at the first item; after a pass change the info bar
+announces the new pass. When nothing is found the session drops its items
+(they may belong to an ended pass) and resets `_undoable`. If the mode holds
+back todo rows of the status filter (grid mode: FLAGGED and DIRTY; counted
+over all batches, or the `--batch` one), it shows `_held_back_message` and
+moves the session's batch to the first batch holding one (the `--batch` one
+itself when given), so `s` opens it. Otherwise it shows `_all_done_message`,
+which chooses, in this order: the pass-complete message (under `--filter
+unreviewed` when the pass has just advanced), the batch-done message (with
+`--batch`), or the all-batches-done message, and appends the current pass
+when an explicit `--pass` differs from `current_pass()`. The messages are in
+[End of a batch](../commands/review.md#end-of-a-batch). A `StoreUnavailable`
+from any of these calls is a lost connection (see *Store Failures*).
 
 ## Grid Packer (`grid_packer.py`)
 
@@ -1478,21 +1432,21 @@ bottom edge.
 (`screen_height - 50px` by `screen_width`), centered both horizontally and
 vertically within the content area. Uses `pg.transform.smoothscale`.
 
-**Status bar**: A colored rectangle spanning the full width at the bottom.
-Color encodes review status (green=CLEAN, red=DIRTY, gray=UNREVIEWED,
-orange=FLAGGED).
-The image name is rendered right-aligned, position info is centered.
+**Status bar**: A rectangle spanning the full width at the bottom, coloured
+by `STATUS_COLORS[status]`. `refresh()` draws the status word, then the help,
+todo-only and gamepad indicators, at the left; the info text centred; and the
+scale percent and the item's name at the right. What each part shows is in
+[`image-review review`](../commands/review.md).
 
 **Scale indicator**: `resize()` applies the pure `fit_image`, which returns the
 scaled size, offset and factor (displayed size / source size) as one `Fit`, or
 `None` when no pixel would show. It never caps the factor, so an image smaller
 than the content area is enlarged and shows more than 100%. The status bar
-shows it as an integer percent (truncated, so a scale just under 1.0 never
-reads "100%") at the right edge, with the image name to its left. Below 100% (any scale under 1.0)
-the percent is drawn in red (`SCALE_WARNING_COLOR`), because small text such as
-burned-in PHI can be lost when an image is scaled down; at or above 100% it uses
-the normal font colour. In grid mode the percent is the smallest image's
-effective scale: `GridSpec.min_scale` (the smallest `fit_size` / header-size
+shows it as an integer percent (`scale_percent`, truncated, so a scale just
+under 1.0 never reads "100%"). Any scale under 1.0 draws the percent in
+`SCALE_WARNING_COLOR`, because small text such as burned-in PHI can be lost
+when an image is scaled down; at or above 1.0 it uses the normal font colour.
+In grid mode the percent is the smallest image's effective scale: `GridSpec.min_scale` (the smallest `fit_size` / header-size
 ratio among the images drawn, 1.0 if none was shrunk) is carried by
 `GridItem.source_scale` to `set_image(..., source_scale=1.0)`, and the
 percent is that times the canvas's display scale. A `SingleItem` is
@@ -1553,32 +1507,21 @@ by hand.
 
 ### Pass Logic
 
-`get_status(image_id, pass)` maps the image's (last) row to a `Status`:
-
-| Row | Status |
-|-----|--------|
-| none | UNREVIEWED |
-| from this pass or a later one | its verdict (CLEAN or DIRTY), as recorded |
-| from an earlier pass, CLEAN | CLEAN |
-| from an earlier pass, DIRTY | FLAGGED |
+`get_status(image_id, pass)` maps the image's last row to a `Status` as the
+table in [Passes](../commands/review.md#passes) gives: no row is UNREVIEWED; a
+row with `pass_number >= pass`, or a CLEAN one, keeps its verdict; an
+earlier-pass DIRTY is FLAGGED.
 
 `mark_many` stores `max(existing pass_number, requested pass)` for each image,
 so an image's recorded pass never decreases (its verdict and timestamp still
-update). A lower `--pass`, or a manifest grown by one image (which sends
-`current_pass` back to 1), therefore cannot hide or overwrite later-pass
-decisions: in such a view a later-pass DIRTY image reads DIRTY, not FLAGGED,
-and is not grid-eligible. `ReviewStore.mark` returns statuses as seen at the
-requested pass.
+update). In a view at a lower pass a later-pass DIRTY image therefore reads
+DIRTY, not FLAGGED, and is not grid-eligible. `ReviewStore.mark` returns
+statuses as seen at the requested pass.
 
-| Pass | Shows (default `unreviewed` filter) |
-|------|-------|
-| 1 | All UNREVIEWED images |
-| N > 1 | FLAGGED images (marked DIRTY in an earlier pass) in single mode, plus any still-UNREVIEWED images; grid mode skips FLAGGED images |
-
-`current_pass` returns 1 if any image has never been reviewed. Otherwise it
-returns `max(pass_number)` if that pass still has work in `TODO_STATUSES`
-(UNREVIEWED or FLAGGED), or `max(pass_number) + 1` if the pass is fully
-complete.
+`current_pass(image_ids)` returns 1 if any of `image_ids` has no row.
+Otherwise it returns `max(pass_number)` if any image's status at that pass is
+in `TODO_STATUSES` (UNREVIEWED or FLAGGED), or `max(pass_number) + 1` if the
+pass is fully complete.
 
 ## Connection String (`connection.py`)
 
@@ -2216,10 +2159,10 @@ cached on disk.
 
 **Startup check.** `RemoteStore.check_api()` GETs `/version` (parsed by
 `parse_version`; a malformed reply raises `RemoteError`) and raises
-`ApiMismatch` (a `RemoteError`) if the server answers 404 ("server is too old
-to report its API version") or reports a different `api` ("server speaks API
-vS, this client vC"); both messages end "install the same image-review version
-on both machines". `cli._remote_store` calls it after entering the store and
+`ApiMismatch` (a `RemoteError`) if the server answers 404 or reports a
+different `api`; the messages are in
+[Connecting to a server](../commands/review.md#connecting-to-a-server).
+`cli._remote_store` calls it after entering the store and
 before yielding, and `cli.open_store` turns `ApiMismatch` into a
 `ClickException` (exit 1).
 
@@ -2295,21 +2238,7 @@ also passed after `--`.
 
 ## Multi-Pass Review Workflow
 
-1. **Pass 1 (grid triage)**: `--mode grid`. Mark grids CLEAN or DIRTY.
-   Each grid mark applies to all constituent images. Err toward DIRTY.
-2. **Pass 2 (single review)**: `--mode single`. Only images marked DIRTY in
-   pass 1 (now FLAGGED) are shown. Inspect individually. Grid mode skips
-   FLAGGED images, so they cannot be cleared by a grid keypress.
-3. **Pass 3+**: Repeat single-mode review on the shrinking DIRTY pool
-   until confident.
-
-Sessions are resumable: quitting mid-session saves all progress (with a
-remote store, progress is saved on the server at every mark). Re-running
-the same command shows only remaining unreviewed (pass 1) or flagged (pass 2+)
-images.
-
-When done, `export` (on the machine holding the work directory) writes the
-allowlist: only the source files reviewed CLEAN, by path and SHA-256; anything
-not listed must not be released. `--report` lists the rest: images still DIRTY
-(or FLAGGED) as `DIRTY`, inputs that failed to preprocess as `NOT_REVIEWED`,
-and inputs that were not images as `IGNORED`.
+The workflow (grid triage in pass 1, single-image review of FLAGGED images in
+later passes, resuming, then `export`) is in
+[Multi-pass workflow](../tutorials/local-review.md#multi-pass-workflow); what
+each pass shows is in [Passes](../commands/review.md#passes).
