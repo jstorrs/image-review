@@ -52,11 +52,18 @@ of human reviewers.
 - **Binding.** Wildcard addresses (`0.0.0.0`, `::`, empty) are refused; the
   server binds and advertises one named host (default: this machine's FQDN).
 - **Logging.** One INFO line per request: peer address, method, path without
-  its query string, and status. Tokens, keys, source paths, query strings and
-  exception messages are never logged in that per-request line. Other records
-  are not so restricted: startup and work-directory messages (for example a
-  `review.tsv` torn-line warning or a failure opening the work directory) can
-  name file paths and parse errors.
+  its query string, and status. Access tokens, `Authorization` headers, query
+  strings, image keys, `image_id`s, source paths, request bodies, and the
+  messages of exceptions raised while serving (only their class names) are
+  never logged in the request line or the error records. No log record, client
+  or server, contains the token. Client-supplied
+  fields in server records are escaped, so control characters cannot reach the
+  terminal. Other records are not so restricted: startup and work-directory
+  messages (for example a `review.tsv` torn-line warning or a failure opening
+  the work directory) can name file paths and parse errors. Client-side
+  warnings from `review` and `status` do name image keys, and `preprocess`
+  warnings name the failed source file (its `image_id`), on the machine where it runs. Levels
+  and format are in [Commands](../commands/index.md#logging).
 - **Caching.** Every response carries `Cache-Control: no-store` (and
   `X-Content-Type-Options: nosniff`).
 - **`image_id`s never leave the server.** The manifest's `image_id` is the

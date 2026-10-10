@@ -104,43 +104,22 @@ CLI group configures for the duration of a command (one handler, no
 propagation to the root logger; third-party loggers are left alone).
 
 - **Destination and format**: stderr, one line per record:
-  `%(asctime)s %(levelname)s %(name)s: %(message)s`, with `asctime` as strict
-  ISO 8601 local time with its UTC offset (`2026-10-01T14:03:07+02:00`, second
-  resolution; `cli.LogFormatter`). During `preprocess` the handler is swapped
-  by `tqdm.contrib.logging.logging_redirect_tqdm`, so records are written with
-  `tqdm.write` and appear above the progress bars instead of through them.
-  The package logger name is `cli.PACKAGE_LOGGER`; `cli` logs as
-  `image_review.cli` even when run as `python -m image_review.cli`.
-- **Levels**: `-v/--verbose` (a group option, before the command name) logs
-  DEBUG and up (currently few: the work directory opened, the server address
-  connected to, the ssh tunnel command line, and each grid build's image,
-  grid and left-out counts and rotation); `-q/--quiet` logs only WARNING and
-  up; the default is INFO.
-  The two flags together are a usage error (exit 2). ERROR: the review session
-  lost its server, a server request failed with a 500. WARNING: an image that
-  cannot be loaded or was left out of every grid, an input skipped by
-  preprocess, a torn last line of `review.tsv`, a world-accessible work
-  directory, a refused verdict, a failed server connection, `export --allow-live`
-  overriding a held lock, an `export --output` or `--report` file that could not be given
-  the work directory's group. INFO: the server's
-  request log, and `export`'s one-line count of allowlisted and reported
-  files. Nothing else is logged at INFO, so the default stays quiet
-  outside `serve` and `export`.
-- **Never logged in the server's request line or error records**: access
-  tokens, `Authorization` headers, query strings, image keys, `image_id`s and
-  source paths, request bodies, and the messages of exceptions raised while
-  serving (only their class names). The server's startup and work-directory
-  messages can name file paths and parse errors.
-  Nothing logs a token. Client-side warnings (`review`, `status`) do name image
-  keys, and `preprocess` warnings name the failed source file (its
-  `image_id`), on the machine where preprocess runs. Client-supplied fields in
-  server records are escaped with Python's `unicode_escape`, so control
-  characters cannot reach the terminal.
-- **Not diagnostics**: the CLI's own output stays plain `print`/`click.echo`:
-  the `preprocess` summary, `status` tables, `export`'s allowlist TSV, `serve`'s connection-string
-  instructions, the review session's start and "nothing to review" lines (all
-  stdout), and error messages of failed commands (`Error: ...`, stderr, exit 1
-  or 2).
+  `%(asctime)s %(levelname)s %(name)s: %(message)s`; `cli.LogFormatter`
+  renders `asctime`. The format with an example, the levels (`-v`, `-q`, and
+  the usage error for both together), what is logged at each level, and the
+  split between stdout and stderr are in
+  [Commands](../commands/index.md#logging). During `preprocess` the handler is
+  swapped by `tqdm.contrib.logging.logging_redirect_tqdm`, so records are
+  written with `tqdm.write`. The package logger name is `cli.PACKAGE_LOGGER`;
+  `cli` logs as `image_review.cli` even when run as `python -m
+  image_review.cli`.
+- **Never logged**: the
+  [security model](security-model.md#the-server-image-review-serve) lists what
+  the server never logs. Client-supplied fields in server records are escaped with
+  Python's `unicode_escape`, so control characters cannot reach the terminal.
+- **Not diagnostics**: the CLI's own output stays plain `print`/`click.echo`,
+  not logging. Which output goes where is in
+  [Commands](../commands/index.md#output-streams).
 
 ### `image-review preprocess`
 
@@ -1826,8 +1805,9 @@ supplies the time, so a line reads `2026-10-01T14:03:07+02:00 INFO
 image_review.server: 10.1.2.3 GET /image 200`. The query string is dropped,
 control characters in the peer, method and path are escaped (`_escape`, at the
 call site), and stdlib `log_message` output (which can echo request lines) is
-suppressed. Tokens, keys in queries and exception messages are not logged. Two
-other records exist: WARNING `connection error: <ExceptionClass>` for failed
+suppressed. What is never logged is listed in the
+[security model](security-model.md#the-server-image-review-serve).
+Two other records exist: WARNING `connection error: <ExceptionClass>` for failed
 handshakes and other connection-level failures, and ERROR `internal error:
 <ExceptionClass>` for 500s. On the Unix-socket server the peer is the
 literal `unix` (`accept` gives no peer address there).
