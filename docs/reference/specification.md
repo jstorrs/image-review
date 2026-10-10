@@ -42,10 +42,10 @@ store.py            ReviewStore Protocol, LocalStore, pure filter/summary functi
 lock.py             The work directory's review.lock: acquire, release, live_writer (stdlib only)
 export.py           Export rows, the allowlist split and their TSV formats: export_rows, split_allowlist, format_allowlist, format_report (stdlib only)
 atomic.py           write_new_file: create a file atomically, never overwriting (stdlib only)
-server.py           HTTPS + bearer-token server exposing a ReviewStore
+server.py           bearer-token server exposing a ReviewStore: plain HTTP on a Unix socket (browser review), or HTTPS (deprecated)
 connection.py       RemoteTarget: the ir:// connection string; API_VERSION, package_version, parse_reviewer
-remote.py           RemoteStore: ReviewStore client with certificate pinning
-tunnel.py           SSH local port-forward for --via
+remote.py           RemoteStore: ReviewStore client with certificate pinning (deprecated client)
+tunnel.py           SSH local port-forward for --via (deprecated client)
 signals.py          interrupt_on: SIGTERM/SIGHUP to KeyboardInterrupt, shared by serve, review and the tunnel
 controller.py       Review session orchestration and event loop
 viewer.py           Fullscreen pygame display
@@ -658,7 +658,7 @@ owned by the user, and tightens it to 0700 if looser; `write_private_file`
 unlinks a stale file, then creates it `O_EXCL|O_NOFOLLOW` with mode 0600 and
 removes a partly written one).
 
-**Socket mode (experimental)**: `serve` without `--https`, `--bind` or
+**Socket mode**: `serve` without `--https`, `--bind` or
 `--port` calls `server.make_unix_server` (see *Unix-socket server*) at
 `--socket-path` or `default_socket_path()` instead of `make_server`.
 
@@ -1644,7 +1644,7 @@ handshakes and other connection-level failures, and ERROR `internal error:
 <ExceptionClass>` for 500s. On the Unix-socket server the peer is the
 literal `unix` (`accept` gives no peer address there).
 
-### Unix-socket server (experimental)
+### Unix-socket server
 
 `make_unix_server(store, path, token=None) -> (UnixReviewServer, token)`
 (a given, parsed `Token` is used as is; None generates `token_urlsafe(16)`) serves the same
@@ -1694,7 +1694,7 @@ the `Host` check and the token check, so a client without the token gets the
 same 400 or 401 as before and learns nothing from a 412; the public files
 need no header. Why the check exists (a tab and its token outliving a
 restarted serve, with keys that repeat across work directories) is in the
-[security model](security-model.md#experimental-browser-review-over-a-unix-socket),
+[security model](security-model.md#browser-review-over-a-unix-socket),
 under "A page belongs to one serve". TLS mode sends no such header and
 requires none; it needed no `API_VERSION` bump, since only the page served
 by this server calls it.
@@ -1756,7 +1756,7 @@ by the first 8 hex characters of the SHA-256 of the short host name (not a
 truncation, since node names often differ only at the end). If even that does
 not fit, it is returned anyway and `parse_socket_path` raises its usual error.
 
-### Browser client (experimental)
+### Browser client
 
 `web/app.js` (plain ES2020, no build step) reviews single images and grids,
 following the pygame client (see *Single Mode*, *Grid Mode*, *Unloadable

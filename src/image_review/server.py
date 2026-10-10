@@ -499,7 +499,7 @@ def load_assets() -> dict[str, Reply]:
 
 
 class UnixReviewHandler(ReviewHandler):
-    """Plain HTTP over a Unix socket, reached through `ssh -L`. Experimental."""
+    """Plain HTTP over a Unix socket, reached through `ssh -L`."""
 
     server: "UnixReviewServer"
 
@@ -634,7 +634,7 @@ def _is_unspecified(address: str) -> bool:
 
 
 def make_server(store: ReviewStore, host: str, port: int) -> tuple[ReviewServer, RemoteTarget]:
-    """Create the TLS server. Raises ValueError for a wildcard or unadvertisable host, OSError if binding fails.
+    """Create the TLS server (deprecated HTTPS mode). Raises ValueError for a wildcard or unadvertisable host, OSError if binding fails.
 
     No listening socket is left behind on failure.
     """

@@ -5,7 +5,7 @@ Information (PHI). This page is the one place that states what the tool
 protects, against whom, and where its protection ends. The commands are
 described in [the command reference](../commands/index.md) and the file
 formats in [the specification](specification.md). The practical HPC steps are in
-[Remote review](../tutorials/remote-review.md).
+[Browser review over SSH](../tutorials/browser-review.md).
 
 ## What is protected, and against whom
 
@@ -29,25 +29,31 @@ of human reviewers.
 
 ## The server (`image-review serve`)
 
-- **Transport.** HTTPS with a self-signed certificate generated at every
-  start, TLS 1.2 or later. The certificate's SHA-256 fingerprint is part of
-  the connection string, and the client checks it on every connection before
-  it sends the token, so a wrong or replaced server is rejected. Nothing is
-  reused across runs.
+The bullets marked deprecated apply only to `serve --https`, the HTTPS mode
+for the deprecated `review --remote` client. The default, browser review, is
+in [its own section](#browser-review-over-a-unix-socket).
+
+- **Transport (deprecated HTTPS mode).** HTTPS with a self-signed certificate
+  generated at every start, TLS 1.2 or later. The certificate's SHA-256
+  fingerprint is part of the connection string, and the client checks it on
+  every connection before it sends the token, so a wrong or replaced server is
+  rejected. Nothing is reused across runs.
 - **Token.** Every request must carry the bearer token, compared in constant
-  time before any routing (in the experimental socket mode, all but the three
+  time before any routing (in socket mode, all but the three
   public page files; see below). The token is a password: anyone holding the
   connection string (`ir://...`) can view the images and record verdicts
   while the server runs. Do not paste it into chat or tickets. A new token
   and certificate are generated at each start, so an old string stops working.
-- **Delivery of the connection string.** When stdout is not a terminal, it
-  goes to a 0600 file in `~/.image-review/`, a 0700 directory you own, so
-  other users cannot read it ([HTTPS mode](../commands/serve.md#https-mode)).
-  The remaining exposure is root on any node that mounts the home directory,
-  backups or snapshots of it, and any process running as you. A hard kill
-  leaves the file behind ([Stopping](../commands/serve.md#stopping)).
-- **Binding.** Wildcard addresses (`0.0.0.0`, `::`, empty) are refused; the
-  server binds and advertises one named host (default: this machine's FQDN).
+- **Delivery of the connection string (deprecated HTTPS mode).** When stdout is
+  not a terminal, it goes to a 0600 file in `~/.image-review/`, a 0700 directory
+  you own, so other users cannot read it ([HTTPS
+  mode](../commands/serve.md#https-mode)). The remaining exposure is root on any
+  node that mounts the home directory, backups or snapshots of it, and any
+  process running as you. A hard kill leaves the file behind
+  ([Stopping](../commands/serve.md#stopping)).
+- **Binding (deprecated HTTPS mode).** Wildcard addresses (`0.0.0.0`, `::`,
+  empty) are refused; the server binds and advertises one named host (default:
+  this machine's FQDN).
 - **Logging.** One INFO line per request: peer address, method, path without
   its query string, and status. Access tokens, `Authorization` headers, query
   strings, image keys, `image_id`s, source paths, request bodies, and the
@@ -82,16 +88,18 @@ of human reviewers.
   snapshot of the statuses and may not see another client's marks until it
   refetches; in `review.tsv` the last row for an image wins. Serving several
   clients at once is out of scope.
-- **`--via`.** `review --via` and `status --via` run `ssh` to forward a local
-  port to the compute node. ssh protects the hop to the login node; TLS with
-  the pinned certificate covers the whole path to the compute node, and the
-  tunnel adds no trust of its own.
+- **`--via` (deprecated).** `review --via` and `status --via` run `ssh` to
+  forward a local port to the compute node. ssh protects the hop to the login
+  node; TLS with the pinned certificate covers the whole path to the compute
+  node, and the tunnel adds no trust of its own.
 
-## Experimental: browser review over a Unix socket
+## Browser review over a Unix socket
 
-`image-review serve` serves a browser page instead of the pygame
-client's HTTPS API. It is experimental and has weaker properties than the
-default mode; use it only where you accept the points below.
+This is what `image-review serve` does by default, and the recommended way to
+review remotely. It serves a browser page on a Unix socket on the compute
+node, reached through `ssh -L`. It differs from the deprecated HTTPS mode in
+two ways: there is no TLS on the node, and the token is in the URL you open.
+The points below are its limits.
 
 - **No TLS.** ssh encrypts the path from the laptop to the node. On the node
   the socket carries plain HTTP, so anyone able to connect to it can read it.
@@ -200,7 +208,7 @@ default mode; use it only where you accept the points below.
 - With `job_container/tmpfs`, does an adopted ssh session see the job's
   private `/tmp`?
 
-## The client (`image-review review --remote`)
+## The client (`image-review review --remote`, deprecated)
 
 The viewer holds the preprocessed images in memory only. The tool makes no
 deliberate attempt to write them to disk. Several things are outside its

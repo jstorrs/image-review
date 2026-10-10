@@ -1,7 +1,7 @@
 "use strict";
 
-// Image review in the browser (experimental). The pygame client is the reference:
-// see docs/reference/specification.md, "Browser client (experimental)".
+// Image review in the browser. The pygame client is the reference:
+// see docs/reference/specification.md, "Browser client".
 
 const TOKEN_HASH = /^#([A-Za-z0-9_-]+)$/;
 const TODO_STATUSES = new Set(["UNREVIEWED", "FLAGGED"]);

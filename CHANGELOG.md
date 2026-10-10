@@ -2,9 +2,10 @@
 
 ## 0.4.0
 
-Experimental browser review over SSH (`serve`) with a grid mode, wire
-API v7 (upgrade client and server together), and the documentation site. Read
-**Upgrading** first.
+Browser review over SSH, now `serve`'s default and the recommended way to
+review remotely, with a grid mode; the Python remote client is deprecated;
+wire API v7 (upgrade client and server together); and the documentation site.
+Read **Upgrading** first.
 
 ### Upgrading: breaking and behaviour changes
 
@@ -102,7 +103,7 @@ API v7 (upgrade client and server together), and the documentation site. Read
 
 ### Wire API (remote review)
 
-- **Experimental:** in socket mode, `POST /grids` returns grid layouts
+- In socket mode, `POST /grids` returns grid layouts
   computed with the viewer's own packing code, for the browser page's grid
   mode. Socket mode only; it does not change the HTTPS API and needed no API
   version bump.

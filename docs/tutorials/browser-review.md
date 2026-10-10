@@ -5,8 +5,8 @@ with nothing installed there but `ssh`. The traffic is plain HTTP inside the
 ssh tunnel, with no TLS on the node. The server listens on a Unix socket on
 the compute node and your laptop forwards a local port to it. The page reviews
 single images or, in grid mode, packed grids of a batch's images.
-**Read the experimental section of
-[the security model](../reference/security-model.md#experimental-browser-review-over-a-unix-socket)
+**Read the browser review section of
+[the security model](../reference/security-model.md#browser-review-over-a-unix-socket)
 first**: it lists the differences from the HTTPS mode (a URL that
 holds the token) and the questions to ask your HPC administrator if
 forwarding does not work.
