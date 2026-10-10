@@ -585,6 +585,60 @@ class TestCli(RemoteTestCase):
         self.assertIn("Invalid value for '--work-dir': Path './review_work' does not exist.", result.output)
 
 
+class TestRemoteDeprecation(RemoteTestCase):
+    def invoke(self, *args, **kwargs):
+        return invoke_cli(*args, **kwargs)
+
+    def warnings(self, result) -> list[str]:
+        return [line for line in result.stderr.splitlines() if " WARNING " in line and "deprecated" in line]
+
+    def test_status_remote_warns_once(self):
+        remote = self.invoke("status", "--remote", self.target.to_uri())
+        local = self.invoke("status", "--work-dir", str(self.work_dir))
+        self.assertEqual(remote.exit_code, 0, remote.output)
+        (line,) = self.warnings(remote)
+        self.assertIn("WARNING image_review.cli: status --remote is deprecated", line)
+        self.assertNotIn("(from $IMAGE_REVIEW_REMOTE)", line)
+        self.assertNotIn(self.target.token, remote.stderr)
+        self.assertEqual(remote.stdout, local.stdout)
+        self.assertEqual(self.warnings(local), [])
+
+    def test_envvar_names_its_source(self):
+        result = self.invoke("status", env={"IMAGE_REVIEW_REMOTE": self.target.to_uri()})
+        self.assertEqual(result.exit_code, 0, result.output)
+        (line,) = self.warnings(result)
+        self.assertIn("status --remote (from $IMAGE_REVIEW_REMOTE) is deprecated", line)
+
+    def test_quiet_still_shows_it(self):
+        result = self.invoke("-q", "status", "--remote", self.target.to_uri())
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(len(self.warnings(result)), 1)
+
+    def test_exclusivity_error_logs_no_warning(self):
+        result = self.invoke("status", "--remote", self.target.to_uri(), "--work-dir", str(self.work_dir))
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(self.warnings(result), [])
+
+    def test_invalid_connection_string_is_warned_before_parsing(self):
+        result = self.invoke("status", "--remote", "nonsense")
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(len(self.warnings(result)), 1)
+
+    def test_invalid_via_from_environment_says_so(self):
+        result = self.invoke("status", "--remote", self.target.to_uri(), env={"IMAGE_REVIEW_VIA": "-oProxyCommand=x"})
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Invalid $IMAGE_REVIEW_VIA: ", result.stderr)
+
+    def test_review_remote_warns_once(self):
+        with mock.patch("image_review.controller.ReviewSession") as session:
+            result = self.invoke("review", "--remote", self.target.to_uri())
+        self.assertEqual(result.exit_code, 0, result.output)
+        session.assert_called_once()
+        (line,) = self.warnings(result)
+        self.assertIn("WARNING image_review.cli: review --remote is deprecated", line)
+        self.assertIn("browser review", line)
+
+
 class TestSession(RemoteTestCase):
     def setUp(self):
         super().setUp()

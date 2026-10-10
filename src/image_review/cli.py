@@ -45,6 +45,18 @@ SERVE_HTTPS_DEPRECATED = (
     "server. Plain `image-review {command}` serves browser review instead; its page comes from the server itself, "
     "so it always matches. See {url}"
 )
+# {source} is " (from $IMAGE_REVIEW_REMOTE)" when the connection string came from the environment, else empty.
+REMOTE_DEPRECATED = (
+    "{command} --remote{source} is deprecated and will be removed in a future release: it must run the same "
+    "image-review version as the server. Use browser review instead: plain `image-review serve` where the work "
+    "directory is, then a browser through ssh -L; the page comes from the server itself, so it always matches. "
+    "See {url}"
+)
+STATUS_REMOTE_DEPRECATED = (
+    "{command} --remote{source} is deprecated and will be removed in a future release: it must run the same "
+    "image-review version as the server. Run `image-review status --work-dir DIR` on the machine holding the work "
+    "directory instead, e.g. over ssh."
+)
 
 # The top-level modules each optional extra (pyproject.toml) provides and the commands import; the core
 # dependencies (click, cryptography, rectpack) are always there. The codecs extra is loaded by pydicom only when needed.
@@ -110,7 +122,7 @@ def remote_option(f):
         "--remote",
         envvar="IMAGE_REVIEW_REMOTE",
         default=None,
-        help="Review a server started with `image-review serve --https` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).",
+        help="Deprecated: review a server started with `image-review serve --https` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).",
     )(f)
 
 
@@ -119,7 +131,7 @@ def via_option(f):
         "--via",
         envvar="IMAGE_REVIEW_VIA",
         default=None,
-        help="With --remote: reach the server through an SSH tunnel via this login node, e.g. user@login.cluster (also read from $IMAGE_REVIEW_VIA).",
+        help="Deprecated. With --remote: reach the server through an SSH tunnel via this login node, e.g. user@login.cluster (also read from $IMAGE_REVIEW_VIA).",
     )(f)
 
 
@@ -164,6 +176,15 @@ def _existing_work_dir(work_dir: str | None) -> Path:
     return path
 
 
+def warn_remote_deprecated() -> None:
+    """Log the one deprecation WARNING for the remote client, naming `$IMAGE_REVIEW_REMOTE` when it selected it."""
+    ctx = click.get_current_context()
+    from_env = ctx.get_parameter_source("remote") is click.core.ParameterSource.ENVIRONMENT
+    template = STATUS_REMOTE_DEPRECATED if ctx.info_name == "status" else REMOTE_DEPRECATED
+    source = " (from $IMAGE_REVIEW_REMOTE)" if from_env else ""
+    log.warning(template.format(command=ctx.info_name, source=source, url=BROWSER_REVIEW_DOCS))
+
+
 @contextlib.contextmanager
 def open_store(
     work_dir: str | None, remote: str | None, via: str | None = None, read_only: bool = False
@@ -189,6 +210,7 @@ def open_store(
     from .remote import RemoteError
     from .tunnel import TunnelError, parse_via
 
+    warn_remote_deprecated()
     try:
         target = RemoteTarget.parse(remote)
     except ValueError as e:
@@ -197,7 +219,9 @@ def open_store(
         try:
             via = parse_via(via)
         except ValueError as e:
-            raise click.ClickException(f"Invalid --via: {e}")
+            from_env = click.get_current_context().get_parameter_source("via") is click.core.ParameterSource.ENVIRONMENT
+            source = "$IMAGE_REVIEW_VIA" if from_env else "--via"
+            raise click.ClickException(f"Invalid {source}: {e}")
     where = f"{target.host}:{target.port}" + (f" (via {via})" if via else "")
     log.debug("connecting to server at %s", where)
     try:

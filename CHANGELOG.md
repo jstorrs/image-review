@@ -21,6 +21,13 @@ API v7 (upgrade client and server together), and the documentation site. Read
   `--ssh-host` and `--socket-path` on the command line exit 2 in HTTPS mode.
   `serve --socket` from pre-release builds is gone (exit 2, no such option):
   drop it; plain `serve` does the same.
+- **Deprecated: the Python remote client.** `review --remote`, `status
+  --remote` (with `$IMAGE_REVIEW_REMOTE` and `--via`) and `serve --https`,
+  `--bind` or `--port` each log one WARNING and keep working; they will be
+  removed in a future release. With browser review there is no client to
+  install or keep in sync: the server serves the page itself, so it always
+  matches. The Python client must run the same version as the server, and a
+  mismatch is refused. The laptop needs only ssh and a browser.
 - **Wire API v7: client and server must be upgraded together.** `POST /mark`
   now refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
   FLAGGED in that pass, unless every one is DIRTY, answering 409 and

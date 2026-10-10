@@ -40,7 +40,8 @@ Errors and warnings cover:
   - `export --allow-live` overriding a held lock;
   - an `export --output` or `--report` file that could not be given the work
     directory's group;
-  - a deprecated remote path (`serve` over HTTPS).
+  - a deprecated remote path (`serve` over HTTPS, `review --remote` or
+    `status --remote`).
 
 Only `serve` and `export` log at INFO. `serve` logs one line per request,
 with the peer address, method, path without its query string, and status.

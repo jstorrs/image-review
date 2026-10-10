@@ -42,8 +42,8 @@ grid.
 | `--rotate` | `auto` | Rotate images 90 degrees in grids: `auto` = only when that saves a grid, `always` or `never` |
 | `--reviewer` | your login name; `$IMAGE_REVIEW_REVIEWER` | Name recorded with each verdict; see [Recorded verdicts](#recorded-verdicts) |
 | `--work-dir` | `./review_work` | Work directory containing preprocessed data |
-| `--remote` | `$IMAGE_REVIEW_REMOTE` | Review a server started with `image-review serve --https` instead of a local `--work-dir`; see [Connecting to a server](#connecting-to-a-server) |
-| `--via` | `$IMAGE_REVIEW_VIA` | Reach that server through an SSH tunnel via a login node, e.g. `--via user@login.cluster`; requires `--remote` |
+| `--remote` | `$IMAGE_REVIEW_REMOTE` | Deprecated: review a server started with `image-review serve --https` instead of a local `--work-dir`; see [Connecting to a server](#connecting-to-a-server) |
+| `--via` | `$IMAGE_REVIEW_VIA` | Deprecated: reach that server through an SSH tunnel via a login node, e.g. `--via user@login.cluster`; requires `--remote` |
 
 ## Keys and gamepad
 
@@ -262,6 +262,21 @@ Grid mode packs only images it can load; one it cannot is shown on its own,
 after the grids.
 
 ## Connecting to a server
+
+`--remote` and `--via` are deprecated and will be removed in a future
+release. The Python client must run the same image-review version as the
+server, and a mismatch is refused; browser review has no client to install
+or keep in sync, because the server serves the page itself and it always
+matches. See [Browser review over SSH](../tutorials/browser-review.md).
+Selecting the remote client, by `--remote` or by `$IMAGE_REVIEW_REMOTE`,
+logs one WARNING (see [Logging](index.md#logging)) after the exclusivity
+check below and before the connection string is parsed. `--via` adds no
+second one. `{SOURCE}` is " (from $IMAGE_REVIEW_REMOTE)" when the
+connection string came from the environment, and empty otherwise:
+
+```text
+review --remote{SOURCE} is deprecated and will be removed in a future release: it must run the same image-review version as the server. Use browser review instead: plain `image-review serve` where the work directory is, then a browser through ssh -L; the page comes from the server itself, so it always matches. See https://jstorrs.github.io/image-review/tutorials/browser-review.html
+```
 
 `--remote` and `--work-dir` are mutually exclusive (exit 2). When
 `--remote` came from `$IMAGE_REVIEW_REMOTE`, the message says

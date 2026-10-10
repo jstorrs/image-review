@@ -349,6 +349,11 @@ class TestCliVia(FakeSshTestCase):
         )
         self.assertFalse(pid_alive(record["pid"]))
 
+    def test_via_adds_no_second_warning(self):
+        result = self.invoke("status", "--remote", self.target.to_uri(), "--via", "me@login")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.stderr.count("is deprecated"), 1)
+
     def test_via_envvar(self):
         result = self.invoke("status", IMAGE_REVIEW_REMOTE=self.target.to_uri(), IMAGE_REVIEW_VIA="me@login")
         self.assertEqual(result.exit_code, 0, result.output)

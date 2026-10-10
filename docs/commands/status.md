@@ -32,8 +32,8 @@ Skipped during preprocess: 3 failed, 12 ignored (see skipped.tsv in the work dir
 |--------|---------|-------------|
 | `--check` | off | Set the exit status by whether the review is finished (see below) |
 | `--work-dir` | `./review_work` | Work directory containing preprocessed data |
-| `--remote` | `$IMAGE_REVIEW_REMOTE` | As for `review` |
-| `--via` | `$IMAGE_REVIEW_VIA` | As for `review` |
+| `--remote` | `$IMAGE_REVIEW_REMOTE` | Deprecated; as for `review` |
+| `--via` | `$IMAGE_REVIEW_VIA` | Deprecated; as for `review` |
 
 Unloadable images are not counted separately. `status` does not open the
 images, so one that cannot be loaded is only found when `review` tries to show
@@ -62,6 +62,16 @@ inputs do not count). FLAGGED images have a DIRTY verdict from an earlier
 pass, so they count as decided: re-review passes are optional. They still
 show in the report, so a second pass remains available. Without `--check`,
 `status` exits 0.
+
+`--remote` and `--via` are deprecated, for the reason given under
+[Connecting to a server](review.md#connecting-to-a-server). Selecting the
+remote client logs one WARNING (see [Logging](index.md#logging)), at the same
+point as for `review`. `{SOURCE}` is " (from $IMAGE_REVIEW_REMOTE)" when the
+connection string came from the environment, and empty otherwise:
+
+```text
+status --remote{SOURCE} is deprecated and will be removed in a future release: it must run the same image-review version as the server. Run `image-review status --work-dir DIR` on the machine holding the work directory instead, e.g. over ssh.
+```
 
 `--check` works with `--remote` too, and a malformed `skipped.tsv` still exits
 1. In a script:

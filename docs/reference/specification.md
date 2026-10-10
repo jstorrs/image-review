@@ -437,9 +437,13 @@ store (and tunnel) is up, so ssh password/MFA prompts keep terminal focus.
   `ClickException` (exit 1) with its message. A `--via` whose parameter
   source is not the environment is a `UsageError`.
 - With `--remote`: `--work-dir` is a `UsageError`, worded by the `--remote`
-  parameter source. The string is parsed with `RemoteTarget.parse` and
+  parameter source. Then `warn_remote_deprecated` logs one WARNING (so a
+  usage error logs none), before parsing or connecting; it names
+  `$IMAGE_REVIEW_REMOTE` when the `--remote` parameter source is the
+  environment, and `--via` adds none. `status` has its own text (the fix is
+  `status --work-dir`, since the browser has no status report). The string is parsed with `RemoteTarget.parse` and
   `--via` validated with `parse_via`; either failure is a `ClickException`
-  naming the option. `_remote_store` enters `ssh_tunnel` first when `--via`
+  naming the option (`$IMAGE_REVIEW_VIA` when that is the source). `_remote_store` enters `ssh_tunnel` first when `--via`
   is given, and the `RemoteStore` connects to `127.0.0.1:<local port>`
   instead of the advertised host; it calls `check_api()` before yielding. The
   store is closed before the tunnel.
