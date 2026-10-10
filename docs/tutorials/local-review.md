@@ -160,7 +160,6 @@ Check review progress at any time:
 
 ```bash
 image-review status [--work-dir ./review_work]
-image-review status --remote 'ir://...' [--via user@login-node]
 ```
 
 [`image-review status`](../commands/status.md) shows an example report. To

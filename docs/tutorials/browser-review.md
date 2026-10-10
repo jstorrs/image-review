@@ -1,31 +1,58 @@
-# Browser review over SSH (experimental)
+# Browser review over SSH
 
-An experimental alternative to the pygame viewer: a browser on your laptop,
-with nothing installed there but `ssh`. The traffic is plain HTTP inside the
-ssh tunnel, with no TLS on the node. The server listens on a Unix socket on
-the compute node and your laptop forwards a local port to it. The page reviews
-single images or, in grid mode, packed grids of a batch's images.
+Review images where they are, without copying them off the cluster, in a
+browser on your laptop. This is the recommended way to review remotely. There
+is nothing to install on the laptop but ssh and a browser, and nothing to keep
+in sync: the page is served by `serve` itself, so it always matches the
+server's version. (The deprecated
+[Python client](remote-review.md) must run the same version as the server,
+and a mismatch is refused.)
+
+`image-review serve` runs on a compute node and listens on a Unix socket, and
+your laptop forwards a local port to it with ssh. The traffic is plain HTTP
+inside the ssh tunnel, with no TLS on the node. The page reviews single
+images or, in grid mode, packed grids of a batch's images.
 **Read the browser review section of
 [the security model](../reference/security-model.md#browser-review-over-a-unix-socket)
 first**: it lists the differences from the HTTPS mode (a URL that
 holds the token) and the questions to ask your HPC administrator if
 forwarding does not work.
 
-For the HTTPS mode with the pygame viewer, and the Slurm basics used below,
-see [Remote review on an HPC cluster](remote-review.md).
+Install `[preprocess,codecs]` where you preprocess and core alone where you
+only `serve`; see [Installation](../install.md) and
+[Cluster install without root](../install.md#cluster-install-without-root).
 
-1. On the cluster, get a shell on a compute node (`salloc`, then `srun --pty
-   bash`) and start the server, naming your login node:
+## 1. Preprocess on the cluster
+
+Run `preprocess` as a batch or interactive job, asking Slurm for several
+cores: `--jobs` follows `$SLURM_CPUS_PER_TASK`, so rendering uses every core
+you were given.
+
+```bash
+srun --cpus-per-task=8 --mem=16G image-review preprocess /data/scans.zip --work-dir /scratch/me/review_work
+```
+
+In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. See
+[Parallel rendering](../commands/preprocess.md#parallel-rendering) for how
+`--jobs` is chosen otherwise.
+
+## 2. Review in the browser
+
+1. On the cluster, get a shell on a compute node and start the server, naming
+   your login node:
 
    ```bash
+   salloc ...                       # your site's usual options
+   srun --pty bash                  # or your site's interactive command
    image-review serve --work-dir /scratch/me/review_work --via me@login-node
    ```
 
-   If your laptop can ssh to compute nodes directly (`ssh me@<node>` works
-   without a jump host), use `--direct` instead of `--via`; the printed
-   command then has no `-J`. If the node name it prints does not resolve from
-   your laptop, add `--ssh-host NAME` (a host name, no `user@`) with the name
-   that does.
+   On many Slurm sites `salloc` leaves you on the login node, hence the
+   `srun --pty bash`. If your laptop can ssh to compute nodes directly
+   (`ssh me@<node>` works without a jump host), use `--direct` instead of
+   `--via`; the printed command then has no `-J`. If the node name it prints
+   does not resolve from your laptop, add `--ssh-host NAME` (a host name, no
+   `user@`) with the name that does.
 
 2. It prints an ssh command and, on a terminal, a URL. On your laptop, paste
    the ssh command and leave it running (password or MFA prompts appear
@@ -161,7 +188,6 @@ see [Remote review on an HPC cluster](remote-review.md).
    new URL into the same tab. Use a per-job name such as `$SLURM_JOB_ID`,
    not one shared between jobs: on a home directory shared between nodes, a
    second job with the same path would take over the first one's socket.
-   (Not yet tested on a cluster.)
 
    To keep the URL too, give the job one token and export it as
    `$IMAGE_REVIEW_TOKEN`; `serve` then reuses it on every start in
@@ -267,6 +293,22 @@ it there if the default does not work from your laptop, e.g. `--ssh-host
   `ControlPath=none` to avoid that; if you edit it, keep that option.
 - "Socket path is N bytes; the limit is ...": use a shorter `--socket-path`.
 - "Another server is listening on ...": pick a different `--socket-path`.
+- "work directory is in use": another session holds the work directory, and
+  the message names it (user, node, pid, start time) and the lock file.
+  Finish or stop that session first. A lock left on another node, for
+  example by a `serve` job that was killed, is not cleared automatically;
+  [`review.lock`](../reference/work-directory.md#reviewlock) says when it is
+  safe to delete it by hand:
+
+  ```bash
+  rm /scratch/me/review_work/review.lock
+  ```
+
+- "Cannot read work directory": `review.tsv` or `manifest.tsv` is malformed,
+  for example after a hand edit. The message names the file and line; fix or
+  remove that line and run again. See
+  [`review.tsv`](../reference/work-directory.md#reviewtsv) and
+  [`manifest.tsv`](../reference/work-directory.md#manifesttsv).
 - Prefer the default socket path. On a shared home directory, a second server
   on another node given the same explicit `--socket-path` takes the first's
   socket over and the first becomes unreachable. If you must choose a path,

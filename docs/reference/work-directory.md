@@ -227,8 +227,8 @@ system that has none (such as macOS, which has no
 **Deleting it by hand.** Delete `review.lock` only when you are sure its
 process is gone: check `squeue`, or `ps -p PID` on that node, and compare the
 start time.
-[Remote review](../tutorials/remote-review.md#troubleshooting) shows the
-command.
+[Browser review over SSH](../tutorials/browser-review.md#troubleshooting)
+shows the command.
 
 ## Leftover temporary files
 

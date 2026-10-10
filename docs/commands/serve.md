@@ -19,7 +19,7 @@ it.
 
 For the workflow, see the tutorials
 [Browser review over SSH](../tutorials/browser-review.md) and
-[Remote review on an HPC cluster](../tutorials/remote-review.md).
+[Remote review with the Python client (deprecated)](../tutorials/remote-review.md).
 
 `serve` prints a URL, or in HTTPS mode a connection string (`ir://...`),
 that grants access: **treat it like a password.** When stdout is not a

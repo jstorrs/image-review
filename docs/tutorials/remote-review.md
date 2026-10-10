@@ -1,9 +1,18 @@
-# Remote review on an HPC cluster
+# Remote review with the Python client (deprecated)
+
+**Deprecated.** The Python client (`review --remote`, `status --remote`) and
+the HTTPS server it talks to (`serve --https`) will be removed in a future
+release; until then each logs a warning and keeps working. Use
+[Browser review over SSH](browser-review.md) instead: there is nothing to
+install on the laptop but ssh and a browser, and nothing to keep in sync,
+because the page is served by `serve` itself and always matches the server's
+version. The Python client must run the same version as the server, and a
+mismatch is refused.
 
 Review images where they are, without copying them off the cluster. The
 server runs on a compute node and the viewer on your laptop:
-`image-review serve` serves the preprocessed work directory over HTTPS, and
-`image-review review --remote` is the viewer.
+`image-review serve --https` serves the preprocessed work directory over
+HTTPS, and `image-review review --remote` is the viewer.
 
 Install `[preprocess,codecs]` on the cluster (core alone is enough for a node
 that only runs `serve`, `status` and `export`) and `[viewer]` on the laptop;
@@ -15,24 +24,10 @@ Original files, DICOM headers and source paths stay on the cluster. Only the
 preprocessed JPGs (and their batch/file names and review statuses) travel,
 over TLS with a pinned certificate, and are held in the viewer's memory.
 
-To review in a browser instead, with nothing installed on the laptop but
-`ssh`, see the experimental [Browser review over SSH](browser-review.md).
-
 ## 1. Preprocess on the cluster
 
-Unchanged. Run it as a batch or interactive job, asking Slurm for several
-cores: `--jobs` defaults to `$SLURM_CPUS_PER_TASK`, so rendering uses every
-core you were given:
-
-```bash
-srun --cpus-per-task=8 --mem=16G image-review preprocess /data/scans.zip --work-dir /scratch/me/review_work
-```
-
-In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. Without
-`--cpus-per-task`, `$SLURM_CPUS_PER_TASK` is unset and `--jobs` falls back to
-the CPUs the job may use; see
-[Parallel rendering](../commands/preprocess.md#parallel-rendering). `scancel`
-(or the time limit) stops the workers and leaves no work directory.
+As for browser review: see
+[Preprocess on the cluster](browser-review.md#1-preprocess-on-the-cluster).
 
 ## 2. Serve from an interactive session
 
@@ -150,24 +145,8 @@ shared nodes and home directories, and multiple clients.
   `Host` alias without `LocalForward`.
 - If ssh backgrounds itself (`ForkAfterAuthentication`), remove that option.
 
-**Troubleshooting "work directory is in use":** the message names who holds
-the work directory (user, node, pid, start time) and the lock file. Finish or
-stop that session first. A lock left on another node, for example by a
-`serve` job that was killed, is not cleared automatically; the rules are in
-[`review.lock`](../reference/work-directory.md#reviewlock). If you are sure
-that process is gone (check `squeue`, or `ps -p PID` on that node, and
-compare the start time), delete the lock file by hand and run again:
-
-```bash
-rm /scratch/me/review_work/review.lock
-```
-
-**Troubleshooting "Cannot read work directory":** `review.tsv` or
-`manifest.tsv` is malformed, for example after a hand edit. The message names
-the file and line; fix or remove that line and run again. The tool never
-repairs or drops rows on its own. What a valid file looks like is in
-[`review.tsv`](../reference/work-directory.md#reviewtsv) and
-[`manifest.tsv`](../reference/work-directory.md#manifesttsv).
+For "work directory is in use" and "Cannot read work directory", see
+[Troubleshooting](browser-review.md#troubleshooting) in the browser tutorial.
 
 **Troubleshooting versions:** an API-version message from the viewer means
 the laptop and the cluster have different image-review versions. Install the

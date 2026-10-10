@@ -309,7 +309,7 @@ starts only after these checks pass; each failure exits 1 with its message:
 
 `HOST:PORT` is followed by "(via DESTINATION)" when `--via` is used. For
 setting up the server, the tunnel and the environment variables, see
-[Remote review on an HPC cluster](../tutorials/remote-review.md).
+[Remote review with the Python client (deprecated)](../tutorials/remote-review.md).
 
 ## Lost connection
 

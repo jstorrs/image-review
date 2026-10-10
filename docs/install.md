@@ -17,20 +17,23 @@ commands need:
 | Install | Commands | Adds |
 |---|---|---|
 | `pip install .` (core) | `serve`, `status`, `export`, `--help` | click, cryptography, rectpack |
-| `pip install '.[viewer]'` | `review` (local or `--remote`) | pygame-ce, Pillow |
+| `pip install '.[viewer]'` | `review` (local, or the deprecated `--remote`) | pygame-ce, Pillow |
 | `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
 | `pip install '.[all]'` | every command | `preprocess` + `codecs` + `viewer` |
 
-On a cluster with a laptop viewer (see
-[Remote review on an HPC cluster](tutorials/remote-review.md)), install
-`[preprocess,codecs]` where you preprocess, core alone where you only `serve`,
-and `[viewer]` on the laptop (`pip install '.[viewer]'`). A command whose
-extra is missing exits 1 with
+For [browser review](tutorials/browser-review.md) on a cluster, install
+`[preprocess,codecs]` where you preprocess and core alone where you only
+`serve`; the laptop needs only ssh and a browser. A command whose extra is
+missing exits 1 with
 `this command needs the <extra> extra: pip install 'image-review[<extra>]'`.
 
-`cryptography` is a core dependency (`serve` uses it for its TLS
-certificate). `review --via` and `status --via` need an OpenSSH client on the
-machine you run them on (built into macOS, Linux and Windows 10+).
+The deprecated [Python client](tutorials/remote-review.md) also needs:
+
+- `[viewer]` on the laptop, for `review --remote` (deprecated).
+- `cryptography`, for the TLS certificate of `serve --https` (deprecated).
+  It is a core dependency, so it is installed everywhere.
+- An OpenSSH client on the laptop for `review --via` and `status --via`
+  (deprecated; built into macOS, Linux and Windows 10+).
 
 ## Cluster install without root
 
@@ -50,8 +53,9 @@ pip install -e '.[preprocess,codecs]'
 
 If the repository is private, the https URL needs credentials (or use an
 `ssh://git@github.com/jstorrs/image-review` URL with a key on the cluster).
-Activate the same environment in your `sbatch` scripts. Use the same
-image-review version on the laptop and on the cluster.
+Activate the same environment in your `sbatch` scripts. With the deprecated
+Python client, use the same image-review version on the laptop and on the
+cluster.
 
 ## Compressed DICOMs
 

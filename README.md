@@ -49,9 +49,13 @@ The quick start is also on its own page: [Quick start](docs/quickstart.md).
 
 - [Local review](docs/tutorials/local-review.md): a walk-through of a whole
   review on one machine.
-- [Remote review on an HPC cluster](docs/tutorials/remote-review.md) and
-  [Browser review over SSH](docs/tutorials/browser-review.md)
-  (experimental): review images that stay on the cluster, from your laptop.
+- [Browser review over SSH](docs/tutorials/browser-review.md): the
+  recommended way to review images that stay on the cluster, from your
+  laptop. There is nothing to install on the laptop but ssh and a browser,
+  and nothing to keep in sync: the page is served by `serve` itself, so it
+  always matches the server's version. The deprecated
+  [Python client](docs/tutorials/remote-review.md) must run the same version
+  as the server, and a mismatch is refused.
 - [Commands overview](docs/commands/index.md), with one page each for
   [preprocess](docs/commands/preprocess.md),
   [review](docs/commands/review.md), [status](docs/commands/status.md),
