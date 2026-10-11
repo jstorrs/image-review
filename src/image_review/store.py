@@ -13,7 +13,17 @@ from .access import MANIFEST_NAME
 from .export import ExportRow, export_rows
 from .lock import LockHolder, acquire_lock, release_lock
 from .review_db import Change, ReviewDB, decode_utf8
-from .status import TODO_STATUSES, ImageId, Key, MarkMode, Status, Verdict, parse_choice
+from .status import (
+    TODO_STATUSES,
+    GridCleanRefused,
+    ImageId,
+    Key,
+    MarkMode,
+    Status,
+    Verdict,
+    grid_clean_refused,
+    parse_choice,
+)
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +87,9 @@ class ReviewStore(Protocol):
     ) -> dict[Key, Status]:
         """Record a verdict on keys, given by `reviewer` (an unauthenticated claim) in `mode`.
 
-        Returns the new status of every key affected (incl. keys sharing an image_id).
+        Returns the new status of every key affected (incl. keys sharing an image_id). Raises
+        status.GridCleanRefused, recording nothing, for a `grid` CLEAN that status.grid_clean_refused refuses
+        against the current statuses for the pass.
         """
         ...
 
@@ -278,8 +290,18 @@ class LocalStore:
     def mark(
         self, keys: list[Key], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
     ) -> dict[Key, Status]:
+        """Also raises KeyError for an unknown key and ValueError for repeated keys or a `single` mark of other than
+        one key, recording nothing; a RemoteStore surfaces the server's 400 for those as RemoteError."""
         self._require_writable()
         targets = [self._by_key[k] for k in keys]  # an unknown key raises before anything is written
+        if len(set(keys)) != len(keys):
+            raise ValueError("a mark names each key once")
+        if mode == "single" and len(keys) != 1:
+            raise ValueError(f"a single mark names exactly one key, not {len(keys)}")
+        if mode == "grid" and status == "CLEAN":
+            snapshot = {k: self._db.get_status(e.image_id, pass_number) for k, e in zip(keys, targets, strict=True)}
+            if grid_clean_refused(snapshot, tuple(keys)):
+                raise GridCleanRefused("grid holds a DIRTY or FLAGGED image")
         changes = self._db.mark_many(
             [(e.image_id, e.batch) for e in targets], status, pass_number, reviewer=reviewer, mode=mode
         )

@@ -572,7 +572,7 @@ class ReviewSession:
         self._advance_pending = True
 
     def _grid_clean_refused_by_store(self, item: ReviewItem):
-        """The server refused a grid-mode CLEAN this client allowed: its statuses were stale (e.g. another
+        """The store refused a grid-mode CLEAN this client allowed: its statuses were stale (e.g. another
         client marked a key DIRTY). Show the refusal and re-read the statuses so the item shows them."""
         message = GRID_HAS_DIRTY if isinstance(item, GridItem) else IMAGE_HAS_DIRTY
         log.warning("%s", message)

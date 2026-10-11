@@ -176,9 +176,11 @@ def mark(
     pass_number: int = 1,
     *,
     reviewer: str = "tester",
-    mode: MarkMode = "single",
+    mode: MarkMode | None = None,
 ):
-    """store.mark with the usual reviewer and mode, for tests where neither is the point."""
+    """store.mark with the usual reviewer, for tests where it is not the point; mode defaults to single for one key,
+    else grid."""
+    mode = mode or ("single" if len(keys) == 1 else "grid")
     return store.mark(keys, status, pass_number, reviewer=reviewer, mode=mode)
 
 

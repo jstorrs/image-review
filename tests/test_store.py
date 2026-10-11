@@ -24,7 +24,7 @@ from image_review.connection import package_version
 from image_review.controller import ReviewSession
 from image_review.lock import LOCK_NAME
 from image_review.review_db import HEADER, Decision, ReviewDB
-from image_review.status import ImageId
+from image_review.status import GridCleanRefused, ImageId
 from image_review.store import (
     LocalStore,
     ManifestEntry,
@@ -160,6 +160,75 @@ class TestMarkAndStatuses(StoreTestCase):
         with self.assertRaises(KeyError):
             mark(self.store, ["batch_001/a.jpg", "nope.jpg"], "CLEAN")
         self.assertFalse((self.work_dir / "review.tsv").exists())
+
+    def assert_refused_writes_nothing(self, exc, keys, status, pass_number, mode, *, tsv: bytes | None):
+        """The mark raises `exc`; review.tsv is as `tsv` (None: absent). Tests check the undo stack."""
+        with self.assertRaises(exc):
+            self.store.mark(keys, status, pass_number, reviewer="tester", mode=mode)
+        path = self.work_dir / "review.tsv"
+        self.assertEqual(path.read_bytes() if path.exists() else None, tsv)
+
+    def test_single_mark_of_two_keys_raises_and_writes_nothing(self):
+        keys = ["batch_001/a.jpg", "batch_001/b.jpg"]
+        self.assert_refused_writes_nothing(ValueError, keys, "CLEAN", 1, "single", tsv=None)
+        self.assert_refused_writes_nothing(ValueError, [], "CLEAN", 1, "single", tsv=None)
+        self.assertEqual(self.store.undo(1, reviewer="tester"), {})
+
+    def test_single_refusal_leaves_the_undo_stack_alone(self):
+        mark(self.store, ["batch_001/a.jpg"], "CLEAN")
+        before = (self.work_dir / "review.tsv").read_bytes()
+        self.assert_refused_writes_nothing(
+            ValueError, ["batch_001/a.jpg", "batch_001/b.jpg"], "DIRTY", 1, "single", tsv=before
+        )
+        self.assertEqual(self.store.undo(1, reviewer="tester"), {"batch_001/a.jpg": "UNREVIEWED"})
+
+    def test_repeated_keys_raise_in_either_mode_and_write_nothing(self):
+        keys = ["batch_001/a.jpg", "batch_001/b.jpg", "batch_001/a.jpg"]
+        self.assert_refused_writes_nothing(ValueError, keys, "CLEAN", 1, "grid", tsv=None)
+        self.assert_refused_writes_nothing(ValueError, keys, "DIRTY", 1, "grid", tsv=None)
+        self.assert_refused_writes_nothing(ValueError, ["batch_001/a.jpg"] * 2, "CLEAN", 1, "single", tsv=None)
+        self.assertEqual(self.store.undo(1, reviewer="tester"), {})
+
+    def test_unknown_key_is_a_key_error_before_the_shape_rules(self):
+        self.assert_refused_writes_nothing(KeyError, ["nope.jpg", "nope.jpg"], "CLEAN", 1, "single", tsv=None)
+        self.assert_refused_writes_nothing(KeyError, ["batch_001/a.jpg", "nope.jpg"], "CLEAN", 1, "grid", tsv=None)
+
+    def test_grid_clean_over_a_dirty_key_is_refused_and_writes_nothing(self):
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY")
+        before = (self.work_dir / "review.tsv").read_bytes()
+        self.assert_refused_writes_nothing(
+            GridCleanRefused, ["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN", 1, "grid", tsv=before
+        )
+        self.assertEqual(self.store.statuses(1)["batch_001/b.jpg"], "UNREVIEWED")
+        self.assertEqual(self.store.undo(1, reviewer="tester"), {"batch_001/a.jpg": "UNREVIEWED"})  # the DIRTY mark
+
+    def test_grid_clean_over_a_flagged_key_is_refused_and_writes_nothing(self):
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY")
+        mark(self.store, ["batch_001/b.jpg"], "CLEAN")
+        self.assertEqual(self.store.statuses(2)["batch_001/a.jpg"], "FLAGGED")
+        before = (self.work_dir / "review.tsv").read_bytes()
+        self.assert_refused_writes_nothing(
+            GridCleanRefused, ["batch_001/a.jpg", "batch_002/c.jpg"], "CLEAN", 2, "grid", tsv=before
+        )
+        self.assertEqual(self.store.statuses(2)["batch_002/c.jpg"], "UNREVIEWED")
+
+    def test_grid_clean_is_allowed_when_every_key_is_dirty(self):
+        keys = ["batch_001/a.jpg", "batch_001/b.jpg"]
+        mark(self.store, keys, "DIRTY")
+        self.assertEqual(mark(self.store, keys, "CLEAN"), dict.fromkeys(keys, "CLEAN"))
+
+    def test_grid_dirty_is_allowed_over_anything(self):
+        mark(self.store, ["batch_001/a.jpg"], "DIRTY")
+        mark(self.store, ["batch_001/b.jpg"], "CLEAN")
+        keys = ["batch_001/a.jpg", "batch_001/b.jpg", "batch_002/c.jpg"]
+        self.assertEqual(mark(self.store, keys, "DIRTY"), dict.fromkeys(keys, "DIRTY"))
+
+    def test_grid_rule_is_judged_per_pass(self):
+        keys = ["batch_001/a.jpg", "batch_002/c.jpg"]
+        mark(self.store, keys, "DIRTY")  # DIRTY in pass 1, so FLAGGED in pass 2
+        with self.assertRaises(GridCleanRefused):
+            mark(self.store, keys, "CLEAN", 2)
+        self.assertEqual(mark(self.store, keys, "CLEAN", 1), dict.fromkeys(keys, "CLEAN"))  # all DIRTY there
 
     def test_prior_pass_semantics(self):
         mark(self.store, ["batch_001/a.jpg"], "CLEAN")
@@ -926,10 +995,10 @@ class TestUndo(StoreTestCase):
         self.addCleanup(self.store.close)
         keys = [r.key for r in self.store.manifest()]
         self.assertEqual(len(keys), 5)
-        self.store.mark(keys[:1], "DIRTY", 1, reviewer="alice", mode="single")
-        self.store.mark(keys, "CLEAN", 1, reviewer="alice", mode="grid")
+        self.store.mark(keys[:1], "CLEAN", 1, reviewer="alice", mode="single")
+        self.store.mark(keys, "DIRTY", 1, reviewer="alice", mode="grid")
         changed = self.store.undo(1, reviewer="alice")
-        self.assertEqual(changed, {keys[0]: "DIRTY", **dict.fromkeys(keys[1:], "UNREVIEWED")})
+        self.assertEqual(changed, {keys[0]: "CLEAN", **dict.fromkeys(keys[1:], "UNREVIEWED")})
         undo_rows = review_rows(self.work_dir / "review.tsv")[-5:]
         self.assertEqual({(r["mode"], r["grid_size"]) for r in undo_rows}, {("undo", "5")})
         self.assertEqual(self.store.undo(1, reviewer="alice"), {keys[0]: "UNREVIEWED"})

@@ -781,13 +781,13 @@ class TestGridCleanRefusal(ServerTestCase):
     def test_check_runs_under_the_store_lock(self):
         lock = self.server.store_lock
         held = []
-        statuses = self.server.store.statuses
+        mark_ = self.server.store.mark
 
-        def recording_statuses(pass_number):
+        def recording_mark(*args, **kwargs):
             held.append(lock.locked())
-            return statuses(pass_number)
+            return mark_(*args, **kwargs)
 
-        with mock.patch.object(self.server.store, "statuses", side_effect=recording_statuses):
+        with mock.patch.object(self.server.store, "mark", side_effect=recording_mark):
             resp, _ = self.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN")
         self.assertEqual(resp.status, 200)
         self.assertEqual(held, [True])

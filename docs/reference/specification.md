@@ -888,7 +888,7 @@ image preprocessed more than once); they share a review status.
 | `image_bytes(key) -> bytes` | JPG bytes; `KeyError` for an unknown key |
 | `image_bytes_many(keys) -> dict[str, bytes]` | Bytes for the keys that loaded; missing or unloadable keys are omitted with a logged warning |
 | `statuses(pass_number) -> dict[str, Status]` | Pass-aware status of every manifest key |
-| `mark(keys, status, pass_number, *, reviewer, mode) -> dict[str, Status]` | Record a verdict given by `reviewer` (an unauthenticated claim) in `mode` (`single` or `grid`); returns the new status of every key affected, including keys that share an `image_id` with a marked key |
+| `mark(keys, status, pass_number, *, reviewer, mode) -> dict[str, Status]` | Record a verdict given by `reviewer` (an unauthenticated claim) in `mode` (`single` or `grid`); returns the new status of every key affected, including keys that share an `image_id` with a marked key. Raises `status.GridCleanRefused`, recording nothing, for a `grid` CLEAN that `grid_clean_refused` refuses against the keys' current statuses (a key DIRTY or FLAGGED, unless every key is DIRTY); `LocalStore` enforces this itself, so every writer holds to it. `LocalStore` also raises `KeyError` for an unknown key and `ValueError` for repeated keys or a `single` mark of other than one key, recording nothing; `RemoteStore` surfaces the server's 400 for those as `RemoteError` |
 | `undo(pass_number, *, reviewer) -> dict[str, Status]` | Undo the latest mark not yet undone (one `mark` call: one image or a whole grid), restoring each of its images' decision from before it (see *Undo rows*); `reviewer` is checked and recorded like `mark`'s. Returns the new status, at `pass_number`, of every key affected, as `mark` does; `{}` when there is nothing to undo |
 | `current_pass() -> int` | Auto-detected pass number |
 | `close()`, `__enter__`, `__exit__` | Release what the store holds (`RemoteStore`: pool and connections; `LocalStore`: the work dir lock); idempotent. Stores are context managers that close on exit |
@@ -1048,22 +1048,25 @@ When a grid is marked CLEAN or DIRTY, `store.mark()` is called with all its
 
 A grid can still come to hold a DIRTY key mid-session, when a key in it shares
 an `image_id` with an image marked DIRTY elsewhere. CLEAN on a grid holding any
-DIRTY or FLAGGED key is refused (`status.grid_clean_refused`; no store call;
-the status bar shows `controller.GRID_HAS_DIRTY`, also logged), unless every
-key in the grid is DIRTY, which reverses that grid's own verdict. The
-messages are in
+DIRTY or FLAGGED key is refused (`status.grid_clean_refused`; the session
+makes no store call; the status bar shows `controller.GRID_HAS_DIRTY`, also
+logged), unless every key in the grid is DIRTY, which reverses that grid's own
+verdict. The messages are in
 [Refused CLEAN on a grid](../commands/review.md#refused-clean-on-a-grid).
 
-The server applies the same rule to every `POST /mark` with mode `grid` (409,
-see *Error semantics*), so a snapshot gone stale (e.g. another client marked
-a key DIRTY since it was read) cannot record such a CLEAN either.
+The store applies the same rule to every grid mark, so the server's
+`POST /mark` answers 409 (see *Error semantics*) and a snapshot gone stale
+(e.g. another client marked a key DIRTY since it was read) cannot record such
+a CLEAN either.
 `RemoteStore.mark` raises `GridCleanRefused` for the 409; it is not a lost
 connection: the session logs and shows the same refusal (for a left-out
 single, `controller.IMAGE_HAS_DIRTY`), re-reads the statuses (a `StoreUnavailable` there is a lost
 connection) and repaints the item's status. Nothing is recorded, so the undo
-count is unchanged and there is no auto-advance. `LocalStore` does not check the rule:
-the session refuses a grid before calling it, and a left-out single cannot
-become FLAGGED locally (see above).
+count is unchanged and there is no auto-advance. `LocalStore.mark` checks the rule
+itself, against the keys' current statuses for the pass, and raises
+`GridCleanRefused` before writing; the session still refuses a grid first
+(without a store call), and a left-out single cannot become FLAGGED locally
+(see above).
 
 If grid mode has no items but the status filter selected rows it left out, the
 session says so instead of implying the review is done: `run()` prints, and a
@@ -1505,7 +1508,7 @@ the boundary (`parse_pass`, `parse_mark`, `parse_undo`, `parse_grids`).
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`; both 0 if it has none). Only counts are sent, never `image_id`s or reasons (which contain source paths) |
-| `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; `keys` must be distinct, and a `single` mark must name exactly one key (otherwise 400, nothing recorded); responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`). A `grid` CLEAN that `status.grid_clean_refused` refuses against the store's current statuses for `pass` (a key DIRTY or FLAGGED, unless every key is DIRTY) is answered 409 and records nothing; `single` marks and DIRTY verdicts are never refused with 409 |
+| `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; `keys` must be distinct, and a `single` mark must name exactly one key (otherwise 400, nothing recorded); responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`). A `grid` CLEAN that the store refuses with `GridCleanRefused` (`status.grid_clean_refused` against its current statuses for `pass`: a key DIRTY or FLAGGED, unless every key is DIRTY) is answered 409 and records nothing; `single` marks and DIRTY verdicts are never refused with 409 |
 | `POST /undo` | Body `{"pass": N, "reviewer": str}`, checked as for `/mark`; other fields are ignored. Undoes the server store's latest mark (`ReviewStore.undo`); responds `{key: status, ...}` for every key affected, or `{}` when there is nothing to undo |
 | `POST /grids` | Socket mode only (404 over TLS): grid layouts for the browser client; see *Unix-socket server* |
 

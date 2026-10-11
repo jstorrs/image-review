@@ -46,11 +46,11 @@ from .status import (
     MARK_MODES,
     ROTATIONS,
     VERDICTS,
+    GridCleanRefused,
     Key,
     MarkMode,
     Rotation,
     Verdict,
-    grid_clean_refused,
     parse_choice,
 )
 from .store import ReviewStore
@@ -372,13 +372,12 @@ class ReviewHandler(BaseHTTPRequestHandler):
             case ("POST", "/mark"):
                 req = parse_mark(self._read_body(), self.server.known_keys)
                 with lock:
-                    if req.mode == "grid" and req.status == "CLEAN":
-                        # The clients refuse this first; their statuses may be stale. statuses() is
-                        # O(manifest) in memory, once per grid CLEAN.
-                        snapshot = store.statuses(req.pass_number)
-                        if grid_clean_refused(snapshot, tuple(req.keys)):
-                            return GRID_CLEAN_REFUSED
-                    changed = store.mark(req.keys, req.status, req.pass_number, reviewer=req.reviewer, mode=req.mode)
+                    try:
+                        changed = store.mark(
+                            req.keys, req.status, req.pass_number, reviewer=req.reviewer, mode=req.mode
+                        )
+                    except GridCleanRefused:  # the clients refuse this first; their statuses may be stale
+                        return GRID_CLEAN_REFUSED
                 return json_reply(changed)
             case ("POST", "/undo"):
                 undo = parse_undo(self._read_body())
