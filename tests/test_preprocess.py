@@ -1925,9 +1925,7 @@ class RenderTest(unittest.TestCase):
             [r["image_id"] for r in _read_tsv(root / "work" / "manifest.tsv")], [(src / "ok.dcm").as_posix()]
         )
 
-    def test_non_finite_float_rgb_dicom_is_unsupported(self):
-        rgb = np.full((40, 60, 3), 100.0, dtype=np.float32)
-        rgb[0, 0, 0] = np.nan
+    def float_rgb_dicom_bytes(self, rgb: np.ndarray) -> bytes:
         ds = pydicom.dcmread(io.BytesIO(self.float_dicom_bytes(rgb[:, :, 0])))
         ds.SamplesPerPixel = 3
         ds.PlanarConfiguration = 0
@@ -1936,8 +1934,18 @@ class RenderTest(unittest.TestCase):
         ds.FloatPixelData = rgb.astype("<f4").tobytes()
         buf = io.BytesIO()
         ds.save_as(buf, enforce_file_format=True)
+        return buf.getvalue()
+
+    def test_non_finite_float_rgb_dicom_is_unsupported(self):
+        rgb = np.full((40, 60, 3), 100.0, dtype=np.float32)
+        rgb[0, 0, 0] = np.nan
         with self.assertRaisesRegex(Unsupported, r"^unsupported: non-finite pixel values \(1 NaN, 0 infinite\)$"):
-            render("dicom", "id", buf.getvalue(), "inferno")
+            render("dicom", "id", self.float_rgb_dicom_bytes(rgb), "inferno")
+
+    def test_finite_float_rgb_dicom_is_unsupported(self):
+        rgb = np.full((40, 60, 3), 0.5, dtype=np.float32)
+        with self.assertRaisesRegex(Unsupported, r"^unsupported: float colour pixel data$"):
+            render("dicom", "id", self.float_rgb_dicom_bytes(rgb), "inferno")
 
     def test_mode_f_tiff_with_non_finite_value_is_unsupported(self):
         def tiff(arr: np.ndarray) -> bytes:
@@ -1980,13 +1988,57 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(out.rgb.dtype, np.uint8)
         np.testing.assert_array_equal(out.rgb, pixels)
 
-    def test_high_bit_rgb_dicom_scales_by_bits_stored(self):
+    def test_high_bit_rgb_dicom_uses_its_full_range(self):
         pixels = np.full((32, 40, 3), 65535, dtype=np.uint16)
         pixels[8:24, 10:30, 0] = 0
         out = render("dicom", "id", self.dicom_bytes(pixels, "RGB"), "inferno")
         self.assertEqual(out.rgb.dtype, np.uint8)
         self.assertEqual(out.rgb.max(), 255)
         self.assertEqual(out.rgb.min(), 0)
+        pixels[:] = 32768  # the top bit set: unchanged scaling by 16 bits
+        self.assertEqual(preprocess_module._to_uint8(pixels).max(), 128)
+
+    def test_16_bit_rgb_holding_12_bit_values_is_stretched(self):
+        pixels = np.zeros((40, 60, 3), dtype=np.uint16)
+        pixels[_text_mask()] = 4095
+        ds = pydicom.dcmread(io.BytesIO(self.dicom_bytes(pixels, "RGB")))
+        self.assertEqual(ds.BitsStored, 16)
+        rgb, _ = preprocess_module._colour_dicom(ds, "RGB")
+        np.testing.assert_array_equal(rgb, np.where(_text_mask()[..., None], 255, 0).repeat(3, axis=2))
+
+    def _palette_dataset(self, lut_bits: int, entries: np.ndarray) -> pydicom.Dataset:
+        ds = pydicom.dcmread(
+            io.BytesIO(self.dicom_bytes(np.arange(256, dtype=np.uint8).reshape(16, 16), "PALETTE COLOR"))
+        )
+        for element in (0x1101, 0x1102, 0x1103):  # red, green, blue
+            ds.add_new((0x0028, element), "US", [256, 0, lut_bits])
+            ds.add_new((0x0028, element + 0x100), "OW", entries.astype("<u2").tobytes())
+        return ds
+
+    def test_palette_with_8_bit_entries_in_a_16_bit_descriptor_renders_the_entries(self):
+        entries = np.arange(256)[::-1]
+        rgb, _ = preprocess_module._colour_dicom(self._palette_dataset(16, entries), "PALETTE COLOR")
+        np.testing.assert_array_equal(rgb[..., 0].ravel(), entries)
+
+    def test_palette_with_16_bit_entries_in_an_8_bit_descriptor_clips_without_wrapping(self):
+        entries = np.arange(256) * 257
+        rgb, _ = preprocess_module._colour_dicom(self._palette_dataset(8, entries), "PALETTE COLOR")
+        out = rgb[..., 0].ravel()  # indices are sorted, so the outputs must be non-decreasing
+        self.assertTrue(np.all(np.diff(out.astype(int)) >= 0))
+        self.assertEqual((out[0], out[-1]), (0, 255))
+
+    def test_to_uint8_scales_by_the_bits_used(self):
+        to_uint8 = preprocess_module._to_uint8
+        eight = np.arange(256, dtype=np.uint8)
+        np.testing.assert_array_equal(to_uint8(eight), eight)
+        np.testing.assert_array_equal(to_uint8(eight.astype(np.uint16)), eight)
+        np.testing.assert_array_equal(to_uint8(np.array([0, 2048, 4095], dtype=np.uint16)), [0, 128, 255])
+        np.testing.assert_array_equal(to_uint8(np.array([0, 40000, 65535], dtype=np.uint16)), [0, 156, 255])
+        np.testing.assert_array_equal(to_uint8(np.array([-5, 3, 255], dtype=np.int16)), [0, 3, 255])  # negatives clip
+
+    def test_to_uint8_accepts_an_empty_array(self):
+        out = preprocess_module._to_uint8(np.zeros((0, 4, 3), dtype=np.uint16))
+        self.assertEqual((out.shape, out.dtype), ((0, 4, 3), np.uint8))
 
     def test_bundled_colour_dicoms_render_rgb_uint8(self):
         for name in ("examples_rgb_color.dcm", "SC_ybr_full_422_uncompressed.dcm", "examples_palette.dcm"):

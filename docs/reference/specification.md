@@ -351,10 +351,16 @@ none. Notes never affect the exit status.
    split into per-frame items. `RGB`, `YBR_*` (pydicom's `pixel_array`
    returns RGB) and `PALETTE COLOR` (expanded with `apply_color_lut`) images
    get step 2's unused-bit masking and skip the rest of steps 2-5: samples
-   are scaled to uint8 (by `BitsStored`, or the palette's entry bit depth,
-   when above 8 bits), no windowing or colormap is applied, and only the crop
-   of step 6 follows. Steps 2-5 apply in full to
-   `MONOCHROME1`/`MONOCHROME2`
+   are scaled to uint8 by the bits the data uses, not the declared depth:
+   `effective = max(8, bit length of the maximum sample)` and each sample
+   becomes `round(sample * 255 / (2**effective - 1))`, clipped to 0-255
+   (negative samples become 0). Float colour pixel data raises
+   `unsupported: float colour pixel data`, since it has no bit depth to
+   scale by. So 8-bit data is unchanged and 12-bit values in a 16-bit image
+   are stretched to full brightness, but each image is scaled by its own
+   maximum, so brightness can differ between images of one series. No
+   windowing or colormap is applied, and only the crop of step 6 follows.
+   Steps 2-5 apply in full to `MONOCHROME1`/`MONOCHROME2`
 2. Extract pixel array, mask its unused bits, convert to float32 (values keep
    their native scale). Float pixel data (`FloatPixelData`, grayscale or
    colour) holding NaN or infinity raises

@@ -159,6 +159,14 @@ Read **Upgrading** first.
 
 ### Fixes
 
+- Colour and palette DICOMs are now scaled to 8 bits by the bits their
+  samples actually use, not the declared depth. Before, 12-bit values in a
+  16-bit RGB image, or 8-bit palette entries under a 16-bit descriptor,
+  rendered near black, hiding burned-in text; and 16-bit palette entries
+  under an 8-bit descriptor wrapped around instead of clipping. 8-bit images
+  are unchanged. Each image is scaled by its own maximum, so brightness can
+  differ between images of one series. A colour DICOM with float pixel data
+  is now a `failed` input (`unsupported: float colour pixel data`).
 - A float DICOM or mode `F` TIFF with a NaN or infinite pixel value is now a
   `failed` input (`unsupported: non-finite pixel values (1 NaN, 0
   infinite)`). Before, the one value made the min-max scaling collapse the

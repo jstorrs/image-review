@@ -175,6 +175,9 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
     mode `F` TIFF), with `unsupported: non-finite pixel values (1 NaN, 0
     infinite)`: scaling by the minimum and maximum would wipe out the
     contrast, so nothing readable would be left to review;
+  - a colour DICOM with float pixel data (`unsupported: float colour pixel
+    data`): it has no bit depth to scale by, and values in 0..1 would render
+    near black;
   - an unreadable subdirectory;
   - a rendered image wider or taller than 65500 pixels, libjpeg's limit,
     with an `OSError` from the JPEG writer (with Pillow 12.3,
@@ -275,7 +278,8 @@ holds source paths.
 
 The DICOM preprocessing pipeline for grayscale (MONOCHROME1/2) images;
 single-frame colour (RGB, YBR) and palette DICOMs are only converted to 8-bit
-RGB and cropped, with no windowing or colormap:
+RGB (scaled by the bits the image uses, not the declared depth) and cropped,
+with no windowing or colormap:
 
 1. Converts to float32, corrects photometric interpretation
 2. Compresses intensity outliers (beyond the 1st/99th percentile) into the

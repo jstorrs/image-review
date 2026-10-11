@@ -291,11 +291,15 @@ def _compress_tails(img: np.ndarray) -> np.ndarray:
     return np.interp(img, [lo, bot, top, hi], [0, TAIL_FRACTION, 1 - TAIL_FRACTION, 1]).astype(np.float32)
 
 
-def _to_uint8(pixels: np.ndarray, bits: int) -> np.ndarray:
-    """Scale unsigned integer samples of `bits` significant bits to uint8."""
-    if bits <= 8:
-        return ski.util.img_as_ubyte(pixels.astype(np.uint8))
-    scaled = pixels.astype(np.float32) * (255 / (2**bits - 1))
+def _to_uint8(pixels: np.ndarray) -> np.ndarray:
+    """Scale colour samples to uint8 by the bits they use, not the declared depth: the larger of 8 and the bit length
+    of the maximum maps to 255. 8-bit data is unchanged; data using fewer bits than declared is stretched to full
+    brightness, so burned-in text stays visible. Negative samples (signed, non-conformant) clip to 0."""
+    if pixels.size == 0:
+        return np.zeros(pixels.shape, dtype=np.uint8)
+    pixels = np.maximum(pixels, 0)
+    effective = max(8, int(pixels.max()).bit_length())
+    scaled = pixels.astype(np.float64) * 255 / (2**effective - 1)
     return np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
 
 
@@ -395,13 +399,13 @@ def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarra
     """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels, and the unused
     bits that held content (see `_stored_pixels`; palette indices are masked before the lookup)."""
     pixels, unused_bits = _stored_pixels(dcm)
-    bits = int(dcm.BitsStored)
+    if pixels.dtype.kind == "f":  # no depth to scale by: 0..1 floats would render near black
+        raise Unsupported("float colour pixel data")
     if photometric == "PALETTE COLOR":
         pixels = pydicom.pixels.apply_color_lut(pixels, dcm)
-        bits = int(dcm.RedPaletteColorLookupTableDescriptor[2])
     if pixels.ndim != 3 or pixels.shape[2] != 3:
         raise Unsupported(f"pixel array with shape {pixels.shape}")
-    return _to_uint8(pixels, bits), unused_bits
+    return _to_uint8(pixels), unused_bits
 
 
 def preprocess_dicom(
