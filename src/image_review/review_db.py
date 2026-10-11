@@ -6,7 +6,7 @@ import logging
 import os
 import stat
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import astuple, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -130,6 +130,19 @@ def decode_utf8(path: Path, data: bytes) -> str:
         raise ValueError(f"{path}: not valid UTF-8 at byte {exc.start}") from None
 
 
+def tsv_rows(path: Path, text: str) -> Iterator[tuple[int, list[str]]]:
+    """Every row of a tab-separated file's text (header first) with the line it ends on.
+
+    ValueError naming `path` and the line if csv refuses the text, as it does for a field over its 128 KiB limit.
+    """
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t")
+    try:
+        for fields in reader:
+            yield reader.line_num, fields
+    except csv.Error as exc:
+        raise ValueError(f"{path}:{reader.line_num}: {exc}") from None
+
+
 def parse_log(path: Path, data: bytes) -> tuple[list[Decision], bool]:
     """Every decision in review.tsv's bytes, in file order, and whether the file has LEGACY_HEADER.
 
@@ -137,11 +150,11 @@ def parse_log(path: Path, data: bytes) -> tuple[list[Decision], bool]:
     """
     if not data:
         return [], False  # created but the first append never landed
-    reader = csv.reader(io.StringIO(decode_utf8(path, data), newline=""), delimiter="\t")
-    header = next(reader, None)
+    rows = tsv_rows(path, decode_utf8(path, data))
+    _, header = next(rows, (1, None))
     if header not in (HEADER, LEGACY_HEADER):
         raise ValueError(f"{path}:1: header must be {', '.join(HEADER)}")
-    decisions = [parse_decision(path, reader.line_num, fields, header) for fields in reader]
+    decisions = [parse_decision(path, line, fields, header) for line, fields in rows]
     return decisions, header == LEGACY_HEADER
 
 

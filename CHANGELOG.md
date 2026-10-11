@@ -123,6 +123,12 @@ Read **Upgrading** first.
   machine with a long host name: when the default socket path would be too
   long, an 8-character hash of the host name replaces the host in the file
   name.
+- A `review.tsv` ending in a very long unfinished line (for example the
+  zero-filled tail some file systems leave after a crash) no longer stops
+  `status`, `review` and `export` with a traceback: it is treated as a torn
+  last line like any other. A field longer than 131072 characters
+  anywhere else in `review.tsv`, `manifest.tsv` or `skipped.tsv` is now
+  reported as a parse error naming the file and line.
 
 ### Documentation
 

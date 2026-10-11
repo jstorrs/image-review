@@ -5,6 +5,7 @@ import grp
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -607,6 +608,55 @@ class TestExportLiveOrTorn(ExportTestCase):
                 self.assertIn("`review`", result.output)
                 self.assertEqual(result.stdout, "")
         self.assertEqual((self.work / "review.tsv").read_bytes(), before)
+
+
+class TestOversizedField(ExportTestCase):
+    """A TSV field over csv's 128 KiB limit is a parse error, never an uncaught csv.Error."""
+
+    BIG = "x" * 200_000
+
+    def assertCleanExit(self, result, code):
+        self.assertIn(type(result.exception), (type(None), SystemExit), repr(result.exception))  # not a csv.Error
+        self.assertEqual(result.exit_code, code, result.output)
+        self.assertNotIn("Traceback", result.output)
+
+    def test_huge_torn_review_tail(self):
+        with open(self.work / "review.tsv", "ab") as f:
+            f.write(b"\x00" * 200_000)
+        before = (self.work / "review.tsv").read_bytes()
+        status = invoke("status", "--work-dir", str(self.work))
+        self.assertCleanExit(status, 0)
+        self.assertIn("Overall: 13 images", status.stdout)
+        self.assertIn("ignoring the unfinished last line", status.stderr)
+        export = self.export()
+        self.assertCleanExit(export, 1)
+        self.assertIn("unfinished line", export.output)
+        self.assertEqual(export.stdout, "")
+        self.assertEqual((self.work / "review.tsv").read_bytes(), before)
+
+    def test_oversized_field_is_cannot_read_work_directory(self):
+        good = "\t".join(MANIFEST_WITH_HASHES[0])
+        cases = {
+            "review.tsv": lambda: (self.work / "review.tsv").write_bytes(
+                (self.work / "review.tsv").read_bytes() + f"{self.BIG}\tb1\r\n".encode() + b"x\tb1\r\n"
+            ),
+            "manifest.tsv": lambda: (self.work / "manifest.tsv").write_text(
+                "\t".join(MANIFEST_HEADER) + f"\r\n{good}\r\nb\tk\t{self.BIG}\t\t\r\n{good}\r\n"
+            ),
+            "skipped.tsv": lambda: (self.work / "skipped.tsv").write_text(
+                f"image_id\tkind\treason\r\n/a\tfailed\t{self.BIG}\r\n/b\tignored\tr\r\n"
+            ),
+        }
+        # skipped.tsv is read after the store opens, so its error is a ClickException without the prefix
+        prefix = {"review.tsv": "Cannot read work directory: ", "manifest.tsv": "Cannot read work directory: "}
+        for name, corrupt in cases.items():
+            with self.subTest(name):
+                self.setUp()  # a fresh, valid work dir for each file
+                corrupt()
+                for command in ("status", "export"):
+                    result = invoke(command, "--work-dir", str(self.work))
+                    self.assertCleanExit(result, 1)
+                    self.assertRegex(result.stderr, rf"{prefix.get(name, '')}.*{re.escape(name)}:\d+: field larger")
 
 
 class TestStatusCheck(unittest.TestCase):

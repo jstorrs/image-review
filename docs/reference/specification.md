@@ -787,15 +787,19 @@ Files written before the log format (one row per `image_id`) are already
 valid logs. The file is parsed strictly (`review_db.parse_log`; `FLAGGED` is
 never a valid `status`), and a bad file is a `ValueError` naming
 `<file>:<line>`, shown as `Cannot read work directory: ...`, never skipped or
-rewritten.
+rewritten. `review_db.tsv_rows` reads all three TSVs (`review.tsv`,
+`manifest.tsv`, `skipped.tsv`) and turns a `csv.Error` (in practice a field
+longer than csv's limit of 131072 characters, which is deliberately not raised)
+into that `ValueError` with the reader's line.
 
 Two crash leftovers are tolerated. An empty file (created, but the first append
 never landed) holds no decisions. An unparseable last line with no line ending
-(`\r` or `\n`; a torn append) is ignored with a logged WARNING, and the
-next mark truncates the file back to the end of the last complete line before
-appending, so the file stays strictly parseable. The truncate happens only if
-the file still has the inode and size seen when it was loaded; otherwise the
-mark fails with `<file> changed since it was loaded`. A failed append (short
+(`\r` or `\n`; a torn append, including a tail longer than 131072 characters
+that csv refuses, such as a zero-filled extension) is ignored with a logged
+WARNING, and the next mark truncates the file back to the end of the last
+complete line before appending, so the file stays strictly parseable. The
+truncate happens only if the file still has the inode and size seen when it was
+loaded; otherwise the mark fails with `<file> changed since it was loaded`. A failed append (short
 write then an error, or a failed `fsync`) is cut off the same way, at once if
 possible, else by the next mark. A read-only store warns but never writes.
 

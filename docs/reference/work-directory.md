@@ -77,8 +77,10 @@ Cannot read work directory: <file>:<line>: <problem>
 if the header is not exactly one of the two above, a row has a missing or
 empty field, a hash is not 64 lowercase hex characters, or a
 `preprocessed_path` repeats. A file that is not valid UTF-8 is named with a
-byte offset instead of a line (`<file>: not valid UTF-8 at byte N`). The tool
-never repairs the file: fix or remove the line it names.
+byte offset instead of a line (`<file>: not valid UTF-8 at byte N`), and a
+field longer than 131072 characters (csv's field limit) is a parse error at its
+line (`field larger than field limit`). The tool never repairs the file: fix or
+remove the line it names.
 
 **Hash check.** Each JPG is checked against its `jpeg_sha256` whenever it is
 loaded. A JPG changed or cut short after preprocessing is shown as an
@@ -100,7 +102,8 @@ its header when nothing was skipped. Every input ends up in exactly one of
 What each kind covers, with example reasons, is in
 [Skipped inputs](../commands/preprocess.md#skipped-inputs). `status` counts
 the rows and `export` reports them. Both read the file strictly and stop with
-an error naming the file and line if it is malformed.
+an error naming the file and line if it is malformed, including a field
+longer than 131072 characters.
 
 ## `preprocess.json`
 
@@ -167,8 +170,11 @@ with a warning and dropped on the next rating, unless all of its fields made
 it to disk: then it is kept, and only its last field (`tool_version`, or
 `timestamp` in an old five-column file) may be cut short or empty. A crash
 in the middle of a grid mark can record only some of its images. A bad line
-anywhere else is still an error. `export` refuses a file whose last line was
-cut short; see [Refusals](../commands/export.md#refusals-and-output-files).
+anywhere else is still an error. A last line with no line ending that holds a
+field longer than 131072 characters (for example the zero-filled tail some
+file systems leave after a crash) counts as cut short; the same field on a
+complete line is a parse error. `export` refuses a file whose last line was cut
+short; see [Refusals](../commands/export.md#refusals-and-output-files).
 
 ### Undo rows
 

@@ -103,6 +103,11 @@ class TestSkipped(StoreTestCase):
         self.assertEqual(self.store.skipped(), SkippedCounts(0, 0))
         self.assertEqual(load_skipped(self.work_dir), [])
 
+    def test_oversized_field_names_file_and_line(self):
+        self.write(f"image_id\tkind\treason\n/a\tfailed\t{'x' * 200_000}\n/b\tignored\tr\n")
+        with self.assertRaisesRegex(ValueError, r"skipped\.tsv:2: field larger than field limit"):
+            load_skipped(self.work_dir)
+
     def test_header_only_is_zero(self):
         self.write("image_id\tkind\treason\n")
         self.assertEqual(self.store.skipped(), SkippedCounts(0, 0))
@@ -472,6 +477,18 @@ class TestStrictLoading(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, rf"manifest\.tsv:(3: .*)?{message}"):
                     load_manifest(self.work_dir)
 
+    def test_oversized_manifest_field_names_file_and_line(self):
+        self.write_manifest(
+            self.MANIFEST_HEADER, "b\tk.jpg\t/src/a.dcm", f"b\tk2.jpg\t{'x' * 200_000}", "b\tk3.jpg\t/c"
+        )
+        with self.assertRaisesRegex(ValueError, r"manifest\.tsv:3: field larger than field limit"):
+            load_manifest(self.work_dir)
+
+    def test_oversized_manifest_header_names_file_and_line_1(self):
+        self.write_manifest("batch\t" + "x" * 200_000)
+        with self.assertRaisesRegex(ValueError, r"manifest\.tsv:1: field larger than field limit"):
+            load_manifest(self.work_dir)
+
     def test_hashed_row_under_legacy_header_is_refused(self):
         self.write_manifest(
             self.MANIFEST_HEADER, f"batch_001\tbatch_001/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}"
@@ -542,6 +559,31 @@ class TestReviewLog(unittest.TestCase):
         self.assertTrue(after[len(intact) :].startswith(b"z\tbatch_001\tDIRTY\t1\t"))
         self.assertEqual(len(after.splitlines()), 3)  # header, x, z: the fragment is gone
         self.assertEqual(set(self.reload()._rows), {"x", "z"})
+
+    def test_huge_unterminated_tail_is_a_torn_line(self):
+        # a zero-filled extension after a crash: csv refuses a field over 128 KiB, which must not escape as csv.Error
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        intact = self.path.read_bytes()
+        with open(self.path, "ab") as f:
+            f.write(b"\x00" * 200_000)
+        with self.assertLogs("image_review.review_db", "WARNING") as logs:
+            db = ReviewDB(self.work_dir)
+        self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
+        self.assertIn("field larger than field limit", logs.records[0].getMessage())
+        self.assertEqual(set(db._rows), {"x"})
+        db.mark_many([("z", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
+        after = self.path.read_bytes()
+        self.assertTrue(after.startswith(intact))
+        self.assertNotIn(b"\x00", after)
+        self.assertEqual(set(self.reload()._rows), {"x", "z"})
+
+    def test_oversized_field_on_a_complete_line_is_a_value_error(self):
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        with open(self.path, "ab") as f:
+            f.write(b"y" * 200_000 + b"\tbatch_001\r\n")
+            f.write(b"z\tbatch_001\r\n")
+        with self.assertRaisesRegex(ValueError, r"review\.tsv:3: field larger than field limit"):
+            ReviewDB(self.work_dir)
 
     def test_torn_last_line_that_parses_is_kept(self):
         ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")

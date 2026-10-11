@@ -1,6 +1,4 @@
-import csv
 import hashlib
-import io
 import logging
 import re
 from collections import Counter
@@ -12,7 +10,7 @@ from typing import Literal, Protocol, Self, get_args
 from .access import MANIFEST_NAME
 from .export import ExportRow, export_rows
 from .lock import LockHolder, acquire_lock, release_lock
-from .review_db import Change, ReviewDB, decode_utf8
+from .review_db import Change, ReviewDB, decode_utf8, tsv_rows
 from .status import (
     TODO_STATUSES,
     GridCleanRefused,
@@ -137,14 +135,13 @@ def load_manifest(work_dir: Path) -> list[ManifestEntry]:
     path = work_dir / MANIFEST_NAME
     entries: list[ManifestEntry] = []
     key_lines: dict[str, int] = {}
-    reader = csv.reader(io.StringIO(decode_utf8(path, path.read_bytes()), newline=""), delimiter="\t")
-    header = next(reader, None)
+    rows = tsv_rows(path, decode_utf8(path, path.read_bytes()))
+    _, header = next(rows, (1, None))
     if header not in (MANIFEST_HEADER, LEGACY_MANIFEST_HEADER):
         raise ValueError(
             f"{path}:1: header must be {', '.join(MANIFEST_HEADER)} (or {', '.join(LEGACY_MANIFEST_HEADER)})"
         )
-    for fields in reader:
-        line = reader.line_num
+    for line, fields in rows:
         if len(fields) != len(header) or not all(fields):
             raise ValueError(
                 f"{path}:{line}: expected {len(header)} non-empty tab-separated fields ({', '.join(header)})"
@@ -197,16 +194,16 @@ def load_skipped(work_dir: Path) -> list[SkippedRow]:
     path = work_dir / SKIPPED_NAME
     if not path.exists():
         return []
-    rows: list[SkippedRow] = []
-    reader = csv.reader(io.StringIO(decode_utf8(path, path.read_bytes()), newline=""), delimiter="\t")
-    if next(reader, None) != SKIPPED_HEADER:
+    skipped: list[SkippedRow] = []
+    rows = tsv_rows(path, decode_utf8(path, path.read_bytes()))
+    if next(rows, (1, None))[1] != SKIPPED_HEADER:
         raise ValueError(f"{path}:1: header must be {', '.join(SKIPPED_HEADER)}")
-    for fields in reader:
+    for line, fields in rows:
         kind = parse_choice(fields[1], SKIP_KINDS) if len(fields) == len(SKIPPED_HEADER) else None
         if kind is None:
-            raise ValueError(f"{path}:{reader.line_num}: expected image_id, kind (failed or ignored), reason")
-        rows.append(SkippedRow(ImageId(fields[0]), kind, fields[2]))
-    return rows
+            raise ValueError(f"{path}:{line}: expected image_id, kind (failed or ignored), reason")
+        skipped.append(SkippedRow(ImageId(fields[0]), kind, fields[2]))
+    return skipped
 
 
 def skipped_counts(rows: Iterable[SkippedRow]) -> SkippedCounts:
