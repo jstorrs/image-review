@@ -31,6 +31,7 @@ from image_review.controller import (
 )
 from image_review.grid_packer import pack_into_grids
 from image_review.layout import fit_size
+from image_review.review_db import ReviewLogChanged
 from image_review.status import GridCleanRefused
 from image_review.store import (
     LocalStore,
@@ -61,6 +62,16 @@ class TestSession(SessionTestCase):
         s._mark("CLEAN")
         self.assertEqual(s._statuses[key], "CLEAN")
         self.assertEqual(s._todo_count, before - 1)
+
+    def test_review_log_changed_on_mark_ends_the_session(self):
+        # not a transient store error: the session's statuses are stale, so it must not carry on marking
+        s = ReviewSession(self.store, reviewer="tester", mode="single")
+        s._cursor = 0
+        with (
+            mock.patch.object(self.store, "mark", side_effect=ReviewLogChanged("review.tsv changed")),
+            self.assertRaises(ReviewLogChanged),
+        ):
+            s._mark("CLEAN")
 
     def test_grid_mode_mark_updates_all_keys(self):
         s = ReviewSession(self.store, reviewer="tester", mode="grid")

@@ -21,6 +21,7 @@ from .atomic import write_new_file
 from .connection import RemoteTarget, Token, parse_reviewer, parse_token
 from .export import ExportRow, ExportStatus, format_allowlist, format_report, split_allowlist
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
+from .review_db import ReviewLogChanged
 from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on
 from .status import MarkMode, Rotation, Status
 from .store import LocalStore, ReviewStore, SkippedCounts, StatusFilter, batch_summary, skipped_counts, summary
@@ -572,6 +573,10 @@ def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, 
                 rotation=rotate,
             )
             session.run()
+        except ReviewLogChanged as e:  # review.tsv changed under this session (a mark or undo): its statuses are stale
+            raise click.ClickException(
+                f"Not recorded: {e}. Stop any other review or serve using this work directory, then run review again."
+            ) from e
         finally:
             pg.quit()
 

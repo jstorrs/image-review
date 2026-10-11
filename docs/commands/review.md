@@ -331,6 +331,26 @@ not. Autoplay stops, and only `q`, Escape, the gamepad's Start and closing
 the window do anything: no navigation, mode switch or `z`. Quit, then run the
 same command again while the server is still running.
 
+## Another writer on the work directory
+
+A local review refuses a verdict or an undo if `review.tsv` has changed
+since the session last read or wrote it: another writer is using the work
+directory despite its [`review.lock`](../reference/work-directory.md#reviewlock),
+or the file was edited, replaced or deleted. Nothing is saved, the window
+closes, and the command exits 1 with:
+
+```
+Not recorded: PATH changed since it was loaded; not appending (is another review or serve using this work directory?). Stop any other review or serve using this work directory, then run review again.
+```
+
+If the session was about to drop an unfinished last line of `review.tsv`
+(left by an interrupted write), the message says `not truncating its
+unfinished last line` instead of `not appending (...)`.
+
+Every verdict before it is saved. Stop the other writer, then run the same
+command again: it reads the file afresh, including the other writer's
+verdicts.
+
 ## Recorded verdicts
 
 Every verdict is saved to `review.tsv` in the work directory, with who gave

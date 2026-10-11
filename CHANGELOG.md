@@ -129,6 +129,14 @@ Read **Upgrading** first.
   last line like any other. A field longer than 131072 characters
   anywhere else in `review.tsv`, `manifest.tsv` or `skipped.tsv` is now
   reported as a parse error naming the file and line.
+- Two writers on one work directory (possible, for example, after
+  `review.lock` was deleted by hand while its `review` or `serve` still ran)
+  could let a stale grid CLEAN override the other writer's DIRTY, putting the
+  image in the export allowlist. A writer now refuses to record a verdict or
+  an undo when `review.tsv` has changed since it last read or wrote it:
+  `review` exits 1 with "Not recorded: ... changed since it was loaded", and
+  `serve` answers that request and later ones with an error until restarted.
+  Nothing is written.
 
 ### Documentation
 

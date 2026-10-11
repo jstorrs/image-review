@@ -23,7 +23,7 @@ from image_review import store as store_module
 from image_review.access import policy_of_dir
 from image_review.cli import unknown_batch_message
 from image_review.lock import LOCK_NAME, WorkDirLocked, acquire_lock, boot_id, release_lock, this_process
-from image_review.review_db import ReviewDB
+from image_review.review_db import ReviewDB, ReviewLogChanged
 from image_review.store import LocalStore
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, temp_dir
 
@@ -448,6 +448,17 @@ class TestLockCli(LockTestCase):
         self.assertIn("changed since it was loaded", result.output)
         self.assertNotIn("Traceback", result.output)
         session.assert_not_called()
+        self.assertFalse(self.lock_path.exists())
+
+    def test_review_log_changed_during_session_is_a_clean_error(self):
+        changed = ReviewLogChanged(f"{self.work_dir / 'review.tsv'} changed since it was loaded; not appending")
+        with mock.patch("image_review.controller.ReviewSession") as session:
+            session.return_value.run.side_effect = changed
+            result = self.invoke("review")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Not recorded: ", result.output)
+        self.assertIn("changed since it was loaded", result.output)
+        self.assertNotIn("Traceback", result.output)
         self.assertFalse(self.lock_path.exists())
 
     def test_review_without_user_name_asks_for_reviewer(self):

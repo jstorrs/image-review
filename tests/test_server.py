@@ -20,6 +20,7 @@ from unittest import mock
 
 from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, RemoteTarget
+from image_review.review_db import ReviewLogChanged
 from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
 from image_review.store import LocalStore, load_manifest
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server, temp_dir, wait_for_file
@@ -235,6 +236,19 @@ class TestConnectionHandling(ServerTestCase):
         self.assertNotIn("secret-detail", "\n".join(logs.output))
         conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {self.target.token}"})
         self.assertEqual(conn.getresponse().status, 200)
+
+    def test_review_log_changed_is_500_naming_the_class(self):
+        body = json.dumps(
+            {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
+        ).encode()
+        with (
+            self.assertLogs(SERVER_LOGGER, "INFO") as logs,
+            mock.patch.object(self.server.store, "mark", side_effect=ReviewLogChanged("review.tsv changed")),
+        ):
+            resp, data, _ = self.request("POST", "/mark", body=body)
+        self.assertEqual((resp.status, data), (500, b""))
+        errors = [r.getMessage() for r in logs.records if r.levelno == logging.ERROR]
+        self.assertEqual(errors, ["internal error: ReviewLogChanged"])
 
     def test_deeply_nested_json_is_400(self):
         resp, _ = self.post_mark(b"[" * 200000)

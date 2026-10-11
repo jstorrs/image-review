@@ -236,6 +236,15 @@ start time.
 [Browser review over SSH](../tutorials/browser-review.md#troubleshooting)
 shows the command.
 
+If it was still running and a second writer starts, each checks before
+every verdict that `review.tsv` is exactly the file it last read or wrote,
+and refuses the verdict if not. So once one writer has recorded a verdict,
+the other's next one is refused (a verdict recorded at the same moment can
+still land, but then both writers refuse their next). What each command
+does then is in
+[`review`](../commands/review.md#another-writer-on-the-work-directory) and
+[`serve`](../commands/serve.md#another-writer-on-the-work-directory).
+
 ## Leftover temporary files
 
 Each of these is normally removed when the command exits, but an abrupt kill

@@ -95,6 +95,10 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) 
     )
 
 
+class ReviewLogChanged(RuntimeError):
+    """review.tsv is not the file this ReviewDB last loaded or wrote: another writer changed it. Nothing was written."""
+
+
 @dataclass(frozen=True)
 class PendingTruncate:
     """A torn tail of review.tsv, from `offset` to the end, as seen in the file `ino` when it was `size` bytes."""
@@ -189,6 +193,8 @@ class ReviewDB:
         self._rows: dict[ImageId, Decision] = {}  # keyed by image_id; last row wins (see latest(): never a tombstone)
         self._truncate: PendingTruncate | None = None  # a torn tail to drop before the next append
         self._legacy: LegacyLog | None = None  # an old-header file; appends refuse until migrate()
+        # review.tsv's (inode, size) as last loaded or written; None: absent when loaded, so only an empty file will do
+        self._seen: tuple[int, int] | None = None
         if self.review_path.exists():
             self._load()
 
@@ -210,6 +216,7 @@ class ReviewDB:
             log.warning("ignoring the unfinished last line of %s (an interrupted write): %s", self.review_path, exc)
             self._truncate = PendingTruncate(st.st_ino, len(data), end)
         self._rows = latest(decisions)
+        self._seen = (st.st_ino, len(data))
         if legacy:
             self._legacy = LegacyLog(st.st_ino, len(data), decisions)
 
@@ -224,7 +231,7 @@ class ReviewDB:
         legacy = self._legacy
         st = os.stat(self.review_path)
         if (st.st_ino, st.st_size) != (legacy.ino, legacy.size):
-            raise RuntimeError(f"{self.review_path} changed since it was loaded; not migrating it")
+            raise ReviewLogChanged(f"{self.review_path} changed since it was loaded; not migrating it")
         file_mode = policy_of_dir(self.work_dir).file_mode
         fd, tmp = tempfile.mkstemp(dir=self.work_dir, prefix=".review.tsv.", suffix=".tmp")
         try:
@@ -233,6 +240,7 @@ class ReviewDB:
                 f.write(format_tsv([HEADER, *map(astuple, legacy.decisions)]).encode("utf-8"))
                 f.flush()
                 os.fsync(f.fileno())
+                st = os.fstat(f.fileno())
             os.replace(tmp, self.review_path)
         except BaseException:
             with contextlib.suppress(OSError):
@@ -240,6 +248,7 @@ class ReviewDB:
             raise
         self._legacy = None
         self._truncate = None  # the torn tail was not copied
+        self._seen = (st.st_ino, st.st_size)
         try:  # make the rename itself durable, where the filesystem can
             dir_fd = os.open(self.work_dir, os.O_RDONLY)
             try:
@@ -254,7 +263,9 @@ class ReviewDB:
         """Append decisions to review.tsv as one buffer (written in a loop that handles short writes), then fsync.
 
         Earlier bytes never change, except a torn tail: one found by _load, or left by a failed append, is cut off first.
-        An old-header file is refused: its rows would not match the header until migrate() rewrites it.
+        An old-header file is refused: its rows would not match the header until migrate() rewrites it. So is a file
+        that is not the one this ReviewDB last loaded or wrote (ReviewLogChanged): another writer appended to it or
+        replaced it, and a verdict decided from the state loaded here could override one recorded there.
         """
         if self._legacy is not None:
             raise RuntimeError(
@@ -262,17 +273,28 @@ class ReviewDB:
             )
         rows = format_tsv(map(astuple, decisions))
         file_mode = policy_of_dir(self.work_dir).file_mode
-        fd = os.open(self.review_path, os.O_RDWR | os.O_APPEND | os.O_CREAT, file_mode)
+        changed = (
+            f"{self.review_path} changed since it was loaded; not appending "
+            "(is another review or serve using this work directory?)"
+        )
+        try:  # create it only if it was absent when loaded: one deleted or moved since is a change, not a fresh start
+            fd = os.open(
+                self.review_path, os.O_RDWR | os.O_APPEND | (os.O_CREAT if self._seen is None else 0), file_mode
+            )
+        except FileNotFoundError:
+            raise ReviewLogChanged(changed) from None
         try:
             st = os.fstat(fd)
             start = st.st_size
             if self._truncate is not None:
                 if not self._truncate.matches(st):
-                    raise RuntimeError(
+                    raise ReviewLogChanged(
                         f"{self.review_path} changed since it was loaded; not truncating its unfinished last line"
                     )
                 os.ftruncate(fd, self._truncate.offset)  # drop the torn tail
                 start = self._truncate.offset
+            elif (st.st_ino, st.st_size) != (self._seen if self._seen is not None else (st.st_ino, 0)):
+                raise ReviewLogChanged(changed)
             if start == 0:
                 if stat.S_IMODE(st.st_mode) != file_mode:
                     os.fchmod(fd, file_mode)  # the umask may have stripped group bits teammates need to read it
@@ -283,7 +305,8 @@ class ReviewDB:
                     "" if last == b"\n" else "\n" if last == b"\r" else "\r\n"
                 )  # finish a last line that parsed but lacks its ending
                 payload = prefix + rows
-            remaining = payload.encode("utf-8")
+            encoded = payload.encode("utf-8")
+            remaining = encoded
             try:
                 while remaining:
                     remaining = remaining[os.write(fd, remaining) :]  # os.write may write less than asked
@@ -292,11 +315,14 @@ class ReviewDB:
                 self._truncate = PendingTruncate(st.st_ino, None, start)  # whatever landed is a torn tail
                 with contextlib.suppress(OSError):
                     os.ftruncate(fd, start)  # best effort; the next append retries it
+                with contextlib.suppress(OSError):  # the size, cut or not, so the next append can tell if it changed
                     self._truncate = PendingTruncate(st.st_ino, os.fstat(fd).st_size, start)
                 raise
         finally:
             os.close(fd)
         self._truncate = None
+        # what this writer wrote, not the file's size now: bytes another writer appended meanwhile are a change
+        self._seen = (st.st_ino, start + len(encoded))
 
     def mark_many(
         self, targets: list[tuple[ImageId, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode

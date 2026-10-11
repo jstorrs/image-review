@@ -238,6 +238,17 @@ or through an SSH tunnel via the login node:
 Press Ctrl-C to stop.
 ```
 
+## Another writer on the work directory
+
+If `review.tsv` changes while this server runs, other than through the
+server itself (another writer using the work directory despite its
+[`review.lock`](../reference/work-directory.md#reviewlock), or the file
+edited, replaced or deleted), the server refuses the next verdict or undo
+without saving it, and every one after it: each gets an error reply (HTTP
+500), and the server logs `internal error: ReviewLogChanged`. Verdicts
+already saved are kept. Stop the other writer, then restart `serve`; it reads
+the file afresh.
+
 ## Stopping
 
 Ctrl-C (SIGINT), SIGTERM and SIGHUP all stop the server. SIGTERM is what

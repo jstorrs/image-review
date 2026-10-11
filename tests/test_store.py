@@ -22,8 +22,9 @@ import skimage as ski
 from image_review import review_db as review_db_module
 from image_review.connection import package_version
 from image_review.controller import ReviewSession
+from image_review.export import split_allowlist
 from image_review.lock import LOCK_NAME
-from image_review.review_db import HEADER, Decision, ReviewDB
+from image_review.review_db import HEADER, Decision, ReviewDB, ReviewLogChanged
 from image_review.status import GridCleanRefused, ImageId
 from image_review.store import (
     LocalStore,
@@ -674,9 +675,99 @@ class TestReviewLog(unittest.TestCase):
         with open(self.path, "ab") as f:
             f.write(b"01\tCLEAN\t1\tt\r\n")  # someone else finished the line since the load
         before = self.path.read_bytes()
-        with self.assertRaisesRegex(RuntimeError, "changed since it was loaded"):
+        with self.assertRaisesRegex(ReviewLogChanged, "changed since it was loaded"):
             db.mark_many([("w", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_append_by_another_writer_since_load_refuses(self):
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        db = ReviewDB(self.work_dir)
+        db.mark_many([("y", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")  # its own marks: fine
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="other", mode="single")
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ReviewLogChanged, "changed since it was loaded; not appending"):
+            db.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(set(db._rows), {"x", "y"})
+
+    def test_file_created_by_another_writer_since_load_refuses(self):
+        db = ReviewDB(self.work_dir)  # no review.tsv yet
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="other", mode="single")
+        before = self.path.read_bytes()
+        with self.assertRaises(ReviewLogChanged):
+            db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_file_replaced_since_load_refuses(self):
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        db = ReviewDB(self.work_dir)
+        same_size = self.path.read_bytes().replace(b"CLEAN", b"DIRTY")
+        replacement = self.work_dir / "replacement.tsv"
+        replacement.write_bytes(same_size)  # created while review.tsv still exists: a new inode, the same size
+        os.replace(replacement, self.path)
+        with self.assertRaises(ReviewLogChanged):
+            db.mark_many([("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        self.assertEqual(self.path.read_bytes(), same_size)
+
+    def test_concurrent_append_refuses_both_writers_next_mark(self):
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        a, b = ReviewDB(self.work_dir), ReviewDB(self.work_dir)
+        real_write = os.write
+
+        def a_appends_first(fd, data):  # A appends between B's check and B's write
+            if not a_appends_first.done:
+                a_appends_first.done = True
+                a.mark_many([("y", "batch_001")], "DIRTY", 1, reviewer="alice", mode="single")
+            return real_write(fd, data)
+
+        a_appends_first.done = False
+        with mock.patch.object(review_db_module.os, "write", a_appends_first):
+            b.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="bob", mode="single")
+        self.assertEqual(set(self.reload()._rows), {"x", "y", "z"})  # both landed, once
+        for db in (a, b):
+            with self.assertRaises(ReviewLogChanged):
+                db.mark_many([("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="grid")
+        self.assertEqual(self.reload()._rows["y"].status, "DIRTY")
+
+    def test_file_deleted_since_load_refuses_and_is_not_recreated(self):
+        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        db = ReviewDB(self.work_dir)
+        self.path.unlink()
+        with self.assertRaisesRegex(ReviewLogChanged, "changed since it was loaded; not appending"):
+            db.mark_many([("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        self.assertFalse(self.path.exists())
+
+    def test_append_after_failed_rollback_refuses_if_file_grew(self):
+        db = ReviewDB(self.work_dir)
+        db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        real_write = os.write
+
+        def short_then_full(fd, data):
+            if short_then_full.done:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            short_then_full.done = True
+            return real_write(fd, data[:10])
+
+        short_then_full.done = False
+        with (
+            mock.patch.object(review_db_module.os, "write", short_then_full),
+            mock.patch.object(review_db_module.os, "ftruncate", side_effect=OSError(errno.EIO, "I/O error")),
+            self.assertRaises(OSError),
+        ):
+            db.mark_many([("y", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
+        with open(self.path, "ab") as f:
+            f.write(b"\r\nw\tbatch_001\tDIRTY\t1\tt\tother\tsingle\t1\t0.1\r\n")  # another writer, after the fragment
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ReviewLogChanged, "not truncating"):
+            db.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_undo_after_own_marks_appends(self):
+        db = ReviewDB(self.work_dir)
+        changes = db.mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
+        db.undo_many(changes, reviewer="tester")
+        db.mark_many([("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        self.assertEqual(self.reload()._rows, db._rows)
 
     def test_bare_cr_file_with_bad_middle_line_raises(self):
         ts = "2026-01-01T00:00:00+00:00"
@@ -882,9 +973,48 @@ class TestMigration(unittest.TestCase):
         with open(self.path, "ab") as f:
             f.write(self.OLD_ROWS[0].encode() + b"\r\n")
         changed = self.path.read_bytes()
-        with self.assertRaisesRegex(RuntimeError, "changed since it was loaded"):
+        with self.assertRaisesRegex(ReviewLogChanged, "changed since it was loaded"):
             db.migrate()
         self.assertEqual(self.path.read_bytes(), changed)
+
+
+class TestTwoWriters(unittest.TestCase):
+    """A second writer despite the lock (review.lock deleted by hand while the first runs) must not append a verdict
+    decided from a stale view of review.tsv."""
+
+    def setUp(self):
+        self.work_dir = temp_dir(self)
+        make_work_dir(self.work_dir)
+        self.path = self.work_dir / "review.tsv"
+
+    def open_both(self) -> tuple[LocalStore, LocalStore]:
+        a = LocalStore(self.work_dir)
+        self.addCleanup(a.close)
+        (self.work_dir / LOCK_NAME).unlink()
+        b = LocalStore(self.work_dir)
+        self.addCleanup(b.close)
+        return a, b
+
+    def assert_grid_clean_refused(self, a: LocalStore, b: LocalStore) -> None:
+        mark(a, ["batch_001/a.jpg"], "DIRTY")
+        self.assertEqual(b.statuses(1)["batch_001/a.jpg"], "UNREVIEWED")  # B's view is stale
+        after_a = self.path.read_bytes()
+        with self.assertRaises(ReviewLogChanged):
+            b.mark(["batch_001/a.jpg", "batch_001/b.jpg"], "CLEAN", 1, reviewer="bob", mode="grid")
+        self.assertEqual(self.path.read_bytes(), after_a)
+        allowed, _ = split_allowlist(LocalStore(self.work_dir, read_only=True).export_rows())
+        self.assertNotIn("/src/patient_smith/a.dcm", [r.image_id for r in allowed])
+
+    def test_stale_grid_clean_does_not_override_dirty(self):
+        with LocalStore(self.work_dir) as store:
+            mark(store, ["batch_002/c.jpg"], "CLEAN")  # review.tsv exists when both load
+        a, b = self.open_both()
+        self.assert_grid_clean_refused(a, b)
+
+    def test_stale_grid_clean_refused_when_review_tsv_was_absent(self):
+        a, b = self.open_both()
+        self.assertFalse(self.path.exists())
+        self.assert_grid_clean_refused(a, b)
 
 
 class TestReadOnlyTornLog(StoreTestCase):

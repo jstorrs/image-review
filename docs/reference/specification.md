@@ -803,6 +803,22 @@ loaded; otherwise the mark fails with `<file> changed since it was loaded`. A fa
 write then an error, or a failed `fsync`) is cut off the same way, at once if
 possible, else by the next mark. A read-only store warns but never writes.
 
+Every other append is checked too. `ReviewDB` keeps the file's `(st_ino,
+size)` as it last loaded or migrated it, or, after an append, the inode and
+the append's start offset plus the bytes it wrote (not the file's size then,
+which would absorb another writer's concurrent append). If the file was
+absent when loaded, only an empty file, the one its own `O_CREAT` made, will
+do; if it existed, it is opened without `O_CREAT`, so one deleted or moved
+since is a change too. If the file is missing or the `fstat` of the
+descriptor opened for the append differs, the mark raises
+`review_db.ReviewLogChanged` (a `RuntimeError`) before writing anything:
+`<file> changed since it was loaded; not appending (is another review or
+serve using this work directory?)`. With a torn tail pending, the truncate's
+own check above stands in for it; after a failed append that check has the
+file's size too, cut or not, unless even `fstat` failed (then only the
+inode). The truncate and migration refusals raise `ReviewLogChanged` too. The
+`ReviewDB` keeps refusing until it is loaded again.
+
 A last line with no line ending that does parse is kept; the next mark first
 writes its missing line ending (`\n` after a bare `\r`, else `\r\n`). Such a
 row's last field may be cut short or empty, since it is not validated:
@@ -1568,11 +1584,25 @@ readiness probe through `--via` (a TCP connect and close) produces one such
 
 Each writer holds its own in-memory copy of the review state and appends to
 `review.tsv` from it, so two writers on one work directory would each work from
-a stale view of the other's marks. Worse, a writer that loaded a torn tail
-truncates the file back to that offset before its next append, which would cut
-away every row the other writer appended since; the inode-and-size check before
-truncating (see *`review.tsv`*) makes that mark fail instead. A writable `LocalStore` (used by `review` and `serve`)
-therefore holds `work_dir/review.lock`:
+a stale view of the other's marks: a grid CLEAN decided from that view could
+land after the other writer's DIRTY for the same image and, as the last row,
+put it in the allowlist. Worse, a writer that loaded a torn tail truncates the
+file back to that offset before its next append, which would cut away every
+row the other writer appended since. A writable `LocalStore` (used by `review`
+and `serve`) therefore holds `work_dir/review.lock`, described below.
+
+Two writers can still happen: `review.lock` deleted by hand while its writer
+runs, containers that share a hostname but not a pid namespace, or the
+reclaim's `stat`-to-`unlink` gap (below). As a backstop, every append first
+checks that `review.tsv` still has the inode and size this writer last saw
+(see *`review.tsv`*), so the second writer's next mark fails with
+`ReviewLogChanged` instead of landing. `review` then exits 1; `serve` answers
+that mark, and every later one, with a 500 (logged as `internal error:
+ReviewLogChanged`) until it is restarted. The check and the write are not
+atomic, so an append by the other writer inside that window can land along
+with this one, once: each writer then records the size it expects as its own
+append's end, not the file's, so the next mark of each is refused. The lock
+works as follows:
 
 - Contents are JSON `{"host", "boot_id", "user", "pid", "started"}`: hostname,
   `/proc/sys/kernel/random/boot_id` (`""` where unavailable), login name (the
