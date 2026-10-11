@@ -239,6 +239,16 @@ def _has_pixel_data(dcm: pydicom.FileDataset) -> bool:
     return any(keyword in dcm for keyword in _PIXEL_DATA_KEYWORDS)
 
 
+def _require_finite(arr: np.ndarray) -> None:
+    """Raise `Unsupported` if float `arr` holds NaN or infinity: min/max scaling would collapse the rendering."""
+    if arr.dtype.kind != "f":
+        return
+    n_nan = int(np.isnan(arr).sum())
+    n_inf = int(np.isinf(arr).sum())
+    if n_nan or n_inf:
+        raise Unsupported(f"non-finite pixel values ({n_nan} NaN, {n_inf} infinite)")
+
+
 def _compress_tails(img: np.ndarray) -> np.ndarray:
     """Map float `img` to [0, 1], squeezing the outlier tails instead of clipping them.
 
@@ -326,6 +336,7 @@ def _decode_pixels(dcm: pydicom.FileDataset) -> np.ndarray:
 def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> np.ndarray:
     """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels."""
     pixels = _decode_pixels(dcm)
+    _require_finite(pixels)
     bits = int(dcm.BitsStored)
     if photometric == "PALETTE COLOR":
         pixels = pydicom.pixels.apply_color_lut(pixels, dcm)
@@ -352,6 +363,7 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
     match photometric:
         case "MONOCHROME1" | "MONOCHROME2":
             pixels = _decode_pixels(dcm)
+            _require_finite(pixels)
             if pixels.ndim != 2:
                 raise Unsupported(f"pixel array with shape {pixels.shape}")
             return apply_colormap(_gray_dicom(pixels, photometric, _overlay_mask(dcm, pixels.shape)), colormap)
@@ -417,6 +429,7 @@ def _high_bit_gray(im: Image.Image) -> np.ndarray:
     if im.mode.startswith("I;16"):
         return ski.util.img_as_float32(arr.astype(np.uint16))
     arr = arr.astype(np.float32)
+    _require_finite(arr)
     lo, hi = arr.min(), arr.max()
     return (arr - lo) / (hi - lo) if hi > lo else np.zeros_like(arr)
 

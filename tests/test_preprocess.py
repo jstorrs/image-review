@@ -31,7 +31,7 @@ import skimage as ski
 from PIL import Image, JpegImagePlugin, PngImagePlugin
 from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
-from pydicom.uid import MediaStorageDirectoryStorage, generate_uid
+from pydicom.uid import ExplicitVRLittleEndian, MediaStorageDirectoryStorage, SecondaryCaptureImageStorage, generate_uid
 
 from image_review import cli as cli_module
 from image_review import preprocess as preprocess_module
@@ -1436,6 +1436,94 @@ class RenderTest(unittest.TestCase):
     def test_uniform_dicom_renders(self):
         [out] = render("dicom", "id", self.dicom_bytes(np.full((30, 40), 1234, dtype=np.uint16)), "gray")
         self.assertEqual(out.rgb.shape, (30, 40, 3))
+
+    def float_dicom_bytes(self, pixels: np.ndarray) -> bytes:
+        ds = pydicom.Dataset()
+        ds.file_meta = FileMetaDataset()
+        ds.SOPClassUID = SecondaryCaptureImageStorage
+        ds.SOPInstanceUID = generate_uid()
+        ds.file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
+        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        ds.Rows, ds.Columns = pixels.shape
+        ds.SamplesPerPixel = 1
+        ds.PhotometricInterpretation = "MONOCHROME2"
+        ds.BitsAllocated = 32
+        ds.FloatPixelData = pixels.astype("<f4").tobytes()
+        buf = io.BytesIO()
+        ds.save_as(buf, enforce_file_format=True)
+        return buf.getvalue()
+
+    def float_pixels(self, bad: float | None = None) -> np.ndarray:
+        pixels = np.full((40, 60), 100.0, dtype=np.float32)
+        pixels[_text_mask()] = 200.0
+        if bad is not None:
+            pixels[0, 0] = bad
+        return pixels
+
+    def test_finite_float_dicom_renders(self):
+        [out] = render("dicom", "id", self.float_dicom_bytes(self.float_pixels()), "gray")
+        self.assertEqual(out.rgb.ndim, 3)  # cropped, so the shape is not the input's
+        self.assertGreater(len(np.unique(out.rgb)), 1)
+
+    def test_non_finite_float_dicom_is_unsupported(self):
+        for bad, counts in ((np.nan, "1 NaN, 0 infinite"), (np.inf, "0 NaN, 1 infinite")):
+            with self.subTest(bad=bad):
+                data = self.float_dicom_bytes(self.float_pixels(bad))
+                with self.assertRaisesRegex(Unsupported, rf"^unsupported: non-finite pixel values \({counts}\)$"):
+                    render("dicom", "id", data, "inferno")
+
+    def test_non_finite_float_inputs_are_failed_rows(self):
+        root = temp_dir(self).resolve()
+        src = root / "src"
+        src.mkdir()
+        (src / "nan.dcm").write_bytes(self.float_dicom_bytes(self.float_pixels(np.nan)))
+        (src / "inf.dcm").write_bytes(self.float_dicom_bytes(self.float_pixels(np.inf)))
+        (src / "ok.dcm").write_bytes(self.float_dicom_bytes(self.float_pixels()))
+        with quiet():
+            run_preprocess([src], root / "work")
+        skipped = {r["image_id"]: r for r in _read_tsv(root / "work" / "skipped.tsv")}
+        self.assertEqual(
+            {k: (r["kind"], r["reason"]) for k, r in skipped.items()},
+            {
+                (src / "nan.dcm").as_posix(): ("failed", "unsupported: non-finite pixel values (1 NaN, 0 infinite)"),
+                (src / "inf.dcm").as_posix(): ("failed", "unsupported: non-finite pixel values (0 NaN, 1 infinite)"),
+            },
+        )
+        self.assertEqual(
+            [r["image_id"] for r in _read_tsv(root / "work" / "manifest.tsv")], [(src / "ok.dcm").as_posix()]
+        )
+
+    def test_non_finite_float_rgb_dicom_is_unsupported(self):
+        rgb = np.full((40, 60, 3), 100.0, dtype=np.float32)
+        rgb[0, 0, 0] = np.nan
+        ds = pydicom.dcmread(io.BytesIO(self.float_dicom_bytes(rgb[:, :, 0])))
+        ds.SamplesPerPixel = 3
+        ds.PlanarConfiguration = 0
+        ds.PhotometricInterpretation = "RGB"
+        ds.BitsStored, ds.HighBit, ds.PixelRepresentation = 32, 31, 0
+        ds.FloatPixelData = rgb.astype("<f4").tobytes()
+        buf = io.BytesIO()
+        ds.save_as(buf, enforce_file_format=True)
+        with self.assertRaisesRegex(Unsupported, r"^unsupported: non-finite pixel values \(1 NaN, 0 infinite\)$"):
+            render("dicom", "id", buf.getvalue(), "inferno")
+
+    def test_mode_f_tiff_with_non_finite_value_is_unsupported(self):
+        def tiff(arr: np.ndarray) -> bytes:
+            buf = io.BytesIO()
+            Image.fromarray(arr.astype(np.float32), "F").save(buf, "TIFF")
+            return buf.getvalue()
+
+        finite = self.float_pixels()
+        [out] = render("raster", "id", tiff(finite), "inferno")
+        self.assertEqual(out.rgb.ndim, 3)  # cropped, so the shape is not the input's
+        self.assertGreater(len(np.unique(out.rgb)), 1)
+        for bad, counts in ((np.nan, "1 NaN, 0 infinite"), (-np.inf, "0 NaN, 1 infinite")):
+            with (
+                self.subTest(bad=bad),
+                self.assertRaisesRegex(Unsupported, rf"^unsupported: non-finite pixel values \({counts}\)$"),
+            ):
+                render("raster", "id", tiff(self.float_pixels(bad)), "inferno")
 
     def test_dicom_without_pixel_data_is_unsupported(self):
         ds = pydicom.dcmread(io.BytesIO(self.dicom_bytes(_good_pixels())))

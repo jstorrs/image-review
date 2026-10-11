@@ -115,6 +115,10 @@ Read **Upgrading** first.
 
 ### Fixes
 
+- A float DICOM or mode `F` TIFF with a NaN or infinite pixel value is now a
+  `failed` input (`unsupported: non-finite pixel values (1 NaN, 0
+  infinite)`). Before, the one value made the min-max scaling collapse the
+  rendering to a single colour, hiding burned-in text.
 - `export` no longer gives a file the hash of a different file named like
   its DICOM icon: a ZIP entry `scan.png#icon` listed before `scan.png` made
   `scan.png`'s row carry the wrong hash, so it could be allowlisted although

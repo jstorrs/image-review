@@ -167,6 +167,10 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
   - a ZIP inside a ZIP;
   - an `unsupported:` multi-frame DICOM, or a DICOM object without pixel
     data (structured reports, encapsulated PDFs);
+  - an input whose float pixel data holds NaN or infinity (a float DICOM or a
+    mode `F` TIFF), with `unsupported: non-finite pixel values (1 NaN, 0
+    infinite)`: scaling by the minimum and maximum would wipe out the
+    contrast, so nothing readable would be left to review;
   - an unreadable subdirectory;
   - a rendered image wider or taller than 65500 pixels, libjpeg's limit,
     with an `OSError` from the JPEG writer (with Pillow 12.3,

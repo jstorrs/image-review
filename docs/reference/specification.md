@@ -329,7 +329,11 @@ Only rendered images are compared: a `failed` or `ignored` row sharing an
    palette's entry bit depth, when above 8 bits), no windowing or colormap is
    applied, and only the crop of step 6 follows. Steps 2-5 apply to
    `MONOCHROME1`/`MONOCHROME2`
-2. Extract pixel array, convert to float32 (values keep their native scale)
+2. Extract pixel array, convert to float32 (values keep their native scale).
+   Float pixel data (`FloatPixelData`, grayscale or colour) holding NaN or
+   infinity raises
+   `unsupported: non-finite pixel values (1 NaN, 0 infinite)` (counts of
+   each), as min-max scaling would collapse the whole image
 3. Correct photometric interpretation (invert MONOCHROME1 by negation)
 4. Compress the intensity tails: the robust core range (1st-99th percentile
    of the values strictly inside the outer 1% of the min-max range, then
@@ -378,8 +382,9 @@ unused bits of PixelData are not drawn.
   content hidden under transparent pixels stays visible). Grayscale+alpha
   stays grayscale
 - High-bit-depth grayscale (`I;16*` scaled by 65535, `I`/`F` min-max scaled)
-  keeps its full range; a `tRNS` colour key is matched against the native
-  values to build the alpha mask
+  keeps its full range; a mode `F` image holding NaN or infinity raises
+  `unsupported: non-finite pixel values (1 NaN, 0 infinite)`; a `tRNS` colour
+  key is matched against the native values to build the alpha mask
 - Grayscale modes (`1`, `L`, `I;16*`, `I`, `F`) stay grayscale; every other
   mode (`RGB`, `CMYK`, `YCbCr`, `P`, ...) is converted to RGB by Pillow (so
   CMYK black text stays black)
