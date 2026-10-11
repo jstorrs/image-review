@@ -513,18 +513,16 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
     return dcm
 
 
-def render(
-    kind: Kind, image_id: ImageId, data: bytes, colormap: str
-) -> tuple[Rendered, *tuple[Rendered | SkippedRow, ...]]:
+def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str) -> Rendered:
     """Render one input's image: a DICOM's PixelData only, nothing else embedded in the file.
 
     A failure raises.
     """
     match kind:
         case "dicom":
-            return (Rendered(image_id, preprocess_dicom(read_dicom(data), colormap)),)
+            return Rendered(image_id, preprocess_dicom(read_dicom(data), colormap))
         case "raster":
-            return (Rendered(image_id, preprocess_raster(decode_raster(data))),)
+            return Rendered(image_id, preprocess_raster(decode_raster(data)))
 
 
 # ---------------------------------------------------------------- discovery (IO)
@@ -778,8 +776,8 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def render_and_encode(candidate: Candidate, colormap: str) -> list[Encoded | SkippedRow]:
-    """Hash, render and JPEG-encode one input's bytes into its output rows: encoded images and skipped parts.
+def render_and_encode(candidate: Candidate, colormap: str) -> Encoded | SkippedRow:
+    """Hash, render and JPEG-encode one input's bytes into its output row: an encoded image or a skipped row.
 
     Pure, and the unit of work sent to pool workers (so it and its arguments pickle). The rendered image
     carries the SHA-256 of `data`. A failure of the input is a single `SkippedRow`.
@@ -788,22 +786,19 @@ def render_and_encode(candidate: Candidate, colormap: str) -> list[Encoded | Ski
     try:
         source_sha256 = hashlib.sha256(data).hexdigest()
         rendered = render(kind, image_id, data, colormap)
-        encoded = [
-            r if isinstance(r, SkippedRow) else Encoded(r.image_id, encode_jpeg(r.rgb), source_sha256) for r in rendered
-        ]
+        return Encoded(rendered.image_id, encode_jpeg(rendered.rgb), source_sha256)
     except NotAnImage as exc:
-        return [SkippedRow(image_id, "ignored", _clean_reason(str(exc)))]
+        return SkippedRow(image_id, "ignored", _clean_reason(str(exc)))
     except Exception as exc:  # noqa: BLE001 - one bad input must not abort the run; it is recorded in skipped.tsv
-        return [_failed(image_id, exc)]
-    return encoded
+        return _failed(image_id, exc)
 
 
-Outcome = tuple[ImageId, list[Encoded | SkippedRow]]  # (input image_id, its output rows)
+Outcome = tuple[ImageId, Encoded | SkippedRow]  # (input image_id, its output row)
 
 
 def _outcomes_serial(items: Iterable[Candidate | SkippedRow], colormap: str) -> Iterator[Outcome]:
     for item in items:
-        yield item.image_id, (render_and_encode(item, colormap) if isinstance(item, Candidate) else [item])
+        yield item.image_id, (render_and_encode(item, colormap) if isinstance(item, Candidate) else item)
 
 
 def _outcomes_pooled(
@@ -815,24 +810,24 @@ def _outcomes_pooled(
     A dead worker breaks the pool and every input in flight with it, so the run fails (`WorkerCrashed`) rather
     than retrying in this process, where the same input could take the whole run down without a message.
     """
-    queue: deque[tuple[ImageId, Future[list[Encoded | SkippedRow]] | list[Encoded | SkippedRow]]] = deque()
+    queue: deque[tuple[ImageId, Future[Encoded | SkippedRow] | Encoded | SkippedRow]] = deque()
     in_flight = 0
 
-    def start(item: Candidate | SkippedRow) -> Future[list[Encoded | SkippedRow]] | list[Encoded | SkippedRow]:
+    def start(item: Candidate | SkippedRow) -> Future[Encoded | SkippedRow] | Encoded | SkippedRow:
         if isinstance(item, SkippedRow):
-            return [item]
+            return item
         with _sigint_blocked():  # a worker spawned here starts with SIGINT blocked, until it ignores it
             # the pool keeps the bytes until the result is back; `limit` bounds them
             return pool.submit(render_and_encode, item, colormap)
 
     def finish() -> Outcome:
         nonlocal in_flight
-        image_id, rows = queue[0]
-        if isinstance(rows, Future):
-            rows = _result(rows, pool)
+        image_id, row = queue[0]
+        if isinstance(row, Future):
+            row = _result(row, pool)
             in_flight -= 1
         queue.popleft()
-        return image_id, rows
+        return image_id, row
 
     try:
         for item in items:
@@ -871,7 +866,7 @@ def _workers(pool: Executor) -> list[multiprocessing.process.BaseProcess]:
     return list(processes.values()) if isinstance(processes, dict) else []
 
 
-def _result(future: Future[list[Encoded | SkippedRow]], pool: Executor) -> list[Encoded | SkippedRow]:
+def _result(future: Future[Encoded | SkippedRow], pool: Executor) -> Encoded | SkippedRow:
     """`future.result()`, checking every `WORKER_CHECK_SECONDS` that no worker has exited.
 
     A worker killed (e.g. by the OOM killer) while sending a result leaves the pool's manager thread waiting
@@ -1156,37 +1151,35 @@ def _stage(
     colormap: str,
     policy: Modes,
     jobs: int,
-) -> list[tuple[ImageId, list[Staged], list[SkippedRow]]]:
-    """Discover and render every input, writing its JPGs into `pending`.
+) -> list[Staged | SkippedRow]:
+    """Discover and render every input, writing its JPG into `pending`.
 
-    Returns `(input image_id, its staged rows, its skipped rows)` in discovery order.
+    Returns one `Staged` or `SkippedRow` per input, in discovery order.
     Inputs are rendered by `jobs` worker processes, or in this one for 1; either way this process writes
     every file, in discovery order.
     """
-    inputs: list[tuple[ImageId, list[Staged], list[SkippedRow]]] = []
+    inputs: list[Staged | SkippedRow] = []
     count = 0
 
     items = discover(sources, exclude)
     with _outcomes(items, colormap, jobs) as outcomes:
-        for input_id, outcome in outcomes:
-            staged: list[Staged] = []
-            skipped: list[SkippedRow] = []
-            for part in outcome:
-                if isinstance(part, SkippedRow):
-                    if part.kind == "failed":
-                        log.warning("skipping %s: %s", part.image_id, part.reason)
-                    skipped.append(part)
-                    continue
-                count += 1
-                path = pending / f"{count:08d}.jpg"
-                _write_new(path, policy.file_mode, part.jpeg)
-                staged.append(Staged(part.image_id, path, part.source_sha256, hashlib.sha256(part.jpeg).hexdigest()))
-            inputs.append((input_id, staged, skipped))
+        for _, outcome in outcomes:
+            if isinstance(outcome, SkippedRow):
+                if outcome.kind == "failed":
+                    log.warning("skipping %s: %s", outcome.image_id, outcome.reason)
+                inputs.append(outcome)
+                continue
+            count += 1
+            path = pending / f"{count:08d}.jpg"
+            _write_new(path, policy.file_mode, outcome.jpeg)
+            inputs.append(
+                Staged(outcome.image_id, path, outcome.source_sha256, hashlib.sha256(outcome.jpeg).hexdigest())
+            )
     return inputs
 
 
 def _place(
-    inputs: list[tuple[ImageId, list[Staged], list[SkippedRow]]],
+    inputs: list[Staged | SkippedRow],
     *,
     staging: Path,
     batch_size: int,
@@ -1194,34 +1187,33 @@ def _place(
 ) -> tuple[list[tuple[str, str, str, str, str]], list[SkippedRow]]:
     """Move the JPGs of inputs without a colliding image_id into batches under `staging`.
 
-    An input with any colliding image becomes one `failed` row and its JPGs are deleted.
+    An input with a colliding image becomes one `failed` row and its JPG is deleted.
     Returns the manifest rows and the skipped rows, both in discovery order.
     """
     collisions = colliding_ids(
-        (row.image_id, row.source_sha256, row.jpeg_sha256) for _, staged, _ in inputs for row in staged
+        (row.image_id, row.source_sha256, row.jpeg_sha256) for row in inputs if isinstance(row, Staged)
     )
     manifest_rows: list[tuple[str, str, str, str, str]] = []
     skipped: list[SkippedRow] = []
-    for input_id, staged, input_skipped in inputs:
-        if any(row.image_id in collisions for row in staged):
-            for row in staged:
-                row.path.unlink()
-            # the input's own skipped rows give way to the one collision row
-            log.warning("skipping %s: %s", input_id, COLLISION_REASON)
-            skipped.append(SkippedRow(input_id, "failed", COLLISION_REASON))
+    for row in inputs:
+        if isinstance(row, SkippedRow):
+            skipped.append(row)
             continue
-        skipped.extend(input_skipped)
-        for row in staged:
-            batch_index, slot = divmod(len(manifest_rows), batch_size)
-            batch_id = f"batch_{batch_index + 1:03d}"
-            batch_dir = staging / batch_id
-            if slot == 0:
-                batch_dir.mkdir()
-                os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
-            img_path = batch_dir / f"img_{slot + 1:05d}.jpg"
-            os.rename(row.path, img_path)
-            key = img_path.relative_to(staging).as_posix()
-            manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
+        if row.image_id in collisions:
+            row.path.unlink()
+            log.warning("skipping %s: %s", row.image_id, COLLISION_REASON)
+            skipped.append(SkippedRow(row.image_id, "failed", COLLISION_REASON))
+            continue
+        batch_index, slot = divmod(len(manifest_rows), batch_size)
+        batch_id = f"batch_{batch_index + 1:03d}"
+        batch_dir = staging / batch_id
+        if slot == 0:
+            batch_dir.mkdir()
+            os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
+        img_path = batch_dir / f"img_{slot + 1:05d}.jpg"
+        os.rename(row.path, img_path)
+        key = img_path.relative_to(staging).as_posix()
+        manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
     return manifest_rows, skipped
 
 

@@ -122,8 +122,8 @@ The pipeline has three parts: **discovery** (IO) yields one `Candidate`
 (`image_id`, `kind` = `dicom` or `raster`, and its raw
 bytes, read during discovery) per input without decoding anything (or a `SkippedRow` for content
 that is not an input or cannot be read); a pure **`render(kind, image_id,
-data, colormap) -> tuple[Rendered, ...]`** (never empty: the main image first)
-turns the bytes into `(H, W, 3)` uint8 RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
+data, colormap) -> Rendered`** turns the bytes into one `(H, W, 3)` uint8 RGB
+image; the image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and, once collisions are
 known (see *Collisions*), records them in the manifest. Each input's bytes are read
 once; their SHA-256 becomes the `source_sha256` of the image rendered from
@@ -132,7 +132,7 @@ bytes its `jpeg_sha256` (see *`manifest.tsv`*).
 
 **Parallel rendering** (`run_preprocess(..., jobs)`, CLI `--jobs`). Hashing,
 rendering and encoding one input is the pure, top-level
-`render_and_encode(candidate, colormap) -> list[Encoded | SkippedRow]`.
+`render_and_encode(candidate, colormap) -> Encoded | SkippedRow`.
 With `jobs` = 1 it runs in the main process and no pool exists. With `jobs` >
 1 the main process submits each candidate's bytes (read during discovery) to a `ProcessPoolExecutor(jobs)` using
 the `spawn` start method on every platform (workers import the package afresh:
@@ -299,7 +299,7 @@ or the same JPG from a different source (two sources that render identically
 still collide, since `export` attests one `source_sha256` per `image_id`).
 Every input that rendered such an image is replaced by one `failed` row for
 its own `image_id`, reason `image_id collides with another input (rename one
-of them)`, with a logged warning; its JPGs are deleted and never appear in the
+of them)`, with a logged warning; its JPG is deleted and never appears in the
 manifest. A file literally named `a.dcm#icon` beside an `a.dcm` with an icon
 is not a collision: no `#icon` id is minted. The same source reached twice
 under one `image_id` (a file reached through overlapping SOURCEs, so the same

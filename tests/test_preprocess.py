@@ -445,7 +445,7 @@ class CollisionTest(unittest.TestCase):
             zf.writestr("a.png", plain)
         (self.src / "z.zip::a.png").write_bytes(buf.getvalue())
         self.assertNotEqual(plain, buf.getvalue())
-        rendered = [render("raster", "x", data, "gray")[0].rgb for data in (plain, buf.getvalue())]
+        rendered = [render("raster", "x", data, "gray").rgb for data in (plain, buf.getvalue())]
         self.assertTrue(np.array_equal(*rendered))
         self.run_quietly()
         image_id = f"{archive.as_posix()}::a.png"
@@ -1219,7 +1219,7 @@ class DecodeRasterTest(unittest.TestCase):
         self.assertTrue((left == 0.5).all())
         self.assertTrue((right[_text_mask()] == 0).all())
         self.assertTrue((right[~_text_mask()] == 1).all())
-        [out] = render("raster", "id", _png_bytes(rgba, "RGBA"), "inferno")
+        out = render("raster", "id", _png_bytes(rgba, "RGBA"), "inferno")
         self.assertEqual(out.rgb.shape, (40, 120 + SIDE_BY_SIDE_GAP, 3))
 
     def test_opaque_alpha_is_dropped(self):
@@ -1232,7 +1232,7 @@ class DecodeRasterTest(unittest.TestCase):
         img = decode_raster(_png_bytes(gray))
         self.assertEqual(img.ndim, 2)
         np.testing.assert_allclose(img, gray / 65535, atol=1e-6)
-        [out] = render("raster", "id", _png_bytes(gray), "inferno")
+        out = render("raster", "id", _png_bytes(gray), "inferno")
         self.assertEqual(out.rgb.shape, (40, 60, 3))
 
     def test_16_bit_grayscale_with_trns_keeps_full_range(self):
@@ -1261,7 +1261,7 @@ class DecodeRasterTest(unittest.TestCase):
         self.assertGreater(left.min(), 0.95)
         self.assertAlmostEqual(float(right[:20].mean()), 128 / 255, delta=0.02)
         self.assertTrue((right[20:] == 0).all())  # padded below the shorter frame
-        [out] = render("raster", "id", buf.getvalue(), "inferno")
+        out = render("raster", "id", buf.getvalue(), "inferno")
         self.assertEqual(out.rgb.shape, (40, 94, 3))
 
     def test_animated_png_is_unsupported(self):
@@ -1290,8 +1290,7 @@ class RenderTest(unittest.TestCase):
         pixels = RNG.integers(0, 1001, (200, 200)).astype(np.uint16)  # noise: nothing is cropped
         block = np.ones((5, 8), dtype=bool)
         data = self.with_elements(pixels, edit=lambda ds: add_overlay(ds, block, origin=(10, 20)))
-        [out, *rest] = render("dicom", "id", data, "gray")
-        self.assertEqual(rest, [])
+        out = render("dicom", "id", data, "gray")
         self.assertEqual(out.rgb.shape, (200, 200, 3))
         self.assertGreaterEqual(out.rgb[9:14, 19:27].min(), 250)  # 1-based (10, 20) is zero-based (9, 19)
         self.assertLess(out.rgb[8, 19:27].mean(), 250)
@@ -1301,7 +1300,7 @@ class RenderTest(unittest.TestCase):
         pixels = RNG.integers(0, 1001, (50, 60)).astype(np.uint16)
         block = np.ones((20, 20), dtype=bool)
         data = self.with_elements(pixels, edit=lambda ds: add_overlay(ds, block, origin=(40, 50)))
-        [out] = render("dicom", "id", data, "gray")
+        out = render("dicom", "id", data, "gray")
         self.assertEqual(out.rgb.shape, (50, 60, 3))
         self.assertGreaterEqual(out.rgb[39:, 49:].min(), 250)
 
@@ -1309,7 +1308,7 @@ class RenderTest(unittest.TestCase):
         pixels = RNG.integers(0, 200, (60, 80, 3)).astype(np.uint8)
         block = np.ones((4, 4), dtype=bool)
         data = self.with_elements(pixels, "RGB", lambda ds: add_overlay(ds, block, origin=(5, 6)))
-        [out] = render("dicom", "id", data, "inferno")
+        out = render("dicom", "id", data, "inferno")
         self.assertTrue((out.rgb[4:8, 5:9] == 255).all())
 
     def test_undecodable_overlay_fails_the_file_naming_the_group(self):
@@ -1333,8 +1332,8 @@ class RenderTest(unittest.TestCase):
 
         self.assertIn("IconImageSequence", pydicom.dcmread(path))
         bare = self.with_elements_from(data, strip)
-        [main] = render("dicom", "/x/a.dcm", data, "gray")
-        [plain] = render("dicom", "/x/a.dcm", bare, "gray")
+        main = render("dicom", "/x/a.dcm", data, "gray")
+        plain = render("dicom", "/x/a.dcm", bare, "gray")
         self.assertEqual(main.image_id, "/x/a.dcm")
         self.assertFalse(np.array_equal(main.rgb, plain.rgb))
         mask = pydicom.dcmread(path).overlay_array(0x6000).astype(bool)
@@ -1354,7 +1353,7 @@ class RenderTest(unittest.TestCase):
             ds.IconImageSequence = [item]
 
         data = self.with_elements(_good_pixels(), edit=edit)
-        [main] = render("dicom", "/x/a.dcm", data, "gray")
+        main = render("dicom", "/x/a.dcm", data, "gray")
         self.assertIsInstance(main, preprocess_module.Rendered)
         self.assertEqual(main.image_id, "/x/a.dcm")
 
@@ -1392,14 +1391,14 @@ class RenderTest(unittest.TestCase):
 
     def test_all_zero_dicom_keeps_uncropped_image(self):
         with quiet():
-            [out] = render("dicom", "id", self.dicom_bytes(np.zeros((40, 60), dtype=np.uint16)), "inferno")
+            out = render("dicom", "id", self.dicom_bytes(np.zeros((40, 60), dtype=np.uint16)), "inferno")
         self.assertEqual(out.rgb.shape, (40, 60, 3))
         self.assertEqual(out.rgb.dtype, np.uint8)
 
     def test_monochrome1_is_inverted(self):
         pixels = _good_pixels()  # values grow from the top row to the bottom row
-        [mono2] = render("dicom", "id", self.dicom_bytes(pixels, "MONOCHROME2"), "gray")
-        [mono1] = render("dicom", "id", self.dicom_bytes(pixels, "MONOCHROME1"), "gray")
+        mono2 = render("dicom", "id", self.dicom_bytes(pixels, "MONOCHROME2"), "gray")
+        mono1 = render("dicom", "id", self.dicom_bytes(pixels, "MONOCHROME1"), "gray")
         self.assertGreater(mono2.rgb[-10:].mean(), mono2.rgb[:10].mean() + 100)
         self.assertLess(mono1.rgb[-10:].mean(), mono1.rgb[:10].mean() - 100)
 
@@ -1420,7 +1419,7 @@ class RenderTest(unittest.TestCase):
         pixels[text] = 4095
         for colormap in ("inferno", "gray"):
             with self.subTest(colormap=colormap):
-                [out] = render("dicom", "id", self.dicom_bytes(pixels), colormap)
+                out = render("dicom", "id", self.dicom_bytes(pixels), colormap)
                 self.assertEqual(out.rgb.shape[:2], pixels.shape)
                 lum = self.luminance(out.rgb.astype(float))
                 self.assertGreaterEqual(lum[text].mean() - lum[band & ~text].mean(), 20)
@@ -1430,13 +1429,13 @@ class RenderTest(unittest.TestCase):
             with self.subTest(dtype=dtype.__name__):
                 pixels = np.full((60, 80), low, dtype=dtype)
                 pixels[20:30, 10:40:2] = high  # stripes, so cropping keeps the text
-                [out] = render("dicom", "id", self.dicom_bytes(pixels), "gray")
+                out = render("dicom", "id", self.dicom_bytes(pixels), "gray")
                 lum = self.luminance(out.rgb.astype(float))
                 self.assertGreater(lum.max(), 200)
                 self.assertLess(lum.min(), 50)
 
     def test_uniform_dicom_renders(self):
-        [out] = render("dicom", "id", self.dicom_bytes(np.full((30, 40), 1234, dtype=np.uint16)), "gray")
+        out = render("dicom", "id", self.dicom_bytes(np.full((30, 40), 1234, dtype=np.uint16)), "gray")
         self.assertEqual(out.rgb.shape, (30, 40, 3))
 
     def float_dicom_bytes(self, pixels: np.ndarray) -> bytes:
@@ -1464,7 +1463,7 @@ class RenderTest(unittest.TestCase):
         return pixels
 
     def test_finite_float_dicom_renders(self):
-        [out] = render("dicom", "id", self.float_dicom_bytes(self.float_pixels()), "gray")
+        out = render("dicom", "id", self.float_dicom_bytes(self.float_pixels()), "gray")
         self.assertEqual(out.rgb.ndim, 3)  # cropped, so the shape is not the input's
         self.assertGreater(len(np.unique(out.rgb)), 1)
 
@@ -1517,7 +1516,7 @@ class RenderTest(unittest.TestCase):
             return buf.getvalue()
 
         finite = self.float_pixels()
-        [out] = render("raster", "id", tiff(finite), "inferno")
+        out = render("raster", "id", tiff(finite), "inferno")
         self.assertEqual(out.rgb.ndim, 3)  # cropped, so the shape is not the input's
         self.assertGreater(len(np.unique(out.rgb)), 1)
         for bad, counts in ((np.nan, "1 NaN, 0 infinite"), (-np.inf, "0 NaN, 1 infinite")):
@@ -1547,14 +1546,14 @@ class RenderTest(unittest.TestCase):
 
     def test_single_frame_rgb_dicom_is_shown_as_is(self):
         pixels = RNG.integers(0, 255, (32, 40, 3), dtype=np.uint8)
-        [out] = render("dicom", "id", self.dicom_bytes(pixels, "RGB"), "inferno")
+        out = render("dicom", "id", self.dicom_bytes(pixels, "RGB"), "inferno")
         self.assertEqual(out.rgb.dtype, np.uint8)
         np.testing.assert_array_equal(out.rgb, pixels)
 
     def test_high_bit_rgb_dicom_scales_by_bits_stored(self):
         pixels = np.full((32, 40, 3), 65535, dtype=np.uint16)
         pixels[8:24, 10:30, 0] = 0
-        [out] = render("dicom", "id", self.dicom_bytes(pixels, "RGB"), "inferno")
+        out = render("dicom", "id", self.dicom_bytes(pixels, "RGB"), "inferno")
         self.assertEqual(out.rgb.dtype, np.uint8)
         self.assertEqual(out.rgb.max(), 255)
         self.assertEqual(out.rgb.min(), 0)
@@ -1565,7 +1564,7 @@ class RenderTest(unittest.TestCase):
                 path = get_testdata_file(name, download=False)
                 if path is None:
                     self.skipTest(f"{name} not bundled")
-                [out] = render("dicom", "id", Path(path).read_bytes(), "inferno")
+                out = render("dicom", "id", Path(path).read_bytes(), "inferno")
                 self.assertEqual(out.rgb.ndim, 3)
                 self.assertEqual(out.rgb.shape[2], 3)
                 self.assertEqual(out.rgb.dtype, np.uint8)
@@ -1586,7 +1585,7 @@ class RenderTest(unittest.TestCase):
                 path = get_testdata_file(name, download=False) or next(iter(get_testdata_files(name)), None)
                 if path is None:
                     self.skipTest(f"{name} not available")
-                [out] = render("dicom", "id", Path(path).read_bytes(), "inferno")
+                out = render("dicom", "id", Path(path).read_bytes(), "inferno")
                 self.assertEqual(out.rgb.shape[2], 3)
                 self.assertEqual(out.rgb.dtype, np.uint8)
 
@@ -1699,7 +1698,7 @@ class RenderTest(unittest.TestCase):
         del ds.SOPInstanceUID
         buf = io.BytesIO()
         ds.save_as(buf, implicit_vr=True, little_endian=True)
-        [out] = render("dicom", "id", buf.getvalue(), "gray")
+        out = render("dicom", "id", buf.getvalue(), "gray")
         self.assertEqual(out.rgb.dtype, np.uint8)
 
     def test_failure_reason_has_no_tabs_or_newlines(self):
@@ -1927,7 +1926,7 @@ def _probe_worker(candidate, colormap):
     state: dict[str, object] = {name: os.environ.get(name) for name in preprocess_module._BLAS_THREAD_VARS}
     state["sigint_ignored"] = signal.getsignal(signal.SIGINT) == signal.SIG_IGN
     state["sigint_blocked"] = signal.SIGINT in signal.pthread_sigmask(signal.SIG_BLOCK, [])
-    return [SkippedRow(candidate.image_id, "failed", json.dumps(state))]
+    return SkippedRow(candidate.image_id, "failed", json.dumps(state))
 
 
 def _start_large_result() -> None:
