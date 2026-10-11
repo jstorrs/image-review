@@ -67,6 +67,15 @@ Read **Upgrading** first.
   extension gets an `overlay-unused-bits` note
   (see `notes.tsv` below). The bits are not reviewed and stay in the file:
   clear them before releasing files.
+- **Overlay planes are no longer drawn on the review image.** Work
+  directories made from now on show the DICOM pixel data alone; overlays
+  still in the file are listed in `notes.tsv` and must be stripped before
+  release. An overlay that cannot be decoded no longer fails the
+  input. Pass `preprocess --draw-overlays` for the old output (overlays at
+  maximum brightness, and an undecodable one fails its input).
+  `preprocess.json` records `parameters.draw_overlays`. `notes.tsv` lists
+  every overlay (`overlay-plane`, `overlay-unused-bits`), drawn or not. The flag does not draw overlays stored in the unused pixel bits,
+  which are always masked.
 
 ### CLI
 
@@ -128,7 +137,8 @@ Read **Upgrading** first.
   `preprocess` now always writes `notes.tsv` (`image_id`, `kind`, `detail`;
   header only when empty) beside `skipped.tsv`, one row per note on a
   written input: `overlay-plane` for a DICOM with overlay planes (detail
-  `group 0x6000` or `groups 0x6000, 0x6002`; overlays are still drawn too),
+  `group 0x6000` or `groups 0x6000, 0x6002`; overlays are not drawn by default,
+  see Upgrading),
   `overlay-unused-bits` for a DICOM whose pixel data holds something above
   BitsStored other than zeros or sign extension (detail `bit 15`,
   `bits 12, 15`, or `bit 15 (overlay 0x6000)` when a 60xx group's

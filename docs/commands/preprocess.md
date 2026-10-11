@@ -7,12 +7,13 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
                                             [--access {private,group}]
                                             [--allow-skipped]
                                             [--jobs N]
+                                            [--draw-overlays]
 ```
 
 Renders each image input to a JPG, in batches, in a new work directory.
 Inputs it cannot render are listed in `skipped.tsv` (see
-[Skipped inputs](#skipped-inputs)); rendered inputs that hold something the
-reviewer will not see are listed in `notes.tsv` (see
+[Skipped inputs](#skipped-inputs)); rendered inputs that hold something
+downstream tools should strip are listed in `notes.tsv` (see
 [Input notes](#input-notes)).
 
 | Option | Default | Description |
@@ -23,6 +24,7 @@ reviewer will not see are listed in `notes.tsv` (see
 | `--access` | `private`; `$IMAGE_REVIEW_ACCESS` | Who may use the work directory; see [Access control](#access-control) |
 | `--allow-skipped` | off | Exit 0 even if some inputs failed to preprocess (they are still listed in `skipped.tsv`) |
 | `--jobs` | `$SLURM_CPUS_PER_TASK`, else the usable CPUs | Worker processes (1 or more); see [Parallel rendering](#parallel-rendering) |
+| `--draw-overlays` | off | Draw DICOM overlay planes onto the review images at maximum brightness; by default they are not drawn, only listed in `notes.tsv` (see [Rendering pipeline](#rendering-pipeline)) |
 
 An unknown `--colormap` name, or `--jobs 0`, is a usage error: the command
 exits 2 before reading any input or creating the work directory.
@@ -228,9 +230,8 @@ inputs as success).
 
 ## Input notes
 
-`notes.tsv` lists written inputs that hold something notable the reviewer
-will not see, or not see as it is stored, and that downstream tools are
-expected to strip. A note never fails an input and never changes the exit
+`notes.tsv` lists written inputs that hold something that downstream tools
+are expected to strip, whether or not the review image shows it. A note never fails an input and never changes the exit
 status: the image is in `manifest.tsv` and is reviewed as usual. Only
 inputs that are written get notes; a failed or ignored input has none. An
 input can have several notes, one row each. The file's columns are in
@@ -243,9 +244,11 @@ holds source paths.
 | `overlay-unused-bits` | A DICOM whose pixel data holds something above BitsStored other than zeros or sign extension (e.g. a retired overlay) | `bit 15`, `bits 12, 15`, or `bit 15 (overlay 0x6000)` |
 | `icon-image` | A DICOM with an embedded icon image (IconImageSequence (0088,0200)) | `IconImageSequence: 64x64 MONOCHROME2` |
 
-- **`overlay-plane`**: overlays are currently both drawn onto the review image
-  (see [Rendering pipeline](#rendering-pipeline)) and noted, so that the
-  planes are stripped before release.
+- **`overlay-plane`**: the review image is the pixel data alone, so overlay
+  planes are not reviewed (unless `--draw-overlays` draws them; see
+  [Rendering pipeline](#rendering-pipeline)): strip them before release.
+  The note needs only that OverlayData is present, so an overlay that cannot
+  be decoded is noted too.
 - **`overlay-unused-bits`**: the bits of each pixel above BitsStored are
   masked before rendering (signed data is sign-extended from its stored
   bits), whatever the transfer syntax, so they are not reviewed. A pixel
@@ -272,14 +275,14 @@ holds source paths.
 
 The DICOM preprocessing pipeline for grayscale (MONOCHROME1/2) images;
 single-frame colour (RGB, YBR) and palette DICOMs are only converted to 8-bit
-RGB and cropped, with no windowing or colormap (overlay planes are drawn in
-white):
+RGB and cropped, with no windowing or colormap:
 
 1. Converts to float32, corrects photometric interpretation
 2. Compresses intensity outliers (beyond the 1st/99th percentile) into the
    ends of the range instead of clipping them, so bright burned-in text
-   stays visible. DICOM overlay planes (annotations stored outside the pixel
-   data) are then drawn at maximum brightness
+   stays visible. With `--draw-overlays`, DICOM overlay planes (annotations
+   stored outside the pixel data) are then drawn at maximum brightness (white
+   on colour and palette images)
 3. Applies adaptive histogram equalization (CLAHE with 96-pixel tiles)
 4. Strips uniform rows/columns (letterboxing removal)
 5. Applies colormap and saves as JPG
@@ -288,10 +291,14 @@ A DICOM's embedded icon image (a thumbnail stored in the file, in
 IconImageSequence (0088,0200)) is not rendered, so text burned into it is not
 reviewed: remove icons before releasing files. `notes.tsv` lists each DICOM
 that has one (see [Input notes](#input-notes)). Only the pixel data is
-reviewed, with overlay planes drawn on it (and noted). A DICOM whose overlay
-cannot be decoded is `failed` as a whole. Overlays stored in the unused bits
-of the pixel data (bits above BitsStored), rather than in overlay planes, are
-masked for every transfer syntax, so they are not drawn, and noted as
+reviewed: overlay planes are not drawn by default, so the review image shows
+only the pixel data, and `notes.tsv` lists each DICOM that has
+overlay planes, which still ship in the file (strip them before release). With `--draw-overlays` they are
+drawn onto the image, and a DICOM whose overlay cannot be decoded is `failed`
+as a whole, naming its group; without the flag they are never decoded.
+Overlays stored in the unused bits of the pixel data (bits above
+BitsStored), rather than in overlay planes, are masked for every transfer
+syntax, so they are never drawn, with or without the flag, and are noted as
 `overlay-unused-bits`. Only
 single-frame DICOMs (grayscale, colour or palette) are rendered for now.
 

@@ -328,8 +328,9 @@ world-readable.
   `--report`, for audit and follow-up; it must never be used to choose what
   to release (e.g. "everything not DIRTY"). An allowlisted DICOM may still
   hold an embedded icon image (IconImageSequence (0088,0200)) that nobody
-  reviewed: only the pixel data is reviewed (with overlay planes drawn on
-  it), so strip icons before releasing files.
+  reviewed, and so may overlay planes: only the pixel data is reviewed
+  (overlay planes are not drawn unless `preprocess --draw-overlays` was
+  given), so strip overlays and icons before releasing files.
 - **DIRTY-only placeholders.** The viewer shows an image that cannot be
   fetched, read or verified as a placeholder that accepts DIRTY but refuses
   CLEAN, so an image nobody could see is not cleared by the viewer (see the

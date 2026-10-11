@@ -111,8 +111,8 @@ longer than 131072 characters.
 ## `notes.tsv`
 
 One row per note on an input that was written to `manifest.tsv`: something
-the input holds that its image does not show, and that downstream tools are
-expected to strip. It is always written, with only its header when there are
+the input holds that downstream tools are expected to strip, whether or not
+its image shows it. It is always written, with only its header when there are
 no notes. Rows follow `manifest.tsv` order; an input with several notes has
 one row each. A failed or ignored input, including one whose image_id
 collides, has no notes.
@@ -139,7 +139,7 @@ One JSON object recording how the work directory was made:
 | `tool_version` | The image-review version (`"unknown"` if not installed) |
 | `created` | UTC time the run finished, ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) |
 | `sources` | The SOURCES as resolved absolute paths, in the order given, escaped like an `image_id` |
-| `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `access`, `jobs` (recorded only: the output does not depend on it) |
+| `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `draw_overlays` (`true` if `--draw-overlays` drew the DICOM overlay planes onto the images, else `false`; absent from work dirs made by older versions, which drew overlays), `access`, `jobs` (recorded only: the output does not depend on it) |
 | `libraries` | Versions of `pydicom`, `numpy`, `scikit-image`, `Pillow`, `matplotlib`, plus `gdcm`, `pylibjpeg`, `openjpeg` when installed |
 | `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored`, and `notes`: an object with the number of `notes.tsv` rows of each kind, every kind present (zero included), e.g. `{"overlay-plane": 1, "overlay-unused-bits": 0, "icon-image": 0}` |
 

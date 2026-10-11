@@ -557,6 +557,7 @@ class ProvenanceTest(unittest.TestCase):
                 "tail_fraction": preprocess_module.TAIL_FRACTION,
                 "jpeg_quality": preprocess_module.JPEG_QUALITY,
                 "jpeg_subsampling": preprocess_module.JPEG_SUBSAMPLING,
+                "draw_overlays": False,
                 "access": "private",
                 "jobs": 1,
             },
@@ -661,6 +662,26 @@ class NotesTest(unittest.TestCase):
         self.assertEqual(result.notes_path, self.work / "notes.tsv")
         record = json.loads((self.work / "preprocess.json").read_text())
         self.assertEqual(record["counts"]["notes"], {**NO_NOTES, "overlay-plane": 1})
+
+    def test_undecodable_overlay_is_written_with_its_note_by_default_and_fails_with_the_flag(self):
+        def corrupt(path: Path) -> None:
+            ds = pydicom.dcmread(path)
+            ds[0x6000, 0x3000].value = b"\x00\x00"
+            ds.save_as(path, enforce_file_format=True)
+
+        path = self.src / "a.dcm"
+        _dicom_with_overlays(path, 0x6000)
+        corrupt(path)
+        result = self.run_quietly()
+        self.assertEqual(result.written, 1)
+        self.assertEqual(self.notes(), [[path.as_posix(), "overlay-plane", "group 0x6000"]])
+        self.assertEqual(json.loads((self.work / "preprocess.json").read_text())["parameters"]["draw_overlays"], False)
+        shutil.rmtree(self.work)
+        result = self.run_quietly(draw_overlays=True)
+        self.assertEqual(result.written, 0)
+        [skipped] = result.skipped
+        self.assertIn("overlay 0x6000 cannot be decoded", skipped.reason)
+        self.assertEqual(json.loads((self.work / "preprocess.json").read_text())["parameters"]["draw_overlays"], True)
 
     def test_several_overlay_planes_are_one_note(self):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000, 0x6002)
@@ -1675,7 +1696,7 @@ class RenderTest(unittest.TestCase):
         pixels = RNG.integers(0, 1001, (200, 200)).astype(np.uint16)  # noise: nothing is cropped
         block = np.ones((5, 8), dtype=bool)
         data = self.with_elements(pixels, edit=lambda ds: add_overlay(ds, block, origin=(10, 20)))
-        out = render("dicom", "id", data, "gray")
+        out = render("dicom", "id", data, "gray", draw_overlays=True)
         self.assertEqual(out.rgb.shape, (200, 200, 3))
         self.assertGreaterEqual(out.rgb[9:14, 19:27].min(), 250)  # 1-based (10, 20) is zero-based (9, 19)
         self.assertLess(out.rgb[8, 19:27].mean(), 250)
@@ -1685,7 +1706,7 @@ class RenderTest(unittest.TestCase):
         pixels = RNG.integers(0, 1001, (50, 60)).astype(np.uint16)
         block = np.ones((20, 20), dtype=bool)
         data = self.with_elements(pixels, edit=lambda ds: add_overlay(ds, block, origin=(40, 50)))
-        out = render("dicom", "id", data, "gray")
+        out = render("dicom", "id", data, "gray", draw_overlays=True)
         self.assertEqual(out.rgb.shape, (50, 60, 3))
         self.assertGreaterEqual(out.rgb[39:, 49:].min(), 250)
 
@@ -1693,7 +1714,7 @@ class RenderTest(unittest.TestCase):
         pixels = RNG.integers(0, 200, (60, 80, 3)).astype(np.uint8)
         block = np.ones((4, 4), dtype=bool)
         data = self.with_elements(pixels, "RGB", lambda ds: add_overlay(ds, block, origin=(5, 6)))
-        out = render("dicom", "id", data, "inferno")
+        out = render("dicom", "id", data, "inferno", draw_overlays=True)
         self.assertTrue((out.rgb[4:8, 5:9] == 255).all())
 
     def test_undecodable_overlay_fails_the_file_naming_the_group(self):
@@ -1703,7 +1724,30 @@ class RenderTest(unittest.TestCase):
 
         data = self.with_elements(_good_pixels(), edit=edit)
         with self.assertRaisesRegex(ValueError, r"overlay 0x6002 cannot be decoded"):
-            render("dicom", "id", data, "gray")
+            render("dicom", "id", data, "gray", draw_overlays=True)
+
+    def test_overlays_are_not_drawn_by_default(self):
+        pixels = RNG.integers(0, 1001, (200, 200)).astype(np.uint16)
+        block = np.ones((5, 8), dtype=bool)
+        for photometric, shape in (("MONOCHROME2", (200, 200)), ("RGB", (60, 80, 3))):
+            with self.subTest(photometric=photometric):
+                pix = pixels if photometric == "MONOCHROME2" else RNG.integers(0, 200, shape).astype(np.uint8)
+                bare = self.with_elements(pix, photometric)
+                drawn = self.with_elements(pix, photometric, lambda ds: add_overlay(ds, block, origin=(10, 20)))
+                plain, default = render("dicom", "id", bare, "gray"), render("dicom", "id", drawn, "gray")
+                self.assertTrue(np.array_equal(plain.rgb, default.rgb))
+                self.assertEqual(default.notes, (Note("overlay-plane", "group 0x6000"),))
+                flagged = render("dicom", "id", drawn, "gray", draw_overlays=True)
+                self.assertFalse(np.array_equal(plain.rgb, flagged.rgb))
+
+    def test_undecodable_overlay_is_not_decoded_by_default(self):
+        def edit(ds):
+            add_overlay(ds, np.ones((8, 8), dtype=bool), group=0x6002)
+            ds[0x6002, 0x3000].value = b"\x00\x00"
+
+        data = self.with_elements(_good_pixels(), edit=edit)
+        out = render("dicom", "id", data, "gray")
+        self.assertEqual(out.notes, (Note("overlay-plane", "group 0x6002"),))
 
     def test_bundled_overlay_is_rendered_and_its_icon_is_not(self):
         path = get_testdata_file("examples_overlay.dcm", download=False)
@@ -1717,7 +1761,7 @@ class RenderTest(unittest.TestCase):
 
         self.assertIn("IconImageSequence", pydicom.dcmread(path))
         bare = self.with_elements_from(data, strip)
-        main = render("dicom", "/x/a.dcm", data, "gray")
+        main = render("dicom", "/x/a.dcm", data, "gray", draw_overlays=True)
         plain = render("dicom", "/x/a.dcm", bare, "gray")
         self.assertEqual(main.image_id, "/x/a.dcm")
         self.assertFalse(np.array_equal(main.rgb, plain.rgb))
@@ -2139,6 +2183,20 @@ class PreprocessCliTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn(f"; 2 notes (1 overlay-plane, 1 icon-image; see {work / 'notes.tsv'})", result.output)
 
+    def test_draw_overlays_flag_is_listed_and_recorded(self):
+        help_ = self.invoke("--help")
+        self.assertIn("--draw-overlays", help_.output)
+        notable = self.root / "notable"
+        notable.mkdir()
+        _dicom_with_overlays(notable / "a.dcm", 0x6000)
+        work = self.root / "work"
+        for flag, expected in ((None, False), ("--draw-overlays", True)):
+            shutil.rmtree(work, ignore_errors=True)
+            result = self.invoke(*([flag] if flag else []), source="notable")
+            self.assertEqual(result.exit_code, 0, result.output)
+            record = json.loads((work / "preprocess.json").read_text())
+            self.assertIs(record["parameters"]["draw_overlays"], expected)
+
     def test_failures_exit_1(self):
         result = self.invoke()
         self.assertEqual(result.exit_code, 1, result.output)
@@ -2308,22 +2366,22 @@ def _tree(work: Path) -> dict[str, bytes]:
     return {**files, "preprocess.json": json.dumps(record).encode()}
 
 
-def _exit_in_worker(candidate, colormap):
+def _exit_in_worker(candidate, colormap, *, draw_overlays):
     """A pool worker function that kills its process on the input named `crash.png`."""
     if candidate.image_id.endswith("crash.png"):
         os._exit(1)
-    return render_and_encode(candidate, colormap)
+    return render_and_encode(candidate, colormap, draw_overlays=draw_overlays)
 
 
-def _hang_in_worker(candidate, colormap):
+def _hang_in_worker(candidate, colormap, *, draw_overlays):
     """A pool worker function that marks that it started (beside the source directory), then hangs."""
     path = Path(candidate.image_id)
     (path.parent.parent / f"started-{path.name}").touch()
     time.sleep(60)
-    return render_and_encode(candidate, colormap)
+    return render_and_encode(candidate, colormap, draw_overlays=draw_overlays)
 
 
-def _probe_worker(candidate, colormap):
+def _probe_worker(candidate, colormap, *, draw_overlays):
     """A pool worker function reporting the worker's BLAS thread variables and SIGINT state as a skipped row."""
     state: dict[str, object] = {name: os.environ.get(name) for name in preprocess_module._BLAS_THREAD_VARS}
     state["sigint_ignored"] = signal.getsignal(signal.SIGINT) == signal.SIG_IGN
@@ -2345,19 +2403,19 @@ def _start_large_result() -> None:
     os.write(results._writer.fileno(), struct.pack("!i", 10_000_000) + bytes(1000))
 
 
-def _die_mid_send(candidate, colormap):
+def _die_mid_send(candidate, colormap, *, draw_overlays):
     """A pool worker function that dies part way through sending a large result (as the OOM killer would)."""
     _start_large_result()
     os._exit(1)
 
 
-def _hang_mid_send(candidate, colormap):
+def _hang_mid_send(candidate, colormap, *, draw_overlays):
     """A pool worker function that stalls part way through sending a large result, after marking that it did."""
     _start_large_result()
     path = Path(candidate.image_id)
     (path.parent.parent / f"started-{path.name}").touch()
     time.sleep(60)
-    return render_and_encode(candidate, colormap)
+    return render_and_encode(candidate, colormap, draw_overlays=draw_overlays)
 
 
 class _CountedFuture(Future):
@@ -2409,6 +2467,10 @@ class ParallelTest(unittest.TestCase):
             cls.serial = run_preprocess(cls.sources, cls.root / "serial", batch_size=4, colormap="viridis", jobs=1)
             with mock.patch.object(preprocess_module, "ProcessPoolExecutor", wraps=ProcessPoolExecutor) as pool:
                 cls.pooled = run_preprocess(cls.sources, cls.root / "pooled", batch_size=4, colormap="viridis", jobs=2)
+            for name, jobs in (("serial-drawn", 1), ("pooled-drawn", 2)):
+                run_preprocess(
+                    cls.sources, cls.root / name, batch_size=4, colormap="viridis", jobs=jobs, draw_overlays=True
+                )
         cls.pool_calls = pool.call_args_list
 
     def setUp(self):
@@ -2435,6 +2497,15 @@ class ParallelTest(unittest.TestCase):
             for w in ("serial", "pooled")
         ]
         self.assertEqual(jobs, [1, 2])
+
+    def test_output_with_draw_overlays_is_identical_to_jobs_1(self):
+        serial, pooled = _tree(self.root / "serial-drawn"), _tree(self.root / "pooled-drawn")
+        self.assertEqual(sorted(serial), sorted(pooled))
+        for name in serial:
+            with self.subTest(name=name):
+                self.assertEqual(serial[name], pooled[name])
+        self.assertTrue(json.loads(serial["preprocess.json"])["parameters"]["draw_overlays"])
+        self.assertNotEqual(serial, _tree(self.root / "serial"))  # the overlay is drawn
 
     def test_workers_are_spawned(self):
         [call] = self.pool_calls
@@ -2531,7 +2602,7 @@ class ParallelTest(unittest.TestCase):
             SkippedRow(ImageId("s.txt"), "ignored", "not an image"),
             Candidate(ImageId("b.png"), "raster", b""),
         ]
-        outcomes = preprocess_module._outcomes_pooled(items, "viridis", _BrokenExecutor(), limit=4)
+        outcomes = preprocess_module._outcomes_pooled(items, "viridis", _BrokenExecutor(), limit=4, draw_overlays=False)
         with self.assertRaises(WorkerCrashed) as ctx:
             list(outcomes)
         self.assertIn("2 input(s) were in flight, starting with a.png", str(ctx.exception))

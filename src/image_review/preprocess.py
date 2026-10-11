@@ -131,7 +131,7 @@ _SPAWN = multiprocessing.get_context("spawn")
 
 Kind = Literal["dicom", "raster"]
 Content = Literal[Kind, "zip"]
-# Something a written input holds that its review image does not show, and that downstream tools should strip
+# Something a written input holds that downstream tools should strip, noted whether or not the image shows it
 NoteKind = Literal["overlay-plane", "overlay-unused-bits", "icon-image"]
 NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
 
@@ -404,10 +404,13 @@ def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarra
     return _to_uint8(pixels, bits), unused_bits
 
 
-def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> tuple[np.ndarray, tuple[int, ...]]:
+def preprocess_dicom(
+    dcm: pydicom.FileDataset, colormap: str = "inferno", *, draw_overlays: bool = False
+) -> tuple[np.ndarray, tuple[int, ...]]:
     """Render a single-frame DICOM to (H, W, 3) uint8: grayscale through `colormap`, colour as is.
 
-    Overlay planes are drawn at maximum brightness. Bits above BitsStored are masked before rendering; their
+    Overlay planes are drawn at maximum brightness only if `draw_overlays` (an undecodable one then raises);
+    otherwise they are not decoded and the image is the PixelData alone. Bits above BitsStored are masked before rendering; their
     positions that held content are returned with the image, for `_dicom_notes`.
     """
     if not _has_pixel_data(dcm):
@@ -424,7 +427,8 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> tup
             pixels, unused_bits = _stored_pixels(dcm)
             if pixels.ndim != 2:
                 raise Unsupported(f"pixel array with shape {pixels.shape}")
-            gray = _gray_dicom(pixels, photometric, _overlay_mask(dcm, pixels.shape))
+            overlay = _overlay_mask(dcm, pixels.shape) if draw_overlays else np.zeros(pixels.shape, dtype=bool)
+            gray = _gray_dicom(pixels, photometric, overlay)
             return apply_colormap(gray, colormap), unused_bits
         case (
             "RGB"
@@ -437,7 +441,8 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> tup
             | "YBR_RCT"
         ):
             rgb, unused_bits = _colour_dicom(dcm, photometric)
-            rgb[_overlay_mask(dcm, rgb.shape[:2])] = 255
+            if draw_overlays:
+                rgb[_overlay_mask(dcm, rgb.shape[:2])] = 255
             return _crop(rgb), unused_bits
         case _:
             raise Unsupported(f"photometric interpretation {photometric}")
@@ -503,7 +508,7 @@ def _icon_note(dcm: pydicom.FileDataset) -> Note | None:
 
 
 def _dicom_notes(dcm: pydicom.FileDataset, unused_bits: tuple[int, ...]) -> tuple[Note, ...]:
-    """What `dcm` holds that its rendering does not show, in NOTE_KINDS order; `unused_bits` are the positions above
+    """What `dcm` holds that downstream tools should strip, in NOTE_KINDS order; `unused_bits` are the positions above
     BitsStored that held content, from the decode that rendered it (see `preprocess_dicom`)."""
     notes = (_overlay_note(dcm), _unused_bits_note(dcm, unused_bits), _icon_note(dcm))
     return tuple(note for note in notes if note is not None)
@@ -639,7 +644,7 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
     return dcm
 
 
-def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str) -> Rendered:
+def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str, *, draw_overlays: bool = False) -> Rendered:
     """Render one input's image: a DICOM's PixelData only, nothing else embedded in the file.
 
     A DICOM's rendering carries its notes (see `_dicom_notes`). A failure raises.
@@ -647,7 +652,7 @@ def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str) -> Rendere
     match kind:
         case "dicom":
             dcm = read_dicom(data)
-            rgb, unused_bits = preprocess_dicom(dcm, colormap)
+            rgb, unused_bits = preprocess_dicom(dcm, colormap, draw_overlays=draw_overlays)
             return Rendered(image_id, rgb, _dicom_notes(dcm, unused_bits))
         case "raster":
             return Rendered(image_id, preprocess_raster(decode_raster(data)), ())
@@ -904,7 +909,7 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def render_and_encode(candidate: Candidate, colormap: str) -> Encoded | SkippedRow:
+def render_and_encode(candidate: Candidate, colormap: str, *, draw_overlays: bool) -> Encoded | SkippedRow:
     """Hash, render and JPEG-encode one input's bytes into its output row: an encoded image or a skipped row.
 
     Pure, and the unit of work sent to pool workers (so it and its arguments pickle). The rendered image
@@ -913,7 +918,7 @@ def render_and_encode(candidate: Candidate, colormap: str) -> Encoded | SkippedR
     kind, image_id, data = candidate.kind, candidate.image_id, candidate.data
     try:
         source_sha256 = hashlib.sha256(data).hexdigest()
-        rendered = render(kind, image_id, data, colormap)
+        rendered = render(kind, image_id, data, colormap, draw_overlays=draw_overlays)
         return Encoded(rendered.image_id, encode_jpeg(rendered.rgb), source_sha256, rendered.notes)
     except NotAnImage as exc:
         return SkippedRow(image_id, "ignored", _clean_reason(str(exc)))
@@ -924,13 +929,18 @@ def render_and_encode(candidate: Candidate, colormap: str) -> Encoded | SkippedR
 Outcome = tuple[ImageId, Encoded | SkippedRow]  # (input image_id, its output row)
 
 
-def _outcomes_serial(items: Iterable[Candidate | SkippedRow], colormap: str) -> Iterator[Outcome]:
+def _outcomes_serial(
+    items: Iterable[Candidate | SkippedRow], colormap: str, *, draw_overlays: bool
+) -> Iterator[Outcome]:
     for item in items:
-        yield item.image_id, (render_and_encode(item, colormap) if isinstance(item, Candidate) else item)
+        yield (
+            item.image_id,
+            (render_and_encode(item, colormap, draw_overlays=draw_overlays) if isinstance(item, Candidate) else item),
+        )
 
 
 def _outcomes_pooled(
-    items: Iterable[Candidate | SkippedRow], colormap: str, pool: Executor, limit: int
+    items: Iterable[Candidate | SkippedRow], colormap: str, pool: Executor, limit: int, *, draw_overlays: bool
 ) -> Iterator[Outcome]:
     """`_outcomes_serial`, rendered by `pool`: yielded in input order, with at most `limit` inputs submitted and
     not yet yielded. Workers hash.
@@ -946,7 +956,7 @@ def _outcomes_pooled(
             return item
         with _sigint_blocked():  # a worker spawned here starts with SIGINT blocked, until it ignores it
             # the pool keeps the bytes until the result is back; `limit` bounds them
-            return pool.submit(render_and_encode, item, colormap)
+            return pool.submit(render_and_encode, item, colormap, draw_overlays=draw_overlays)
 
     def finish() -> Outcome:
         nonlocal in_flight
@@ -975,13 +985,15 @@ def _outcomes_pooled(
 
 
 @contextmanager
-def _outcomes(items: Iterable[Candidate | SkippedRow], colormap: str, jobs: int) -> Iterator[Iterator[Outcome]]:
+def _outcomes(
+    items: Iterable[Candidate | SkippedRow], colormap: str, jobs: int, *, draw_overlays: bool
+) -> Iterator[Iterator[Outcome]]:
     """The outcomes of `items`, rendered by `jobs` worker processes, or in this one for 1."""
     if jobs > 1:
         with _worker_pool(jobs) as pool:
-            yield _outcomes_pooled(items, colormap, pool, IN_FLIGHT_PER_JOB * jobs)
+            yield _outcomes_pooled(items, colormap, pool, IN_FLIGHT_PER_JOB * jobs, draw_overlays=draw_overlays)
     else:
-        yield _outcomes_serial(items, colormap)
+        yield _outcomes_serial(items, colormap, draw_overlays=draw_overlays)
 
 
 def _workers(pool: Executor) -> list[multiprocessing.process.BaseProcess]:
@@ -1123,6 +1135,7 @@ def provenance(
     colormap: str,
     access: Access,
     jobs: int,
+    draw_overlays: bool,
     result: PreprocessResult,
     created: datetime,
     tool_version: str,
@@ -1144,6 +1157,7 @@ def provenance(
             "tail_fraction": TAIL_FRACTION,
             "jpeg_quality": JPEG_QUALITY,
             "jpeg_subsampling": JPEG_SUBSAMPLING,
+            "draw_overlays": draw_overlays,
             "access": access,
             "jobs": jobs,  # how the run was made, not what it made: the output is the same for any value
         },
@@ -1191,6 +1205,8 @@ def run_preprocess(
     colormap: str = "inferno",
     access: Access = "private",
     jobs: int = 1,
+    *,
+    draw_overlays: bool = False,
 ) -> PreprocessResult:
     """Render every discovered input into a staging dir, then rename it to `output_dir`.
 
@@ -1207,6 +1223,8 @@ def run_preprocess(
     `jobs` > 1 renders in that many worker processes; the output is identical
     to `jobs` = 1, which renders in this process. A dead worker fails the run
     (`WorkerCrashed`).
+
+    Overlay planes are listed in notes.tsv but not drawn on the images unless `draw_overlays`.
     """
     policy = modes(access)
     output_dir.parent.mkdir(parents=True, exist_ok=True)  # before the umask: parents get normal permissions
@@ -1223,6 +1241,7 @@ def run_preprocess(
                 colormap=colormap,
                 policy=policy,
                 jobs=jobs,
+                draw_overlays=draw_overlays,
             )
             _write_tsv(staging / MANIFEST_NAME, MANIFEST_HEADER, manifest_rows, policy.file_mode)
             _write_tsv(
@@ -1249,6 +1268,7 @@ def run_preprocess(
                 colormap=colormap,
                 access=access,
                 jobs=jobs,
+                draw_overlays=draw_overlays,
                 result=result,
                 created=datetime.now(UTC),
                 tool_version=package_version(),
@@ -1291,6 +1311,7 @@ def _stage(
     colormap: str,
     policy: Modes,
     jobs: int,
+    draw_overlays: bool,
 ) -> list[Staged | SkippedRow]:
     """Discover and render every input, writing its JPG into `pending`.
 
@@ -1302,7 +1323,7 @@ def _stage(
     count = 0
 
     items = discover(sources, exclude)
-    with _outcomes(items, colormap, jobs) as outcomes:
+    with _outcomes(items, colormap, jobs, draw_overlays=draw_overlays) as outcomes:
         for _, outcome in outcomes:
             if isinstance(outcome, SkippedRow):
                 if outcome.kind == "failed":
@@ -1367,12 +1388,21 @@ def _render_into(
     colormap: str,
     policy: Modes,
     jobs: int,
+    draw_overlays: bool,
 ) -> tuple[int, list[tuple[str, str, str, str, str]], list[SkippedRow], list[tuple[str, NoteKind, str]]]:
     """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches."""
     pending = staging / PENDING_NAME
     pending.mkdir()
     os.chmod(pending, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
-    inputs = _stage(sources=sources, exclude=exclude, pending=pending, colormap=colormap, policy=policy, jobs=jobs)
+    inputs = _stage(
+        sources=sources,
+        exclude=exclude,
+        pending=pending,
+        colormap=colormap,
+        policy=policy,
+        jobs=jobs,
+        draw_overlays=draw_overlays,
+    )
     manifest_rows, skipped, notes = _place(inputs, staging=staging, batch_size=batch_size, policy=policy)
     pending.rmdir()  # every staged JPG was moved or deleted
     return len(inputs), manifest_rows, skipped, notes

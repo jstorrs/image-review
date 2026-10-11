@@ -122,7 +122,7 @@ The pipeline has three parts: **discovery** (IO) yields one `Candidate`
 (`image_id`, `kind` = `dicom` or `raster`, and its raw
 bytes, read during discovery) per input without decoding anything (or a `SkippedRow` for content
 that is not an input or cannot be read); a pure **`render(kind, image_id,
-data, colormap) -> Rendered`** turns the bytes into one `(H, W, 3)` uint8 RGB
+data, colormap, *, draw_overlays) -> Rendered`** turns the bytes into one `(H, W, 3)` uint8 RGB
 image, with the input's notes (see *Notes*); the image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and, once collisions are
 known (see *Collisions*), records them in the manifest and their notes in `notes.tsv`. Each input's bytes are read
@@ -132,7 +132,7 @@ bytes its `jpeg_sha256` (see *`manifest.tsv`*).
 
 **Parallel rendering** (`run_preprocess(..., jobs)`, CLI `--jobs`). Hashing,
 rendering and encoding one input is the pure, top-level
-`render_and_encode(candidate, colormap) -> Encoded | SkippedRow`.
+`render_and_encode(candidate, colormap, *, draw_overlays) -> Encoded | SkippedRow`.
 With `jobs` = 1 it runs in the main process and no pool exists. With `jobs` >
 1 the main process submits each candidate's bytes (read during discovery) to a `ProcessPoolExecutor(jobs)` using
 the `spawn` start method on every platform (workers import the package afresh:
@@ -311,8 +311,8 @@ Only rendered images are compared: a `failed` or `ignored` row sharing an
 
 **Notes.** A note (`Note(kind, detail)`, `kind` a `NoteKind`,
 `Literal["overlay-plane", "overlay-unused-bits", "icon-image"]`, listed in
-that order by `NOTE_KINDS`) records something a rendered input holds that its
-image does not show; the kinds and their details are in
+that order by `NOTE_KINDS`) records something a rendered input holds that downstream
+tools should strip, written whether or not an overlay is drawn; the kinds and their details are in
 [Input notes](../commands/preprocess.md#input-notes). `render` makes a DICOM's
 notes after rendering it, in `NOTE_KINDS` order, decoding nothing beyond the
 render's own single decode: `overlay-plane` lists the overlay groups (the same
@@ -393,26 +393,29 @@ none. Notes never affect the exit status.
    extremes such as burned-in text at the maximum stay distinguishable from
    a bright core. An image with a single value maps to all zeros; when no
    robust core exists (no inner values, or the core is empty or touches
-   the min or max) a plain min-max rescale is used. Then overlay planes
-   (see below) are drawn at 1.0
+   the min or max) a plain min-max rescale is used. Then, only with
+   `draw_overlays`, overlay planes (see below) are drawn at 1.0
 5. Apply CLAHE (adaptive histogram equalization, 96-pixel tiles)
-   (overlay pixels stay at or near the top of the range)
+   (drawn overlay pixels stay at or near the top of the range)
 6. Strip uniform rows/columns (`compress_image` -- removes letterboxing). If
    stripping would leave nothing (e.g. an all-zero image), the uncropped
    image is kept
 7. Apply colormap (grayscale only), save as 8-bit RGB JPG (quality 95, 4:4:4 chroma, no subsampling)
 
-**Overlays**: each overlay plane (even group 0x6000-0x601E with OverlayData
-`(g,3000)`) is decoded with `overlay_array`, placed at its OverlayOrigin
+**Overlays**: by default (`draw_overlays` false; CLI `--draw-overlays`)
+overlay planes are not decoded or drawn: the image is the PixelData alone and
+`overlay-plane` notes list the planes. With `draw_overlays`, each overlay
+plane (even group 0x6000-0x601E with OverlayData `(g,3000)`) is decoded with `overlay_array`, placed at its OverlayOrigin
 (1-based row, column; default 1, 1) and clipped to the image. For grayscale
 images the overlay pixels are set to 1.0 after intensity compression (step 4)
 and before the first crop, so they come out near 255 (CLAHE keeps them at the
 top of the range); for colour and palette images they are set to white (255)
-before the crop. A plane that cannot be decoded fails the whole file
-(fail-closed, so a reviewer never sees an image with undrawn annotations):
+before the crop. With the flag, a plane that cannot be decoded fails the
+whole file (fail-closed: a reviewer who asked for overlays drawn never
+reviews an image missing one):
 `ValueError: overlay 0x6002 cannot be decoded: ...`. Overlays embedded in the
 unused bits of PixelData (retired; PS3.5 §8.1.1 lets receivers assume nothing
-about those bits) are not drawn: those bits are masked (step 2) and noted as
+about those bits) are never drawn, with or without the flag: those bits are masked (step 2) and noted as
 `overlay-unused-bits`, naming any 60xx group whose OverlayBitPosition points
 at a set bit.
 

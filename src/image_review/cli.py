@@ -433,7 +433,13 @@ def default_jobs() -> int:
     show_default="$SLURM_CPUS_PER_TASK, else the usable CPUs capped by the cgroup v2 CPU quotas",
     help="Worker processes rendering inputs in parallel; 1 renders in this process. The output is the same for any value.",
 )
-def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, jobs):
+@click.option(
+    "--draw-overlays",
+    is_flag=True,
+    default=False,
+    help="Draw DICOM overlay planes onto the review images (by default they are not drawn, only listed in notes.tsv).",
+)
+def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, jobs, draw_overlays):
     """Normalize DICOM and image files to JPGs and organize them into batches.
 
     SOURCES are one or more ZIP files, directories, or image files to process.
@@ -454,7 +460,13 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, j
             logging_redirect_tqdm(loggers=[logging.getLogger(PACKAGE_LOGGER)]),  # log lines print above the bars
         ):
             result = run_preprocess(
-                source_paths, Path(work_dir), batch_size=batch_size, colormap=colormap, access=access, jobs=jobs
+                source_paths,
+                Path(work_dir),
+                batch_size=batch_size,
+                colormap=colormap,
+                access=access,
+                jobs=jobs,
+                draw_overlays=draw_overlays,
             )
     except (WorkDirExists, WorkerCrashed) as exc:
         raise click.ClickException(str(exc)) from exc
