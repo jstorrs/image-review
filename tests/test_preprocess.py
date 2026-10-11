@@ -1,4 +1,4 @@
-"""Preprocess: every input lands in exactly one of manifest.tsv or skipped.tsv."""
+"""Preprocess: every input lands in exactly one of manifest.tsv or skipped.tsv; notes.tsv notes written ones."""
 
 import contextlib
 import csv
@@ -8,8 +8,10 @@ import io
 import json
 import multiprocessing
 import os
+import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -69,6 +71,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 APPLEDOUBLE = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + bytes(100)
 # SLURM_CPUS_PER_TASK=1 renders in-process, with no worker start-up per run
 CLI_ENV = {"SLURM_CPUS_PER_TASK": "1"}
+NO_NOTES = {"overlay-plane": 0, "icon-image": 0}
 
 
 def _good_pixels() -> np.ndarray:
@@ -305,6 +308,15 @@ def _dicom_with_icon(path: Path) -> None:
     write_dicom(path, _good_pixels(), IconImageSequence=[icon])
 
 
+def _dicom_with_overlays(path: Path, *groups: int, photometric: str = "MONOCHROME2") -> None:
+    """A DICOM with an 8x8 overlay plane in each of `groups`."""
+    write_dicom(path, _good_pixels(), photometric)
+    ds = pydicom.dcmread(path)
+    for group in groups:
+        add_overlay(ds, np.ones((8, 8), dtype=bool), origin=(3, 3), group=group)
+    ds.save_as(path, enforce_file_format=True)
+
+
 def _png_text(key: str, value: str) -> PngImagePlugin.PngInfo:
     info = PngImagePlugin.PngInfo()
     info.add_text(key, value)
@@ -346,7 +358,13 @@ class CollisionTest(unittest.TestCase):
         record = json.loads((self.work / "preprocess.json").read_text())
         self.assertEqual(
             record["counts"],
-            {"inputs": inputs, "written": len(kept), "skipped_failed": len(expected_ids), "skipped_ignored": 0},
+            {
+                "inputs": inputs,
+                "written": len(kept),
+                "skipped_failed": len(expected_ids),
+                "skipped_ignored": 0,
+                "notes": NO_NOTES,
+            },
         )
 
     def assert_cli_exit_codes(self) -> None:
@@ -520,7 +538,16 @@ class ProvenanceTest(unittest.TestCase):
         )
         self.assertLessEqual({"pydicom", "numpy", "scikit-image", "Pillow", "matplotlib"}, set(record["libraries"]))
         self.assertEqual(record["libraries"]["pydicom"], pydicom.__version__)
-        self.assertEqual(record["counts"], {"inputs": 5, "written": 3, "skipped_failed": 1, "skipped_ignored": 1})
+        self.assertEqual(
+            record["counts"],
+            {
+                "inputs": 5,
+                "written": 3,
+                "skipped_failed": 1,
+                "skipped_ignored": 1,
+                "notes": {"overlay-plane": 0, "icon-image": 1},
+            },
+        )
         self.assertEqual((self.result.found, self.result.written), (5, 3))
         self.assertEqual(stat.S_IMODE((self.work / "preprocess.json").stat().st_mode), 0o600)
 
@@ -572,6 +599,176 @@ class ProvenanceTest(unittest.TestCase):
                 (entries[image_id].source_sha256, entries[image_id].jpeg_sha256),
                 (row["source_sha256"], row["jpeg_sha256"]),
             )
+
+
+class NotesTest(unittest.TestCase):
+    """notes.tsv lists what written inputs hold that their review images do not show; it never fails an input."""
+
+    def setUp(self):
+        self.root = temp_dir(self).resolve()
+        self.src = self.root / "src"
+        self.src.mkdir()
+        self.work = self.root / "work"
+
+    def run_quietly(self, **kwargs):
+        with quiet():
+            return run_preprocess([self.src], self.work, **kwargs)
+
+    def notes(self) -> list[list[str]]:
+        with open(self.work / "notes.tsv", newline="", encoding="utf-8") as f:
+            rows = list(csv.reader(f, delimiter="\t"))
+        self.assertEqual(rows[0], ["image_id", "kind", "detail"])
+        return rows[1:]
+
+    def written(self) -> list[str]:
+        return [r["image_id"] for r in _read_tsv(self.work / "manifest.tsv")]
+
+    def dicom_with_icons(self, *items: pydicom.Dataset) -> str:
+        path = self.src / "a.dcm"
+        write_dicom(path, _good_pixels(), IconImageSequence=list(items))
+        return path.as_posix()
+
+    def test_overlay_plane_is_noted_and_counted(self):
+        _dicom_with_overlays(self.src / "a.dcm", 0x6000)
+        result = self.run_quietly()
+        self.assertEqual(self.notes(), [[(self.src / "a.dcm").as_posix(), "overlay-plane", "group 0x6000"]])
+        self.assertEqual(result.notes, {"overlay-plane": 1, "icon-image": 0})
+        self.assertEqual(result.notes_path, self.work / "notes.tsv")
+        record = json.loads((self.work / "preprocess.json").read_text())
+        self.assertEqual(record["counts"]["notes"], {"overlay-plane": 1, "icon-image": 0})
+
+    def test_several_overlay_planes_are_one_note(self):
+        _dicom_with_overlays(self.src / "a.dcm", 0x6000, 0x6002)
+        self.run_quietly()
+        self.assertEqual(self.notes(), [[(self.src / "a.dcm").as_posix(), "overlay-plane", "groups 0x6000, 0x6002"]])
+
+    def test_icon_is_noted_without_decoding_its_pixels(self):
+        _dicom_with_icon(self.src / "a.dcm")
+        decoded = []
+        real = pydicom.Dataset.pixel_array
+
+        def counting(ds):
+            decoded.append(ds)
+            return real.fget(ds)
+
+        with mock.patch.object(pydicom.Dataset, "pixel_array", property(counting)):
+            result = self.run_quietly()
+        self.assertEqual(len(decoded), 1)  # the input's own pixel data only
+        self.assertEqual(
+            self.notes(), [[(self.src / "a.dcm").as_posix(), "icon-image", "IconImageSequence: 8x8 MONOCHROME2"]]
+        )
+        self.assertEqual(result.notes, {"overlay-plane": 0, "icon-image": 1})
+
+    def test_icon_lacking_its_size_is_noted_with_question_marks(self):
+        icon = pydicom.Dataset()
+        icon.SamplesPerPixel = 1
+        image_id = self.dicom_with_icons(icon, icon)
+        self.run_quietly()
+        self.assertEqual(self.written(), [image_id])
+        self.assertEqual(self.notes(), [[image_id, "icon-image", "IconImageSequence: ?x? ?, 2 items"]])
+
+    def test_icon_detail_is_one_tsv_safe_line(self):
+        icon = pydicom.Dataset()
+        icon.Rows, icon.Columns = 4, 6
+        with quiet():  # pydicom warns that the value is not a valid CS
+            icon.PhotometricInterpretation = "MONO\tCHROME\n2"
+            image_id = self.dicom_with_icons(icon)
+        self.run_quietly()
+        self.assertEqual(self.notes(), [[image_id, "icon-image", "IconImageSequence: 4x6 MONO CHROME 2"]])
+
+    def test_unreadable_icon_is_noted_and_the_input_still_renders(self):
+        _dicom_with_icon(self.src / "a.dcm")
+        with mock.patch.object(pydicom.sequence.Sequence, "__getitem__", side_effect=ValueError("bad item")):
+            result = self.run_quietly()
+        image_id = (self.src / "a.dcm").as_posix()
+        self.assertEqual(self.written(), [image_id])
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(self.notes(), [[image_id, "icon-image", "IconImageSequence: unreadable (ValueError)"]])
+
+    def test_icon_with_a_malformed_element_is_noted_and_the_input_still_renders(self):
+        path = self.src / "a.dcm"
+        _dicom_with_icon(path)
+        data = bytearray(path.read_bytes())
+        # Give the icon's Rows (US) a value length of 3, growing the sequence and item lengths to match
+        sequence = data.find(b"\x88\x00\x00\x02SQ\x00\x00")
+        item = sequence + 12
+        self.assertEqual(data[item : item + 4], b"\xfe\xff\x00\xe0")
+        rows = data.find(b"\x28\x00\x10\x00US\x02\x00", item)
+        for offset in (sequence + 8, item + 4):
+            data[offset : offset + 4] = struct.pack("<I", struct.unpack("<I", data[offset : offset + 4])[0] + 1)
+        data[rows + 6 : rows + 8] = b"\x03\x00"
+        data[rows + 10 : rows + 10] = b"\x00"
+        path.write_bytes(bytes(data))
+        result = self.run_quietly()
+        self.assertEqual(self.written(), [path.as_posix()])
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(
+            self.notes(), [[path.as_posix(), "icon-image", "IconImageSequence: unreadable (BytesLengthException)"]]
+        )
+
+    def test_long_icon_values_are_truncated(self):
+        icon = pydicom.Dataset()
+        icon.Rows, icon.Columns = 4, 6
+        cut = "M" * preprocess_module.NOTE_VALUE_MAX + "…"
+        # 1000 characters stay a CS string; 200000 overflow explicit VR's 16-bit length, so pydicom stores UN bytes
+        for length, expected in ((1000, cut), (200_000, "b'" + cut[2:])):
+            with self.subTest(length=length):
+                self.work = self.root / f"work{length}"
+                with quiet():  # pydicom warns that the value is not a valid CS
+                    icon.PhotometricInterpretation = "M" * length
+                    image_id = self.dicom_with_icons(icon)
+                self.run_quietly()
+                self.assertEqual(self.notes(), [[image_id, "icon-image", f"IconImageSequence: 4x6 {expected}"]])
+
+    def test_notes_follow_manifest_order_and_kind_order(self):
+        _dicom_with_icon(self.src / "a.dcm")
+        (self.src / "b.png").write_bytes(_solid_png(10))
+        path = self.src / "c.dcm"
+        _dicom_with_icon(path)
+        ds = pydicom.dcmread(path)
+        add_overlay(ds, np.ones((8, 8), dtype=bool))
+        ds.save_as(path, enforce_file_format=True)
+        self.run_quietly()
+        a, c = (self.src / "a.dcm").as_posix(), path.as_posix()
+        self.assertEqual(self.written(), [a, (self.src / "b.png").as_posix(), c])
+        icon = "IconImageSequence: 8x8 MONOCHROME2"
+        self.assertEqual(
+            self.notes(),
+            [[a, "icon-image", icon], [c, "overlay-plane", "group 0x6000"], [c, "icon-image", icon]],
+        )
+
+    def test_empty_icon_sequence_is_not_noted(self):
+        self.dicom_with_icons()
+        self.run_quietly()
+        self.assertEqual(self.notes(), [])
+
+    def test_nothing_notable_writes_a_header_only_file_with_the_policy_mode(self):
+        write_dicom(self.src / "a.dcm", _good_pixels())
+        (self.src / "b.png").write_bytes(_solid_png(10))
+        for access, mode in (("private", 0o600), ("group", 0o660)):
+            with self.subTest(access=access):
+                self.work = self.root / access
+                result = self.run_quietly(access=access)
+                self.assertEqual((self.work / "notes.tsv").read_text(encoding="utf-8"), "image_id\tkind\tdetail\n")
+                self.assertEqual(stat.S_IMODE((self.work / "notes.tsv").stat().st_mode), mode)
+                self.assertEqual(result.notes, NO_NOTES)
+                record = json.loads((self.work / "preprocess.json").read_text())
+                self.assertEqual(record["counts"]["notes"], NO_NOTES)
+
+    def test_failed_and_colliding_inputs_have_no_notes(self):
+        write_dicom(self.src / "multi.dcm", RNG.integers(0, 4000, (3, 32, 32), dtype=np.uint16))
+        ds = pydicom.dcmread(self.src / "multi.dcm")
+        add_overlay(ds, np.ones((8, 8), dtype=bool))
+        ds.save_as(self.src / "multi.dcm", enforce_file_format=True)
+        _dicom_with_overlays(self.src / "z.zip::a.dcm", 0x6000)
+        _dicom_with_icon(self.root / "a.dcm")
+        with zipfile.ZipFile(self.src / "z.zip", "w") as zf:
+            zf.write(self.root / "a.dcm", "a.dcm")
+        result = self.run_quietly()
+        self.assertEqual(self.written(), [])
+        self.assertEqual(len(result.skipped), 3)
+        self.assertEqual(self.notes(), [])
+        self.assertEqual(result.notes, NO_NOTES)
 
 
 class ClassifyTest(unittest.TestCase):
@@ -1736,7 +1933,22 @@ class PreprocessCliTest(unittest.TestCase):
         result = self.invoke(source="good")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Found 1 inputs: wrote 1 images in 1 batches; 0 skipped (0 failed, 0 ignored;", result.output)
+        self.assertNotIn("note", result.output)
         self.assertNotIn("Error", result.output)
+
+    def test_notes_are_summarized_without_changing_the_exit_code(self):
+        notable = self.root / "notable"
+        notable.mkdir()
+        _dicom_with_overlays(notable / "a.dcm", 0x6000)
+        work = self.root / "work"
+        result = self.invoke(source="notable")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(result.output.rstrip().endswith(f"; 1 note (1 overlay-plane; see {work / 'notes.tsv'})"))
+        _dicom_with_icon(notable / "b.dcm")
+        shutil.rmtree(work)
+        result = self.invoke(source="notable")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"; 2 notes (1 overlay-plane, 1 icon-image; see {work / 'notes.tsv'})", result.output)
 
     def test_failures_exit_1(self):
         result = self.invoke()
@@ -1880,7 +2092,7 @@ def make_parallel_source(root: Path) -> list[Path]:
     for i, side in enumerate((300, 40, 200, 64, 260, 32)):
         gradient = np.linspace(0, 3000, side * side).reshape(side, side)
         write_dicom(src / f"d{i}.dcm", (gradient + RNG.integers(0, 200, (side, side))).astype(np.uint16))
-    write_dicom(src / "m1.dcm", _good_pixels(), "MONOCHROME1")
+    _dicom_with_overlays(src / "m1.dcm", 0x6000, photometric="MONOCHROME1")
     _dicom_with_icon(src / "icon.dcm")
     (src / "j2k.dcm").write_bytes(Path(get_testdata_file("JPEG2000.dcm", download=False)).read_bytes())
     (src / "p.png").write_bytes(_png_bytes(RNG.integers(0, 255, (90, 120), dtype=np.uint8)))
@@ -2017,7 +2229,12 @@ class ParallelTest(unittest.TestCase):
         self.assertEqual(self.serial.written, 12)  # 10 files, 2 zip entries
         self.assertEqual([s.kind for s in self.serial.skipped], ["failed", "ignored", "failed", "failed", "failed"])
         self.assertEqual([s.reason for s in self.serial.skipped].count(COLLISION_REASON), 2)
-        self.assertEqual(self.pooled, replace(self.serial, skipped_path=self.root / "pooled" / "skipped.tsv"))
+        self.assertEqual(self.serial.notes, {"overlay-plane": 1, "icon-image": 1})
+        pooled_paths = {
+            "skipped_path": self.root / "pooled" / "skipped.tsv",
+            "notes_path": self.root / "pooled" / "notes.tsv",
+        }
+        self.assertEqual(self.pooled, replace(self.serial, **pooled_paths))
         serial, pooled = _tree(self.root / "serial"), _tree(self.root / "pooled")
         self.assertEqual(sorted(serial), sorted(pooled))
         for name in serial:

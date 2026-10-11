@@ -86,6 +86,7 @@ rest; together they are enough to rebuild the tool.
 | The browser page's keys, screens and messages | `docs/commands/browser.md` |
 | Work-directory files: columns, encoding, parsing, `review.lock`, leftover files | `docs/reference/work-directory.md` |
 | Skip kinds and example reasons | `docs/commands/preprocess.md` |
+| Note kinds and example details | `docs/commands/preprocess.md` |
 | Allowlist and report format, export refusals | `docs/commands/export.md` |
 | Extras, minimum versions and codec limits | `docs/install.md` |
 | The `dev` and `docs` extras, tooling | this file |

@@ -11,7 +11,9 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 
 Renders each image input to a JPG, in batches, in a new work directory.
 Inputs it cannot render are listed in `skipped.tsv` (see
-[Skipped inputs](#skipped-inputs)).
+[Skipped inputs](#skipped-inputs)); rendered inputs that hold something the
+reviewer will not see are listed in `notes.tsv` (see
+[Input notes](#input-notes)).
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -209,7 +211,13 @@ such as:
 Found 1200 inputs: wrote 1195 images in 4 batches; 5 skipped (3 failed, 2 ignored; see review_work/skipped.tsv)
 ```
 
-N counts every input found: rendered, failed and ignored.
+N counts every input found: rendered, failed and ignored. When any rendered
+input has [notes](#input-notes), the line goes on with their count by kind
+(kinds with none are left out):
+
+```
+...; 5 skipped (3 failed, 2 ignored; see review_work/skipped.tsv); 3 notes (2 overlay-plane, 1 icon-image; see review_work/notes.tsv)
+```
 
 It exits 1 if any input failed, unless `--allow-skipped` is given, so
 scripts notice. Check `skipped.tsv` before reviewing: those images will not
@@ -217,6 +225,33 @@ be shown. Either fix them and preprocess again into a new work directory, or
 accept the result: the work directory has been written and can be reviewed as
 it is (pass `--allow-skipped` up front when a script should treat failed
 inputs as success).
+
+## Input notes
+
+`notes.tsv` lists written inputs that hold something notable the reviewer
+will not see, or not see as it is stored, and that downstream tools are
+expected to strip. A note never fails an input and never changes the exit
+status: the image is in `manifest.tsv` and is reviewed as usual. Only
+inputs that are written get notes; a failed or ignored input has none. An
+input can have several notes, one row each. The file's columns are in
+[`notes.tsv`](../reference/work-directory.md#notestsv); like `skipped.tsv` it
+holds source paths.
+
+| Kind | Meaning | Example detail |
+|------|---------|----------------|
+| `overlay-plane` | A DICOM with one or more overlay planes (groups 6000-601E with OverlayData) | `group 0x6000`, or `groups 0x6000, 0x6002` |
+| `icon-image` | A DICOM with an embedded icon image (IconImageSequence (0088,0200)) | `IconImageSequence: 64x64 MONOCHROME2` |
+
+- **`overlay-plane`**: overlays are currently both drawn onto the review image
+  (see [Rendering pipeline](#rendering-pipeline)) and noted, so that the
+  planes are stripped before release.
+- **`icon-image`**: icons are not rendered, so text burned into them is not
+  reviewed: remove them before releasing files. The detail gives the first
+  icon's rows, columns and photometric interpretation, with `?` for one that
+  is missing (`IconImageSequence: ?x? ?`) and each value cut to 64 characters
+  plus `…`, and `, N items` when the sequence holds more than one icon. An icon sequence that cannot be read is noted as
+  `IconImageSequence: unreadable (ValueError)` (the error's class), and the
+  input still renders. An empty sequence gets no note.
 
 ## Rendering pipeline
 
@@ -236,12 +271,12 @@ white):
 
 A DICOM's embedded icon image (a thumbnail stored in the file, in
 IconImageSequence (0088,0200)) is not rendered, so text burned into it is not
-reviewed: remove icons before releasing files. Only the pixel data is
-reviewed, with overlay planes drawn on it. A DICOM whose overlay cannot be
-decoded is
-`failed` as a whole. Overlays stored in the unused bits of the pixel data,
-rather than in overlay planes, are not drawn. Only single-frame DICOMs
-(grayscale, colour or palette) are rendered for now.
+reviewed: remove icons before releasing files. `notes.tsv` lists each DICOM
+that has one (see [Input notes](#input-notes)). Only the pixel data is
+reviewed, with overlay planes drawn on it (and noted). A DICOM whose overlay
+cannot be decoded is `failed` as a whole. Overlays stored in the unused bits
+of the pixel data, rather than in overlay planes, are not drawn. Only
+single-frame DICOMs (grayscale, colour or palette) are rendered for now.
 
 Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
 converted to RGB; 16-bit grayscale keeps its full range), get adaptive

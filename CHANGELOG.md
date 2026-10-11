@@ -52,7 +52,8 @@ Read **Upgrading** first.
   to add each DICOM's embedded icon (IconImageSequence) as a second image,
   `<path>#icon`, and list an icon it could not render as its own `failed`
   row. A new work directory has neither; nobody sees the icon, so remove
-  icons before releasing files. Work directories made by an older version
+  icons before releasing files; notes.tsv lists each DICOM that has one
+  (`icon-image`). Work directories made by an older version
   keep their icon rows and verdicts, and `export` still folds them into
   their file's row. A file whose name ends in `#icon` beside the file without
   it is no longer a preprocess collision, but `export` cannot vouch for it:
@@ -114,6 +115,17 @@ Read **Upgrading** first.
   socket routes and the page needed no API version bump and do not change the
   HTTPS API (API v8, above, is for the `/mark` refusals). See the security
   model in the documentation for the limits.
+- **`notes.tsv`: inputs written with something the reviewer does not see.**
+  `preprocess` now always writes `notes.tsv` (`image_id`, `kind`, `detail`;
+  header only when empty) beside `skipped.tsv`, one row per note on a
+  written input: `overlay-plane` for a DICOM with overlay planes (detail
+  `group 0x6000` or `groups 0x6000, 0x6002`; overlays are still drawn too) and
+  `icon-image` for a DICOM with an embedded icon (detail such as
+  `IconImageSequence: 64x64 MONOCHROME2`). Notes never fail an input or
+  change the exit status. When there are any, the summary line ends with
+  `; N notes (K overlay-plane, J icon-image; see .../notes.tsv)`, and
+  `preprocess.json` gains `counts.notes`, the count of every kind. The file
+  holds source paths: treat it like `manifest.tsv`.
 
 ### Wire API (remote review)
 

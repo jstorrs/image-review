@@ -7,6 +7,7 @@ All state lives in the work directory (default `./review_work`), which
 review_work/
   manifest.tsv        # Master list of images
   skipped.tsv         # Inputs that produced no image
+  notes.tsv           # Notable things written inputs hold
   preprocess.json     # How it was made
   review.tsv          # Verdicts (created later during review)
   review.lock         # Present while review or serve has it open
@@ -22,6 +23,7 @@ review_work/
 |------|--------|-------------|
 | [`manifest.tsv`](#manifesttsv) | TSV | Master image list, written by `preprocess` |
 | [`skipped.tsv`](#skippedtsv) | TSV | Inputs that produced no image, written by `preprocess` |
+| [`notes.tsv`](#notestsv) | TSV | What rendered inputs hold that their images do not show, written by `preprocess` |
 | [`preprocess.json`](#preprocessjson) | JSON | How the work directory was made |
 | [`review.tsv`](#reviewtsv) | TSV | Review decisions, appended by `review` and `serve` |
 | [`review.lock`](#reviewlock) | JSON | Present while a writer (`review` or `serve`) has the work directory open; names the holder |
@@ -106,6 +108,28 @@ the rows and `export` reports them. Both read the file strictly and stop with
 an error naming the file and line if it is malformed, including a field
 longer than 131072 characters.
 
+## `notes.tsv`
+
+One row per note on an input that was written to `manifest.tsv`: something
+the input holds that its image does not show, and that downstream tools are
+expected to strip. It is always written, with only its header when there are
+no notes. Rows follow `manifest.tsv` order; an input with several notes has
+one row each. A failed or ignored input, including one whose image_id
+collides, has no notes.
+
+| Column | Description |
+|--------|-------------|
+| `image_id` | The input, as in `manifest.tsv` |
+| `kind` | `overlay-plane` or `icon-image` |
+| `detail` | One line describing it, e.g. `groups 0x6000, 0x6002` or `IconImageSequence: 64x64 MONOCHROME2` |
+
+It is encoded like `skipped.tsv`, and the detail is cleaned like a skipped
+reason (no tabs, newlines or other control characters). What each kind means,
+with example details, is in
+[Input notes](../commands/preprocess.md#input-notes). It holds source paths,
+so it is as sensitive as `manifest.tsv`. The tool never reads it back, and
+the server never sends it.
+
 ## `preprocess.json`
 
 One JSON object recording how the work directory was made:
@@ -117,7 +141,7 @@ One JSON object recording how the work directory was made:
 | `sources` | The SOURCES as resolved absolute paths, in the order given, escaped like an `image_id` |
 | `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `access`, `jobs` (recorded only: the output does not depend on it) |
 | `libraries` | Versions of `pydicom`, `numpy`, `scikit-image`, `Pillow`, `matplotlib`, plus `gdcm`, `pylibjpeg`, `openjpeg` when installed |
-| `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored` |
+| `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored`, and `notes`: an object with the number of `notes.tsv` rows of each kind, every kind present (zero included), e.g. `{"overlay-plane": 1, "icon-image": 0}` |
 
 It holds source paths, so it is as sensitive as `manifest.tsv`. The tool
 never reads it back, and the server never sends it.

@@ -460,9 +460,15 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, j
         raise click.ClickException(str(exc)) from exc
     skipped = skipped_counts(result.skipped)
     failed = skipped.failed
+    total_notes = sum(result.notes.values())
+    notes = ""
+    if total_notes:
+        kinds = ", ".join(f"{count} {kind}" for kind, count in result.notes.items() if count)
+        notes = f"; {total_notes} note{'' if total_notes == 1 else 's'} ({kinds}; see {result.notes_path})"
     click.echo(
         f"Found {result.found} inputs: wrote {result.written} images in {result.batches} batches; "
         f"{len(result.skipped)} skipped ({failed} failed, {skipped.ignored} ignored; see {result.skipped_path})"
+        f"{notes}"
     )
     if access == "group":
         click.echo(_shared_with(Path(work_dir)))

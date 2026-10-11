@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from functools import partial
 from itertools import groupby
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, assert_never, cast
+from typing import Any, Literal, assert_never, cast, get_args
 from zipfile import ZipFile
 
 import matplotlib
@@ -82,6 +82,7 @@ _OVERLAY_FIRST_GROUP = 0x6000
 _OVERLAY_LAST_GROUP = 0x601E
 _OVERLAY_DATA_ELEMENT = 0x3000
 _OVERLAY_ORIGIN_ELEMENT = 0x0050
+_ICON_IMAGE_SEQUENCE = (0x0088, 0x0200)
 _DICOM_SUFFIXES = {".dcm", ".dicom", ".ima"}
 _RASTER_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".webp",
@@ -111,6 +112,9 @@ _ALPHA_MODES = {"RGBA", "RGBa", "LA", "La", "PA"}
 _HIGH_BIT_GRAY_MODES = {"I", "F", "I;16", "I;16L", "I;16B", "I;16N"}
 _PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
 PROVENANCE_NAME = "preprocess.json"
+NOTES_NAME = "notes.tsv"
+NOTES_HEADER = ["image_id", "kind", "detail"]
+NOTE_VALUE_MAX = 64  # characters of one DICOM value quoted in a note detail
 PENDING_NAME = ".pending"  # staging subdirectory holding JPGs until their image_ids are known not to collide
 COLLISION_REASON = "image_id collides with another input (rename one of them)"
 BAD_NAME_REASON = "name is not UTF-8 or holds a control character or line separator; rename it"
@@ -126,6 +130,17 @@ _SPAWN = multiprocessing.get_context("spawn")
 
 Kind = Literal["dicom", "raster"]
 Content = Literal[Kind, "zip"]
+# Something a written input holds that its review image does not show, and that downstream tools should strip
+NoteKind = Literal["overlay-plane", "icon-image"]
+NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
+
+
+@dataclass(frozen=True)
+class Note:
+    """One notable thing about a written input, for notes.tsv; it never fails the input."""
+
+    kind: NoteKind
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -151,6 +166,7 @@ class Rendered:
 
     image_id: ImageId
     rgb: np.ndarray
+    notes: tuple[Note, ...]
 
 
 @dataclass(frozen=True)
@@ -160,6 +176,7 @@ class Encoded:
     image_id: ImageId
     jpeg: bytes
     source_sha256: str
+    notes: tuple[Note, ...]
 
 
 @dataclass(frozen=True)
@@ -170,6 +187,7 @@ class Staged:
     path: Path
     source_sha256: str
     jpeg_sha256: str
+    notes: tuple[Note, ...]
 
 
 @dataclass(frozen=True)
@@ -179,6 +197,8 @@ class PreprocessResult:
     batches: int
     skipped: list[SkippedRow]
     skipped_path: Path
+    notes: dict[NoteKind, int]  # notes.tsv rows per kind, every kind in NOTE_KINDS order
+    notes_path: Path
 
 
 class WorkerCrashed(RuntimeError):
@@ -278,17 +298,24 @@ def _to_uint8(pixels: np.ndarray, bits: int) -> np.ndarray:
     return np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
 
 
+def _overlay_groups(dcm: pydicom.FileDataset) -> list[int]:
+    """The overlay planes' groups: the even groups 0x6000-0x601E that have OverlayData (not decoded)."""
+    return [
+        group
+        for group in range(_OVERLAY_FIRST_GROUP, _OVERLAY_LAST_GROUP + 1, 2)
+        if (group, _OVERLAY_DATA_ELEMENT) in dcm
+    ]
+
+
 def _overlay_mask(dcm: pydicom.FileDataset, shape: tuple[int, int]) -> np.ndarray:
-    """Union of the overlay planes (groups 0x6000-0x601E with OverlayData) as a bool mask of `shape`.
+    """Union of the overlay planes (see `_overlay_groups`) as a bool mask of `shape`.
 
     Each plane is placed at its OverlayOrigin (1-based row, column; default 1, 1)
     and clipped to the image. All False when there are no overlays. A plane that
     cannot be decoded raises ValueError naming its group.
     """
     mask = np.zeros(shape, dtype=bool)
-    for group in range(_OVERLAY_FIRST_GROUP, _OVERLAY_LAST_GROUP + 1, 2):
-        if (group, _OVERLAY_DATA_ELEMENT) not in dcm:
-            continue
+    for group in _overlay_groups(dcm):
         try:
             plane = dcm.overlay_array(group)
             if plane.ndim != 2:
@@ -381,6 +408,46 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
             return _crop(rgb)
         case _:
             raise Unsupported(f"photometric interpretation {photometric}")
+
+
+def _overlay_note(dcm: pydicom.FileDataset) -> Note | None:
+    groups = [f"0x{group:04X}" for group in _overlay_groups(dcm)]
+    if not groups:
+        return None
+    return Note("overlay-plane", f"group{'s' if len(groups) > 1 else ''} {', '.join(groups)}")
+
+
+def _truncated(text: str) -> str:
+    """`text`, cut to `NOTE_VALUE_MAX` characters plus `…` when longer, so a note stays a short line."""
+    return text if len(text) <= NOTE_VALUE_MAX else text[:NOTE_VALUE_MAX] + "…"
+
+
+def _icon_note(dcm: pydicom.FileDataset) -> Note | None:
+    """A note for the top-level IconImageSequence: the first icon's size and photometric (`?` when missing).
+
+    Only those attributes are read, never the icon's pixels, each cut to `NOTE_VALUE_MAX` characters; a sequence
+    that cannot be read is noted as unreadable rather than failing the input.
+    """
+    if _ICON_IMAGE_SEQUENCE not in dcm:
+        return None
+    try:
+        items = dcm[_ICON_IMAGE_SEQUENCE].value
+        if not items:
+            return None
+        rows, cols, photometric = (
+            "?" if value in (None, "") else _truncated(str(value))
+            for value in (items[0].get(keyword) for keyword in ("Rows", "Columns", "PhotometricInterpretation"))
+        )
+        count = f", {len(items)} items" if len(items) > 1 else ""
+        detail = f"IconImageSequence: {rows}x{cols} {photometric}{count}"
+    except Exception as exc:  # noqa: BLE001 - a bad icon must never fail the input
+        detail = f"IconImageSequence: unreadable ({type(exc).__name__})"
+    return Note("icon-image", detail)
+
+
+def _dicom_notes(dcm: pydicom.FileDataset) -> tuple[Note, ...]:
+    """What `dcm` holds that its rendering does not show, in NOTE_KINDS order."""
+    return tuple(note for note in (_overlay_note(dcm), _icon_note(dcm)) if note is not None)
 
 
 def apply_colormap(img: np.ndarray, colormap: str = "inferno") -> np.ndarray:
@@ -516,13 +583,14 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
 def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str) -> Rendered:
     """Render one input's image: a DICOM's PixelData only, nothing else embedded in the file.
 
-    A failure raises.
+    A DICOM's rendering carries its notes (see `_dicom_notes`). A failure raises.
     """
     match kind:
         case "dicom":
-            return Rendered(image_id, preprocess_dicom(read_dicom(data), colormap))
+            dcm = read_dicom(data)
+            return Rendered(image_id, preprocess_dicom(dcm, colormap), _dicom_notes(dcm))
         case "raster":
-            return Rendered(image_id, preprocess_raster(decode_raster(data)))
+            return Rendered(image_id, preprocess_raster(decode_raster(data)), ())
 
 
 # ---------------------------------------------------------------- discovery (IO)
@@ -786,7 +854,7 @@ def render_and_encode(candidate: Candidate, colormap: str) -> Encoded | SkippedR
     try:
         source_sha256 = hashlib.sha256(data).hexdigest()
         rendered = render(kind, image_id, data, colormap)
-        return Encoded(rendered.image_id, encode_jpeg(rendered.rgb), source_sha256)
+        return Encoded(rendered.image_id, encode_jpeg(rendered.rgb), source_sha256, rendered.notes)
     except NotAnImage as exc:
         return SkippedRow(image_id, "ignored", _clean_reason(str(exc)))
     except Exception as exc:  # noqa: BLE001 - one bad input must not abort the run; it is recorded in skipped.tsv
@@ -1025,6 +1093,7 @@ def provenance(
             "written": result.written,
             "skipped_failed": skipped.failed,
             "skipped_ignored": skipped.ignored,
+            "notes": result.notes,
         },
     }
 
@@ -1068,7 +1137,8 @@ def run_preprocess(
     Every directory and file follows the `access` policy (see `access.modes`),
     enforced by a umask held for the whole run and restored afterwards.
 
-    Every input ends up in exactly one of manifest.tsv or skipped.tsv; preprocess.json
+    Every input ends up in exactly one of manifest.tsv or skipped.tsv; notes.tsv lists
+    what written inputs hold that their images do not show; preprocess.json
     records how the work dir was made (see `provenance`). Write
     errors (OSError on the work directory) propagate and abort the run. The
     work dir appears only on success; an existing non-empty one is refused
@@ -1085,7 +1155,7 @@ def run_preprocess(
         staging = _claim_staging(output_dir, policy.dir_mode)
         exclude = frozenset({output_dir.resolve(), staging.resolve()})  # never ingest our own output
         try:
-            found, manifest_rows, skipped = _render_into(
+            found, manifest_rows, skipped, notes = _render_into(
                 sources=sources,
                 exclude=exclude,
                 staging=staging,
@@ -1101,8 +1171,18 @@ def run_preprocess(
                 [(s.image_id, s.kind, s.reason) for s in skipped],
                 policy.file_mode,
             )
+            _write_tsv(staging / NOTES_NAME, NOTES_HEADER, notes, policy.file_mode)
             written = len(manifest_rows)
-            result = PreprocessResult(found, written, -(-written // batch_size), skipped, output_dir / SKIPPED_NAME)
+            note_counts = Counter(kind for _, kind, _ in notes)
+            result = PreprocessResult(
+                found,
+                written,
+                -(-written // batch_size),
+                skipped,
+                output_dir / SKIPPED_NAME,
+                {kind: note_counts[kind] for kind in NOTE_KINDS},
+                output_dir / NOTES_NAME,
+            )
             record = provenance(
                 sources=sources,
                 batch_size=batch_size,
@@ -1172,9 +1252,8 @@ def _stage(
             count += 1
             path = pending / f"{count:08d}.jpg"
             _write_new(path, policy.file_mode, outcome.jpeg)
-            inputs.append(
-                Staged(outcome.image_id, path, outcome.source_sha256, hashlib.sha256(outcome.jpeg).hexdigest())
-            )
+            jpeg_sha256 = hashlib.sha256(outcome.jpeg).hexdigest()
+            inputs.append(Staged(outcome.image_id, path, outcome.source_sha256, jpeg_sha256, outcome.notes))
     return inputs
 
 
@@ -1184,17 +1263,18 @@ def _place(
     staging: Path,
     batch_size: int,
     policy: Modes,
-) -> tuple[list[tuple[str, str, str, str, str]], list[SkippedRow]]:
+) -> tuple[list[tuple[str, str, str, str, str]], list[SkippedRow], list[tuple[str, NoteKind, str]]]:
     """Move the JPGs of inputs without a colliding image_id into batches under `staging`.
 
     An input with a colliding image becomes one `failed` row and its JPG is deleted.
-    Returns the manifest rows and the skipped rows, both in discovery order.
+    Returns the manifest rows, the skipped rows and the note rows of placed inputs, all in discovery order.
     """
     collisions = colliding_ids(
         (row.image_id, row.source_sha256, row.jpeg_sha256) for row in inputs if isinstance(row, Staged)
     )
     manifest_rows: list[tuple[str, str, str, str, str]] = []
     skipped: list[SkippedRow] = []
+    notes: list[tuple[str, NoteKind, str]] = []
     for row in inputs:
         if isinstance(row, SkippedRow):
             skipped.append(row)
@@ -1214,7 +1294,8 @@ def _place(
         os.rename(row.path, img_path)
         key = img_path.relative_to(staging).as_posix()
         manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
-    return manifest_rows, skipped
+        notes.extend((row.image_id, note.kind, _clean_reason(note.detail)) for note in row.notes)
+    return manifest_rows, skipped, notes
 
 
 def _render_into(
@@ -1226,12 +1307,12 @@ def _render_into(
     colormap: str,
     policy: Modes,
     jobs: int,
-) -> tuple[int, list[tuple[str, str, str, str, str]], list[SkippedRow]]:
+) -> tuple[int, list[tuple[str, str, str, str, str]], list[SkippedRow], list[tuple[str, NoteKind, str]]]:
     """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches."""
     pending = staging / PENDING_NAME
     pending.mkdir()
     os.chmod(pending, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
     inputs = _stage(sources=sources, exclude=exclude, pending=pending, colormap=colormap, policy=policy, jobs=jobs)
-    manifest_rows, skipped = _place(inputs, staging=staging, batch_size=batch_size, policy=policy)
+    manifest_rows, skipped, notes = _place(inputs, staging=staging, batch_size=batch_size, policy=policy)
     pending.rmdir()  # every staged JPG was moved or deleted
-    return len(inputs), manifest_rows, skipped
+    return len(inputs), manifest_rows, skipped, notes

@@ -123,9 +123,9 @@ The pipeline has three parts: **discovery** (IO) yields one `Candidate`
 bytes, read during discovery) per input without decoding anything (or a `SkippedRow` for content
 that is not an input or cannot be read); a pure **`render(kind, image_id,
 data, colormap) -> Rendered`** turns the bytes into one `(H, W, 3)` uint8 RGB
-image; the image is then JPEG-encoded in memory; and a **writer** saves
+image, with the input's notes (see *Notes*); the image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and, once collisions are
-known (see *Collisions*), records them in the manifest. Each input's bytes are read
+known (see *Collisions*), records them in the manifest and their notes in `notes.tsv`. Each input's bytes are read
 once; their SHA-256 becomes the `source_sha256` of the image rendered from
 them, and the SHA-256 of each JPG's encoded
 bytes its `jpeg_sha256` (see *`manifest.tsv`*).
@@ -137,7 +137,7 @@ With `jobs` = 1 it runs in the main process and no pool exists. With `jobs` >
 1 the main process submits each candidate's bytes (read during discovery) to a `ProcessPoolExecutor(jobs)` using
 the `spawn` start method on every platform (workers import the package afresh:
 no inherited threads, signal handlers or open archives); workers hash the
-bytes and return JPEG bytes or `SkippedRow`s. While the pool exists,
+bytes and return JPEG bytes (with their notes) or `SkippedRow`s. While the pool exists,
 `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` are set to 1 in
 the main process's environment (only those the user has not set; restored
 afterwards), so each worker inherits single-threaded BLAS instead of a thread
@@ -145,7 +145,7 @@ per core. At most `2 × jobs` inputs are submitted and not yet consumed: the
 main process holds their raw bytes, each worker one input and its decoded
 arrays. Results are consumed in input
 order, so the main process writes every file and row in the same order as
-with `jobs` = 1 and the output is byte-identical (only `preprocess.json`'s
+with `jobs` = 1 and the output (`manifest.tsv`, `skipped.tsv`, `notes.tsv`, the JPGs) is byte-identical (only `preprocess.json`'s
 `created` and `parameters.jobs` differ). Workers ignore SIGINT from the start
 (SIGINT is blocked while they are spawned and the initializer ignores, then
 unblocks it), so Ctrl-C reaches only the main process. The CLI runs preprocess
@@ -164,7 +164,7 @@ second while it waits that no worker has exited (without
 `max_tasks_per_child`, workers exit only at shutdown).
 
 **Work directory lifecycle.** The run builds everything (batch directories,
-JPGs, `manifest.tsv`, `skipped.tsv`, `preprocess.json`) in a staging directory
+JPGs, `manifest.tsv`, `skipped.tsv`, `notes.tsv`, `preprocess.json`) in a staging directory
 `<parent>/.<name>.partial`, created with the access policy's directory mode
 (not `exist_ok`), and renames it to the work directory only on success; the
 final directory keeps that mode. If the work directory already exists and is not an empty directory
@@ -279,7 +279,7 @@ SOURCE is never entered, so no file is reached through one).
 
 A DICOM's `IconImageSequence` (0088,0200) is never rendered: an embedded
 icon's pixels are never decoded, it adds no row to the manifest or
-`skipped.tsv`, and a broken icon item does not fail its file (a sequence
+`skipped.tsv` (only an `icon-image` note, see *Notes*), and a broken icon item does not fail its file (a sequence
 malformed enough to break reading the file still fails it, as any malformed
 element does). Text burned into an icon is therefore not reviewed (see
 [Security model](security-model.md)). Work directories made by an older
@@ -308,6 +308,25 @@ stay in the manifest (see *Key versus `image_id`*).
 Only rendered images are compared: a `failed` or `ignored` row sharing an
 `image_id` with an image changes nothing (`export` already reports an
 `image_id` with a `failed` or `ignored` row as `NOT_REVIEWED`).
+
+**Notes.** A note (`Note(kind, detail)`, `kind` a `NoteKind`,
+`Literal["overlay-plane", "icon-image"]`, listed in that order by
+`NOTE_KINDS`) records something a rendered input holds that its image does
+not show; the kinds and their details are in
+[Input notes](../commands/preprocess.md#input-notes). `render` reads a DICOM's
+notes from the dataset after rendering it, in `NOTE_KINDS` order, without
+decoding anything: `overlay-plane` lists the overlay groups (the same
+enumeration the overlay mask uses: even groups 0x6000-0x601E with
+OverlayData), and `icon-image` reads only the first IconImageSequence item's
+Rows, Columns and PhotometricInterpretation (`?` when missing, each value cut
+to 64 characters plus `…`), inside a
+catch-all so a bad icon gives an `unreadable (<ExceptionClass>)` detail and
+never fails the input. A raster has no notes. Notes travel with the image
+through `Rendered`, `Encoded` (so from pool workers) and the staged image;
+when the JPGs are placed (see *Batching*), each placed input's notes become
+`notes.tsv` rows in manifest order, details cleaned like a `skipped.tsv`
+reason (see *Error handling*). A failed input, including a colliding one, has
+none. Notes never affect the exit status.
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
@@ -405,7 +424,7 @@ under its escaped name (see *Source loading*). Content that is not an input
 (see *Source loading*) becomes an `ignored` row, without a logged warning.
 Only `failed` rows affect the exit status. Errors writing to the work
 directory (JPG files, batch directories, `manifest.tsv`, `skipped.tsv`,
-`preprocess.json`) still abort the run; since images are encoded in memory first, an input's content
+`notes.tsv`, `preprocess.json`) still abort the run; since images are encoded in memory first, an input's content
 cannot cause one.
 
 **Batching**: Each input is rendered, encoded and written as soon as discovery yields
@@ -416,8 +435,8 @@ are renamed into their batches in discovery order, the rest are deleted, and
 `.pending` is removed. The n-th kept image
 (0-based) goes to `batch_{n // batch_size + 1:03d}/img_{n % batch_size + 1:05d}.jpg`.
 
-**Output**: `manifest.tsv`, `skipped.tsv` (always written, even when
-empty) and `preprocess.json`. The summary line and the exit status are in
+**Output**: `manifest.tsv`, `skipped.tsv` and `notes.tsv` (both always
+written, even when empty) and `preprocess.json`. The summary line and the exit status are in
 [Skipped inputs](../commands/preprocess.md#skipped-inputs).
 
 ### `image-review review`
@@ -782,6 +801,17 @@ makes each `failed` `image_id` `NOT_REVIEWED` with its `reason` (folding a
 failed icon's, from a work directory made by an older version, into its
 file's row), and lists each `ignored` one not otherwise
 covered as `IGNORED` with its `reason` (see *Ignored inputs* under *Parts and folding*).
+
+### `notes.tsv`
+
+Written by `preprocess`, always (header only when there are no notes), with
+the policy's file mode like the other files. Columns and encoding are in
+[`notes.tsv`](work-directory.md#notestsv); how notes are made is in *Notes*.
+`preprocess.json`'s `counts.notes` holds its row count per kind, and the
+summary line the same counts.
+
+It contains source paths, so it is as sensitive as `manifest.tsv`. Nothing
+reads it back and the server never serves it (no JPG key can name it).
 
 ### `review.lock`
 

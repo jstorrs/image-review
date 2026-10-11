@@ -248,8 +248,8 @@ world-readable.
   `chmod -R o-rwx <work dir>`.
 - **Files that hold PHI:**
   - the batch JPGs, which show whatever text was burned in;
-  - `manifest.tsv`, `skipped.tsv` and `preprocess.json`, which hold source
-    paths (and `skipped.tsv` reasons, which also contain paths);
+  - `manifest.tsv`, `skipped.tsv`, `notes.tsv` and `preprocess.json`, which
+    hold source paths (and `skipped.tsv` reasons, which also contain paths);
   - `review.tsv`, which holds source paths as `image_id`s plus reviewer names
     and timestamps;
   - job output and stderr logs: `preprocess` logs the source paths that
