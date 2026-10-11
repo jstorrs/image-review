@@ -12,7 +12,7 @@ dependencies = [
     # release with a CPython 3.12 wheel.
     # Core: what `serve`, `status` and `export` need (and the CLI itself, including --help), plus
     # the grid layout code (layout.py) shared by the viewer and, later, serve's browser client.
-    "click>=8.2",  # the tests read CliRunner stderr separately
+    "click>=8.2.2",  # the tests read CliRunner stderr separately; 8.2.2 validates values taken from envvars
     "cryptography>=41",  # 3.1 is the oldest that runs; 41 is a floor without old known CVEs
     "rectpack==0.2.2",  # unmaintained, sdist only; grid packing results depend on its exact behaviour
 ]
@@ -26,19 +26,21 @@ Issues = "https://github.com/jstorrs/image-review/issues"
 [project.optional-dependencies]
 # `preprocess`; without the codecs extra a compressed DICOM is listed in skipped.tsv as "cannot decode <syntax>"
 preprocess = [
-    "matplotlib>=3.7.3",
-    "numpy>=1.26",
-    "pydicom>=3.0",  # pydicom.pixels, the 3.x decoders, Dataset.set_pixel_data (tests)
+    "imagecodecs>=2024.6.1",  # 16-bit colour and alpha PNGs, which Pillow truncates to their high byte
+    "matplotlib>=3.8.4",  # older releases require numpy < 2
+    "numpy>=2.1",  # imagecodecs 2026.5.10 and later require it; the floors are tested with it
+    "pydicom>=3.0.1",  # 3.0.0 fails on float pixel data (missing Bits Stored); pydicom.pixels, set_pixel_data (tests)
     "Pillow>=10.3,!=11.*",  # 10.3: 16-bit grayscale PNG; 11.x misdecodes an MPO frame after a mode change
-    "scikit-image>=0.22",
-    "scipy>=1.11.2",
+    "scikit-image>=0.23.1",  # older releases fail to import with numpy 2
+    "scipy>=1.13",  # older releases require numpy < 2
+    "tifffile>=2024.1.30",  # 16-bit RGB and CMYK TIFFs, which Pillow truncates; older releases fail with numpy 2
     "tqdm>=4.60",  # tqdm.contrib.logging
 ]
 # Pixel-data decoders pydicom uses for compressed DICOMs during `preprocess`
 codecs = [
     "python-gdcm>=3.0.25",  # older releases "decode" a corrupt JPEG 2000 codestream without error
     "pylibjpeg>=2.0",  # what pydicom 3 supports
-    "pylibjpeg-openjpeg>=2.0",
+    "pylibjpeg-openjpeg>=2.3",  # older releases require numpy < 2
 ]
 # `review`, local or --remote
 viewer = [

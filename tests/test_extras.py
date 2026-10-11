@@ -1,6 +1,7 @@
 """A command whose optional extra is missing names the install command; other import failures are not masked."""
 
 import builtins
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -90,6 +91,16 @@ class CommandHintTest(unittest.TestCase):
     def test_preprocess_without_tqdm(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.invoke("tqdm", missing("tqdm"), "preprocess", tmp, "--work-dir", str(Path(tmp) / "w"))
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("pip install 'image-review[preprocess]'", result.stderr)
+
+    def test_preprocess_without_imagecodecs(self):
+        # imagecodecs is imported only by image_review.preprocess: drop a cached copy so the import runs again
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules):
+            sys.modules.pop("image_review.preprocess", None)
+            result = self.invoke(
+                "imagecodecs", missing("imagecodecs"), "preprocess", tmp, "--work-dir", str(Path(tmp) / "w")
+            )
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("pip install 'image-review[preprocess]'", result.stderr)
 

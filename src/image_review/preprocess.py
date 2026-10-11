@@ -24,11 +24,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, assert_never, cast, get_args
 from zipfile import ZipFile
 
+import imagecodecs
 import matplotlib
 import numpy as np
 import pydicom
 import skimage as ski
-from PIL import Image
+import tifffile
+from PIL import Image, PngImagePlugin, TiffImagePlugin
 from pydicom.errors import InvalidDicomError
 from pydicom.uid import (
     UID,
@@ -111,6 +113,8 @@ _ARCHIVE_SUFFIXES = {
 _HEIF_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif", b"avis"}
 _ALPHA_MODES = {"RGBA", "RGBa", "LA", "La", "PA"}
 _HIGH_BIT_GRAY_MODES = {"I", "F", "I;16", "I;16L", "I;16B", "I;16N"}
+# Pillow's raw modes for 16-bit RGB, gray+alpha and RGBA PNGs, of which it keeps only the high byte
+_PNG_TRUNCATED_RAWMODES = {"RGB;16B", "LA;16B", "RGBA;16B"}
 _PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
 PROVENANCE_NAME = "preprocess.json"
 NOTES_NAME = "notes.tsv"
@@ -119,7 +123,8 @@ NOTE_VALUE_MAX = 64  # characters of one DICOM value quoted in a note detail
 PENDING_NAME = ".pending"  # staging subdirectory holding JPGs until their image_ids are known not to collide
 COLLISION_REASON = "image_id collides with another input (rename one of them)"
 BAD_NAME_REASON = "name is not UTF-8 or holds a control character or line separator; rename it"
-_LIBRARIES = ("pydicom", "numpy", "scikit-image", "Pillow", "matplotlib")  # distribution names
+# Libraries that shape the output, by distribution name
+_LIBRARIES = ("pydicom", "numpy", "scikit-image", "Pillow", "matplotlib", "imagecodecs", "tifffile")
 # Optional pixel-data codecs, recorded when importable: module name -> distribution name
 _CODEC_DISTRIBUTIONS = {"gdcm": "python-gdcm", "pylibjpeg": "pylibjpeg", "openjpeg": "pylibjpeg-openjpeg"}
 IN_FLIGHT_PER_JOB = 2  # inputs submitted to the pool and not yet written, per worker: bounds the bytes held in memory
@@ -291,15 +296,20 @@ def _compress_tails(img: np.ndarray) -> np.ndarray:
     return np.interp(img, [lo, bot, top, hi], [0, TAIL_FRACTION, 1 - TAIL_FRACTION, 1]).astype(np.float32)
 
 
+def _full_scale(pixels: np.ndarray) -> int:
+    """The value shown at full brightness for non-empty, non-negative colour samples, by the bits they use, not the
+    declared depth: 2**bits - 1, bits being the larger of 8 and the bit length of the maximum. 8-bit data is unchanged;
+    data using fewer bits than declared is stretched to full brightness, so burned-in text stays visible."""
+    return 2 ** max(8, int(pixels.max()).bit_length()) - 1
+
+
 def _to_uint8(pixels: np.ndarray) -> np.ndarray:
-    """Scale colour samples to uint8 by the bits they use, not the declared depth: the larger of 8 and the bit length
-    of the maximum maps to 255. 8-bit data is unchanged; data using fewer bits than declared is stretched to full
-    brightness, so burned-in text stays visible. Negative samples (signed, non-conformant) clip to 0."""
+    """Scale colour samples to uint8 by the bits they use (see `_full_scale`). Negative samples (signed,
+    non-conformant) clip to 0."""
     if pixels.size == 0:
         return np.zeros(pixels.shape, dtype=np.uint8)
     pixels = np.maximum(pixels, 0)
-    effective = max(8, int(pixels.max()).bit_length())
-    scaled = pixels.astype(np.float64) * 255 / (2**effective - 1)
+    scaled = pixels.astype(np.float64) * 255 / _full_scale(pixels)
     return np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
 
 
@@ -587,18 +597,107 @@ def _decode_frame(im: Image.Image) -> np.ndarray:
     return ski.util.img_as_float32(np.asarray(im.convert("RGB")))
 
 
+def _pillow_truncates(im: Image.Image) -> bool:
+    """Whether Pillow would keep only the high byte of the samples: a 16-bit RGB, gray+alpha or RGBA PNG, or a
+    16-bit unsigned RGB (with or without extra samples) or CMYK TIFF. Read from the header, before any pixels are
+    decoded."""
+    if isinstance(im, PngImagePlugin.PngImageFile):
+        return bool(im.tile) and im.tile[0][3] in _PNG_TRUNCATED_RAWMODES
+    if isinstance(im, TiffImagePlugin.TiffImageFile):
+        tags = im.tag_v2
+        samples = tags.get(TiffImagePlugin.SAMPLESPERPIXEL, 1)
+        photometric = tags.get(TiffImagePlugin.PHOTOMETRIC_INTERPRETATION)
+        return (
+            set(_as_tuple(tags.get(TiffImagePlugin.BITSPERSAMPLE, 1))) == {16}
+            and set(_as_tuple(tags.get(TiffImagePlugin.SAMPLEFORMAT, 1))) == {1}  # unsigned integers
+            and (
+                (photometric == tifffile.PHOTOMETRIC.RGB and samples >= 3)
+                or (photometric == tifffile.PHOTOMETRIC.SEPARATED and samples == 4)  # CMYK
+            )
+        )
+    return False
+
+
+def _as_tuple(value: object) -> tuple[object, ...]:
+    return value if isinstance(value, tuple) else (value,)
+
+
+def _png_samples(data: bytes) -> tuple[np.ndarray, np.ndarray | None]:
+    """A 16-bit PNG's colour, (H, W) gray or (H, W, 3) RGB, and its alpha, if any, as integers."""
+    try:
+        samples = imagecodecs.png_decode(data)  # (H, W, 2 | 3 | 4); a tRNS colour key becomes an alpha channel
+    except Exception as exc:
+        # The class only: libpng's message can arrive as undecodable stack bytes, which differ from run to run
+        raise DecodeError(f"cannot decode 16-bit PNG: {type(exc).__name__}") from exc
+    if samples.shape[2] == 2:
+        return samples[:, :, 0], samples[:, :, 1]
+    return samples[:, :, :3], samples[:, :, 3] if samples.shape[2] == 4 else None
+
+
+def _unpremultiplied(colour: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Straight colour from premultiplied 16-bit `colour`, clipped; 0 where alpha is 0, as Pillow does."""
+    straight = colour.astype(np.uint32) * 65535 // np.maximum(alpha, 1)[:, :, None]
+    return np.where(alpha[:, :, None] > 0, np.minimum(straight, 65535), 0).astype(np.uint16)
+
+
+def _decode_tiff(data: bytes) -> np.ndarray:
+    """Decode the first page of a 16-bit TIFF that Pillow would truncate (see `_pillow_truncates`) to float32
+    [0, 1] (H, W, 3), or side by side with alpha (see `_full_depth`).
+
+    RGB: the first extra sample is alpha when ExtraSamples marks it associated (premultiplied; unpremultiplied as
+    Pillow does) or unassociated alpha, or when a fourth sample has no ExtraSamples at all, as Pillow reads it. CMYK:
+    inks scale by the bits they use (see `_full_scale`), then RGB = (1 - [C, M, Y]) * (1 - K), Pillow's conversion.
+    """
+    with tifffile.TiffFile(io.BytesIO(data)) as tif:
+        page = tif.pages[0]
+        assert isinstance(page, tifffile.TiffPage)
+        samples = page.asarray()
+        if page.planarconfig == tifffile.PLANARCONFIG.SEPARATE:
+            samples = np.moveaxis(samples, 0, -1)
+        photometric, extra = page.photometric, page.extrasamples
+    if samples.ndim != 3:
+        raise Unsupported(f"TIFF with shape {samples.shape}")
+    if photometric == tifffile.PHOTOMETRIC.SEPARATED:
+        ink = samples.astype(np.float32) / _full_scale(samples)
+        return (1 - ink[:, :, :3]) * (1 - ink[:, :, 3:4])
+    colour = samples[:, :, :3]
+    first_extra = extra[0] if extra else (tifffile.EXTRASAMPLE.UNASSALPHA if samples.shape[2] == 4 else None)
+    if first_extra == tifffile.EXTRASAMPLE.ASSOCALPHA:
+        return _full_depth(_unpremultiplied(colour, samples[:, :, 3]), samples[:, :, 3])
+    if first_extra == tifffile.EXTRASAMPLE.UNASSALPHA:
+        return _full_depth(colour, samples[:, :, 3])
+    return _full_depth(colour, None)
+
+
+def _full_depth(colour: np.ndarray, alpha: np.ndarray | None) -> np.ndarray:
+    """16-bit samples to float32 [0, 1]: colour by the bits it uses (see `_full_scale`), alpha by its declared 16
+    bits (see `_with_alpha`). With alpha, the bits are those of the pixels not nearly transparent (alpha >= 256), if
+    any, so a stray near-transparent pixel cannot dim the rest."""
+    if alpha is None:
+        return colour.astype(np.float32) / _full_scale(colour)
+    visible = alpha >= 256
+    scale = _full_scale(colour[visible] if visible.any() else colour)
+    scaled = np.minimum(colour.astype(np.float32) / scale, 1)  # a nearly transparent pixel may exceed the scale
+    return _with_alpha(scaled, alpha.astype(np.float32) / 65535)
+
+
 def decode_raster(data: bytes) -> np.ndarray:
     """Decode with PIL, branching on mode, to float32 [0, 1] (H, W) grayscale or (H, W, 3) RGB.
 
     Grayscale modes (including 16-bit) stay grayscale; everything else (CMYK,
-    YCbCr, P, ...) becomes RGB; see `_with_alpha` for transparency. An MPO
-    (JPEG with extra MPF images: HDR gain maps, previews) renders all its frames
-    side by side; any other multi-frame image is unsupported.
+    YCbCr, P, ...) becomes RGB; see `_with_alpha` for transparency. A 16-bit
+    colour or alpha PNG or 16-bit RGB or CMYK TIFF, which Pillow would truncate
+    to its high byte, is decoded at full depth instead (see `_full_depth` and
+    `_decode_tiff`); its gray+alpha stays grayscale. An MPO (JPEG with extra MPF images: HDR gain
+    maps, previews) renders all its frames side by side; any other multi-frame
+    image is unsupported.
     """
     with Image.open(io.BytesIO(data)) as im:
         frames = getattr(im, "n_frames", 1)
         if frames > 1 and im.format != "MPO":
             raise Unsupported(f"multi-frame image ({frames} frames)")
+        if _pillow_truncates(im):
+            return _full_depth(*_png_samples(data)) if im.format == "PNG" else _decode_tiff(data)
         views = []
         for index in range(frames):
             im.seek(index)

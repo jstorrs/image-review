@@ -1500,7 +1500,8 @@ class TestServeSocketCommand(unittest.TestCase):
     def test_socket_flag_is_gone(self):
         result = self.serve("--socket")
         self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("No such option '--socket'", result.stderr)
+        # click 8.4 quotes the option and older releases do not; neither may mean --socket-path
+        self.assertRegex(result.stderr, r"No such option:? '?--socket(?![\w-])")
         self.assertFalse((self.work / "review.lock").exists())
         self.assertFalse(self.dir.exists())
 

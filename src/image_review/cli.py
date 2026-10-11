@@ -62,7 +62,9 @@ STATUS_REMOTE_DEPRECATED = (
 # The top-level modules each optional extra (pyproject.toml) provides and the commands import; the core
 # dependencies (click, cryptography, rectpack) are always there. The codecs extra is loaded by pydicom only when needed.
 EXTRA_MODULES: dict[str, frozenset[str]] = {
-    "preprocess": frozenset({"matplotlib", "numpy", "pydicom", "PIL", "skimage", "scipy", "tqdm"}),
+    "preprocess": frozenset(
+        {"imagecodecs", "matplotlib", "numpy", "pydicom", "PIL", "skimage", "scipy", "tifffile", "tqdm"}
+    ),
     "viewer": frozenset({"pygame", "PIL"}),
 }
 

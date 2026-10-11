@@ -18,7 +18,7 @@ commands need:
 |---|---|---|
 | `pip install .` (core) | `serve`, `status`, `export`, `--help` | click, cryptography, rectpack |
 | `pip install '.[viewer]'` | `review` (local, or the deprecated `--remote`) | pygame-ce, Pillow |
-| `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
+| `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
 | `pip install '.[all]'` | every command | `preprocess` + `codecs` + `viewer` |
 
 For [browser review](tutorials/browser-review.md) on a cluster, install
@@ -80,16 +80,26 @@ DICOMs are decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`
 ## Minimum dependency versions
 
 These are declared in `pyproject.toml` and checked by running the test suite
-on CPython 3.12. Most are the oldest release with a CPython 3.12 wheel. click
-8.2 is needed only by the tests (`CliRunner` with separate stderr), and
-python-gdcm 3.0.25 is the first release that reports a corrupt JPEG 2000
-codestream instead of decoding it without an error. The minimums are: click >=
-8.2, matplotlib >= 3.7.3, numpy >= 1.26, pydicom >= 3.0, Pillow >= 10.3 except
-11.x (which misdecodes an MPO frame whose mode differs from the one before),
-scikit-image >= 0.22, scipy >= 1.11.2, tqdm >= 4.60, pygame-ce >= 2.3.1,
+on CPython 3.12. Most are the oldest release with a CPython 3.12 wheel. numpy
+2.1 is what imagecodecs 2026.5.10 and later require, and matplotlib,
+scikit-image, scipy, tifffile and pylibjpeg-openjpeg are the oldest releases
+that work with it. click 8.2.2
+is needed only by the tests (`CliRunner` with separate stderr, and values
+from environment variables validated); pydicom 3.0.1 is the first release
+that decodes float pixel data without BitsStored; and python-gdcm 3.0.25 is the first release that reports a
+corrupt JPEG 2000 codestream instead of decoding it without an error. The
+minimums are: click >= 8.2.2, imagecodecs >= 2024.6.1, matplotlib >= 3.8.4,
+numpy >= 2.1, pydicom >= 3.0.1, Pillow >= 10.3 except 11.x (which misdecodes
+an MPO frame whose mode differs from the one before), scikit-image >= 0.23.1,
+scipy >= 1.13, tifffile >= 2024.1.30, tqdm >= 4.60, pygame-ce >= 2.3.1,
 cryptography >= 41, python-gdcm >= 3.0.25, pylibjpeg >= 2.0,
-pylibjpeg-openjpeg >= 2.0, and rectpack pinned at 0.2.2 (unmaintained; grid
+pylibjpeg-openjpeg >= 2.3, and rectpack pinned at 0.2.2 (unmaintained; grid
 packing depends on its exact behavior).
+
+imagecodecs decodes 16-bit colour PNGs and tifffile 16-bit RGB and CMYK
+TIFFs (with imagecodecs for LZW, deflate and other compressions), which
+Pillow truncates to their high byte. imagecodecs has wheels for CPython 3.12 and later on
+Linux x86_64 and macOS arm64.
 
 rectpack is published only as a source distribution: a default `pip install`
 builds it, but an offline or `--only-binary :all:` install needs its sdist or

@@ -48,6 +48,14 @@ Read **Upgrading** first.
   that `serve` lays out browser grids with the same code as the viewer.
   rectpack has no wheel: an offline or `--only-binary` install needs its
   sdist.
+- **Requirements: the `preprocess` extra now needs numpy 2.1 or later** and
+  adds imagecodecs (>= 2024.6.1) and tifffile (>= 2024.1.30), which decode
+  16-bit colour PNGs and TIFFs; imagecodecs 2026.5.10 and later need numpy
+  2.1, the minimum tested with these floors. Raised to work with numpy 2.1:
+  matplotlib >= 3.8.4, scikit-image >= 0.23.1, scipy >= 1.13 and, in the `codecs`
+  extra, pylibjpeg-openjpeg >= 2.3. Also raised, because the test suite
+  fails with the old minimums: pydicom >= 3.0.1 and click >= 8.2.2. An
+  environment pinned to numpy 1.x must upgrade before installing.
 - **DICOM icon images are no longer rendered or reviewed.** preprocess used
   to add each DICOM's embedded icon (IconImageSequence) as a second image,
   `<path>#icon`, and list an icon it could not render as its own `failed`
@@ -159,6 +167,18 @@ Read **Upgrading** first.
 
 ### Fixes
 
+- 16-bit colour PNGs (RGB, RGBA and gray+alpha) and 16-bit RGB and CMYK
+  TIFFs are now decoded at full depth, with imagecodecs and tifffile. Pillow
+  kept only their high byte, so 12-bit text rendered near black (near white
+  for CMYK ink) and anything carried only in the low byte was lost. Colour
+  and ink are scaled by the bits they use, as for colour DICOMs; alpha,
+  premultiplied alpha and CMYK are interpreted as Pillow did. A 16-bit
+  gray+alpha PNG is now rendered as grayscale (with adaptive histogram
+  equalization), not as RGB, and a non-conformant 16-bit colour PNG that
+  libpng refuses (for example with a chunk before IHDR) is now `failed`
+  instead of rendered from its high byte. Other rasters, including 8-bit images and 16-bit grayscale PNGs,
+  render exactly as before. `preprocess.json` records the imagecodecs and
+  tifffile versions.
 - Colour and palette DICOMs are now scaled to 8 bits by the bits their
   samples actually use, not the declared depth. Before, 12-bit values in a
   16-bit RGB image, or 8-bit palette entries under a 16-bit descriptor,

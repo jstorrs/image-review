@@ -308,9 +308,13 @@ single-frame DICOMs (grayscale, colour or palette) are rendered for now.
 
 Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
 converted to RGB; 16-bit grayscale keeps its full range), get adaptive
-histogram equalization if grayscale, and are saved as RGB JPGs. Some inputs
-are shown as several views side by side in one image (still one item to
-review):
+histogram equalization if grayscale, and are saved as RGB JPGs. 16-bit colour
+and alpha PNGs (RGB, RGBA, gray+alpha) and 16-bit RGB and CMYK TIFFs are
+decoded at full depth: colour is scaled by the bits it uses, as for colour
+DICOMs, so 12-bit text on a 16-bit image is shown bright, and gray+alpha
+stays grayscale. 12-bit CMYK ink is far more visible than before, except
+under near-full black, where it can be slightly darker. Some inputs are shown
+as several views side by side in one image (still one item to review):
 
 - **Transparent images**: left is the image composited over mid-gray (so
   anything drawn only in the alpha channel is visible), right is the raw

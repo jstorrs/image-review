@@ -20,6 +20,7 @@ import time
 import unittest
 import warnings
 import zipfile
+import zlib
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
@@ -27,9 +28,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+import imagecodecs
 import numpy as np
 import pydicom
 import skimage as ski
+import tifffile
 from PIL import Image, JpegImagePlugin, PngImagePlugin
 from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
@@ -59,6 +62,7 @@ from image_review.preprocess import (
     WorkerCrashed,
     _escape_name,
     _failed,
+    _to_uint8,
     classify,
     colliding_ids,
     compress_image,
@@ -562,7 +566,10 @@ class ProvenanceTest(unittest.TestCase):
                 "jobs": 1,
             },
         )
-        self.assertLessEqual({"pydicom", "numpy", "scikit-image", "Pillow", "matplotlib"}, set(record["libraries"]))
+        self.assertLessEqual(
+            {"pydicom", "numpy", "scikit-image", "Pillow", "matplotlib", "imagecodecs", "tifffile"},
+            set(record["libraries"]),
+        )
         self.assertEqual(record["libraries"]["pydicom"], pydicom.__version__)
         self.assertEqual(
             record["counts"],
@@ -1676,6 +1683,215 @@ class DecodeRasterTest(unittest.TestCase):
         frames[0].save(buf, "PNG", save_all=True, append_images=frames[1:])
         with self.assertRaisesRegex(Unsupported, r"^unsupported: multi-frame image \(2 frames\)$"):
             decode_raster(buf.getvalue())
+
+    def test_16_bit_colour_png_keeps_its_low_bits(self):
+        rgb = np.zeros((40, 60, 3), dtype=np.uint16)
+        rgb[_text_mask()] = 4000
+        rgb[0, 0] = [4000, 1, 2]
+        img = decode_raster(imagecodecs.png_encode(rgb))
+        self.assertEqual(img.dtype, np.float32)
+        np.testing.assert_array_equal(img[0, 0], np.array([4000, 1, 2], dtype=np.float32) / 4095)
+        self.assertEqual(len(set(img[0, 0].tolist())), 3)
+
+    def test_16_bit_colour_and_alpha_pngs_scale_by_the_bits_used(self):
+        text = _to_uint8(np.array([0, 4000]))[1]  # 12 bits used: the shared colour rule
+        colour = np.where(_text_mask()[..., None], 4000, 0).astype(np.uint16).repeat(3, axis=2)
+        opaque = np.full((40, 60, 1), 65535, dtype=np.uint16)
+        partly = opaque.copy()
+        partly[:, 30:] = 0
+        cases = {
+            "RGB": colour,
+            "RGBA opaque": np.concatenate([colour, opaque], axis=2),
+            "RGBA partly transparent": np.concatenate([colour, partly], axis=2),
+        }
+        for name, samples in cases.items():
+            with self.subTest(name):
+                out = render("raster", "id", imagecodecs.png_encode(samples), "inferno").rgb
+                raw = _halves(out, 60)[1] if name == "RGBA partly transparent" else out
+                self.assertEqual(raw.shape, (40, 60, 3))
+                np.testing.assert_array_equal(raw[_text_mask()], text)
+                np.testing.assert_array_equal(raw[~_text_mask()], 0)
+        left, _ = _halves(render("raster", "id", imagecodecs.png_encode(cases["RGBA partly transparent"]), "x").rgb, 60)
+        np.testing.assert_array_equal(left[:, :30][_text_mask()[:, :30]], text)  # opaque: the colour itself
+        np.testing.assert_array_equal(left[:, 30:], 128)  # transparent: the background
+
+    def test_16_bit_gray_alpha_png_stays_grayscale(self):
+        gray = np.where(_text_mask(), 4000, 0).astype(np.uint16)
+        for alpha in (65535, 0):
+            with self.subTest(alpha=alpha):
+                img = decode_raster(imagecodecs.png_encode(np.dstack([gray, np.full_like(gray, alpha)])))
+                raw = img if alpha else _halves(img, 60)[1]
+                self.assertEqual(raw.shape, (40, 60))
+                np.testing.assert_array_equal(raw, (gray / 4095).astype(np.float32))
+        out = render("raster", "id", imagecodecs.png_encode(np.dstack([gray, np.full_like(gray, 65535)])), "x").rgb
+        self.assertEqual(out.shape, (40, 60, 3))
+        self.assertTrue((out[_text_mask()] == 255).all())
+        self.assertTrue((out[~_text_mask()] == 0).all())
+
+    def test_16_bit_rgb_png_colour_key_becomes_transparency(self):
+        rgb = np.full((40, 60, 3), 4000, dtype=np.uint16)
+        rgb[:, 30:] = 0  # the tRNS key
+
+        def chunk(kind: bytes, body: bytes) -> bytes:
+            return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+        rows = b"".join(b"\0" + row.astype(">u2").tobytes() for row in rgb)
+        png = (
+            PNG_MAGIC
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", 60, 40, 16, 2, 0, 0, 0))
+            + chunk(b"tRNS", struct.pack(">HHH", 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows))
+            + chunk(b"IEND", b"")
+        )
+        left, right = _halves(decode_raster(png), 60)
+        np.testing.assert_array_equal(left[:, 30:], 0.5)
+        np.testing.assert_array_equal(right[:, :30], np.float32(4000 / 4095))
+
+    def test_16_bit_rgb_tiff_scales_by_the_bits_used(self):
+        text = _to_uint8(np.array([0, 4000]))[1]
+        rgb = np.where(_text_mask()[..., None], 4000, 0).astype(np.uint16).repeat(3, axis=2)
+        rgb[0, 0] = [4000, 1, 2]
+        cases = {
+            "uncompressed": {},
+            "LZW": {"compression": "lzw"},
+            "deflate": {"compression": "zlib"},
+            "planar": {"planarconfig": "separate"},
+            "big-endian": {"byteorder": ">"},
+            "big-endian tiled": {"byteorder": ">", "tile": (16, 16)},
+            "big-endian planar": {"byteorder": ">", "planarconfig": "separate"},
+        }
+        for name, options in cases.items():
+            with self.subTest(name):
+                buf = io.BytesIO()
+                samples = np.moveaxis(rgb, -1, 0) if "planarconfig" in options else rgb
+                tifffile.imwrite(buf, samples, photometric="rgb", **options)
+                img = decode_raster(buf.getvalue())
+                np.testing.assert_array_equal(img[0, 0], np.array([4000, 1, 2], dtype=np.float32) / 4095)
+                out = render("raster", "id", buf.getvalue(), "inferno").rgb
+                np.testing.assert_array_equal(out[_text_mask()], text)
+                np.testing.assert_array_equal(out[~_text_mask()][1:], 0)  # but the low-bit pixel at [0, 0]
+
+    def test_16_bit_rgba_tiff_alpha_is_transparency(self):
+        rgb = np.where(_text_mask()[..., None], 4000, 0).astype(np.uint16).repeat(3, axis=2)
+        alpha = np.full((40, 60, 1), 65535, dtype=np.uint16)
+        alpha[:, 30:] = 0
+        buf = io.BytesIO()
+        tifffile.imwrite(buf, np.concatenate([rgb, alpha], axis=2), photometric="rgb", extrasamples=["unassalpha"])
+        left, right = _halves(decode_raster(buf.getvalue()), 60)
+        np.testing.assert_array_equal(left[:, 30:], 0.5)
+        np.testing.assert_array_equal(right, (rgb / 4095).astype(np.float32))
+
+    def test_16_bit_tiff_fourth_sample_without_extra_samples_is_alpha(self):
+        alpha = np.where(_text_mask(), 65535, 0).astype(np.uint16)[..., None]  # content only in the 4th sample
+        buf = io.BytesIO()
+        tifffile.imwrite(buf, np.concatenate([np.zeros((40, 60, 3), np.uint16), alpha], axis=2), photometric="rgb")
+        data = bytearray(buf.getvalue())
+        tag = data.index(struct.pack("<HH", 338, 3))  # ExtraSamples, SHORT
+        data[tag : tag + 2] = struct.pack("<H", 65000)  # renamed to an unknown private tag: no ExtraSamples
+        with tifffile.TiffFile(io.BytesIO(bytes(data))) as tif:
+            self.assertEqual(tif.pages[0].extrasamples, ())
+        left, _ = _halves(decode_raster(bytes(data)), 60)
+        np.testing.assert_array_equal(left[_text_mask()], 0)
+        np.testing.assert_array_equal(left[~_text_mask()], 0.5)
+
+    def test_16_bit_tiff_associated_alpha_is_unpremultiplied_as_pillow_does(self):
+        straight = np.full((40, 60, 3), 40000, dtype=np.uint16)
+        alpha = np.full((40, 60, 1), 65535, dtype=np.uint16)
+        alpha[:, 20:40], alpha[:, 40:] = 16384, 0
+        premultiplied = (straight.astype(np.uint32) * alpha // 65535).astype(np.uint16)
+        buf = io.BytesIO()
+        tifffile.imwrite(
+            buf, np.concatenate([premultiplied, alpha], axis=2), photometric="rgb", extrasamples=["assocalpha"]
+        )
+        _, right = _halves(decode_raster(buf.getvalue()), 60)
+        with Image.open(io.BytesIO(buf.getvalue())) as im:
+            im.load()
+            pillow = np.asarray(im)[:, :, :3] / 255
+        np.testing.assert_allclose(right[:, :40], 40000 / 65535, atol=2 / 65535)  # straight colour, not dimmed
+        np.testing.assert_array_equal(right[:, 40:], 0)  # fully transparent: colour dropped, as Pillow does
+        np.testing.assert_allclose(right, pillow, atol=1.5 / 255)
+
+    def test_16_bit_cmyk_tiff_matches_pillow_at_full_depth(self):
+        ink = RNG.integers(0, 256, (40, 60, 4), dtype=np.uint16)
+        ink[0, 0] = 255  # full ink: all 16 bits used, so the scale is that of an 8-bit image
+        buf = io.BytesIO()
+        tifffile.imwrite(buf, ink * 257, photometric="separated")
+        with Image.open(io.BytesIO(buf.getvalue())) as im:
+            self.assertEqual(im.mode, "CMYK")
+            pillow = np.asarray(im.convert("RGB")).astype(int)
+        out = render("raster", "id", buf.getvalue(), "inferno").rgb.astype(int)
+        self.assertLessEqual(np.abs(out - pillow).max(), 1)
+
+    def test_16_bit_cmyk_tiff_keeps_12_bit_black_text(self):
+        ink = np.zeros((40, 60, 4), dtype=np.uint16)
+        ink[_text_mask(), 3] = 4000  # 12 bits used: Pillow's high byte, 15, was near white
+        buf = io.BytesIO()
+        tifffile.imwrite(buf, ink, photometric="separated")
+        img = decode_raster(buf.getvalue())
+        np.testing.assert_allclose(img[_text_mask()], 1 - 4000 / 4095, atol=1e-6)
+        np.testing.assert_array_equal(img[~_text_mask()], 1)
+
+    def test_png_with_a_chunk_before_ihdr_is_not_truncated(self):
+        png = imagecodecs.png_encode(np.full((40, 60, 3), 4000, dtype=np.uint16))
+        body = b"a\0b"
+        text = struct.pack(">I", len(body)) + b"tEXt" + body + struct.pack(">I", zlib.crc32(b"tEXt" + body))
+        misordered = png[:8] + text + png[8:]
+        with Image.open(io.BytesIO(misordered)) as im:
+            self.assertTrue(preprocess_module._pillow_truncates(im))  # routed to libpng, which refuses it
+        row = render_and_encode(Candidate("id", "raster", misordered), "inferno", draw_overlays=False)
+        self.assertIsInstance(row, SkippedRow)
+        self.assertEqual(row.kind, "failed")
+        # Older imagecodecs raise PngError; newer ones garble libpng's message into a UnicodeDecodeError
+        self.assertIn(
+            row.reason, {"cannot decode 16-bit PNG: PngError", "cannot decode 16-bit PNG: UnicodeDecodeError"}
+        )
+
+    def test_nearly_transparent_pixel_does_not_dim_the_image(self):
+        text = np.where(_text_mask()[..., None], 4000, 0).astype(np.uint16).repeat(3, axis=2)
+        alpha = np.full((40, 60), 65535, dtype=np.uint16)
+        alpha[39, 59] = 9
+        premultiplied, straight = text.copy(), text.copy()
+        premultiplied[39, 59] = 1  # rounding at alpha 9: unpremultiplied to 7281, 13 bits
+        straight[39, 59] = 7281
+        for extra, colour in (("assocalpha", premultiplied), ("unassalpha", straight)):
+            with self.subTest(extra):
+                buf = io.BytesIO()
+                tifffile.imwrite(buf, np.dstack([colour, alpha]), photometric="rgb", extrasamples=[extra])
+                _, right = _halves(decode_raster(buf.getvalue()), 60)
+                np.testing.assert_array_equal(right[_text_mask()], np.float32(4000) / 4095)
+                np.testing.assert_array_equal(right[39, 59], 1)  # above the scale: clipped, still visible
+
+    def test_multipage_16_bit_rgb_tiff_is_unsupported(self):
+        buf = io.BytesIO()
+        with tifffile.TiffWriter(buf) as tif:
+            for _ in range(2):
+                tif.write(np.zeros((20, 20, 3), dtype=np.uint16), photometric="rgb")
+        with self.assertRaisesRegex(Unsupported, r"^unsupported: multi-frame image \(2 frames\)$"):
+            decode_raster(buf.getvalue())
+
+    def test_inputs_pillow_decodes_in_full_stay_on_its_path(self):
+        gray16 = (np.arange(40 * 60).reshape(40, 60) * 20).astype(np.uint16)
+        rgb8 = RNG.integers(0, 255, (40, 60, 3), dtype=np.uint8)
+        tiff8 = io.BytesIO()
+        tifffile.imwrite(tiff8, rgb8, photometric="rgb")
+        for name, data in {
+            "8-bit RGB PNG": _png_bytes(rgb8),
+            "8-bit RGBA PNG": imagecodecs.png_encode(np.dstack([rgb8, rgb8[:, :, 0]])),
+            "16-bit grayscale PNG": _png_bytes(gray16),
+            "8-bit RGB TIFF": tiff8.getvalue(),
+        }.items():
+            with self.subTest(name), Image.open(io.BytesIO(data)) as im:
+                im.load()
+                np.testing.assert_array_equal(decode_raster(data), preprocess_module._decode_frame(im))
+
+    def test_damaged_16_bit_colour_png_is_a_failed_row(self):
+        png = bytearray(imagecodecs.png_encode(RNG.integers(0, 4096, (40, 60, 3)).astype(np.uint16)))
+        idat = png.index(b"IDAT") + 4
+        png[idat : idat + 8] = bytes(8)  # zlib header and the start of the stream, CRC left stale
+        row = render_and_encode(Candidate("id", "raster", bytes(png)), "inferno", draw_overlays=False)
+        self.assertIsInstance(row, SkippedRow)
+        self.assertEqual(row.kind, "failed")
+        self.assertEqual(row.reason, "cannot decode 16-bit PNG: PngError")
 
 
 class RenderTest(unittest.TestCase):

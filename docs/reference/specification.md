@@ -447,6 +447,32 @@ at a set bit.
   keeps its full range; a mode `F` image holding NaN or infinity raises
   `unsupported: non-finite pixel values (1 NaN, 0 infinite)`; a `tRNS` colour
   key is matched against the native values to build the alpha mask
+- 16-bit colour and alpha, which Pillow truncates to the high byte, are
+  decoded at full depth instead, chosen from the header before any pixels
+  are decoded. A PNG whose Pillow raw mode is `RGB;16B`, `LA;16B` or
+  `RGBA;16B` (bit depth 16, colour type 2, 4 or 6) is decoded with
+  imagecodecs (`png_decode`, which turns a `tRNS` colour key into alpha;
+  libpng refuses a non-conformant file that Pillow would read, such as one
+  with a chunk before IHDR, so it is `failed` as `cannot decode 16-bit PNG:
+  <ExceptionClass>`, without libpng's message, which can be garbled). A TIFF whose BitsPerSample
+  is 16 and SampleFormat unsigned, with PhotometricInterpretation RGB and at
+  least 3 samples or CMYK (separated) and exactly 4, is decoded with
+  tifffile (first page; planar data is interleaved). In an RGB TIFF the
+  first extra sample is alpha when ExtraSamples marks it unassociated
+  alpha, or when a fourth sample has no ExtraSamples tag at all (as Pillow
+  reads it); associated (premultiplied) alpha is unpremultiplied first,
+  `colour * 65535 // alpha` clipped to 65535, with colour 0 where alpha is
+  0, as Pillow does. Colour is scaled by the bits it uses, as for colour
+  DICOMs: `sample / (2**effective - 1)` with `effective = max(8, bit length
+  of the maximum sample)`, the maximum taken over the pixels whose alpha is
+  at least 256 when there are any, so a stray nearly transparent pixel
+  cannot dim the rest (colour above the scale clips to 1); alpha by 65535;
+  then the alpha rule above applies. CMYK inks are scaled the same way (over
+  all four inks), then converted with Pillow's formula `RGB = (1 - [C, M,
+  Y]) * (1 - K)`. Because the inks are stretched before that product, ink
+  under near-full black can come out slightly darker than Pillow's
+  high-byte rendering; everywhere else 12-bit ink is far more visible.
+  Gray+alpha stays grayscale. The multi-frame check runs first
 - Grayscale modes (`1`, `L`, `I;16*`, `I`, `F`) stay grayscale; every other
   mode (`RGB`, `CMYK`, `YCbCr`, `P`, ...) is converted to RGB by Pillow (so
   CMYK black text stays black)
