@@ -539,7 +539,9 @@ are in [File format](../commands/export.md#file-format). The headers are
 `ALLOWLIST_HEADER` and `REPORT_HEADER`. Fields are joined with tabs, every
 line ends in LF, and there is no quoting or escaping, which the refusals above
 make unambiguous. A row's `source_sha256` is the first one the manifest
-records for `X` or `X#icon`, else empty.
+records for `X` itself; only if the manifest does not list `X` at all (an
+icon without its main, or a failed `X`), the first one for `X#icon`; else
+empty (an `X` listed without a hash never borrows its icon's).
 
 **Parts and folding.** Every distinct `image_id` of the manifest, and of the
 `failed` rows of `skipped.tsv`, is a part:
@@ -560,6 +562,18 @@ named `scan.dcm#icon` with no `scan.dcm` beside it), the row is still `X` and
 the missing main part counts as `NOT_REVIEWED` (`main image missing`, or the
 ignored reason if `X` was ignored, see below), so it is never CLEAN.
 
+A DICOM's icon has its file's hash, so when the manifest records a hash for
+both `X` and `X#icon` (the first per exact `image_id`) and they differ,
+`X#icon` is ambiguous: it may be `X`'s icon or a different file merely named
+so (e.g. a ZIP entry `scan.png#icon` beside `scan.png`), and either reading
+can hide a part nobody saw. Then `X#icon` is still folded into `X`'s row, and
+also gets a row of its own, where `X#icon` first appears (its own part as
+main, with its own hash and its own `X#icon#icon` folded in). Both rows are
+at least `NOT_REVIEWED`, with `export.AMBIGUOUS_ICON` as their last note, so
+neither is CLEAN and both hashes reach the "same content" denial. A chain
+`X`, `X#icon`, `X#icon#icon` with three different hashes gives three such
+rows.
+
 **Ignored inputs.** Each distinct `image_id` of the `ignored` rows of
 `skipped.tsv` (inputs preprocess did not take for images, e.g. a PDF) gets a
 row of its own, `IGNORED`, with the first such row's reason and every other
@@ -569,7 +583,8 @@ folded row: an ignored `X` with a manifest or `failed` `X#icon` but no part
 `X` is that row's main part, `NOT_REVIEWED` with the ignored reason (e.g.
 `DICOMDIR index`) in place of `main image missing`. If the manifest lists
 `X#icon`, an ignored `X#icon` is that part (`NOT_REVIEWED`, folded into `X` as
-`icon: <reason>`); otherwise it is a source path like any other (a file may be
+`icon: <reason>`, and also reported on its own row if it is ambiguous, see
+above); otherwise it is a source path like any other (a file may be
 named so) and gets its own `IGNORED` row, not folded into `X`. An `IGNORED`
 row is never CLEAN; treat its file as possibly containing PHI. Rows cover only
 the listed files and ZIP entries, never a ZIP or directory as a whole. An
@@ -880,7 +895,7 @@ by that rule (not a `StoreUnavailable`).
 | Name | Description |
 |------|-------------|
 | `Key` | `NewType("Key", str)`: a manifest key, the `preprocessed_path` (see *Key versus `image_id`*). A string becomes a `Key` only where it is parsed (`load_manifest`, the client's `parse_manifest` and `parse_statuses`, the server's `parse_mark` and `/image` check), so the type checker keeps keys and source paths apart |
-| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the `#icon` and escaped bad-name ids derived there), `parse_decision`, `load_manifest`, `load_skipped`, and `export_rows` (a file's id with `#icon` removed). Server, client and controller never see one |
+| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the `#icon` and escaped bad-name ids derived there), `parse_decision`, `load_manifest`, `load_skipped`, and `export_rows` (a file's id with `#icon` removed, or an ambiguous `X#icon` kept as a file of its own). Server, client and controller never see one |
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
@@ -949,7 +964,7 @@ see *`image-review export`*.
 | `batch_summary(rows, statuses)` | The same per batch: `dict[str, Counter[Status]]` |
 | `skipped_counts(rows) -> SkippedCounts` | The failed/ignored split of `SkippedRow`s; the one derivation behind `skipped()`, preprocess's summary line and `preprocess.json` counts |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
-| `export.export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons folded in |
+| `export.export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons folded in; an `X#icon` whose hash differs from `X`'s also gets its own row, and both are at least `NOT_REVIEWED` |
 | `export.split_allowlist(rows) -> tuple[list[AllowedRow], list[ExportRow]]` | (allowed, report) in input order, every row in exactly one: allowed only if `CLEAN`, with a `source_sha256` that no row that is not `CLEAN` shares; a denied `CLEAN` row's `reason` says why |
 | `export.format_allowlist(rows: list[AllowedRow]) -> str` | The allowlist as TSV text with `ALLOWLIST_HEADER` (`AllowedRow` is a `NewType` over `ExportRow` that only `split_allowlist` makes, so passing the report's rows is a type error); `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
 | `export.format_report(rows) -> str` | The report as TSV text with `REPORT_HEADER`; the same `ValueError` |

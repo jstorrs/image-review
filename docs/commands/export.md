@@ -45,6 +45,12 @@ with one of these notes in `reason`:
   an older version are never allowlisted.
 - `not allowlisted: same content as a file that is not CLEAN`.
 
+A file whose name ends in `#icon` cannot be told apart from a DICOM's icon.
+Beside a file of the name without `#icon` that has a different hash, both
+rows are at least NOT_REVIEWED; with no such file, it is reported under that
+name as `main image missing`; with an equal hash, it is folded into that
+file's row. Rename such a file before preprocessing.
+
 ## File format
 
 Both files are tab-separated UTF-8 with LF line endings and a header row,
@@ -80,13 +86,18 @@ for reading.)
 |--------|-------------|
 | `image_id` | The source file's path, as in `manifest.tsv` / `skipped.tsv`; a file inside a ZIP is `<zip>::<entry>`, one row per entry |
 | `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest (a DICOM and its icon share it); compare it with the file's own before releasing it. In the report, empty for a file that never rendered (so always for `IGNORED`) or a work directory from an older version. It is derived from the file's content, so treat it like the `image_id` |
-| `status` | (report) `DIRTY`, `UNREVIEWED` (no verdict yet), `NOT_REVIEWED` (preprocess could not render it, or its icon), `IGNORED` (preprocess did not take it for an image, so nobody looked at it), or `CLEAN` for a CLEAN file that was not allowlisted |
+| `status` | (report) `DIRTY`, `UNREVIEWED` (no verdict yet), `NOT_REVIEWED` (preprocess could not render it, or its icon, or it is a file and a file named like its icon whose hashes differ), `IGNORED` (preprocess did not take it for an image, so nobody looked at it), or `CLEAN` for a CLEAN file that was not allowlisted |
 | `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. Also empty when the main image is `NOT_REVIEWED` (preprocess failed on it or ignored it), even if `review.tsv` has a verdict for it, and when there is no main image. After an [undo](../reference/work-directory.md#undo-rows) they are the undo's time and reviewer, with the pass it restored. `reviewer` is the reviewer's unverified claim, and may be empty in rows from an older version |
-| `reason` | (report) Why the row is not simply the main image's verdict, as `; `-separated notes in this order: preprocess's error or ignored reason for a `NOT_REVIEWED` main image; `main image missing` for an icon whose file is neither in the manifest nor a failed input (the row is then at best `NOT_REVIEWED`), or that file's reason if preprocess ignored it; `icon: <error>` for an icon preprocess could not render, else `icon DIRTY` / `icon UNREVIEWED`; preprocess's reason for an `IGNORED` file; and last, `not allowlisted: ...` for a CLEAN file that was not allowlisted. Otherwise empty |
+| `reason` | (report) Why the row is not simply the main image's verdict, as `; `-separated notes in this order: preprocess's error or ignored reason for a `NOT_REVIEWED` main image; `main image missing` for an icon whose file is neither in the manifest nor a failed input (the row is then at best `NOT_REVIEWED`), or that file's reason if preprocess ignored it; `icon: <error>` for an icon preprocess could not render, else `icon DIRTY` / `icon UNREVIEWED`; `ambiguous #icon: the files with and without #icon in their name differ; rename the one ending in #icon` for a file and a file named like its icon whose hashes differ (see below); preprocess's reason for an `IGNORED` file; and last, `not allowlisted: ...` for a CLEAN file that was not allowlisted. Otherwise empty |
 
 - A DICOM's embedded icon (`<path>#icon` in the manifest) is folded into its
   file's row: the row is CLEAN only if the image and its icon both are, else
-  DIRTY if either is, else NOT_REVIEWED, else UNREVIEWED.
+  DIRTY if either is, else NOT_REVIEWED, else UNREVIEWED. A DICOM's icon has
+  its file's hash; if the manifest records a different hash for `<path>#icon`
+  than for `<path>`, it may be a different file merely named so, and export
+  cannot tell which. Then `<path>#icon` also gets a row of its own, and both
+  rows are at least NOT_REVIEWED (DIRTY stays DIRTY), each with its own hash
+  and the `ambiguous #icon: ...` note.
 - Inputs that failed to preprocess (the `failed` rows of `skipped.tsv`) are
   `NOT_REVIEWED`: nobody has looked at them, so treat them as possibly
   containing PHI. This applies even if the manifest also lists them.

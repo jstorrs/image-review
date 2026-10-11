@@ -317,11 +317,14 @@ world-readable.
   (identical bytes cannot be both clean and dirty). So these
   are never listed: inputs that failed to preprocess, inputs that were not
   images, files whose name preprocess recorded under an escaped id (which
-  never matches the real name), CLEAN files of a work directory without
-  hashes, a file changed since preprocess (its hash no longer matches), and
-  a ZIP or directory as a whole (only its entries are listed). Everything
-  else goes to the optional `--report`, for audit and follow-up; it must
-  never be used to choose what to release (e.g. "everything not DIRTY").
+  never matches the real name), a file whose name ends in `#icon` with no
+  file of the name without it, or beside one with a different hash (then
+  neither is listed: it cannot be told apart from a DICOM's icon), CLEAN
+  files of a work directory without hashes, a file changed since
+  preprocess (its hash no longer matches), and a ZIP or directory as a whole
+  (only its entries are listed). Everything else goes to the optional
+  `--report`, for audit and follow-up; it must never be used to choose what
+  to release (e.g. "everything not DIRTY").
 - **DIRTY-only placeholders.** The viewer shows an image that cannot be
   fetched, read or verified as a placeholder that accepts DIRTY but refuses
   CLEAN, so an image nobody could see is not cleared by the viewer (see the

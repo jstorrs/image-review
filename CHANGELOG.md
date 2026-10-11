@@ -115,6 +115,14 @@ Read **Upgrading** first.
 
 ### Fixes
 
+- `export` no longer gives a file the hash of a different file named like
+  its DICOM icon: a ZIP entry `scan.png#icon` listed before `scan.png` made
+  `scan.png`'s row carry the wrong hash, so it could be allowlisted although
+  another file with its bytes was DIRTY. When the manifest records different
+  hashes for `X` and `X#icon`, both now get a row of their own, each with its
+  own hash, and both are at least `NOT_REVIEWED` (`ambiguous #icon: ...`;
+  rename the file ending in `#icon`). So re-exporting an existing work
+  directory may deny a file that an earlier export allowlisted.
 - When some inputs fail, `preprocess` no longer tells you to "Re-run with
   --allow-skipped": the work directory has already been written, so that
   re-run is refused. It now says to review the work directory as it is, or to

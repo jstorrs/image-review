@@ -16,11 +16,12 @@ from unittest import mock
 from image_review import atomic as atomic_module
 from image_review import cli as cli_module
 from image_review import lock as lock_module
-from image_review.export import ExportRow, has_unsafe_char, split_allowlist
+from image_review.export import AMBIGUOUS_ICON, ExportRow, export_rows, has_unsafe_char, split_allowlist
 from image_review.lock import boot_id, this_process
 from image_review.remote import RemoteStore
-from image_review.review_db import HEADER, LEGACY_HEADER
-from image_review.store import LocalStore
+from image_review.review_db import HEADER, LEGACY_HEADER, Decision
+from image_review.status import ImageId, Key
+from image_review.store import LocalStore, ManifestEntry, SkippedRow
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server, temp_dir
 
 KEYS = [key for _, key, _ in ROWS]
@@ -380,6 +381,146 @@ class TestSplitAllowlist(unittest.TestCase):
                 self.assertEqual(allowed, [])
                 self.assertEqual([(r.image_id, r.status) for r in report], [("/a", "CLEAN"), ("/b", other)])
                 self.assertEqual(report[0].reason, "not allowlisted: same content as a file that is not CLEAN")
+
+
+class TestIconNamedFile(unittest.TestCase):
+    """`X#icon` with a different hash from `X` may be X's icon or a file merely so named: both rows are NOT_REVIEWED."""
+
+    @staticmethod
+    def entry(image_id: str, source: str | None) -> ManifestEntry:
+        return ManifestEntry(
+            "b", Key(image_id), ImageId(image_id), source, None if source is None else sha("j" + image_id)
+        )
+
+    @staticmethod
+    def clean(entries: list[ManifestEntry]) -> dict[ImageId, Decision]:
+        return {
+            e.image_id: Decision(
+                image_id=e.image_id,
+                batch="b",
+                status="CLEAN",
+                pass_number=1,
+                timestamp="t",
+                reviewer="r",
+                mode="single",
+                grid_size=1,
+                tool_version="0.1",
+            )
+            for e in entries
+        }
+
+    def pair(self, order: tuple[int, int]) -> list[ManifestEntry]:
+        entries = [self.entry("scan.png#icon", sha("1")), self.entry("scan.png", sha("2"))]
+        return [entries[i] for i in order]
+
+    def test_differing_hashes_make_both_rows_not_reviewed_with_their_own_hashes(self):
+        for order in ((0, 1), (1, 0)):
+            with self.subTest(order=order):
+                entries = self.pair(order)
+                rows = export_rows(entries, self.clean(entries), [])
+                self.assertEqual(
+                    [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
+                    [
+                        ("scan.png", "NOT_REVIEWED", AMBIGUOUS_ICON, sha("2")),
+                        ("scan.png#icon", "NOT_REVIEWED", AMBIGUOUS_ICON, sha("1")),
+                    ],
+                )
+                allowed, report = split_allowlist(rows)
+                self.assertEqual(allowed, [])
+                self.assertEqual(len(report), 2)
+
+    def test_a_clean_file_with_either_hash_is_denied(self):
+        for order in ((0, 1), (1, 0)):
+            for other in (sha("1"), sha("2")):
+                with self.subTest(order=order, other=other):
+                    entries = [*self.pair(order), self.entry("other.png", other)]
+                    allowed, report = split_allowlist(export_rows(entries, self.clean(entries), []))
+                    self.assertEqual(allowed, [])
+                    denied = next(r for r in report if r.image_id == "other.png")
+                    self.assertEqual(denied.status, "CLEAN")
+                    self.assertEqual(denied.reason, "not allowlisted: same content as a file that is not CLEAN")
+
+    def test_a_failed_icon_beside_a_file_named_like_it_is_not_reviewed(self):
+        entries = [self.entry("scan.dcm", sha("2")), self.entry("scan.dcm#icon", sha("1"))]
+        skipped = [SkippedRow(ImageId("scan.dcm#icon"), "failed", "ValueError: bad icon")]
+        rows = export_rows(entries, self.clean(entries), skipped)
+        self.assertEqual(
+            [(r.image_id, r.status, r.reason) for r in rows],
+            [
+                ("scan.dcm", "NOT_REVIEWED", f"icon: ValueError: bad icon; {AMBIGUOUS_ICON}"),
+                ("scan.dcm#icon", "NOT_REVIEWED", f"ValueError: bad icon; {AMBIGUOUS_ICON}"),
+            ],
+        )
+        allowed, _ = split_allowlist(rows)
+        self.assertEqual(allowed, [])
+
+    def test_equal_hashes_or_a_legacy_manifest_fold_into_one_row(self):
+        # (None, hash): an `a.dcm` listed without a hash never borrows its icon's.
+        for main, icon in ((sha("1"), sha("1")), (None, None), (sha("1"), None), (None, sha("1"))):
+            for icon_first in (True, False):
+                with self.subTest(main=main, icon=icon, icon_first=icon_first):
+                    entries = [self.entry("a.dcm#icon", icon), self.entry("a.dcm", main)]
+                    if not icon_first:
+                        entries.reverse()
+                    rows = export_rows(entries, self.clean(entries), [])
+                    self.assertEqual(
+                        [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
+                        [("a.dcm", "CLEAN", "", main or "")],
+                    )
+
+    def test_the_ambiguous_icon_row_comes_where_it_first_appears(self):
+        entries = [
+            self.entry("scan.png", sha("2")),
+            self.entry("other.png", sha("3")),
+            self.entry("scan.png#icon", sha("1")),
+        ]
+        rows = export_rows(entries, self.clean(entries), [])
+        self.assertEqual([r.image_id for r in rows], ["scan.png", "other.png", "scan.png#icon"])
+
+    def test_a_dirty_part_of_an_ambiguous_pair_stays_dirty(self):
+        for dirty in ("scan.png", "scan.png#icon"):
+            with self.subTest(dirty=dirty):
+                entries = self.pair((1, 0))
+                decisions = self.clean(entries)
+                decisions[ImageId(dirty)] = dataclasses.replace(decisions[ImageId(dirty)], status="DIRTY")
+                rows = export_rows(entries, decisions, [])
+                statuses = {r.image_id: r.status for r in rows}
+                self.assertEqual(statuses[dirty], "DIRTY")
+                self.assertTrue(all(AMBIGUOUS_ICON in r.reason for r in rows))
+                allowed, _ = split_allowlist(rows)
+                self.assertEqual(allowed, [])
+
+    def test_icon_without_its_main_keeps_the_icons_hash(self):
+        entries = [self.entry("a.dcm#icon", sha("1"))]
+        rows = export_rows(entries, self.clean(entries), [])
+        self.assertEqual(
+            [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
+            [("a.dcm", "NOT_REVIEWED", "main image missing", sha("1"))],
+        )
+
+    def test_icon_of_a_failed_main_folds_as_not_reviewed_with_the_icons_hash(self):
+        entries = [self.entry("a.dcm#icon", sha("1"))]
+        rows = export_rows(entries, self.clean(entries), [SkippedRow(ImageId("a.dcm"), "failed", "bad")])
+        self.assertEqual(
+            [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
+            [("a.dcm", "NOT_REVIEWED", "bad", sha("1"))],
+        )
+
+    def test_a_chain_of_icon_names_gives_each_hash_a_not_reviewed_row(self):
+        entries = [self.entry("x", sha("1")), self.entry("x#icon", sha("2")), self.entry("x#icon#icon", sha("3"))]
+        rows = export_rows(entries, self.clean(entries), [])
+        self.assertEqual(
+            [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
+            [
+                ("x", "NOT_REVIEWED", AMBIGUOUS_ICON, sha("1")),
+                ("x#icon", "NOT_REVIEWED", AMBIGUOUS_ICON, sha("2")),
+                ("x#icon#icon", "NOT_REVIEWED", AMBIGUOUS_ICON, sha("3")),
+            ],
+        )
+        self.assertEqual(len({r.image_id for r in rows}), len(rows))
+        others = [self.entry(f"other{n}.png", sha(n)) for n in "123"]
+        allowed, _ = split_allowlist(export_rows(entries + others, self.clean(entries + others), []))
+        self.assertEqual(allowed, [])
 
 
 class TestHasUnsafeChar(unittest.TestCase):

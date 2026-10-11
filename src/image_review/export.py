@@ -19,6 +19,11 @@ ExportStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED", "IGNORED"
 ALLOWLIST_HEADER = ["source_sha256", "image_id", "pass_number", "timestamp", "reviewer"]
 REPORT_HEADER = ["image_id", "status", "pass_number", "timestamp", "reviewer", "reason", "source_sha256"]
 ICON_SUFFIX = "#icon"  # a DICOM's embedded icon image
+# The reason note on both rows of a file `X` and a part `X#icon` whose manifest hashes differ: `X#icon` may be X's icon
+# or a different file so named (a DICOM's icon has its file's hash), so neither row can vouch for the other's part.
+AMBIGUOUS_ICON = (
+    "ambiguous #icon: the files with and without #icon in their name differ; rename the one ending in #icon"
+)
 # A part's status: never IGNORED, since an ignored input that is not a part gets a row of its own, never folded.
 _PartStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]
 # The worst part decides a file's status: CLEAN only if every part is CLEAN.
@@ -95,10 +100,13 @@ def _main(f: ImageId, parts: dict[ImageId, _Part], ignored: dict[ImageId, str]) 
     return _MAIN_MISSING
 
 
-def _fold(image_id: ImageId, main: _Part, icon: _Part | None, source_sha256: str) -> ExportRow:
-    """One file's row: the worst status of its main image and its icon; pass, timestamp and reviewer from the main
-    image's decision."""
-    status = max((p.status for p in (main, icon) if p is not None), key=_SEVERITY.__getitem__)
+def _fold(image_id: ImageId, main: _Part, icon: _Part | None, source_sha256: str, *, ambiguous: bool) -> ExportRow:
+    """One file's row: the worst status of its main image and its icon, and at least NOT_REVIEWED (with the
+    `AMBIGUOUS_ICON` note last) if `ambiguous`; pass, timestamp and reviewer from the main image's decision."""
+    statuses: list[_PartStatus] = [p.status for p in (main, icon) if p is not None]
+    if ambiguous:
+        statuses.append("NOT_REVIEWED")
+    status = max(statuses, key=_SEVERITY.__getitem__)
     notes = []
     if main.status == "NOT_REVIEWED":
         notes.append(main.reason)
@@ -106,10 +114,45 @@ def _fold(image_id: ImageId, main: _Part, icon: _Part | None, source_sha256: str
         notes.append(f"icon: {icon.reason}")
     elif icon is not None and icon.status != "CLEAN":
         notes.append(f"icon {icon.status}")
+    if ambiguous:
+        notes.append(AMBIGUOUS_ICON)
     d = main.decision
     if d is None:
         return ExportRow(image_id, status, None, "", "", "; ".join(notes), source_sha256)
     return ExportRow(image_id, status, d.pass_number, d.timestamp, d.reviewer, "; ".join(notes), source_sha256)
+
+
+def _manifest_hashes(entries: list[ManifestEntry]) -> dict[ImageId, str]:
+    """The first source_sha256 the manifest records per exact image_id; none for a legacy entry without one."""
+    hashes: dict[ImageId, str] = {}
+    for e in entries:
+        if e.source_sha256 is not None:
+            hashes.setdefault(e.image_id, e.source_sha256)
+    return hashes
+
+
+def _ambiguous_icons(parts: dict[ImageId, _Part], hashes: dict[ImageId, str]) -> set[ImageId]:
+    """The `X#icon` parts whose manifest hash differs from `X`'s: a DICOM's icon has its file's hash, so this may be
+    a different file that is merely so named, and which one it is cannot be told."""
+    return {
+        i
+        for i in parts
+        if i.endswith(ICON_SUFFIX)
+        and (main := ImageId(i.removesuffix(ICON_SUFFIX))) in hashes
+        and i in hashes
+        and hashes[main] != hashes[i]
+    }
+
+
+def _files(parts: dict[ImageId, _Part], ambiguous_icons: set[ImageId]) -> dict[ImageId, None]:
+    """The files the rows are for, in order of first appearance: each part without its `#icon`, and an ambiguous
+    `X#icon` part also as a file of its own, where that part first appears."""
+    files: dict[ImageId, None] = {}
+    for i in parts:
+        files[ImageId(i.removesuffix(ICON_SUFFIX))] = None
+        if i in ambiguous_icons:
+            files[i] = None
+    return files
 
 
 def export_rows(
@@ -124,8 +167,14 @@ def export_rows(
     contains PHI. A DICOM's icon (`X#icon`) is folded into `X`'s row, whose status is the worse of the two (DIRTY,
     then NOT_REVIEWED, then UNREVIEWED, then CLEAN); an icon without its `X` is reported under `X`, as if `X` were
     NOT_REVIEWED. `decisions` is the latest decision per image_id (review_db.latest); ones for image_ids in neither
-    file are ignored. A row's source_sha256 is the first one the manifest records for `X` or `X#icon` (they share
-    it), else "".
+    file are ignored. A row's source_sha256 is the first one the manifest records for `X` itself; only if the
+    manifest does not list `X` at all (an icon without its main, or a failed `X`), the first one for `X#icon`; else
+    "" (an `X` listed without a hash never borrows its icon's).
+
+    If the manifest records a hash for both `X` and `X#icon` and they differ, `X#icon` is ambiguous: a DICOM's icon
+    has its file's hash, so it may be a different file merely so named, or `X`'s icon. Then `X#icon` gets a row of its
+    own too (with its own hash, and its own `X#icon#icon` folded in), still folded into `X`'s, and both rows are at
+    least NOT_REVIEWED with the `AMBIGUOUS_ICON` note: neither can be vouched for, and each hash reaches the report.
 
     An `ignored` image_id gets a row of its own, IGNORED with the first such row's reason, unless it is a part or the
     file of a folded row: a part's status already covers it (NOT_REVIEWED for a manifest image_id), and an ignored `X`
@@ -136,12 +185,21 @@ def export_rows(
     failed = _first_reasons(skipped, "failed")
     ignored = _first_reasons(skipped, "ignored")
     parts = _parts(entries, decisions, failed, ignored)
-    hashes: dict[ImageId, str] = {}
-    for e in entries:
-        if e.source_sha256 is not None:
-            hashes.setdefault(ImageId(e.image_id.removesuffix(ICON_SUFFIX)), e.source_sha256)
-    files = dict.fromkeys(ImageId(image_id.removesuffix(ICON_SUFFIX)) for image_id in parts)
-    rows = [_fold(f, _main(f, parts, ignored), parts.get(ImageId(f + ICON_SUFFIX)), hashes.get(f, "")) for f in files]
+    manifest_ids = {e.image_id for e in entries}
+    hashes = _manifest_hashes(entries)
+    ambiguous_icons = _ambiguous_icons(parts, hashes)
+    ambiguous = ambiguous_icons | {ImageId(i.removesuffix(ICON_SUFFIX)) for i in ambiguous_icons}
+    files = _files(parts, ambiguous_icons)
+    rows = [
+        _fold(
+            f,
+            _main(f, parts, ignored),
+            parts.get(ImageId(f + ICON_SUFFIX)),
+            hashes.get(f, "") if f in manifest_ids else hashes.get(ImageId(f + ICON_SUFFIX), ""),
+            ambiguous=f in ambiguous,
+        )
+        for f in files
+    ]
     covered = parts.keys() | files.keys()
     rows += [ExportRow(i, "IGNORED", None, "", "", r, "") for i, r in ignored.items() if i not in covered]
     return rows
