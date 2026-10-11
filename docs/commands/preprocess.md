@@ -179,11 +179,14 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
   - a file named on the command line that is not an image, such as
     `notes.txt`;
   - an input whose image id would name a different image from another
-    input's (a file literally called `scan.dcm#icon` beside a `scan.dcm` with
-    an icon, a file called `site.zip::a.png` beside `site.zip`, or a ZIP entry
-    called `a.png#2` beside two `a.png` entries): every one of them, with
+    input's (a file called `site.zip::a.png` beside `site.zip`, or a ZIP
+    entry called `a.png#2` beside two `a.png` entries): every one of them, with
     `image_id collides with another input (rename one of them)`, as they
-    would otherwise share one verdict;
+    would otherwise share one verdict. A file whose name ends in `#icon` is
+    not a collision, but rename it before preprocessing anyway: `export`
+    cannot tell it apart from a DICOM's icon in a work directory made by an
+    older version, so it cannot vouch for it (see
+    [What is allowlisted](export.md#what-is-allowlisted));
   - a file or ZIP entry whose name, or a directory above it, is not UTF-8 or
     holds a control character such as a newline or U+2028/U+2029, even one
     that would otherwise be ignored. It is listed under an escaped name like
@@ -231,11 +234,11 @@ white):
 4. Strips uniform rows/columns (letterboxing removal)
 5. Applies colormap and saves as JPG
 
-A DICOM with an embedded icon image (a thumbnail stored in the file) gets a
-second row in `manifest.tsv` with the image id ending in `#icon`, so any
-text burned into the thumbnail is reviewed too. If the icon cannot be
-rendered, the main image is still written and `<path>#icon` is listed as
-`failed` in `skipped.tsv`. A DICOM whose overlay cannot be decoded is
+A DICOM's embedded icon image (a thumbnail stored in the file, in
+IconImageSequence (0088,0200)) is not rendered, so text burned into it is not
+reviewed: remove icons before releasing files. Only the pixel data is
+reviewed, with overlay planes drawn on it. A DICOM whose overlay cannot be
+decoded is
 `failed` as a whole. Overlays stored in the unused bits of the pixel data,
 rather than in overlay planes, are not drawn. Only single-frame DICOMs
 (grayscale, colour or palette) are rendered for now.

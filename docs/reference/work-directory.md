@@ -43,7 +43,7 @@ One row per image, in the order the inputs were found.
 | `batch` | Batch subdirectory name (e.g. `batch_001`) |
 | `preprocessed_path` | Path of the JPG within the work directory; unique |
 | `image_id` | The image's source (see below) |
-| `source_sha256` | SHA-256 (64 lowercase hex characters) of the source file's bytes, or of the ZIP entry's bytes. One per source: a DICOM and its icon share it |
+| `source_sha256` | SHA-256 (64 lowercase hex characters) of the source file's bytes, or of the ZIP entry's bytes. One per source (in a work directory made by an older version, a DICOM and its `#icon` row share it) |
 | `jpeg_sha256` | SHA-256 (64 lowercase hex characters) of the JPG as written |
 
 An `image_id` is an absolute path:
@@ -55,7 +55,8 @@ An `image_id` is an absolute path:
 - a ZIP entry: `<zip path>::<entry name>`; when several entries share a name,
   the later ones get `#2`, `#3`, ...;
 - a DICOM's embedded icon image: `<path>#icon`, a second row beside the main
-  image;
+  image, only in a work directory made by an older version (preprocess no
+  longer renders icons);
 - a name that is not UTF-8 or holds a control character or line separator
   never reaches the manifest: it is a `failed` row in
   [`skipped.tsv`](#skippedtsv), under an escaped name.
@@ -95,7 +96,7 @@ its header when nothing was skipped. Every input ends up in exactly one of
 
 | Column | Description |
 |--------|-------------|
-| `image_id` | The input, in the same form as in `manifest.tsv`: `<path>#icon` for an icon that failed to render, the source path if a whole source could not be opened, or, for a name that is not UTF-8 or holds a control character or line separator, the escaped name (`\xNN` for a non-UTF-8 byte or ASCII control, `\uNNNN` for any other character) |
+| `image_id` | The input, in the same form as in `manifest.tsv`: `<path>#icon` for an icon that failed to render (only in a work directory made by an older version), the source path if a whole source could not be opened, or, for a name that is not UTF-8 or holds a control character or line separator, the escaped name (`\xNN` for a non-UTF-8 byte or ASCII control, `\uNNNN` for any other character) |
 | `kind` | `failed` (an input that was not rendered; `preprocess` exits 1 unless `--allow-skipped`) or `ignored` (not an image: unrecognized content, AppleDouble, DICOMDIR, a ZIP without files, a symlink to an enclosing directory or to a directory inside a SOURCE, a non-regular file inside a directory) |
 | `reason` | `<ExceptionClass>: <message>`, `unsupported: ...` for inputs this tool does not render, or the `ignored` reason |
 

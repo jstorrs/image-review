@@ -36,6 +36,7 @@ from pydicom.uid import ExplicitVRLittleEndian, MediaStorageDirectoryStorage, Se
 from image_review import cli as cli_module
 from image_review import preprocess as preprocess_module
 from image_review.cli import default_jobs
+from image_review.export import AMBIGUOUS_ICON, export_rows
 from image_review.preprocess import (
     BAD_NAME_REASON,
     COLLISION_REASON,
@@ -57,9 +58,10 @@ from image_review.preprocess import (
     render_and_encode,
     run_preprocess,
 )
+from image_review.review_db import Decision
 from image_review.signals import TERMINATION_SIGNALS, interrupt_on
 from image_review.status import ImageId
-from image_review.store import SkippedRow
+from image_review.store import SkippedRow, load_manifest, load_skipped
 from tests.fixtures import add_overlay, invoke_cli, temp_dir, write_dicom
 
 RNG = np.random.default_rng(0)
@@ -293,13 +295,13 @@ def _discovered(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> 
         return [(item.image_id, item.kind) for item in discover(sources, exclude)]
 
 
-def _dicom_with_icon(path: Path, icon_pixels: np.ndarray | None = None) -> None:
-    """A DICOM with an 8x8 8-bit icon: `icon_pixels`, or a ramp by default."""
+def _dicom_with_icon(path: Path) -> None:
+    """A DICOM with an 8x8 8-bit ramp icon."""
     icon = pydicom.Dataset()
     icon.Rows, icon.Columns, icon.SamplesPerPixel = 8, 8, 1
     icon.PhotometricInterpretation = "MONOCHROME2"
     icon.BitsAllocated, icon.BitsStored, icon.HighBit, icon.PixelRepresentation = 8, 8, 7, 0
-    icon.PixelData = (np.arange(64, dtype=np.uint8) if icon_pixels is None else icon_pixels).tobytes()
+    icon.PixelData = np.arange(64, dtype=np.uint8).tobytes()
     write_dicom(path, _good_pixels(), IconImageSequence=[icon])
 
 
@@ -377,36 +379,42 @@ class CollisionTest(unittest.TestCase):
         self.assert_collision([image_id, image_id], kept=[], inputs=2)
         self.assert_cli_exit_codes()
 
-    def test_file_named_like_a_dicom_icon(self):
+    def test_file_named_like_a_dicom_icon_is_not_a_collision(self):
         _dicom_with_icon(self.src / "a.dcm")
         (self.src / "a.dcm#icon").write_bytes(_solid_png(255))
-        (self.src / "b.png").write_bytes(_solid_png(0))
-        self.run_quietly()
+        result = self.run_quietly()
         dicom = (self.src / "a.dcm").as_posix()
-        # a.dcm fails as a whole: its main image is not kept without its icon
-        self.assert_collision([dicom, f"{dicom}#icon"], kept=[(self.src / "b.png").as_posix()], inputs=3)
-        self.assert_cli_exit_codes()
+        # the icon is never rendered, so no `#icon` id is minted to collide with the real file
+        self.assertEqual([r["image_id"] for r in _read_tsv(self.work / "manifest.tsv")], [dicom, f"{dicom}#icon"])
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(_read_tsv(self.work / "skipped.tsv"), [])
+        # export cannot tell the file from an older version's icon: both rows are NOT_REVIEWED, even if CLEAN
+        entries = load_manifest(self.work)
+        decisions = {
+            e.image_id: Decision(
+                image_id=e.image_id,
+                batch=e.batch,
+                status="CLEAN",
+                pass_number=1,
+                timestamp="t",
+                reviewer="r",
+                mode="single",
+                grid_size=1,
+                tool_version="0.1",
+            )
+            for e in entries
+        }
+        rows = export_rows(entries, decisions, load_skipped(self.work))
+        self.assertEqual(
+            [(r.image_id, r.status, r.reason) for r in rows],
+            [(dicom, "NOT_REVIEWED", AMBIGUOUS_ICON), (f"{dicom}#icon", "NOT_REVIEWED", AMBIGUOUS_ICON)],
+        )
 
-    def test_input_whose_main_image_and_icon_both_collide_is_listed_once(self):
-        _dicom_with_icon(self.root / "x.dcm")
-        dicom = (self.root / "x.dcm").read_bytes()
-        archive = self.src / "z.zip"
-        with warnings.catch_warnings(), zipfile.ZipFile(archive, "w") as zf:
-            warnings.simplefilter("ignore")  # zipfile warns about the duplicate name
-            zf.writestr("a.dcm", dicom)
-            zf.writestr("a.dcm", dicom)  # becomes a.dcm#2, icon a.dcm#2#icon
-            # random noise makes the main image differ; the icon differs too
-            _dicom_with_icon(self.root / "y.dcm", np.full(64, 200, dtype=np.uint8))
-            zf.writestr("a.dcm#2", (self.root / "y.dcm").read_bytes())
-        self.run_quietly()
-        base = f"{archive.as_posix()}::a.dcm"
-        self.assert_collision([f"{base}#2", f"{base}#2"], kept=[base, f"{base}#icon"], inputs=3)
-
-    def test_dicom_with_icon_is_not_a_collision(self):
+    def test_dicom_with_icon_is_one_row(self):
         _dicom_with_icon(self.src / "a.dcm")
         result = self.run_quietly()
         dicom = (self.src / "a.dcm").as_posix()
-        self.assertEqual([r["image_id"] for r in _read_tsv(self.work / "manifest.tsv")], [dicom, f"{dicom}#icon"])
+        self.assertEqual([r["image_id"] for r in _read_tsv(self.work / "manifest.tsv")], [dicom])
         self.assertEqual(result.skipped, [])
         self.assertFalse((self.work / preprocess_module.PENDING_NAME).exists())
 
@@ -468,18 +476,6 @@ class CollisionTest(unittest.TestCase):
             self.assertEqual(hashlib.sha256(data).hexdigest(), row["jpeg_sha256"])
         self.assert_no_orphans(manifest)
 
-    def test_colliding_dicom_with_a_failed_icon_is_one_row(self):
-        broken_icon = pydicom.Dataset()
-        broken_icon.Rows = 4  # no pixel data: the icon fails to render
-        write_dicom(self.root / "a.dcm", _good_pixels(), IconImageSequence=[broken_icon])
-        archive = self.src / "z.zip"
-        with zipfile.ZipFile(archive, "w") as zf:
-            zf.writestr("a.dcm", (self.root / "a.dcm").read_bytes())
-        (self.src / "z.zip::a.dcm").write_bytes(_solid_png(255))
-        self.run_quietly()
-        dicom = f"{archive.as_posix()}::a.dcm"
-        self.assert_collision([dicom, dicom], kept=[], inputs=2)  # no `#icon` row is left behind
-
 
 class ProvenanceTest(unittest.TestCase):
     """preprocess.json records how the work dir was made; manifest.tsv records source and JPG hashes."""
@@ -524,8 +520,8 @@ class ProvenanceTest(unittest.TestCase):
         )
         self.assertLessEqual({"pydicom", "numpy", "scikit-image", "Pillow", "matplotlib"}, set(record["libraries"]))
         self.assertEqual(record["libraries"]["pydicom"], pydicom.__version__)
-        self.assertEqual(record["counts"], {"inputs": 5, "written": 4, "skipped_failed": 1, "skipped_ignored": 1})
-        self.assertEqual((self.result.found, self.result.written), (5, 4))
+        self.assertEqual(record["counts"], {"inputs": 5, "written": 3, "skipped_failed": 1, "skipped_ignored": 1})
+        self.assertEqual((self.result.found, self.result.written), (5, 3))
         self.assertEqual(stat.S_IMODE((self.work / "preprocess.json").stat().st_mode), 0o600)
 
     def test_preprocess_json_follows_group_policy(self):
@@ -535,11 +531,10 @@ class ProvenanceTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE((work / "preprocess.json").stat().st_mode), 0o660)
         self.assertEqual(json.loads((work / "preprocess.json").read_text())["parameters"]["access"], "group")
 
-    def test_source_sha256_of_a_file_is_shared_by_its_icon(self):
+    def test_source_sha256_of_a_file_is_of_the_file(self):
         main = (self.src / "icon.dcm").as_posix()
         expected = hashlib.sha256((self.src / "icon.dcm").read_bytes()).hexdigest()
         self.assertEqual(self.manifest[main]["source_sha256"], expected)
-        self.assertEqual(self.manifest[f"{main}#icon"]["source_sha256"], expected)
         plain = (self.src / "plain.dcm").as_posix()
         self.assertEqual(
             self.manifest[plain]["source_sha256"], hashlib.sha256((self.src / "plain.dcm").read_bytes()).hexdigest()
@@ -551,7 +546,7 @@ class ProvenanceTest(unittest.TestCase):
         self.assertNotEqual(row["source_sha256"], hashlib.sha256(self.archive.read_bytes()).hexdigest())
 
     def test_jpeg_sha256_matches_the_file(self):
-        self.assertEqual(len(self.manifest), 4)
+        self.assertEqual(len(self.manifest), 3)
         for row in self.manifest.values():
             data = (self.work / row["preprocessed_path"]).read_bytes()
             self.assertEqual(row["jpeg_sha256"], hashlib.sha256(data).hexdigest())
@@ -1326,7 +1321,7 @@ class RenderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"overlay 0x6002 cannot be decoded"):
             render("dicom", "id", data, "gray")
 
-    def test_bundled_overlay_and_icon_are_rendered(self):
+    def test_bundled_overlay_is_rendered_and_its_icon_is_not(self):
         path = get_testdata_file("examples_overlay.dcm", download=False)
         if path is None:
             self.skipTest("examples_overlay.dcm not bundled")
@@ -1336,15 +1331,14 @@ class RenderTest(unittest.TestCase):
             for tag in [e.tag for e in ds if 0x6000 <= e.tag.group <= 0x601E]:
                 del ds[tag]
 
+        self.assertIn("IconImageSequence", pydicom.dcmread(path))
         bare = self.with_elements_from(data, strip)
-        [main, icon] = render("dicom", "/x/a.dcm", data, "gray")
-        [plain, plain_icon] = render("dicom", "/x/a.dcm", bare, "gray")
-        self.assertEqual((main.image_id, icon.image_id), ("/x/a.dcm", "/x/a.dcm#icon"))
-        self.assertEqual(plain_icon.image_id, "/x/a.dcm#icon")
+        [main] = render("dicom", "/x/a.dcm", data, "gray")
+        [plain] = render("dicom", "/x/a.dcm", bare, "gray")
+        self.assertEqual(main.image_id, "/x/a.dcm")
         self.assertFalse(np.array_equal(main.rgb, plain.rgb))
         mask = pydicom.dcmread(path).overlay_array(0x6000).astype(bool)
         self.assertGreaterEqual(np.percentile(main.rgb[..., 0][mask], 5), 250)
-        self.assertEqual(icon.rgb.ndim, 3)
 
     def with_elements_from(self, data: bytes, edit) -> bytes:
         ds = pydicom.dcmread(io.BytesIO(data))
@@ -1353,18 +1347,26 @@ class RenderTest(unittest.TestCase):
         ds.save_as(buf, enforce_file_format=True)
         return buf.getvalue()
 
-    def test_failed_icon_is_a_skipped_row_beside_the_main_image(self):
+    def test_broken_icon_is_ignored(self):
         def edit(ds):
             item = pydicom.Dataset()
             item.Rows = 4  # no pixel data
             ds.IconImageSequence = [item]
 
         data = self.with_elements(_good_pixels(), edit=edit)
-        [main, icon] = render("dicom", "/x/a.dcm", data, "gray")
+        [main] = render("dicom", "/x/a.dcm", data, "gray")
         self.assertIsInstance(main, preprocess_module.Rendered)
-        self.assertEqual(icon, SkippedRow("/x/a.dcm#icon", "failed", "unsupported: no pixel data"))
+        self.assertEqual(main.image_id, "/x/a.dcm")
 
-    def test_icon_row_lands_in_manifest_and_failed_icon_in_skipped_tsv(self):
+    def test_icon_pixels_are_never_decoded(self):
+        path = temp_dir(self) / "a.dcm"
+        _dicom_with_icon(path)
+        with mock.patch.object(preprocess_module, "preprocess_dicom", wraps=preprocess_module.preprocess_dicom) as spy:
+            render("dicom", "/x/a.dcm", path.read_bytes(), "gray")
+        [((dcm, _), _)] = spy.call_args_list
+        self.assertIn("IconImageSequence", dcm)  # the whole file, not its icon item
+
+    def test_dicom_with_icon_is_one_manifest_row_and_a_broken_icon_no_skipped_row(self):
         path = get_testdata_file("examples_overlay.dcm", download=False)
         if path is None:
             self.skipTest("examples_overlay.dcm not bundled")
@@ -1384,8 +1386,8 @@ class RenderTest(unittest.TestCase):
             with open(root / "work" / "manifest.tsv", newline="", encoding="utf-8") as f:
                 ids = [row["image_id"] for row in csv.DictReader(f, delimiter="\t")]
         ok, bad = str(root / "src" / "ok.dcm"), str(root / "src" / "bad.dcm")
-        self.assertEqual(sorted(ids), sorted([ok, f"{ok}#icon", bad]))
-        self.assertEqual([(s.image_id, s.kind) for s in result.skipped], [(f"{bad}#icon", "failed")])
+        self.assertEqual(sorted(ids), sorted([ok, bad]))
+        self.assertEqual(result.skipped, [])
         self.assertEqual(result.found, 2)
 
     def test_all_zero_dicom_keeps_uncropped_image(self):
@@ -2013,7 +2015,7 @@ class ParallelTest(unittest.TestCase):
 
     def test_output_is_identical_to_jobs_1(self):
         self.assertEqual(self.serial.found, 17)
-        self.assertEqual(self.serial.written, 13)  # 10 files, an icon, 2 zip entries
+        self.assertEqual(self.serial.written, 12)  # 10 files, 2 zip entries
         self.assertEqual([s.kind for s in self.serial.skipped], ["failed", "ignored", "failed", "failed", "failed"])
         self.assertEqual([s.reason for s in self.serial.skipped].count(COLLISION_REASON), 2)
         self.assertEqual(self.pooled, replace(self.serial, skipped_path=self.root / "pooled" / "skipped.tsv"))

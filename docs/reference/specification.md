@@ -126,8 +126,8 @@ data, colormap) -> tuple[Rendered, ...]`** (never empty: the main image first)
 turns the bytes into `(H, W, 3)` uint8 RGB images; each image is then JPEG-encoded in memory; and a **writer** saves
 the encoded bytes the moment they are produced and, once collisions are
 known (see *Collisions*), records them in the manifest. Each input's bytes are read
-once; their SHA-256 becomes the `source_sha256` of every image rendered from
-them (a DICOM and its icon share it), and the SHA-256 of each JPG's encoded
+once; their SHA-256 becomes the `source_sha256` of the image rendered from
+them, and the SHA-256 of each JPG's encoded
 bytes its `jpeg_sha256` (see *`manifest.tsv`*).
 
 **Parallel rendering** (`run_preprocess(..., jobs)`, CLI `--jobs`). Hashing,
@@ -277,33 +277,34 @@ directory SOURCE are joined from walked names and never resolved, so a
 symlinked file there keeps its link path (a symlinked directory below a
 SOURCE is never entered, so no file is reached through one).
 
-A DICOM whose `IconImageSequence` (0088,0200) has an item also yields a second
-output row, `{image_id}#icon`, for the embedded thumbnail (item 0, rendered
-like a single-frame DICOM image of its own: grayscale through the colormap,
-colour as is). The main image keeps its `image_id`. If the icon cannot be
-rendered the main image is still written and `{image_id}#icon` is a `failed`
-row in `skipped.tsv`. If the main image fails the file is `failed` and has no
-icon row.
+A DICOM's `IconImageSequence` (0088,0200) is never rendered: an embedded
+icon's pixels are never decoded, it adds no row to the manifest or
+`skipped.tsv`, and a broken icon item does not fail its file (a sequence
+malformed enough to break reading the file still fails it, as any malformed
+element does). Text burned into an icon is therefore not reviewed (see
+[Security model](security-model.md)). Work directories made by an older
+version hold a second row, `{image_id}#icon`, for the icon (or a `failed` row
+of that id); `export` still folds these (see *Parts and folding*).
 
 **Collisions.** Verdicts are stored per `image_id`, so an `image_id` must
 name one image. The naming is not escaped (changing it would orphan existing
 `review.tsv` rows), so different inputs can produce the same `image_id`: a ZIP
 entry literally named `a.png#2` beside two `a.png` entries; a file literally
-named `z.zip::a.png` beside `z.zip` holding `a.png`; a file literally named
-`a.dcm#icon` beside an `a.dcm` with an icon. After every input is rendered,
+named `z.zip::a.png` beside `z.zip` holding `a.png`. After every input is
+rendered,
 the pure `colliding_ids(images)` takes the `(image_id, source_sha256,
 jpeg_sha256)` of every rendered image and returns the `image_id`s that name
 more than one distinct `(source_sha256, jpeg_sha256)` pair: a different image,
 or the same JPG from a different source (two sources that render identically
-still collide, since `export` attests one `source_sha256` per `image_id`). Every input that rendered any such image (main or icon) is replaced by
-one `failed` row for its own `image_id` (so a DICOM whose main image and icon
-both collide is listed once, and a DICOM whose icon collides loses its main
-image too), reason `image_id collides with another input (rename one of
-them)`, with a logged warning; its JPGs are deleted and never appear in the
-manifest. `{path}` and `{path}#icon` from one DICOM are distinct ids, never a
-collision. The same source reached twice under one `image_id` (a file reached
-through overlapping SOURCEs, so the same pair) is not a collision either: one verdict is right
-for both, and both rows stay in the manifest (see *Key versus `image_id`*).
+still collide, since `export` attests one `source_sha256` per `image_id`).
+Every input that rendered such an image is replaced by one `failed` row for
+its own `image_id`, reason `image_id collides with another input (rename one
+of them)`, with a logged warning; its JPGs are deleted and never appear in the
+manifest. A file literally named `a.dcm#icon` beside an `a.dcm` with an icon
+is not a collision: no `#icon` id is minted. The same source reached twice
+under one `image_id` (a file reached through overlapping SOURCEs, so the same
+pair) is not a collision either: one verdict is right for both, and both rows
+stay in the manifest (see *Key versus `image_id`*).
 Only rendered images are compared: a `failed` or `ignored` row sharing an
 `image_id` with an image changes nothing (`export` already reports an
 `image_id` with a `failed` or `ignored` row as `NOT_REVIEWED`).
@@ -561,23 +562,25 @@ empty (an `X` listed without a hash never borrows its icon's).
 
 Status is not pass-aware: a DIRTY from an earlier pass that is FLAGGED in the
 current one is `DIRTY` (it still contains PHI as far as anyone has said).
-A part `X#icon` (`export.ICON_SUFFIX`) is
-folded into the row of `X`. When there is no part `X` (e.g. a file literally
-named `scan.dcm#icon` with no `scan.dcm` beside it), the row is still `X` and
-the missing main part counts as `NOT_REVIEWED` (`main image missing`, or the
-ignored reason if `X` was ignored, see below), so it is never CLEAN.
+A part `X#icon` (`export.ICON_SUFFIX`; preprocess no longer renders icons, so
+only a work directory made by an older version, or a file merely so named, has
+one) is folded into the row of `X`. When there is no part `X` (e.g. a file
+literally named `scan.dcm#icon` with no `scan.dcm` beside it), the row is
+still `X` and the missing main part counts as `NOT_REVIEWED` (`main image
+missing`, or the ignored reason if `X` was ignored, see below), so it is never
+CLEAN.
 
-A DICOM's icon has its file's hash, so when the manifest records a hash for
-both `X` and `X#icon` (the first per exact `image_id`) and they differ,
-`X#icon` is ambiguous: it may be `X`'s icon or a different file merely named
-so (e.g. a ZIP entry `scan.png#icon` beside `scan.png`), and either reading
-can hide a part nobody saw. Then `X#icon` is still folded into `X`'s row, and
-also gets a row of its own, where `X#icon` first appears (its own part as
-main, with its own hash and its own `X#icon#icon` folded in). Both rows are
-at least `NOT_REVIEWED`, with `export.AMBIGUOUS_ICON` as their last note, so
-neither is CLEAN and both hashes reach the "same content" denial. A chain
-`X`, `X#icon`, `X#icon#icon` with three different hashes gives three such
-rows.
+An older version's DICOM icon has its file's hash, so when the manifest
+records a hash for both `X` and `X#icon` (the first per exact `image_id`) and
+they differ, `X#icon` is ambiguous: it may be `X`'s icon or a different file
+merely named so (e.g. a ZIP entry `scan.png#icon` beside `scan.png`), and
+either reading can hide a part nobody saw. Then `X#icon` is still folded into
+`X`'s row, and also gets a row of its own, where `X#icon` first appears (its
+own part as main, with its own hash and its own `X#icon#icon` folded in). Both
+rows are at least `NOT_REVIEWED`, with `export.AMBIGUOUS_ICON` as their last
+note, so neither is CLEAN and both hashes reach the "same content" denial. A
+chain `X`, `X#icon`, `X#icon#icon` with three different hashes gives three
+such rows.
 
 **Ignored inputs.** Each distinct `image_id` of the `ignored` rows of
 `skipped.tsv` (inputs preprocess did not take for images, e.g. a PDF) gets a
@@ -775,8 +778,9 @@ It is parsed strictly by `store.load_skipped` (a missing file reads as
 empty).
 
 It contains source paths, so it is as sensitive as `manifest.tsv`. `export`
-makes each `failed` `image_id` `NOT_REVIEWED` with its `reason` (folding an
-icon's into its file's row), and lists each `ignored` one not otherwise
+makes each `failed` `image_id` `NOT_REVIEWED` with its `reason` (folding a
+failed icon's, from a work directory made by an older version, into its
+file's row), and lists each `ignored` one not otherwise
 covered as `IGNORED` with its `reason` (see *Ignored inputs* under *Parts and folding*).
 
 ### `review.lock`
@@ -900,7 +904,7 @@ by that rule (not a `StoreUnavailable`).
 | Name | Description |
 |------|-------------|
 | `Key` | `NewType("Key", str)`: a manifest key, the `preprocessed_path` (see *Key versus `image_id`*). A string becomes a `Key` only where it is parsed (`load_manifest`, the client's `parse_manifest` and `parse_statuses`, the server's `parse_mark` and `/image` check), so the type checker keeps keys and source paths apart |
-| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the `#icon` and escaped bad-name ids derived there), `parse_decision`, `load_manifest`, `load_skipped`, and `export_rows` (a file's id with `#icon` removed, or an ambiguous `X#icon` kept as a file of its own). Server, client and controller never see one |
+| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the escaped bad-name ids derived there; preprocess mints no `#icon` id), `parse_decision`, `load_manifest`, `load_skipped`, and `export_rows` (a file's id with `#icon` removed, or an ambiguous `X#icon` kept as a file of its own). Server, client and controller never see one |
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
@@ -969,7 +973,7 @@ see *`image-review export`*.
 | `batch_summary(rows, statuses)` | The same per batch: `dict[str, Counter[Status]]` |
 | `skipped_counts(rows) -> SkippedCounts` | The failed/ignored split of `SkippedRow`s; the one derivation behind `skipped()`, preprocess's summary line and `preprocess.json` counts |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
-| `export.export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons folded in; an `X#icon` whose hash differs from `X`'s also gets its own row, and both are at least `NOT_REVIEWED` |
+| `export.export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons (from a work directory made by an older version) folded in; an `X#icon` whose hash differs from `X`'s also gets its own row, and both are at least `NOT_REVIEWED` |
 | `export.split_allowlist(rows) -> tuple[list[AllowedRow], list[ExportRow]]` | (allowed, report) in input order, every row in exactly one: allowed only if `CLEAN`, with a `source_sha256` that no row that is not `CLEAN` shares; a denied `CLEAN` row's `reason` says why |
 | `export.format_allowlist(rows: list[AllowedRow]) -> str` | The allowlist as TSV text with `ALLOWLIST_HEADER` (`AllowedRow` is a `NewType` over `ExportRow` that only `split_allowlist` makes, so passing the report's rows is a type error); `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
 | `export.format_report(rows) -> str` | The report as TSV text with `REPORT_HEADER`; the same `ValueError` |

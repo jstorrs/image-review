@@ -29,7 +29,6 @@ import numpy as np
 import pydicom
 import skimage as ski
 from PIL import Image
-from pydicom.dataset import FileMetaDataset
 from pydicom.errors import InvalidDicomError
 from pydicom.uid import (
     UID,
@@ -43,7 +42,7 @@ from tqdm import tqdm
 
 from .access import MANIFEST_NAME, Access, Modes, modes
 from .connection import package_version
-from .export import ICON_SUFFIX, has_unsafe_char
+from .export import has_unsafe_char
 from .review_db import format_tsv
 from .status import ImageId
 from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind, SkippedRow, skipped_counts
@@ -514,36 +513,16 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
     return dcm
 
 
-def _render_icon(dcm: pydicom.FileDataset, image_id: ImageId, colormap: str) -> Rendered | SkippedRow | None:
-    """The embedded IconImageSequence thumbnail (item 0) as its own row, or None when there is none."""
-    icons = dcm.get("IconImageSequence")
-    if not icons:
-        return None
-    icon_id = ImageId(f"{image_id}{ICON_SUFFIX}")
-    try:
-        icon = icons[0]
-        # icon pixels are always uncompressed, in the byte order of the enclosing dataset
-        big_endian = dcm.file_meta.get("TransferSyntaxUID") == ExplicitVRBigEndian
-        icon.file_meta = FileMetaDataset()
-        icon.file_meta.TransferSyntaxUID = ExplicitVRBigEndian if big_endian else ExplicitVRLittleEndian
-        return Rendered(icon_id, preprocess_dicom(icon, colormap))
-    except Exception as exc:  # noqa: BLE001 - a bad icon must not lose the main image; it is recorded as its own failed row
-        return _failed(icon_id, exc)
-
-
 def render(
     kind: Kind, image_id: ImageId, data: bytes, colormap: str
 ) -> tuple[Rendered, *tuple[Rendered | SkippedRow, ...]]:
-    """Render one input: its image, plus (DICOM) an `{image_id}#icon` row for an embedded icon image.
+    """Render one input's image: a DICOM's PixelData only, nothing else embedded in the file.
 
-    A failure of the main image raises; a failure of the icon is returned as a `SkippedRow` row.
+    A failure raises.
     """
     match kind:
         case "dicom":
-            dcm = read_dicom(data)
-            main = Rendered(image_id, preprocess_dicom(dcm, colormap))
-            icon = _render_icon(dcm, image_id, colormap)
-            return (main,) if icon is None else (main, icon)
+            return (Rendered(image_id, preprocess_dicom(read_dicom(data), colormap)),)
         case "raster":
             return (Rendered(image_id, preprocess_raster(decode_raster(data))),)
 
@@ -784,7 +763,7 @@ def discover(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> Ite
         items = (
             _discover_directory(source, exclude, source_dirs) if source.is_dir() else _discover_file(source, named=True)
         )
-        # Every image_id is minted in discovery, and later ones (`#icon`, collision rows) derive from these.
+        # Every image_id is minted in discovery, and later ones (collision rows) derive from these.
         for item in tqdm(items, desc=source.name, position=1, leave=False, unit="input"):
             yield _checked_name(item)
 
@@ -802,9 +781,8 @@ def encode_jpeg(rgb: np.ndarray) -> bytes:
 def render_and_encode(candidate: Candidate, colormap: str) -> list[Encoded | SkippedRow]:
     """Hash, render and JPEG-encode one input's bytes into its output rows: encoded images and skipped parts.
 
-    Pure, and the unit of work sent to pool workers (so it and its arguments pickle). Every image rendered
-    from the input (main and icon) carries the SHA-256 of `data`. A failure of the input itself is a single
-    `SkippedRow`; an embedded icon that fails is a `SkippedRow` beside the main image.
+    Pure, and the unit of work sent to pool workers (so it and its arguments pickle). The rendered image
+    carries the SHA-256 of `data`. A failure of the input is a single `SkippedRow`.
     """
     kind, image_id, data = candidate.kind, candidate.image_id, candidate.data
     try:
@@ -1216,7 +1194,7 @@ def _place(
 ) -> tuple[list[tuple[str, str, str, str, str]], list[SkippedRow]]:
     """Move the JPGs of inputs without a colliding image_id into batches under `staging`.
 
-    An input with any colliding image (main or icon) becomes one `failed` row and its JPGs are deleted.
+    An input with any colliding image becomes one `failed` row and its JPGs are deleted.
     Returns the manifest rows and the skipped rows, both in discovery order.
     """
     collisions = colliding_ids(
@@ -1228,7 +1206,7 @@ def _place(
         if any(row.image_id in collisions for row in staged):
             for row in staged:
                 row.path.unlink()
-            # the input's own skipped rows (e.g. a failed icon) give way to the one collision row
+            # the input's own skipped rows give way to the one collision row
             log.warning("skipping %s: %s", input_id, COLLISION_REASON)
             skipped.append(SkippedRow(input_id, "failed", COLLISION_REASON))
             continue

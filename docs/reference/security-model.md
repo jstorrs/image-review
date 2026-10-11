@@ -312,19 +312,24 @@ world-readable.
   that may be released, each by path and source SHA-256; release a file only
   if both match, and deny everything not listed
   ([What is allowlisted](../commands/export.md#what-is-allowlisted)). A file
-  is listed only if it, and its embedded icon, were reviewed CLEAN, the
-  manifest has its hash, and no file that is not CLEAN has the same hash
-  (identical bytes cannot be both clean and dirty). So these
+  is listed only if it was reviewed CLEAN (and, in a work directory made by
+  an older version, its `#icon` row too), the manifest has its hash, and no
+  file that is not CLEAN has the same hash (identical bytes cannot be both
+  clean and dirty). So these
   are never listed: inputs that failed to preprocess, inputs that were not
   images, files whose name preprocess recorded under an escaped id (which
   never matches the real name), a file whose name ends in `#icon` with no
   file of the name without it, or beside one with a different hash (then
-  neither is listed: it cannot be told apart from a DICOM's icon), CLEAN
+  neither is listed: it cannot be told apart from an older version's DICOM
+  icon), CLEAN
   files of a work directory without hashes, a file changed since
   preprocess (its hash no longer matches), and a ZIP or directory as a whole
   (only its entries are listed). Everything else goes to the optional
   `--report`, for audit and follow-up; it must never be used to choose what
-  to release (e.g. "everything not DIRTY").
+  to release (e.g. "everything not DIRTY"). An allowlisted DICOM may still
+  hold an embedded icon image (IconImageSequence (0088,0200)) that nobody
+  reviewed: only the pixel data is reviewed (with overlay planes drawn on
+  it), so strip icons before releasing files.
 - **DIRTY-only placeholders.** The viewer shows an image that cannot be
   fetched, read or verified as a placeholder that accepts DIRTY but refuses
   CLEAN, so an image nobody could see is not cleared by the viewer (see the

@@ -48,6 +48,15 @@ Read **Upgrading** first.
   that `serve` lays out browser grids with the same code as the viewer.
   rectpack has no wheel: an offline or `--only-binary` install needs its
   sdist.
+- **DICOM icon images are no longer rendered or reviewed.** preprocess used
+  to add each DICOM's embedded icon (IconImageSequence) as a second image,
+  `<path>#icon`, and list an icon it could not render as its own `failed`
+  row. A new work directory has neither; nobody sees the icon, so remove
+  icons before releasing files. Work directories made by an older version
+  keep their icon rows and verdicts, and `export` still folds them into
+  their file's row. A file whose name ends in `#icon` beside the file without
+  it is no longer a preprocess collision, but `export` cannot vouch for it:
+  rename it before preprocessing.
 
 ### CLI
 

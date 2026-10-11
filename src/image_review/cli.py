@@ -668,12 +668,13 @@ def export(work_dir, output, report, allow_live, remote):
     """Write the allowlist of releasable files as TSV: source_sha256, image_id, pass_number, timestamp, reviewer.
 
     Default deny: release a file only if both its path (image_id; a ZIP entry is `<zip>::<entry>`) and its SHA-256
-    match a row; anything not listed is denied. A file is listed only if it was reviewed CLEAN (a DICOM's icon too),
-    the manifest has its hash, and no file that is not CLEAN has the same recorded hash. --report writes the rest as TSV
-    (image_id, status, pass_number, timestamp, reviewer, reason, source_sha256): DIRTY (a FLAGGED image is DIRTY),
-    UNREVIEWED, NOT_REVIEWED when preprocess failed on it, IGNORED when preprocess did not take it for an image, and
-    CLEAN ones not allowlisted, with why. image_ids are source paths and may hold PHI, so export runs only where the
-    work directory is, never with --remote; $IMAGE_REVIEW_REMOTE is ignored.
+    match a row; anything not listed is denied. A file is listed only if it was reviewed CLEAN (and, in a work
+    directory made by an older version, its `#icon` row too), the manifest has its hash, and no file that is not
+    CLEAN has the same recorded hash. --report writes the rest as TSV (image_id, status, pass_number, timestamp,
+    reviewer, reason, source_sha256): DIRTY (a FLAGGED image is DIRTY), UNREVIEWED, NOT_REVIEWED when preprocess
+    failed on it, IGNORED when preprocess did not take it for an image, and CLEAN ones not allowlisted, with why.
+    image_ids are source paths and may hold PHI, so export runs only where the work directory is, never with
+    --remote; $IMAGE_REVIEW_REMOTE is ignored.
     """
     if remote is not None:
         raise click.UsageError(

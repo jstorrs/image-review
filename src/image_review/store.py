@@ -37,7 +37,8 @@ class ManifestEntry:
     batch: str
     key: Key  # preprocessed_path
     image_id: ImageId  # original source path; stays server-side
-    # SHA-256 (64 lowercase hex) of the source file or ZIP entry, shared by X and X#icon; None in a 3-column manifest.
+    # SHA-256 (64 lowercase hex) of the source file or ZIP entry (and of an X#icon from an older version's work
+    # directory); None in a 3-column manifest.
     # Derived from PHI content: stays server-side like image_id.
     source_sha256: str | None = None
     jpeg_sha256: str | None = None  # SHA-256 of the JPG as written; image_bytes checks it. None in a 3-column manifest

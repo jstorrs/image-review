@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 ExportStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED", "IGNORED"]
 ALLOWLIST_HEADER = ["source_sha256", "image_id", "pass_number", "timestamp", "reviewer"]
 REPORT_HEADER = ["image_id", "status", "pass_number", "timestamp", "reviewer", "reason", "source_sha256"]
-ICON_SUFFIX = "#icon"  # a DICOM's embedded icon image
+ICON_SUFFIX = "#icon"  # a DICOM's icon image, from a work directory made by an older version (or a file so named)
 # The reason note on both rows of a file `X` and a part `X#icon` whose manifest hashes differ: `X#icon` may be X's icon
 # or a different file so named (a DICOM's icon has its file's hash), so neither row can vouch for the other's part.
 AMBIGUOUS_ICON = (
@@ -39,7 +39,7 @@ class ExportRow:
     pass_number: int | None  # from the main image's latest decision; None, and timestamp and reviewer "", without one
     timestamp: str
     reviewer: str
-    reason: str  # why the row is not simply its main image's verdict (skip reasons, the icon's state); often ""
+    reason: str  # why the row is not simply its main image's verdict (skip reasons, a legacy icon's state); often ""
     source_sha256: str  # the source file's SHA-256 from the manifest; "" when it has none (legacy, or never rendered)
 
 
@@ -49,7 +49,7 @@ AllowedRow = NewType("AllowedRow", ExportRow)
 
 @dataclass(frozen=True)
 class _Part:
-    """One manifest or skipped image_id, before an icon is folded into its file."""
+    """One manifest or skipped image_id, before a legacy icon is folded into its file."""
 
     status: _PartStatus
     decision: Decision | None  # None for UNREVIEWED and NOT_REVIEWED
@@ -164,17 +164,19 @@ def export_rows(
     A part (manifest or failed image_id) is NOT_REVIEWED if skipped.tsv has a `failed` row for it, or an `ignored`
     one (the first `failed` reason wins, else the first `ignored` one); else its latest decision's status (CLEAN or
     DIRTY), else UNREVIEWED. A DIRTY from an earlier pass not yet re-reviewed (FLAGGED in `status`) is DIRTY: it still
-    contains PHI. A DICOM's icon (`X#icon`) is folded into `X`'s row, whose status is the worse of the two (DIRTY,
-    then NOT_REVIEWED, then UNREVIEWED, then CLEAN); an icon without its `X` is reported under `X`, as if `X` were
-    NOT_REVIEWED. `decisions` is the latest decision per image_id (review_db.latest); ones for image_ids in neither
+    contains PHI. A DICOM's icon (`X#icon`: preprocess no longer renders icons, so only a work directory made by an
+    older version, or a file merely so named, has one) is folded into `X`'s row, whose status is the worse of the two
+    (DIRTY, then NOT_REVIEWED, then UNREVIEWED, then CLEAN); an icon without its `X` is reported under `X`, as if `X`
+    were NOT_REVIEWED. `decisions` is the latest decision per image_id (review_db.latest); ones for image_ids in neither
     file are ignored. A row's source_sha256 is the first one the manifest records for `X` itself; only if the
     manifest does not list `X` at all (an icon without its main, or a failed `X`), the first one for `X#icon`; else
     "" (an `X` listed without a hash never borrows its icon's).
 
-    If the manifest records a hash for both `X` and `X#icon` and they differ, `X#icon` is ambiguous: a DICOM's icon
-    has its file's hash, so it may be a different file merely so named, or `X`'s icon. Then `X#icon` gets a row of its
-    own too (with its own hash, and its own `X#icon#icon` folded in), still folded into `X`'s, and both rows are at
-    least NOT_REVIEWED with the `AMBIGUOUS_ICON` note: neither can be vouched for, and each hash reaches the report.
+    If the manifest records a hash for both `X` and `X#icon` and they differ, `X#icon` is ambiguous: an older
+    version's DICOM icon has its file's hash, so it may be a different file merely so named, or `X`'s icon. Then
+    `X#icon` gets a row of its own too (with its own hash, and its own `X#icon#icon` folded in), still folded into
+    `X`'s, and both rows are at least NOT_REVIEWED with the `AMBIGUOUS_ICON` note: neither can be vouched for, and each
+    hash reaches the report.
 
     An `ignored` image_id gets a row of its own, IGNORED with the first such row's reason, unless it is a part or the
     file of a folded row: a part's status already covers it (NOT_REVIEWED for a manifest image_id), and an ignored `X`
