@@ -1505,30 +1505,30 @@ the boundary (`parse_pass`, `parse_mark`, `parse_undo`, `parse_grids`).
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` integer >= 1 |
 | `GET /current_pass` | `{"pass": N}` |
 | `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`; both 0 if it has none). Only counts are sent, never `image_id`s or reasons (which contain source paths) |
-| `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`). A `grid` CLEAN that `status.grid_clean_refused` refuses against the store's current statuses for `pass` (a key DIRTY or FLAGGED, unless every key is DIRTY) is answered 409 and records nothing; `single` marks and DIRTY verdicts are never refused |
+| `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; `keys` must be distinct, and a `single` mark must name exactly one key (otherwise 400, nothing recorded); responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`). A `grid` CLEAN that `status.grid_clean_refused` refuses against the store's current statuses for `pass` (a key DIRTY or FLAGGED, unless every key is DIRTY) is answered 409 and records nothing; `single` marks and DIRTY verdicts are never refused with 409 |
 | `POST /undo` | Body `{"pass": N, "reviewer": str}`, checked as for `/mark`; other fields are ignored. Undoes the server store's latest mark (`ReviewStore.undo`); responds `{key: status, ...}` for every key affected, or `{}` when there is nothing to undo |
 | `POST /grids` | Socket mode only (404 over TLS): grid layouts for the browser client; see *Unix-socket server* |
 
 Only keys and skip counts appear on the wire; original `image_id`s never do.
 
-**API version rule.** `connection.API_VERSION` (an integer, currently 7; v2
+**API version rule.** `connection.API_VERSION` (an integer, currently 8; v2
 added `GET /skipped`; v3 added `FLAGGED` to the `Status` vocabulary, which
 `/statuses` responses may contain; `/mark` responses hold only the verdict
 just recorded; v4 dropped `batch` from the `/mark` body, the server taking
 each key's batch from the manifest, and added `reviewer` and `mode`; v5 added
 `POST /undo`; v6 made `GET /skipped` always send counts, never `null`, and
 refused repeated query parameters with 400; v7 made `/mark` refuse a grid
-CLEAN over a DIRTY or FLAGGED key with 409) is shared by client and server.
-Any change to request or response shapes, or to the `Status` vocabulary, must
-bump it. Client and server are installed
-separately, so skew is expected and must fail clearly rather than as a
+CLEAN over a DIRTY or FLAGGED key with 409; v8 made `/mark` refuse a single
+mark without exactly one key, and repeated keys, with 400) is shared by client
+and server. Any change to request or response shapes, or to the `Status`
+vocabulary, must bump it. Client and server are installed separately, so skew is expected and must fail clearly rather than as a
 malformed reply or a 404.
 
 ### Error semantics
 
 | Status | Cause |
 |--------|-------|
-| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo` (and, in socket mode, `POST /grids`); a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid; `/grids` as described under *Unix-socket server* |
+| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo` (and, in socket mode, `POST /grids`); a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid, repeated keys, a `single` mark without exactly one key; `/grids` as described under *Unix-socket server* |
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 409 | `POST /mark`: CLEAN with `mode: "grid"` on keys holding a DIRTY or FLAGGED status in that pass, unless every key is DIRTY (`status.grid_clean_refused`); body `{"error": "grid holds a DIRTY or FLAGGED image"}` (no keys); nothing is recorded |
@@ -1679,7 +1679,7 @@ and `Referrer-Policy: no-referrer`, besides `Cache-Control: no-store` and
 none of the new headers. The public routes needed no `API_VERSION` bump and
 do not change the HTTPS API: they exist only in socket mode, which the
 versioned pygame client cannot reach, and the page is served by the same
-server it calls. (v7 is for the grid CLEAN refusal on `/mark`.)
+server it calls. (v7 and v8 are for the refusals on `/mark`.)
 
 Each `UnixReviewServer` start draws an instance id, `token_urlsafe(16)`. It
 names the server run and is not an access secret, but it is never logged.

@@ -18,7 +18,7 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 import pygame as pg
 
 from image_review.cli import status_report
-from image_review.connection import RemoteTarget, is_int_at_least, package_version
+from image_review.connection import API_VERSION, RemoteTarget, is_int_at_least, package_version
 from image_review.controller import GRID_HAS_DIRTY, ReviewSession, UIState
 from image_review.remote import (
     ApiMismatch,
@@ -84,7 +84,7 @@ class TestRoundTrips(RemoteTestCase):
                 self.store.image_bytes(key)
 
     def test_mark_equals_local(self):
-        changed = mark(self.store, [KEYS[0], KEYS[1]], "CLEAN")
+        changed = mark(self.store, [KEYS[0], KEYS[1]], "CLEAN", mode="grid")
         self.assertEqual(changed, {KEYS[0]: "CLEAN", KEYS[1]: "CLEAN"})
         mark(self.store, [KEYS[2]], "DIRTY")
         local = self.local_copy()
@@ -103,9 +103,9 @@ class TestRoundTrips(RemoteTestCase):
         )
 
     def test_undo_equals_local(self):
-        mark(self.store, [KEYS[0]], "DIRTY")
-        self.store.mark([KEYS[0], KEYS[1]], "CLEAN", 1, reviewer="tester", mode="single")
-        self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "DIRTY", KEYS[1]: "UNREVIEWED"})
+        mark(self.store, [KEYS[0]], "CLEAN")
+        self.store.mark([KEYS[0], KEYS[1]], "DIRTY", 1, reviewer="tester", mode="grid")
+        self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "CLEAN", KEYS[1]: "UNREVIEWED"})
         self.assertEqual(self.store.statuses(1), self.local_copy().statuses(1))
         self.assertEqual(self.store.undo(1, reviewer="tester"), {KEYS[0]: "UNREVIEWED"})
         self.assertEqual(self.store.undo(1, reviewer="tester"), {})
@@ -454,7 +454,7 @@ class TestCli(RemoteTestCase):
     def test_status_flagged_identical_to_local(self):
         mark(self.store, [KEYS[0]], "DIRTY")
         mark(self.store, [KEYS[1]], "CLEAN")
-        mark(self.store, [KEYS[2], KEYS[3]], "CLEAN")
+        mark(self.store, [KEYS[2], KEYS[3]], "CLEAN", mode="grid")
         remote = self.invoke("status", "--remote", self.target.to_uri())
         local = self.invoke("status", "--work-dir", str(self.work_dir))
         self.assertEqual(remote.exit_code, 0, remote.output)
@@ -486,11 +486,12 @@ class TestCli(RemoteTestCase):
         self.assertNotIn("Traceback", result.output)
 
     def test_api_mismatch_message(self):
-        with mock.patch("image_review.remote.API_VERSION", 8):
+        with mock.patch("image_review.remote.API_VERSION", API_VERSION + 1):
             result = self.invoke("status", "--remote", self.target.to_uri())
         self.assertEqual(result.exit_code, 1)
         self.assertIn(
-            "server speaks API v7, this client v8; install the same image-review version on both machines",
+            f"server speaks API v{API_VERSION}, this client v{API_VERSION + 1}; "
+            "install the same image-review version on both machines",
             result.output,
         )
         self.assertNotIn(self.target.token, result.output)
@@ -513,14 +514,16 @@ class TestCli(RemoteTestCase):
 
     def test_check_api(self):
         self.store.check_api()
-        with mock.patch("image_review.remote.API_VERSION", 8), self.assertRaises(ApiMismatch):
+        with mock.patch("image_review.remote.API_VERSION", API_VERSION + 1), self.assertRaises(ApiMismatch):
             self.store.check_api()
 
-    def test_v6_server_is_refused(self):
-        # v7 added /mark's 409; a v6 server would record a grid CLEAN over a DIRTY key
-        with mock.patch("image_review.server.API_VERSION", 6), self.assertRaises(ApiMismatch) as ctx:
+    def test_older_server_is_refused(self):
+        # v7 added /mark's 409 and v8 its single-key rule; an older server would accept a multi-key single CLEAN
+        # (and, before v7, a grid CLEAN over a DIRTY key)
+        old = API_VERSION - 1
+        with mock.patch("image_review.server.API_VERSION", old), self.assertRaises(ApiMismatch) as ctx:
             self.store.check_api()
-        self.assertIn("server speaks API v6, this client v7", str(ctx.exception))
+        self.assertIn(f"server speaks API v{old}, this client v{API_VERSION}", str(ctx.exception))
 
     def test_status_envvar(self):
         result = self.invoke("status", env={"IMAGE_REVIEW_REMOTE": self.target.to_uri(), "IMAGE_REVIEW_VIA": None})

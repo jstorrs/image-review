@@ -151,6 +151,10 @@ def parse_mark(body: bytes, known_keys: frozenset[Key]) -> MarkRequest:
     mark_mode = parse_choice(mode, MARK_MODES)
     if mark_mode is None:
         raise BadRequest("mode must be single or grid")
+    if len(set(keys)) != len(keys):
+        raise BadRequest("keys must be distinct")
+    if mark_mode == "single" and len(keys) != 1:
+        raise BadRequest("single mode takes exactly one key")
     return MarkRequest(
         keys=[Key(k) for k in keys],
         status=verdict,

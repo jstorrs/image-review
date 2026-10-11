@@ -4,7 +4,7 @@
 
 Browser review over SSH, now `serve`'s default and the recommended way to
 review remotely, with a grid mode; the Python remote client is deprecated;
-wire API v7 (upgrade client and server together); and the documentation site.
+wire API v8 (upgrade client and server together); and the documentation site.
 Read **Upgrading** first.
 
 ### Upgrading: breaking and behaviour changes
@@ -29,15 +29,20 @@ Read **Upgrading** first.
   install or keep in sync: the server serves the page itself, so it always
   matches. The Python client must run the same version as the server, and a
   mismatch is refused. The laptop needs only ssh and a browser.
-- **Wire API v7: client and server must be upgraded together.** `POST /mark`
-  now refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
+- **Wire API v8: client and server must be upgraded together.** `POST /mark`
+  now answers 400 and records nothing for a `mode: "single"` body that does
+  not name exactly one key, and for repeated keys in either mode (a
+  multi-key "single" CLEAN would otherwise skip the grid rule below; both
+  clients already send one key in single mode and never repeat a key). It
+  also refuses CLEAN with `mode: "grid"` when any of its images is DIRTY or
   FLAGGED in that pass, unless every one is DIRTY, answering 409 and
   recording nothing. Both clients already refused it, but only against their
   own copy of the statuses, which can be stale (another client may have
   marked an image DIRTY meanwhile). The viewer and the browser page show
   "grid contains an image already marked DIRTY - review it in single mode"
   and re-read the statuses; the viewer does not treat the 409 as a lost
-  connection. A v7 client refuses a v6 server, and a v6 client a v7 server.
+  connection. A v8 client refuses a server of any other version (0.3.0
+  speaks v6), and older clients refuse a v8 server.
 - **Requirements:** rectpack (still pinned at 0.2.2) moved from the `viewer`
   extra to the core dependencies, with the grid layout code (`layout.py`), so
   that `serve` lays out browser grids with the same code as the viewer.
@@ -98,7 +103,7 @@ Read **Upgrading** first.
   another (412) and records nothing; the page then says the server was
   restarted or now serves another work directory and offers Reconnect. The
   socket routes and the page needed no API version bump and do not change the
-  HTTPS API (API v7, above, is for the grid CLEAN refusal). See the security
+  HTTPS API (API v8, above, is for the `/mark` refusals). See the security
   model in the documentation for the limits.
 
 ### Wire API (remote review)
