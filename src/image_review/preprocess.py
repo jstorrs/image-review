@@ -82,6 +82,7 @@ _OVERLAY_FIRST_GROUP = 0x6000
 _OVERLAY_LAST_GROUP = 0x601E
 _OVERLAY_DATA_ELEMENT = 0x3000
 _OVERLAY_ORIGIN_ELEMENT = 0x0050
+_OVERLAY_BIT_POSITION_ELEMENT = 0x0102
 _ICON_IMAGE_SEQUENCE = (0x0088, 0x0200)
 _DICOM_SUFFIXES = {".dcm", ".dicom", ".ima"}
 _RASTER_SUFFIXES = {
@@ -131,7 +132,7 @@ _SPAWN = multiprocessing.get_context("spawn")
 Kind = Literal["dicom", "raster"]
 Content = Literal[Kind, "zip"]
 # Something a written input holds that its review image does not show, and that downstream tools should strip
-NoteKind = Literal["overlay-plane", "icon-image"]
+NoteKind = Literal["overlay-plane", "overlay-unused-bits", "icon-image"]
 NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
 
 
@@ -348,7 +349,9 @@ def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray) -> np
 
 
 def _decode_pixels(dcm: pydicom.FileDataset) -> np.ndarray:
-    """`dcm.pixel_array`; a compressed file that cannot be decoded is a `DecodeError` naming its transfer syntax."""
+    """`dcm.pixel_array` as decoded, bits above BitsStored included (pydicom would clear them for some transfer
+    syntaxes only); a compressed file that cannot be decoded is a `DecodeError` naming its transfer syntax."""
+    dcm.pixel_array_options(correct_unused_bits=False)  # before the first access: pixel_array is cached
     try:
         return dcm.pixel_array
     except Exception as exc:
@@ -359,23 +362,53 @@ def _decode_pixels(dcm: pydicom.FileDataset) -> np.ndarray:
         raise DecodeError(f"cannot decode {syntax.name}: {type(exc).__name__}: {cause}") from exc
 
 
-def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> np.ndarray:
-    """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels."""
-    pixels = _decode_pixels(dcm)
-    _require_finite(pixels)
+def _split_unused_bits(raw: np.ndarray, bits_stored: int) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Integer `raw` reduced to its low `bits_stored` bits, and the positions of the bits above them that held content.
+
+    The low bits are sign-extended when `raw` is signed (PixelRepresentation 1). A sample's bits above `bits_stored`
+    hold content unless they are all zero or (signed) the sign extension, both of which writers use; a sample with
+    content reports every such bit that differs from the masked value. `raw` is returned as is when its dtype has no
+    bits above `bits_stored`.
+    """
+    width = raw.dtype.itemsize * 8
+    if bits_stored >= width:
+        return raw, ()
+    shift = raw.dtype.type(width - bits_stored)
+    masked = np.right_shift(np.left_shift(raw, shift), shift)  # arithmetic right shift for signed dtypes
+    # Only a non-zero high field that is not the sign extension holds content: zero-filled negatives do not
+    content = (raw != masked) & (np.right_shift(raw, raw.dtype.type(bits_stored)) != 0)
+    differing = int(np.bitwise_or.reduce(np.bitwise_xor(raw[content], masked[content]).view(f"u{raw.dtype.itemsize}")))
+    return masked, tuple(bit for bit in range(bits_stored, width) if differing >> bit & 1)
+
+
+def _stored_pixels(dcm: pydicom.FileDataset) -> tuple[np.ndarray, tuple[int, ...]]:
+    """The decoded pixels with bits above BitsStored masked (see `_split_unused_bits`), and the positions of those
+    that held content. Float pixels have no unused bits and are returned as is."""
+    raw = _decode_pixels(dcm)
+    _require_finite(raw)
+    if raw.dtype.kind not in "iu":
+        return raw, ()
+    return _split_unused_bits(raw, int(dcm.BitsStored))
+
+
+def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarray, tuple[int, ...]]:
+    """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels, and the unused
+    bits that held content (see `_stored_pixels`; palette indices are masked before the lookup)."""
+    pixels, unused_bits = _stored_pixels(dcm)
     bits = int(dcm.BitsStored)
     if photometric == "PALETTE COLOR":
         pixels = pydicom.pixels.apply_color_lut(pixels, dcm)
         bits = int(dcm.RedPaletteColorLookupTableDescriptor[2])
     if pixels.ndim != 3 or pixels.shape[2] != 3:
         raise Unsupported(f"pixel array with shape {pixels.shape}")
-    return _to_uint8(pixels, bits)
+    return _to_uint8(pixels, bits), unused_bits
 
 
-def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.ndarray:
+def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> tuple[np.ndarray, tuple[int, ...]]:
     """Render a single-frame DICOM to (H, W, 3) uint8: grayscale through `colormap`, colour as is.
 
-    Overlay planes are drawn at maximum brightness.
+    Overlay planes are drawn at maximum brightness. Bits above BitsStored are masked before rendering; their
+    positions that held content are returned with the image, for `_dicom_notes`.
     """
     if not _has_pixel_data(dcm):
         sop_class = _sop_class(dcm)
@@ -388,11 +421,11 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
     photometric = dcm.get("PhotometricInterpretation")
     match photometric:
         case "MONOCHROME1" | "MONOCHROME2":
-            pixels = _decode_pixels(dcm)
-            _require_finite(pixels)
+            pixels, unused_bits = _stored_pixels(dcm)
             if pixels.ndim != 2:
                 raise Unsupported(f"pixel array with shape {pixels.shape}")
-            return apply_colormap(_gray_dicom(pixels, photometric, _overlay_mask(dcm, pixels.shape)), colormap)
+            gray = _gray_dicom(pixels, photometric, _overlay_mask(dcm, pixels.shape))
+            return apply_colormap(gray, colormap), unused_bits
         case (
             "RGB"
             | "PALETTE COLOR"
@@ -403,9 +436,9 @@ def preprocess_dicom(dcm: pydicom.FileDataset, colormap: str = "inferno") -> np.
             | "YBR_ICT"
             | "YBR_RCT"
         ):
-            rgb = _colour_dicom(dcm, photometric)
+            rgb, unused_bits = _colour_dicom(dcm, photometric)
             rgb[_overlay_mask(dcm, rgb.shape[:2])] = 255
-            return _crop(rgb)
+            return _crop(rgb), unused_bits
         case _:
             raise Unsupported(f"photometric interpretation {photometric}")
 
@@ -415,6 +448,30 @@ def _overlay_note(dcm: pydicom.FileDataset) -> Note | None:
     if not groups:
         return None
     return Note("overlay-plane", f"group{'s' if len(groups) > 1 else ''} {', '.join(groups)}")
+
+
+def _bit_overlay_groups(dcm: pydicom.FileDataset) -> dict[int, list[int]]:
+    """OverlayBitPosition -> the groups 0x6000-0x601E that have one and no OverlayData (a retired overlay stored in
+    PixelData's unused bits); a position that cannot be read as one integer is left out."""
+    groups: dict[int, list[int]] = {}
+    for group in range(_OVERLAY_FIRST_GROUP, _OVERLAY_LAST_GROUP + 1, 2):
+        if (group, _OVERLAY_DATA_ELEMENT) in dcm or (group, _OVERLAY_BIT_POSITION_ELEMENT) not in dcm:
+            continue
+        try:
+            position = int(dcm[group, _OVERLAY_BIT_POSITION_ELEMENT].value)
+        except Exception:  # noqa: BLE001, S112 - a malformed position names no group; it must never fail the input
+            continue
+        groups.setdefault(position, []).append(group)
+    return groups
+
+
+def _unused_bits_note(dcm: pydicom.FileDataset, unused_bits: tuple[int, ...]) -> Note | None:
+    """A note for the bits above BitsStored that held content, each followed by the overlay groups that claim it."""
+    if not unused_bits:
+        return None
+    claims = _bit_overlay_groups(dcm)
+    labels = [f"{bit}" + "".join(f" (overlay 0x{group:04X})" for group in claims.get(bit, [])) for bit in unused_bits]
+    return Note("overlay-unused-bits", f"bit{'s' if len(labels) > 1 else ''} {', '.join(labels)}")
 
 
 def _truncated(text: str) -> str:
@@ -445,9 +502,11 @@ def _icon_note(dcm: pydicom.FileDataset) -> Note | None:
     return Note("icon-image", detail)
 
 
-def _dicom_notes(dcm: pydicom.FileDataset) -> tuple[Note, ...]:
-    """What `dcm` holds that its rendering does not show, in NOTE_KINDS order."""
-    return tuple(note for note in (_overlay_note(dcm), _icon_note(dcm)) if note is not None)
+def _dicom_notes(dcm: pydicom.FileDataset, unused_bits: tuple[int, ...]) -> tuple[Note, ...]:
+    """What `dcm` holds that its rendering does not show, in NOTE_KINDS order; `unused_bits` are the positions above
+    BitsStored that held content, from the decode that rendered it (see `preprocess_dicom`)."""
+    notes = (_overlay_note(dcm), _unused_bits_note(dcm, unused_bits), _icon_note(dcm))
+    return tuple(note for note in notes if note is not None)
 
 
 def apply_colormap(img: np.ndarray, colormap: str = "inferno") -> np.ndarray:
@@ -588,7 +647,8 @@ def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str) -> Rendere
     match kind:
         case "dicom":
             dcm = read_dicom(data)
-            return Rendered(image_id, preprocess_dicom(dcm, colormap), _dicom_notes(dcm))
+            rgb, unused_bits = preprocess_dicom(dcm, colormap)
+            return Rendered(image_id, rgb, _dicom_notes(dcm, unused_bits))
         case "raster":
             return Rendered(image_id, preprocess_raster(decode_raster(data)), ())
 

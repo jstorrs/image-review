@@ -58,6 +58,15 @@ Read **Upgrading** first.
   their file's row. A file whose name ends in `#icon` beside the file without
   it is no longer a preprocess collision, but `export` cannot vouch for it:
   rename it before preprocessing.
+- **DICOM pixel bits above BitsStored are masked for every transfer
+  syntax.** JPEG-LS and JPEG 2000 images used to be rendered with whatever
+  their unused high bits held (pydicom clears them only for the other
+  syntaxes), so a retired overlay stored there was drawn into the image; now
+  every syntax renders only the stored bits (signed data sign-extended), and
+  an input whose unused bits hold anything other than zeros or sign
+  extension gets an `overlay-unused-bits` note
+  (see `notes.tsv` below). The bits are not reviewed and stay in the file:
+  clear them before releasing files.
 
 ### CLI
 
@@ -119,7 +128,11 @@ Read **Upgrading** first.
   `preprocess` now always writes `notes.tsv` (`image_id`, `kind`, `detail`;
   header only when empty) beside `skipped.tsv`, one row per note on a
   written input: `overlay-plane` for a DICOM with overlay planes (detail
-  `group 0x6000` or `groups 0x6000, 0x6002`; overlays are still drawn too) and
+  `group 0x6000` or `groups 0x6000, 0x6002`; overlays are still drawn too),
+  `overlay-unused-bits` for a DICOM whose pixel data holds something above
+  BitsStored other than zeros or sign extension (detail `bit 15`,
+  `bits 12, 15`, or `bit 15 (overlay 0x6000)` when a 60xx group's
+  OverlayBitPosition points at it), and
   `icon-image` for a DICOM with an embedded icon (detail such as
   `IconImageSequence: 64x64 MONOCHROME2`). Notes never fail an input or
   change the exit status. When there are any, the summary line ends with

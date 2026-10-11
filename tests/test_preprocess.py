@@ -33,7 +33,14 @@ import skimage as ski
 from PIL import Image, JpegImagePlugin, PngImagePlugin
 from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
-from pydicom.uid import ExplicitVRLittleEndian, MediaStorageDirectoryStorage, SecondaryCaptureImageStorage, generate_uid
+from pydicom.uid import (
+    ExplicitVRLittleEndian,
+    JPEG2000Lossless,
+    MediaStorageDirectoryStorage,
+    RLELossless,
+    SecondaryCaptureImageStorage,
+    generate_uid,
+)
 
 from image_review import cli as cli_module
 from image_review import preprocess as preprocess_module
@@ -45,6 +52,7 @@ from image_review.preprocess import (
     SIDE_BY_SIDE_GAP,
     Candidate,
     DecodeError,
+    Note,
     Rejected,
     Unsupported,
     WorkDirExists,
@@ -56,6 +64,7 @@ from image_review.preprocess import (
     compress_image,
     decode_raster,
     discover,
+    encode_jpeg,
     render,
     render_and_encode,
     run_preprocess,
@@ -71,7 +80,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 APPLEDOUBLE = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + bytes(100)
 # SLURM_CPUS_PER_TASK=1 renders in-process, with no worker start-up per run
 CLI_ENV = {"SLURM_CPUS_PER_TASK": "1"}
-NO_NOTES = {"overlay-plane": 0, "icon-image": 0}
+NO_NOTES = {"overlay-plane": 0, "overlay-unused-bits": 0, "icon-image": 0}
 
 
 def _good_pixels() -> np.ndarray:
@@ -98,6 +107,22 @@ def _text_mask(shape=(40, 60)) -> np.ndarray:
     mask = np.zeros(shape, dtype=bool)
     mask[15:25, 10:50] = True
     return mask
+
+
+def _text_pixels() -> np.ndarray:
+    """12-bit uint16 noise with a bright bar of 'text' (see `_text_mask`)."""
+    pixels = np.random.default_rng(7).integers(500, 1500, (40, 60)).astype(np.uint16)
+    pixels[_text_mask()] = 4000
+    return pixels
+
+
+def _with_unused_bit(pixels: np.ndarray, bit: int) -> np.ndarray:
+    """`pixels` with `bit` set under the middle rows of the text mask, as a retired overlay in PixelData would be."""
+    marked = pixels.copy()
+    under = np.zeros(pixels.shape, dtype=bool)
+    under[18:22, 12:48] = True
+    marked[under] |= marked.dtype.type(1 << bit)
+    return marked
 
 
 def _read_tsv(path: Path) -> list[dict[str, str]]:
@@ -545,7 +570,7 @@ class ProvenanceTest(unittest.TestCase):
                 "written": 3,
                 "skipped_failed": 1,
                 "skipped_ignored": 1,
-                "notes": {"overlay-plane": 0, "icon-image": 1},
+                "notes": {**NO_NOTES, "icon-image": 1},
             },
         )
         self.assertEqual((self.result.found, self.result.written), (5, 3))
@@ -632,10 +657,10 @@ class NotesTest(unittest.TestCase):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000)
         result = self.run_quietly()
         self.assertEqual(self.notes(), [[(self.src / "a.dcm").as_posix(), "overlay-plane", "group 0x6000"]])
-        self.assertEqual(result.notes, {"overlay-plane": 1, "icon-image": 0})
+        self.assertEqual(result.notes, {**NO_NOTES, "overlay-plane": 1})
         self.assertEqual(result.notes_path, self.work / "notes.tsv")
         record = json.loads((self.work / "preprocess.json").read_text())
-        self.assertEqual(record["counts"]["notes"], {"overlay-plane": 1, "icon-image": 0})
+        self.assertEqual(record["counts"]["notes"], {**NO_NOTES, "overlay-plane": 1})
 
     def test_several_overlay_planes_are_one_note(self):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000, 0x6002)
@@ -657,7 +682,7 @@ class NotesTest(unittest.TestCase):
         self.assertEqual(
             self.notes(), [[(self.src / "a.dcm").as_posix(), "icon-image", "IconImageSequence: 8x8 MONOCHROME2"]]
         )
-        self.assertEqual(result.notes, {"overlay-plane": 0, "icon-image": 1})
+        self.assertEqual(result.notes, {**NO_NOTES, "icon-image": 1})
 
     def test_icon_lacking_its_size_is_noted_with_question_marks(self):
         icon = pydicom.Dataset()
@@ -737,6 +762,35 @@ class NotesTest(unittest.TestCase):
             [[a, "icon-image", icon], [c, "overlay-plane", "group 0x6000"], [c, "icon-image", icon]],
         )
 
+    def test_one_input_with_every_kind_lists_them_in_kind_order_from_one_decode(self):
+        path = self.src / "a.dcm"
+        _dicom_with_icon(path)
+        ds = pydicom.dcmread(path)
+        ds.PixelData = _with_unused_bit(ds.pixel_array, 15).tobytes()
+        ds.BitsStored, ds.HighBit = 12, 11
+        add_overlay(ds, np.ones((8, 8), dtype=bool))
+        ds.save_as(path, enforce_file_format=True)
+        decoded = []
+        real = pydicom.Dataset.pixel_array
+
+        def counting(ds):
+            decoded.append(ds)
+            return real.fget(ds)
+
+        with mock.patch.object(pydicom.Dataset, "pixel_array", property(counting)):
+            result = self.run_quietly()
+        self.assertEqual(len(decoded), 1)  # the unused bits come from the decode that rendered the input
+        self.assertEqual(
+            self.notes(),
+            [
+                [path.as_posix(), "overlay-plane", "group 0x6000"],
+                [path.as_posix(), "overlay-unused-bits", "bit 15"],
+                [path.as_posix(), "icon-image", "IconImageSequence: 8x8 MONOCHROME2"],
+            ],
+        )
+        self.assertEqual(list(result.notes), list(preprocess_module.NOTE_KINDS))
+        self.assertEqual(result.notes, {"overlay-plane": 1, "overlay-unused-bits": 1, "icon-image": 1})
+
     def test_empty_icon_sequence_is_not_noted(self):
         self.dicom_with_icons()
         self.run_quietly()
@@ -769,6 +823,140 @@ class NotesTest(unittest.TestCase):
         self.assertEqual(len(result.skipped), 3)
         self.assertEqual(self.notes(), [])
         self.assertEqual(result.notes, NO_NOTES)
+
+
+class UnusedBitsTest(unittest.TestCase):
+    """Bits above BitsStored are masked before rendering, for every transfer syntax, and noted when they held content."""
+
+    def dataset(self, pixels: np.ndarray, photometric: str = "MONOCHROME2", bits_stored: int = 12) -> pydicom.Dataset:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.dcm"
+            write_dicom(path, pixels, photometric)
+            ds = pydicom.dcmread(path)
+        ds.BitsStored, ds.HighBit = bits_stored, bits_stored - 1
+        return ds
+
+    def rendered(self, ds: pydicom.Dataset) -> tuple[bytes, tuple[Note, ...]]:
+        """The JPG and notes `ds` renders to, through its saved bytes."""
+        buf = io.BytesIO()
+        ds.save_as(buf, enforce_file_format=True)
+        out = render("dicom", "id", buf.getvalue(), "inferno")
+        return encode_jpeg(out.rgb), out.notes
+
+    def test_native_unused_bits_are_noted_and_not_rendered(self):
+        clean, notes = self.rendered(self.dataset(_text_pixels()))
+        self.assertEqual(notes, ())
+        jpg, notes = self.rendered(self.dataset(_with_unused_bit(_text_pixels(), 15)))
+        self.assertEqual(notes, (Note("overlay-unused-bits", "bit 15"),))
+        self.assertEqual(jpg, clean)
+        jpg, notes = self.rendered(self.dataset(_with_unused_bit(_with_unused_bit(_text_pixels(), 15), 12)))
+        self.assertEqual(notes, (Note("overlay-unused-bits", "bits 12, 15"),))
+        self.assertEqual(jpg, clean)
+
+    def test_rle_unused_bit_is_noted_and_not_rendered(self):
+        clean, _ = self.rendered(self.dataset(_text_pixels()))
+        ds = self.dataset(_with_unused_bit(_text_pixels(), 15))
+        ds.compress(RLELossless, encoding_plugin="pydicom")  # from the dataset's bytes: no range check on the values
+        jpg, notes = self.rendered(ds)
+        self.assertEqual(notes, (Note("overlay-unused-bits", "bit 15"),))
+        self.assertEqual(jpg, clean)
+
+    def test_jpeg_2000_renders_as_the_masked_native_file(self):
+        if not pydicom.pixels.get_encoder(JPEG2000Lossless).is_available:
+            self.skipTest("no JPEG 2000 encoder")
+        clean, _ = self.rendered(self.dataset(_text_pixels()))
+        # Compressed at 16 bits, then marked 12: the codestream keeps bit 15, which pydicom does not clear for J2K
+        ds = self.dataset(_with_unused_bit(_text_pixels(), 15), bits_stored=16)
+        ds.compress(JPEG2000Lossless)
+        ds.BitsStored, ds.HighBit = 12, 11
+        jpg, notes = self.rendered(ds)
+        self.assertEqual(notes, (Note("overlay-unused-bits", "bit 15"),))
+        self.assertEqual(jpg, clean)
+
+    def test_overlay_group_whose_bit_position_holds_content_is_named(self):
+        ds = self.dataset(_with_unused_bit(_text_pixels(), 15))
+        ds.add_new((0x6000, 0x0102), "US", 15)  # a retired overlay in PixelData: no OverlayData
+        ds.add_new((0x6002, 0x0102), "US", 14)  # names a bit that holds nothing
+        add_overlay(ds, np.ones((8, 8), dtype=bool), group=0x6004)
+        ds[0x6004, 0x0102].value = 15  # has OverlayData: an overlay plane, not the bit's
+        _, notes = self.rendered(ds)
+        self.assertEqual(
+            notes, (Note("overlay-plane", "group 0x6004"), Note("overlay-unused-bits", "bit 15 (overlay 0x6000)"))
+        )
+
+    def test_signed_sign_extension_is_not_content(self):
+        pixels = _text_pixels().astype(np.int16) - 2048  # negatives, sign-extended to 16 bits, and a positive bar
+        before, _ = self.rendered(self.dataset(pixels, bits_stored=16))
+        jpg, notes = self.rendered(self.dataset(pixels))
+        self.assertEqual(notes, ())
+        self.assertEqual(jpg, before)
+        zero_filled = (pixels.view(np.uint16) & 0x0FFF).view(np.int16)  # negatives with their unused bits cleared
+        jpg, notes = self.rendered(self.dataset(zero_filled))
+        self.assertEqual(notes, ())
+        self.assertEqual(jpg, before)
+        stray = _with_unused_bit(pixels, 13)  # set under the positive bar: not its sign
+        stray[0, 0] &= ~np.int16(1 << 14)  # cleared in a negative value: not its sign either
+        jpg, notes = self.rendered(self.dataset(stray))
+        self.assertEqual(notes, (Note("overlay-unused-bits", "bits 13, 14"),))
+        self.assertEqual(jpg, before)
+
+    def test_palette_indices_are_masked_before_the_lookup(self):
+        def palette(indices: np.ndarray) -> pydicom.Dataset:
+            ds = self.dataset(indices, "PALETTE COLOR", bits_stored=8)
+            ramp = np.arange(256, dtype=np.uint16) * 257
+            for element, lut in ((0x1101, ramp), (0x1102, ramp[::-1]), (0x1103, ramp // 2)):  # red, green, blue
+                ds.add_new((0x0028, element), "US", [256, 0, 16])
+                ds.add_new((0x0028, element + 0x100), "OW", lut.astype("<u2").tobytes())
+            return ds
+
+        indices = np.random.default_rng(3).integers(0, 200, (40, 60)).astype(np.uint16)
+        clean, notes = self.rendered(palette(indices))
+        self.assertEqual(notes, ())
+        jpg, notes = self.rendered(palette(_with_unused_bit(indices, 12)))  # unmasked, these indices are off the LUT
+        self.assertEqual(notes, (Note("overlay-unused-bits", "bit 12"),))
+        self.assertEqual(jpg, clean)
+
+    def test_split_matches_a_reference_mask_for_every_integer_dtype(self):
+        def reference(raw: np.ndarray, bits_stored: int) -> tuple[np.ndarray, tuple[int, ...]]:
+            width = raw.dtype.itemsize * 8
+            if bits_stored >= width:
+                return raw, ()
+            signed = raw.dtype.kind == "i"
+            masked, differing = [], 0
+            for value in raw.view(f"u{raw.dtype.itemsize}").ravel().tolist():
+                low = value & ((1 << bits_stored) - 1)
+                negative = signed and low >> (bits_stored - 1) & 1
+                extended = low | ((1 << width) - (1 << bits_stored)) if negative else low  # as unsigned
+                masked.append(extended)
+                if value >> bits_stored not in (0, extended >> bits_stored):
+                    differing |= value ^ extended
+            out = np.array(masked, dtype=f"u{raw.dtype.itemsize}").view(raw.dtype).reshape(raw.shape)
+            return out, tuple(bit for bit in range(bits_stored, width) if differing >> bit & 1)
+
+        rng = np.random.default_rng(11)
+        for dtype in (np.uint8, np.uint16, np.uint32, np.int8, np.int16, np.int32):
+            width = np.dtype(dtype).itemsize * 8
+            unsigned = f"u{np.dtype(dtype).itemsize}"
+            for bits_stored in (1, width - 1, width):
+                full = rng.integers(0, 1 << width, (6, 7), dtype=np.uint64).astype(unsigned).view(dtype)
+                low = (full.view(unsigned) & ((1 << bits_stored) - 1)).view(dtype)  # unsigned or zero-filled
+                extended, _ = reference(full, bits_stored)  # sign-extended (signed) or cleared (unsigned)
+                for name, raw in (("full", full), ("zero-filled", low), ("sign-extended", extended)):
+                    with self.subTest(dtype=np.dtype(dtype).name, bits_stored=bits_stored, raw=name):
+                        masked, positions = preprocess_module._split_unused_bits(raw, bits_stored)
+                        expected_masked, expected_positions = reference(raw, bits_stored)
+                        np.testing.assert_array_equal(masked, expected_masked)
+                        self.assertEqual(masked.dtype, raw.dtype)
+                        self.assertEqual(positions, expected_positions)
+                        if name != "full":
+                            self.assertEqual(positions, ())
+
+    def test_pixels_with_no_unused_bits_are_untouched(self):
+        pixels = _with_unused_bit(_text_pixels(), 15)
+        _, notes = self.rendered(self.dataset(pixels, bits_stored=16))
+        self.assertEqual(notes, ())
+        masked, _ = self.rendered(self.dataset(pixels))
+        self.assertNotEqual(self.rendered(self.dataset(pixels, bits_stored=16))[0], masked)  # bit 15 is a value bit
 
 
 class ClassifyTest(unittest.TestCase):
@@ -1663,6 +1851,7 @@ class RenderTest(unittest.TestCase):
         out = render("dicom", "id", self.float_dicom_bytes(self.float_pixels()), "gray")
         self.assertEqual(out.rgb.ndim, 3)  # cropped, so the shape is not the input's
         self.assertGreater(len(np.unique(out.rgb)), 1)
+        self.assertEqual(out.notes, ())  # float samples have no unused bits
 
     def test_non_finite_float_dicom_is_unsupported(self):
         for bad, counts in ((np.nan, "1 NaN, 0 infinite"), (np.inf, "0 NaN, 1 infinite")):
@@ -2092,6 +2281,7 @@ def make_parallel_source(root: Path) -> list[Path]:
     for i, side in enumerate((300, 40, 200, 64, 260, 32)):
         gradient = np.linspace(0, 3000, side * side).reshape(side, side)
         write_dicom(src / f"d{i}.dcm", (gradient + RNG.integers(0, 200, (side, side))).astype(np.uint16))
+    write_dicom(src / "d1.dcm", _with_unused_bit(_text_pixels(), 15), BitsStored=12, HighBit=11)  # a note to merge
     _dicom_with_overlays(src / "m1.dcm", 0x6000, photometric="MONOCHROME1")
     _dicom_with_icon(src / "icon.dcm")
     (src / "j2k.dcm").write_bytes(Path(get_testdata_file("JPEG2000.dcm", download=False)).read_bytes())
@@ -2229,7 +2419,7 @@ class ParallelTest(unittest.TestCase):
         self.assertEqual(self.serial.written, 12)  # 10 files, 2 zip entries
         self.assertEqual([s.kind for s in self.serial.skipped], ["failed", "ignored", "failed", "failed", "failed"])
         self.assertEqual([s.reason for s in self.serial.skipped].count(COLLISION_REASON), 2)
-        self.assertEqual(self.serial.notes, {"overlay-plane": 1, "icon-image": 1})
+        self.assertEqual(self.serial.notes, {"overlay-plane": 1, "overlay-unused-bits": 1, "icon-image": 1})
         pooled_paths = {
             "skipped_path": self.root / "pooled" / "skipped.tsv",
             "notes_path": self.root / "pooled" / "notes.tsv",

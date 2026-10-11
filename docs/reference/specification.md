@@ -310,14 +310,19 @@ Only rendered images are compared: a `failed` or `ignored` row sharing an
 `image_id` with a `failed` or `ignored` row as `NOT_REVIEWED`).
 
 **Notes.** A note (`Note(kind, detail)`, `kind` a `NoteKind`,
-`Literal["overlay-plane", "icon-image"]`, listed in that order by
-`NOTE_KINDS`) records something a rendered input holds that its image does
-not show; the kinds and their details are in
-[Input notes](../commands/preprocess.md#input-notes). `render` reads a DICOM's
-notes from the dataset after rendering it, in `NOTE_KINDS` order, without
-decoding anything: `overlay-plane` lists the overlay groups (the same
+`Literal["overlay-plane", "overlay-unused-bits", "icon-image"]`, listed in
+that order by `NOTE_KINDS`) records something a rendered input holds that its
+image does not show; the kinds and their details are in
+[Input notes](../commands/preprocess.md#input-notes). `render` makes a DICOM's
+notes after rendering it, in `NOTE_KINDS` order, decoding nothing beyond the
+render's own single decode: `overlay-plane` lists the overlay groups (the same
 enumeration the overlay mask uses: even groups 0x6000-0x601E with
-OverlayData), and `icon-image` reads only the first IconImageSequence item's
+OverlayData); `overlay-unused-bits` takes the bit positions that
+`preprocess_dicom` returns with the image (see step 2 of the pipeline below)
+and follows each with ` (overlay 0x60xx)` for every even group
+0x6000-0x601E without OverlayData whose OverlayBitPosition (60xx,0102) is
+that position (a position that does not read as one integer names no group);
+and `icon-image` reads only the first IconImageSequence item's
 Rows, Columns and PhotometricInterpretation (`?` when missing, each value cut
 to 64 characters plus `…`), inside a
 catch-all so a bad icon gives an `unreadable (<ExceptionClass>)` detail and
@@ -345,15 +350,40 @@ none. Notes never affect the exit status.
    `unsupported: photometric interpretation HSV`). Multi-frame DICOMs are not
    split into per-frame items. `RGB`, `YBR_*` (pydicom's `pixel_array`
    returns RGB) and `PALETTE COLOR` (expanded with `apply_color_lut`) images
-   skip steps 2-5: samples are scaled to uint8 (by `BitsStored`, or the
-   palette's entry bit depth, when above 8 bits), no windowing or colormap is
-   applied, and only the crop of step 6 follows. Steps 2-5 apply to
+   get step 2's unused-bit masking and skip the rest of steps 2-5: samples
+   are scaled to uint8 (by `BitsStored`, or the palette's entry bit depth,
+   when above 8 bits), no windowing or colormap is applied, and only the crop
+   of step 6 follows. Steps 2-5 apply in full to
    `MONOCHROME1`/`MONOCHROME2`
-2. Extract pixel array, convert to float32 (values keep their native scale).
-   Float pixel data (`FloatPixelData`, grayscale or colour) holding NaN or
-   infinity raises
+2. Extract pixel array, mask its unused bits, convert to float32 (values keep
+   their native scale). Float pixel data (`FloatPixelData`, grayscale or
+   colour) holding NaN or infinity raises
    `unsupported: non-finite pixel values (1 NaN, 0 infinite)` (counts of
-   each), as min-max scaling would collapse the whole image
+   each), as min-max scaling would collapse the whole image. The array is
+   decoded once, raw: `pixel_array_options(correct_unused_bits=False)` is set
+   before the first `pixel_array` access, because pydicom clears the bits
+   above `BitsStored` for native, deflated, RLE and JPEG data but not for
+   JPEG-LS or JPEG 2000. `_split_unused_bits` (pure) then keeps each
+   integer sample's low `BitsStored` bits, sign-extended when the dtype is
+   signed (PixelRepresentation 1), and returns the positions above
+   `BitsStored` where a raw sample with content there differs from that. A
+   sample whose bits above `BitsStored` are all zero, or (signed) the sign
+   extension, has no content there: writers fill unused bits either way, and
+   clearing them in a sign-extended file gives the zero form. The note can
+   also come from a `BitsStored` that understates the data or from lossy
+   compression overshooting it (lossy JPEG 2000 coded at a higher precision
+   than `BitsStored`: masking wraps its brightest pixels). Rendering uses
+   the masked array for every transfer syntax; the positions become the
+   `overlay-unused-bits` note (see *Notes*). HighBit is taken as
+   `BitsStored` - 1, as pydicom does. Float samples, and integer samples
+   whose dtype has no bits above `BitsStored` (`BitsStored` equal to
+   `BitsAllocated`), are left as they are and give no positions. Colour and
+   palette images are masked too, palette indices before `apply_color_lut`.
+   Limit: `YBR_*` data is masked after pydicom's conversion to RGB, so for
+   YBR with `BitsStored` below `BitsAllocated` unused bits in the YBR samples
+   reach the conversion, and the converted RGB is masked to `BitsStored`
+   bits: with 8 bits allocated and fewer stored (non-conformant; e.g. 7
+   stored) RGB values of 128 and up wrap and give a spurious note
 3. Correct photometric interpretation (invert MONOCHROME1 by negation)
 4. Compress the intensity tails: the robust core range (1st-99th percentile
    of the values strictly inside the outer 1% of the min-max range, then
@@ -381,7 +411,10 @@ top of the range); for colour and palette images they are set to white (255)
 before the crop. A plane that cannot be decoded fails the whole file
 (fail-closed, so a reviewer never sees an image with undrawn annotations):
 `ValueError: overlay 0x6002 cannot be decoded: ...`. Overlays embedded in the
-unused bits of PixelData are not drawn.
+unused bits of PixelData (retired; PS3.5 §8.1.1 lets receivers assume nothing
+about those bits) are not drawn: those bits are masked (step 2) and noted as
+`overlay-unused-bits`, naming any 60xx group whose OverlayBitPosition points
+at a set bit.
 
 **Raster preprocessing** (`decode_raster` + `preprocess_raster`, for PNG/JPEG/TIFF/BMP/GIF):
 

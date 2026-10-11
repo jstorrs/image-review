@@ -240,11 +240,26 @@ holds source paths.
 | Kind | Meaning | Example detail |
 |------|---------|----------------|
 | `overlay-plane` | A DICOM with one or more overlay planes (groups 6000-601E with OverlayData) | `group 0x6000`, or `groups 0x6000, 0x6002` |
+| `overlay-unused-bits` | A DICOM whose pixel data holds something above BitsStored other than zeros or sign extension (e.g. a retired overlay) | `bit 15`, `bits 12, 15`, or `bit 15 (overlay 0x6000)` |
 | `icon-image` | A DICOM with an embedded icon image (IconImageSequence (0088,0200)) | `IconImageSequence: 64x64 MONOCHROME2` |
 
 - **`overlay-plane`**: overlays are currently both drawn onto the review image
   (see [Rendering pipeline](#rendering-pipeline)) and noted, so that the
   planes are stripped before release.
+- **`overlay-unused-bits`**: the bits of each pixel above BitsStored are
+  masked before rendering (signed data is sign-extended from its stored
+  bits), whatever the transfer syntax, so they are not reviewed. A pixel
+  whose bits above BitsStored are all zero, or (signed data) repeat its
+  sign, holds nothing there; for the other pixels the detail lists the bit
+  positions that differ from the masked value, ascending. A position named by
+  OverlayBitPosition (60xx,0102) in a group without OverlayData is followed
+  by ` (overlay 0x60xx)`. Besides a retired overlay stored in those bits,
+  the note can mean a BitsStored that understates the data, or lossy
+  compression overshooting it (e.g. lossy JPEG 2000 coded at a higher
+  precision than BitsStored, whose brightest pixels then wrap round to dark
+  when masked): check the image against the note. The bits stay in the
+  pixel data as stored, so they ship in the released bytes unless they are
+  stripped (cleared) before release.
 - **`icon-image`**: icons are not rendered, so text burned into them is not
   reviewed: remove them before releasing files. The detail gives the first
   icon's rows, columns and photometric interpretation, with `?` for one that
@@ -275,7 +290,9 @@ reviewed: remove icons before releasing files. `notes.tsv` lists each DICOM
 that has one (see [Input notes](#input-notes)). Only the pixel data is
 reviewed, with overlay planes drawn on it (and noted). A DICOM whose overlay
 cannot be decoded is `failed` as a whole. Overlays stored in the unused bits
-of the pixel data, rather than in overlay planes, are not drawn. Only
+of the pixel data (bits above BitsStored), rather than in overlay planes, are
+masked for every transfer syntax, so they are not drawn, and noted as
+`overlay-unused-bits`. Only
 single-frame DICOMs (grayscale, colour or palette) are rendered for now.
 
 Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
