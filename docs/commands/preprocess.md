@@ -247,6 +247,7 @@ holds source paths.
 | `overlay-unused-bits` | A DICOM whose pixel data holds something above BitsStored other than zeros or sign extension (e.g. a retired overlay) | `bit 15`, `bits 12, 15`, or `bit 15 (overlay 0x6000)` |
 | `icon-image` | A DICOM with an embedded icon image (IconImageSequence (0088,0200)) | `IconImageSequence: 64x64 MONOCHROME2` |
 | `alpha` | A raster with pixels that are not fully opaque | `120 of 2400 pixels not opaque` |
+| `embedded-thumbnail` | A raster with an embedded thumbnail or SubIFDs that are not rendered | `EXIF IFD1 thumbnail (4096 bytes)`, `TIFF SubIFDs (2)`, or `EXIF unreadable: corrupt` (all forms below) |
 
 - **`overlay-plane`**: the review image is the pixel data alone, so overlay
   planes are not reviewed (unless `--draw-overlays` draws them; see
@@ -279,6 +280,33 @@ holds source paths.
   ships in the file as it is. The detail counts the pixels with alpha below
   fully opaque, of all the pixels (a `tRNS` colour key counts as alpha).
   Fully opaque alpha gets no note.
+- **`embedded-thumbnail`**: a raster can carry smaller images that are never
+  rendered, so text burned into them is not reviewed: strip them before
+  releasing files. This is the raster counterpart of the DICOM `icon-image`
+  note; the kinds stay separate because stripping is format-specific. Only the
+  file's metadata is read. The detail is one of these forms:
+  - `EXIF IFD1 thumbnail (N bytes)`: the EXIF IFD1 holds a JPEG thumbnail
+    (JPEGInterchangeFormat 0x0201), N the length in
+    JPEGInterchangeFormatLength 0x0202.
+  - `EXIF IFD1 thumbnail, uncompressed (N bytes)`: the IFD1 holds an
+    uncompressed thumbnail (StripOffsets 0x0111), N the sum of
+    StripByteCounts 0x0117.
+  - `TIFF SubIFDs (k)`: a TIFF or BigTIFF (8 or 16 bits) with k SubIFD
+    offsets (tag 330).
+  - `EXIF unreadable: corrupt`, or `EXIF unreadable: <ExceptionClass>`, or
+    `TIFF SubIFDs unreadable: <ExceptionClass>`, or `TIFF SubIFDs unreadable:
+    invalid value` (the tag is there but its value cannot be read): the
+    metadata could not be read, so a thumbnail may be there. The error's class
+    is the only text from the failure; the input still renders.
+
+  N is `?` when the length tag is missing or not an integer. EXIF is read
+  from a JPEG, a WebP and any other format that carries it (not from a TIFF),
+  and from a PNG's `eXIf` chunks (each one is checked, so a file with two
+  can give two notes) and its ImageMagick "Raw profile type exif" text chunk.
+  Each later frame of an MPO is read too, and its details start `frame N: `
+  (N from 1). Not detected: JFIF/JFXX APP0 thumbnails, Photoshop APP13
+  thumbnails, and a PNG "Raw profile type exif" chunk placed after the
+  pixel data.
 
 ## Rendering pipeline
 

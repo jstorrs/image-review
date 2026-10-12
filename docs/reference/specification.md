@@ -310,8 +310,9 @@ Only rendered images are compared: a `failed` or `ignored` row sharing an
 `image_id` with a `failed` or `ignored` row as `NOT_REVIEWED`).
 
 **Notes.** A note (`Note(kind, detail)`, `kind` a `NoteKind`,
-`Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha"]`,
-the DICOM kinds first and then the raster kind, listed in that order by
+`Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha",
+"embedded-thumbnail"]`,
+the DICOM kinds first and then the raster kinds, listed in that order by
 `NOTE_KINDS`) records something a rendered input holds that downstream
 tools should know about or strip, written whether or not an overlay is drawn; the kinds and their details are in
 [Input notes](../commands/preprocess.md#input-notes). `render` makes a DICOM's
@@ -327,10 +328,11 @@ and `icon-image` reads only the first IconImageSequence item's
 Rows, Columns and PhotometricInterpretation (`?` when missing, each value cut
 to 64 characters plus `…`), inside a
 catch-all so a bad icon gives an `unreadable (<ExceptionClass>)` detail and
-never fails the input. A raster's only note is `alpha` (see the alpha rule
-under *Raster decoding*): `decode_raster` returns it with the image, with
-detail `N of M pixels not opaque`, N the pixels with alpha below 1 and M all
-the pixels of the images that had alpha. Notes travel with the image
+never fails the input. A raster's notes are `alpha` (see the alpha rule
+under *Raster decoding*) and `embedded-thumbnail` (see *Embedded images*
+under *Raster preprocessing*): `decode_raster` returns them with the image,
+`alpha` first, with detail `N of M pixels not opaque`, N the pixels with
+alpha below 1 and M all the pixels of the images that had alpha. Notes travel with the image
 through `Rendered`, `Encoded` (so from pool workers) and the staged image;
 when the JPGs are placed (see *Batching*), each placed input's notes become
 `notes.tsv` rows in manifest order, details cleaned like a `skipped.tsv`
@@ -456,6 +458,46 @@ at a set bit.
   an `alpha` note counting those pixels. An MPO's frames are JPEGs and carry
   no alpha, but if one did, the counts of all its frames would be summed
   into one note
+- Embedded images (*Embedded images*): `_embedded_image_notes(im, data)`
+  reads only metadata, while the Pillow image is open and before the 16-bit
+  branch below, so a 16-bit PNG or TIFF is covered too. Nothing is rendered,
+  no pixel is decoded and the image is not touched: it never calls
+  `getexif()` (which can decode a PNG's pixels and caches an Exif object on
+  the image), and every parse uses a fresh `Image.Exif()`. The EXIF bytes
+  come from every `eXIf` chunk of a PNG, found by walking its chunks up to
+  IEND (`_png_exif`; readers differ on which of several counts, so each gives
+  its own notes in file order), plus the
+  ImageMagick "Raw profile type exif" text in `info` (decoded as Pillow does,
+  `bytes.fromhex("".join(text.split("\n")[3:]))`; a bad one gives `EXIF
+  unreadable: ValueError`), or from `info["exif"]` of any other format except
+  TIFF (JPEG, MPO, WebP, ...). Pillow reads a text chunk after the pixels only
+  on load, which is not done, so such a "Raw profile type exif" is not
+  detected. IFD1 (`get_ifd(IFD1)`) holding
+  JPEGInterchangeFormat 0x0201 gives `embedded-thumbnail` with detail `EXIF
+  IFD1 thumbnail (N bytes)`, N the value of JPEGInterchangeFormatLength
+  0x0202; one holding StripOffsets 0x0111 (and no 0x0201) gives `EXIF IFD1
+  thumbnail, uncompressed (N bytes)`, N the sum of StripByteCounts 0x0117.
+  N is `?` when that tag is missing or not an integer (or integers). TIFF is
+  skipped for EXIF because its IFD1 would be a second page, and multi-page
+  TIFFs are rejected. Each later frame of an MPO is read after its seek, from
+  that frame's `info["exif"]` (Pillow 10.3 and later update it per frame), and
+  its details start `frame N: ` (N from 1). A TIFF or BigTIFF with SubIFDs
+  (tag 330, read from the first page with tifffile because Pillow drops a
+  BigTIFF's IFD8 offsets) gives `TIFF SubIFDs (k)`, k the number of offsets.
+  Whether the tag is there is decided from the first IFD's raw entry list
+  (`_tiff_has_subifds`: 2-byte count and 12-byte entries, or 8-byte count and
+  20-byte entries for BigTIFF; reads bounded by the file length), because
+  tifffile drops a tag whose value it cannot read; a tag that is there
+  without a usable value gives `TIFF SubIFDs unreadable: invalid value`.
+  A failure to read gives a note, never an error: `EXIF unreadable:
+  <ExceptionClass>` or `TIFF SubIFDs unreadable: <ExceptionClass>`; and
+  because Pillow reports most corrupt EXIF only as a `UserWarning` and returns
+  fewer tags, a warning recorded while parsing EXIF adds `EXIF unreadable:
+  corrupt`. Details hold only fixed text, numbers and the exception class,
+  never file text, so they are safe in a TSV. Not detected: JFIF/JFXX APP0
+  thumbnails, Photoshop APP13 thumbnails, and EXIF so malformed that Pillow
+  returns no tags without a warning. A plain JPEG gets no note, nor does an
+  MPO without EXIF thumbnails
 - High-bit-depth grayscale (`I;16*` scaled by 65535, `I`/`F` min-max scaled)
   keeps its full range; a mode `F` image holding NaN or infinity raises
   `unsupported: non-finite pixel values (1 NaN, 0 infinite)`; a `tRNS` colour

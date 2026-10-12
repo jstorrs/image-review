@@ -150,10 +150,13 @@ Read **Upgrading** first.
   something above BitsStored other than zeros or sign extension (detail `bit 15`,
   `bits 12, 15`, or `bit 15 (overlay 0x6000)` when a 60xx group's
   OverlayBitPosition points at it), `icon-image` for a DICOM with an
-  embedded icon (detail such as `IconImageSequence: 64x64 MONOCHROME2`), and
+  embedded icon (detail such as `IconImageSequence: 64x64 MONOCHROME2`),
   `alpha` for a raster with pixels that are not fully opaque (detail
-  `120 of 2400 pixels not opaque`). Notes never fail an input or change the
-  exit status. When there are any, the summary line ends with
+  `120 of 2400 pixels not opaque`), and `embedded-thumbnail` for a raster with
+  an EXIF IFD1 thumbnail (detail `EXIF IFD1 thumbnail (4096 bytes)`) or
+  TIFF SubIFDs (`TIFF SubIFDs (2)`), or whose EXIF cannot be read (`EXIF
+  unreadable: corrupt`); the thumbnails are not rendered. Notes never fail an
+  input or change the exit status. When there are any, the summary line ends with
   `; N notes (K overlay-plane, J icon-image; see .../notes.tsv)`, and
   `preprocess.json` gains `counts.notes`, the count of every kind. The file
   holds source paths: treat it like `manifest.tsv`.

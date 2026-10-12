@@ -10,9 +10,11 @@ import re
 import shutil
 import signal
 import stat
+import struct
 import unicodedata
+import warnings
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager, suppress
@@ -30,7 +32,7 @@ import numpy as np
 import pydicom
 import skimage as ski
 import tifffile
-from PIL import Image, PngImagePlugin, TiffImagePlugin
+from PIL import ExifTags, Image, PngImagePlugin, TiffImagePlugin
 from pydicom.errors import InvalidDicomError
 from pydicom.uid import (
     UID,
@@ -137,7 +139,7 @@ _SPAWN = multiprocessing.get_context("spawn")
 Kind = Literal["dicom", "raster"]
 Content = Literal[Kind, "zip"]
 # Something a written input holds that downstream tools should strip, noted whether or not the image shows it
-NoteKind = Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha"]  # DICOM kinds, then raster kinds
+NoteKind = Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha", "embedded-thumbnail"]  # DICOM, raster
 NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
 
 
@@ -681,13 +683,142 @@ def _full_depth(colour: np.ndarray, alpha: np.ndarray | None) -> tuple[Views, Al
     return _with_alpha(scaled, alpha.astype(np.float32) / 65535)
 
 
+def _png_exif(data: bytes) -> tuple[bytes, ...]:
+    """The data of every `eXIf` chunk of PNG `data`, in file order, found by walking its chunks up to IEND.
+
+    No pixels are decoded. Readers differ on which of several chunks counts (Pillow takes the last), so all are kept.
+    """
+    chunks: list[bytes] = []
+    pos = 8  # after the signature
+    while pos + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[pos : pos + 8])
+        if kind == b"eXIf":
+            chunks.append(data[pos + 8 : pos + 8 + length])
+        elif kind == b"IEND":
+            break
+        pos += 12 + length  # length, type, data, CRC
+    return tuple(chunks)
+
+
+def _raw_profile_exif(text: str) -> bytes:
+    """The EXIF bytes of an ImageMagick "Raw profile type exif" text, decoded as Pillow does (a ValueError if bad)."""
+    return bytes.fromhex("".join(text.split("\n")[3:]))
+
+
+def _tiff_has_subifds(data: bytes) -> bool:
+    """Whether the first IFD of TIFF or BigTIFF `data` has a SubIFDs (330) entry, from its raw entry list.
+
+    Every read is bounded by the length of `data`; an IFD that runs past it is read as far as it goes.
+    """
+    order = "<" if data[:2] == b"II" else ">"
+    big = struct.unpack_from(order + "H", data, 2)[0] == 43
+    offset = struct.unpack_from(order + ("Q" if big else "I"), data, 8 if big else 4)[0]
+    count_size, entry_size = (8, 20) if big else (2, 12)
+    if offset + count_size > len(data):
+        return False
+    (count,) = struct.unpack_from(order + ("Q" if big else "H"), data, offset)
+    first = offset + count_size
+    entries = min(count, (len(data) - first) // entry_size)
+    return any(struct.unpack_from(order + "H", data, first + i * entry_size)[0] == 330 for i in range(entries))
+
+
+def _thumbnail_size(ifd1: Mapping[int, object], *, compressed: bool) -> str:
+    """The thumbnail's byte count from IFD1 (JPEGInterchangeFormatLength, or the sum of StripByteCounts), or `?`."""
+    if compressed:
+        length = ifd1.get(0x0202)
+        return str(length) if isinstance(length, int) else "?"
+    counts = ifd1.get(0x0117)
+    counts = (counts,) if isinstance(counts, int) else counts
+    if isinstance(counts, tuple) and counts and all(isinstance(c, int) for c in counts):
+        return str(sum(counts))
+    return "?"
+
+
+def _exif_notes(raw: bytes | None, prefix: str = "") -> tuple[Note, ...]:
+    """The `embedded-thumbnail` notes for the EXIF bytes `raw` (None: no EXIF), each detail starting with `prefix`.
+
+    Parsed with a fresh `Image.Exif`, never the image's own. A compressed thumbnail has JPEGInterchangeFormat
+    (0x0201) in IFD1, an uncompressed one StripOffsets (0x0111). A failure to read is itself a note, with only fixed
+    text or the exception class in it (the detail goes to a TSV).
+    """
+    if not raw:
+        return ()
+    notes: list[Note] = []
+    try:
+        with warnings.catch_warnings(record=True) as caught:  # Pillow reports most corrupt EXIF as a warning only
+            warnings.simplefilter("always")
+            exif = Image.Exif()
+            exif.load(raw)
+            ifd1 = exif.get_ifd(ExifTags.IFD.IFD1)
+        if 0x0201 in ifd1:
+            notes.append(
+                Note(
+                    "embedded-thumbnail",
+                    f"{prefix}EXIF IFD1 thumbnail ({_thumbnail_size(ifd1, compressed=True)} bytes)",
+                )
+            )
+        elif 0x0111 in ifd1:
+            size = _thumbnail_size(ifd1, compressed=False)
+            notes.append(Note("embedded-thumbnail", f"{prefix}EXIF IFD1 thumbnail, uncompressed ({size} bytes)"))
+        if any(issubclass(w.category, UserWarning) for w in caught):
+            notes.append(Note("embedded-thumbnail", f"{prefix}EXIF unreadable: corrupt"))
+    except Exception as e:  # noqa: BLE001 - any parse failure must surface as a note, never fail or hide the input
+        notes.append(Note("embedded-thumbnail", f"{prefix}EXIF unreadable: {type(e).__name__}"))
+    return tuple(notes)
+
+
+def _subifd_notes(data: bytes) -> tuple[Note, ...]:
+    """The `embedded-thumbnail` note for the SubIFDs (tag 330) of the first page of TIFF or BigTIFF `data`.
+
+    Whether the tag is there comes from the raw entry list, and its value from tifffile, which drops a tag whose value
+    it cannot read: `TIFF SubIFDs unreadable: invalid value` then.
+    """
+    try:
+        present = _tiff_has_subifds(data)
+        with tifffile.TiffFile(io.BytesIO(data)) as tif:
+            page = tif.pages[0]
+            assert isinstance(page, tifffile.TiffPage)
+            tag = page.tags.get("SubIFDs")
+            value = None if tag is None else tag.value
+    except Exception as e:  # noqa: BLE001 - any failure must surface as a note, never fail or hide the input
+        return (Note("embedded-thumbnail", f"TIFF SubIFDs unreadable: {type(e).__name__}"),)
+    if isinstance(value, tuple | list) and value:
+        return (Note("embedded-thumbnail", f"TIFF SubIFDs ({len(value)})"),)
+    if isinstance(value, int):
+        return (Note("embedded-thumbnail", "TIFF SubIFDs (1)"),)
+    return (Note("embedded-thumbnail", "TIFF SubIFDs unreadable: invalid value"),) if present or tag is not None else ()
+
+
+def _embedded_image_notes(im: Image.Image, data: bytes) -> tuple[Note, ...]:
+    """The `embedded-thumbnail` notes for the first frame of `im`, opened from `data`.
+
+    These are its EXIF IFD1 thumbnails and a TIFF's SubIFDs. Only the file's metadata is read: no pixels are decoded
+    and `im` is left as it was. A PNG's EXIF is every `eXIf` chunk and a "Raw profile type exif" text chunk read
+    before the pixels (`im.info`; Pillow reads one after them only on load, which is not done here).
+    """
+    if im.format == "TIFF":
+        return _subifd_notes(data)
+    if im.format != "PNG":
+        raw = im.info.get("exif")
+        return _exif_notes(raw if isinstance(raw, bytes) else None)
+    notes = [note for chunk in _png_exif(data) for note in _exif_notes(chunk)]
+    profile = im.info.get("Raw profile type exif")
+    if isinstance(profile, str):
+        try:
+            notes += _exif_notes(_raw_profile_exif(profile))
+        except ValueError as e:
+            notes.append(Note("embedded-thumbnail", f"EXIF unreadable: {type(e).__name__}"))
+    return tuple(notes)
+
+
 def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
     """Decode with PIL, branching on mode, to float32 [0, 1] views, (H, W) grayscale or (H, W, 3) RGB, and notes.
 
     Grayscale modes (including 16-bit) stay grayscale; everything else (CMYK,
     YCbCr, P, ...) becomes RGB. There is one view, except for a transparent
     image's colour and alpha (see `_with_alpha`, which also gives the `alpha`
-    note; counts are summed over an MPO's frames). A 16-bit
+    note; counts are summed over an MPO's frames). The notes also hold any `embedded-thumbnail` notes (see
+    `_embedded_image_notes`; an MPO's later frames are prefixed `frame N: `). A 16-bit
     colour or alpha PNG or 16-bit RGB or CMYK TIFF, which Pillow would truncate
     to its high byte, is decoded at full depth instead (see `_full_depth` and
     `_decode_tiff`); its gray+alpha stays grayscale. An MPO (JPEG with extra MPF images: HDR gain
@@ -698,18 +829,22 @@ def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
         frames = getattr(im, "n_frames", 1)
         if frames > 1 and im.format != "MPO":
             raise Unsupported(f"multi-frame image ({frames} frames)")
+        embedded = _embedded_image_notes(im, data)  # while `im` is open, before the 16-bit branch below returns
         if _pillow_truncates(im):
             views, counts = _full_depth(*_png_samples(data)) if im.format == "PNG" else _decode_tiff(data)
-            return views, _alpha_notes(counts)
+            return views, _alpha_notes(counts) + embedded
         decoded = []
         for index in range(frames):
             im.seek(index)
+            if index:
+                raw = im.info.get("exif")
+                embedded += _exif_notes(raw if isinstance(raw, bytes) else None, f"frame {index}: ")
             im.load()
             decoded.append(_decode_frame(im))
     counts = (sum(c[0] for _, c in decoded), sum(c[1] for _, c in decoded))
     if len(decoded) == 1:
-        return decoded[0][0], _alpha_notes(counts)
-    return (_side_by_side([v for views, _ in decoded for v in views], fill=0.0),), _alpha_notes(counts)
+        return decoded[0][0], _alpha_notes(counts) + embedded
+    return (_side_by_side([v for views, _ in decoded for v in views], fill=0.0),), _alpha_notes(counts) + embedded
 
 
 def _preprocess_view(img: np.ndarray) -> np.ndarray:

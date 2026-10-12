@@ -21,6 +21,7 @@ import unittest
 import warnings
 import zipfile
 import zlib
+from collections.abc import Sequence
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
@@ -84,7 +85,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 APPLEDOUBLE = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + bytes(100)
 # SLURM_CPUS_PER_TASK=1 renders in-process, with no worker start-up per run
 CLI_ENV = {"SLURM_CPUS_PER_TASK": "1"}
-NO_NOTES = {"overlay-plane": 0, "overlay-unused-bits": 0, "icon-image": 0, "alpha": 0}
+NO_NOTES = {"overlay-plane": 0, "overlay-unused-bits": 0, "icon-image": 0, "alpha": 0, "embedded-thumbnail": 0}
 
 
 def _good_pixels() -> np.ndarray:
@@ -157,6 +158,50 @@ def make_mixed_source(root: Path) -> dict[str, Path]:
     paths["corrupt_jpg"].write_bytes(b"\xff\xd8\xff truncated jpeg")
     paths["corrupt_zip"].write_bytes(b"PK\x03\x04 truncated garbage")
     return paths
+
+
+def _exif_ifd1(entries: Sequence[tuple[int, int]], tail: bytes = b"") -> bytes:
+    """EXIF bytes: a TIFF header, an IFD0 with one entry, and an IFD1 of LONG `entries` (tag, value), then `tail`."""
+    ifd1_at = 8 + 2 + 12 + 4  # IFD0 (one entry) follows the 8-byte header; IFD1 follows IFD0
+    body = struct.pack("<2sHI", b"II", 42, 8)
+    body += struct.pack("<H", 1) + struct.pack("<HHIHH", 0x0112, 3, 1, 1, 0) + struct.pack("<I", ifd1_at)  # Orientation
+    body += struct.pack("<H", len(entries))
+    body += b"".join(struct.pack("<HHII", tag, 4, 1, value) for tag, value in entries)
+    return b"Exif\x00\x00" + body + struct.pack("<I", 0) + tail
+
+
+def _exif_with_thumbnail() -> bytes:
+    """EXIF bytes whose IFD1 has 0x0201/0x0202 and holds a tiny JPEG as the thumbnail."""
+    thumb = io.BytesIO()
+    Image.new("L", (4, 4), 9).save(thumb, "JPEG")
+    jpeg = thumb.getvalue()
+    jpeg_at = 8 + 2 + 12 + 4 + 2 + 2 * 12 + 4
+    return _exif_ifd1([(0x0201, jpeg_at), (0x0202, len(jpeg))], jpeg)
+
+
+def _thumbnail_len(exif: bytes) -> int:
+    return len(exif) - exif.index(b"\xff\xd8")
+
+
+def _png_with_exif_after_pixels(png: bytes, exif: bytes) -> bytes:
+    """`png` with an eXIf chunk holding `exif` (without its `Exif\\0\\0` prefix) inserted just before IEND."""
+    payload = exif.removeprefix(b"Exif\x00\x00")
+    chunk = struct.pack(">I", len(payload)) + b"eXIf" + payload + struct.pack(">I", zlib.crc32(b"eXIf" + payload))
+    return png[:-12] + chunk + png[-12:]
+
+
+def _mpo_bytes(frame1_exif: bytes | None = None) -> bytes:
+    """A two-frame MPO, with an APP1 segment holding `frame1_exif` inserted right after the second frame's SOI."""
+    buf = io.BytesIO()
+    Image.new("RGB", (60, 40), (255, 255, 255)).save(
+        buf, "MPO", save_all=True, append_images=[Image.new("L", (30, 20), 128)]
+    )
+    data = buf.getvalue()
+    if frame1_exif is None:
+        return data
+    soi = data.rindex(b"\xff\xd8\xff")  # the second frame; the first holds no embedded JPEG
+    segment = b"\xff\xe1" + struct.pack(">H", len(frame1_exif) + 2) + frame1_exif
+    return data[: soi + 2] + segment + data[soi + 2 :]
 
 
 class MixedSourceTest(unittest.TestCase):
@@ -671,6 +716,35 @@ class NotesTest(unittest.TestCase):
         result = self.run_quietly()
         self.assertEqual(self.notes(), [[(self.src / "a.png").as_posix(), "alpha", "120 of 2400 pixels not opaque"]])
         self.assertEqual(result.notes, {**NO_NOTES, "alpha": 1})
+
+    def test_embedded_thumbnail_is_noted_and_the_input_still_written(self):
+        exif = _exif_with_thumbnail()
+        thumb_len = len(exif) - exif.index(b"\xff\xd8")
+        Image.new("RGB", (60, 40), (9, 9, 9)).save(self.src / "a.jpg", exif=exif)
+        Image.new("RGB", (60, 40), (9, 9, 9)).save(self.src / "b.jpg")  # plain: no note
+        result = self.run_quietly()
+        self.assertEqual(
+            self.notes(),
+            [[(self.src / "a.jpg").as_posix(), "embedded-thumbnail", f"EXIF IFD1 thumbnail ({thumb_len} bytes)"]],
+        )
+        self.assertEqual(result.notes, {**NO_NOTES, "embedded-thumbnail": 1})
+        self.assertEqual(len(self.written()), 2)
+
+    def test_unreadable_exif_is_noted_and_the_input_still_written(self):
+        Image.new("RGB", (60, 40), (9, 9, 9)).save(self.src / "a.jpg", exif=_exif_with_thumbnail()[:42])  # IFD1 cut off
+        Image.new("RGB", (60, 40), (9, 9, 9)).save(
+            self.src / "b.png", exif=b"Exif\x00\x00XXXXXXXXXXXX"
+        )  # no TIFF header
+        result = self.run_quietly()
+        self.assertEqual(
+            self.notes(),
+            [
+                [(self.src / "a.jpg").as_posix(), "embedded-thumbnail", "EXIF unreadable: corrupt"],
+                [(self.src / "b.png").as_posix(), "embedded-thumbnail", "EXIF unreadable: SyntaxError"],
+            ],
+        )
+        self.assertEqual(result.notes, {**NO_NOTES, "embedded-thumbnail": 2})
+        self.assertEqual(len(self.written()), 2)
 
     def test_overlay_plane_is_noted_and_counted(self):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000)
@@ -1722,6 +1796,152 @@ class DecodeRasterTest(unittest.TestCase):
         self.assertTrue((right[20:] == 0).all())  # padded below the shorter frame
         out = render("raster", "id", buf.getvalue(), "inferno")
         self.assertEqual(out.rgb.shape, (40, 94, 3))
+
+    def test_exif_thumbnail_in_jpeg_and_png(self):
+        exif = _exif_with_thumbnail()
+        for fmt in ("JPEG", "PNG"):
+            with self.subTest(fmt=fmt):
+                buf = io.BytesIO()
+                Image.new("RGB", (60, 40), (9, 9, 9)).save(buf, fmt, exif=exif)
+                _, notes = decode_raster(buf.getvalue())
+                self.assertEqual(
+                    notes, (Note("embedded-thumbnail", f"EXIF IFD1 thumbnail ({_thumbnail_len(exif)} bytes)"),)
+                )
+
+    def test_png_exif_chunk_after_the_pixels_is_found(self):
+        exif = _exif_with_thumbnail()
+        note = Note("embedded-thumbnail", f"EXIF IFD1 thumbnail ({_thumbnail_len(exif)} bytes)")
+        plain = _png_bytes(np.full((40, 60, 3), 9, dtype=np.uint8))
+        self.assertEqual(decode_raster(_png_with_exif_after_pixels(plain, exif))[1], (note,))
+        rgb = np.zeros((40, 60, 3), dtype=np.uint16)
+        rgb[0, 0] = [4000, 1, 2]
+        views, notes = decode_raster(_png_with_exif_after_pixels(imagecodecs.png_encode(rgb), exif))
+        self.assertEqual(notes, (note,))
+        np.testing.assert_array_equal(views[0][0, 0], np.array([4000, 1, 2], dtype=np.float32) / 65535)  # full depth
+
+    def test_png_with_a_broken_pixel_stream_still_fails(self):
+        noise = np.random.default_rng(0).integers(0, 256, (200, 300, 3), dtype=np.uint8)
+        png = _png_bytes(noise)
+        out, pos, idats = [png[:8]], 8, 0
+        while pos < len(png):
+            (length,) = struct.unpack(">I", png[pos : pos + 4])
+            kind, body = png[pos + 4 : pos + 8], png[pos + 8 : pos + 8 + length]
+            if kind == b"IDAT":
+                body, idats = body[: len(body) // 2], idats + 1  # half the stream, a valid CRC
+                out.append(struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body)))
+            else:
+                out.append(png[pos : pos + 12 + length])
+            pos += 12 + length
+        self.assertEqual(idats, 3)
+        row = render_and_encode(Candidate("id", "raster", b"".join(out)), "inferno", draw_overlays=False)
+        self.assertIsInstance(row, SkippedRow)
+        self.assertEqual(row.kind, "failed")
+
+    def test_every_png_exif_chunk_is_checked(self):
+        thumb = _exif_with_thumbnail()
+        note = Note("embedded-thumbnail", f"EXIF IFD1 thumbnail ({_thumbnail_len(thumb)} bytes)")
+        harmless = _exif_ifd1([])
+        plain = _png_bytes(np.full((40, 60, 3), 9, dtype=np.uint8))
+        for first, second in ((harmless, thumb), (thumb, harmless)):
+            with self.subTest(thumbnail_first=first is thumb):
+                data = _png_with_exif_after_pixels(_png_with_exif_after_pixels(plain, first), second)
+                self.assertEqual(decode_raster(data)[1], (note,))
+
+    def test_imagemagick_raw_profile_exif_is_read(self):
+        exif = _exif_with_thumbnail()
+        note = Note("embedded-thumbnail", f"EXIF IFD1 thumbnail ({_thumbnail_len(exif)} bytes)")
+        for name, profile in (("with prefix", exif), ("without prefix", exif.removeprefix(b"Exif\x00\x00"))):
+            with self.subTest(name):
+                info = PngImagePlugin.PngInfo()
+                info.add_text("Raw profile type exif", f"\nexif\n{len(profile):8d}\n{profile.hex()}\n")
+                buf = io.BytesIO()
+                Image.new("RGB", (60, 40)).save(buf, "PNG", pnginfo=info)
+                self.assertEqual(decode_raster(buf.getvalue())[1], (note,))
+        info = PngImagePlugin.PngInfo()
+        info.add_text("Raw profile type exif", "\nexif\n       4\nzz\n")
+        buf = io.BytesIO()
+        Image.new("RGB", (60, 40)).save(buf, "PNG", pnginfo=info)
+        self.assertEqual(decode_raster(buf.getvalue())[1], (Note("embedded-thumbnail", "EXIF unreadable: ValueError"),))
+
+    def test_thumbnail_forms(self):
+        for entries, detail in (
+            ([(0x0201, 40)], "EXIF IFD1 thumbnail (? bytes)"),
+            ([(0x0201, 40), (0x0202, 77)], "EXIF IFD1 thumbnail (77 bytes)"),
+            ([(0x0111, 40), (0x0117, 300)], "EXIF IFD1 thumbnail, uncompressed (300 bytes)"),
+            ([(0x0111, 40)], "EXIF IFD1 thumbnail, uncompressed (? bytes)"),
+            ([(0x0202, 77)], None),  # a length alone is no thumbnail
+        ):
+            with self.subTest(entries=entries):
+                buf = io.BytesIO()
+                Image.new("RGB", (60, 40)).save(buf, "JPEG", exif=_exif_ifd1(entries))
+                expected = () if detail is None else (Note("embedded-thumbnail", detail),)
+                self.assertEqual(decode_raster(buf.getvalue())[1], expected)
+
+    def test_plain_jpeg_and_mpo_have_no_embedded_thumbnail_note(self):
+        buf = io.BytesIO()
+        Image.new("RGB", (60, 40)).save(buf, "JPEG")
+        self.assertEqual(decode_raster(buf.getvalue())[1], ())
+        self.assertEqual(decode_raster(_mpo_bytes())[1], ())
+
+    def test_mpo_later_frames_are_noted_by_frame(self):
+        exif = _exif_with_thumbnail()
+        _, notes = decode_raster(_mpo_bytes(exif))
+        self.assertEqual(
+            notes, (Note("embedded-thumbnail", f"frame 1: EXIF IFD1 thumbnail ({_thumbnail_len(exif)} bytes)"),)
+        )
+
+    def test_mpo_with_unparseable_exif_in_a_later_frame_still_renders(self):
+        data = _mpo_bytes(b"Exif\x00\x00XXXXXXXXXXXX")
+        plain = _decoded(_mpo_bytes())
+        views, notes = decode_raster(data)
+        np.testing.assert_array_equal(views[0], plain)
+        self.assertEqual(notes, (Note("embedded-thumbnail", "frame 1: EXIF unreadable: SyntaxError"),))
+
+    def test_malformed_exif_gives_an_unreadable_note(self):
+        for fmt, exif, detail in (
+            ("JPEG", _exif_with_thumbnail()[:42], "EXIF unreadable: corrupt"),
+            ("PNG", b"Exif\x00\x00XXXXXXXXXXXX", "EXIF unreadable: SyntaxError"),
+        ):
+            with self.subTest(fmt=fmt):
+                buf = io.BytesIO()
+                Image.new("RGB", (60, 40)).save(buf, fmt, exif=exif)
+                self.assertEqual(decode_raster(buf.getvalue())[1], (Note("embedded-thumbnail", detail),))
+
+    def test_tiff_subifds_are_counted_including_16_bit_and_bigtiff(self):
+        for dtype in (np.uint8, np.uint16):
+            for bigtiff in (False, True):
+                with self.subTest(dtype=dtype.__name__, bigtiff=bigtiff):
+                    buf = io.BytesIO()
+                    full = np.zeros((40, 60, 3), dtype)
+                    with tifffile.TiffWriter(buf, bigtiff=bigtiff) as tif:
+                        tif.write(full, photometric="rgb", subifds=2)
+                        tif.write(full[::2, ::2], photometric="rgb", subfiletype=1)
+                        tif.write(full[::4, ::4], photometric="rgb", subfiletype=1)
+                    _, notes = decode_raster(buf.getvalue())
+                    self.assertEqual(notes, (Note("embedded-thumbnail", "TIFF SubIFDs (2)"),))
+
+    def test_unreadable_tiff_subifds_tag_is_noted(self):
+        for bigtiff in (False, True):
+            buf = io.BytesIO()
+            full = np.zeros((40, 60, 3), np.uint8)
+            with tifffile.TiffWriter(buf, bigtiff=bigtiff, byteorder="<") as tif:
+                tif.write(full, photometric="rgb", subifds=2)
+                tif.write(full[::2, ::2], photometric="rgb", subfiletype=1)
+                tif.write(full[::4, ::4], photometric="rgb", subfiletype=1)
+            data = buf.getvalue()
+            ifd = struct.unpack_from("<Q" if bigtiff else "<I", data, 8 if bigtiff else 4)[0]
+            count_size, entry_size = (8, 20) if bigtiff else (2, 12)
+            (n,) = struct.unpack_from("<Q" if bigtiff else "<H", data, ifd)
+            entries = [ifd + count_size + i * entry_size for i in range(n)]
+            entry = next(e for e in entries if struct.unpack_from("<H", data, e)[0] == 330)
+            value_format = "<QQ" if bigtiff else "<II"  # count, then offset (or inline value)
+            for count, offset in ((2, len(data) + 100), (0x40000000, 8)):
+                with self.subTest(bigtiff=bigtiff, count=count):
+                    patched = bytearray(data)
+                    struct.pack_into(value_format, patched, entry + 4, count, offset)
+                    with quiet():
+                        _, notes = decode_raster(bytes(patched))
+                    self.assertEqual(notes, (Note("embedded-thumbnail", "TIFF SubIFDs unreadable: invalid value"),))
 
     def test_animated_png_is_unsupported(self):
         buf = io.BytesIO()

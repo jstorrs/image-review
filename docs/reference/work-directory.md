@@ -120,7 +120,7 @@ collides, has no notes.
 | Column | Description |
 |--------|-------------|
 | `image_id` | The input, as in `manifest.tsv` |
-| `kind` | `overlay-plane`, `overlay-unused-bits`, `icon-image` or `alpha` |
+| `kind` | `overlay-plane`, `overlay-unused-bits`, `icon-image`, `alpha` or `embedded-thumbnail` |
 | `detail` | One line describing it, e.g. `groups 0x6000, 0x6002`, `bit 15`, `IconImageSequence: 64x64 MONOCHROME2` or `120 of 2400 pixels not opaque` |
 
 It is encoded like `skipped.tsv`, and the detail is cleaned like a skipped
@@ -141,7 +141,7 @@ One JSON object recording how the work directory was made:
 | `sources` | The SOURCES as resolved absolute paths, in the order given, escaped like an `image_id` |
 | `parameters` | `batch_size`, `colormap`, `clahe_kernel_size`, `outlier_percentile`, `intensity_margin`, `tail_fraction`, `jpeg_quality`, `jpeg_subsampling`, `draw_overlays` (`true` if `--draw-overlays` drew the DICOM overlay planes onto the images, else `false`; absent from work dirs made by older versions, which drew overlays), `access`, `jobs` (recorded only: the output does not depend on it) |
 | `libraries` | Versions of `pydicom`, `numpy`, `scikit-image`, `Pillow`, `matplotlib`, `imagecodecs`, `tifffile`, plus `gdcm`, `pylibjpeg`, `openjpeg` when installed |
-| `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored`, and `notes`: an object with the number of `notes.tsv` rows of each kind, every kind present (zero included), e.g. `{"overlay-plane": 1, "overlay-unused-bits": 0, "icon-image": 0, "alpha": 0}` |
+| `counts` | `inputs` (N of the summary line), `written`, `skipped_failed`, `skipped_ignored`, and `notes`: an object with the number of `notes.tsv` rows of each kind, every kind present (zero included), e.g. `{"overlay-plane": 1, "overlay-unused-bits": 0, "icon-image": 0, "alpha": 0, "embedded-thumbnail": 0}` |
 
 It holds source paths, so it is as sensitive as `manifest.tsv`. The tool
 never reads it back, and the server never sends it.
