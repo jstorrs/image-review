@@ -141,19 +141,19 @@ Read **Upgrading** first.
   socket routes and the page needed no API version bump and do not change the
   HTTPS API (API v8, above, is for the `/mark` refusals). See the security
   model in the documentation for the limits.
-- **`notes.tsv`: inputs written with something the reviewer does not see.**
+- **`notes.tsv`: inputs written with something downstream tools should know about or strip.**
   `preprocess` now always writes `notes.tsv` (`image_id`, `kind`, `detail`;
   header only when empty) beside `skipped.tsv`, one row per note on a
   written input: `overlay-plane` for a DICOM with overlay planes (detail
   `group 0x6000` or `groups 0x6000, 0x6002`; overlays are not drawn by default,
-  see Upgrading),
-  `overlay-unused-bits` for a DICOM whose pixel data holds something above
-  BitsStored other than zeros or sign extension (detail `bit 15`,
+  see Upgrading), `overlay-unused-bits` for a DICOM whose pixel data holds
+  something above BitsStored other than zeros or sign extension (detail `bit 15`,
   `bits 12, 15`, or `bit 15 (overlay 0x6000)` when a 60xx group's
-  OverlayBitPosition points at it), and
-  `icon-image` for a DICOM with an embedded icon (detail such as
-  `IconImageSequence: 64x64 MONOCHROME2`). Notes never fail an input or
-  change the exit status. When there are any, the summary line ends with
+  OverlayBitPosition points at it), `icon-image` for a DICOM with an
+  embedded icon (detail such as `IconImageSequence: 64x64 MONOCHROME2`), and
+  `alpha` for a raster with pixels that are not fully opaque (detail
+  `120 of 2400 pixels not opaque`). Notes never fail an input or change the
+  exit status. When there are any, the summary line ends with
   `; N notes (K overlay-plane, J icon-image; see .../notes.tsv)`, and
   `preprocess.json` gains `counts.notes`, the count of every kind. The file
   holds source paths: treat it like `manifest.tsv`.
@@ -167,26 +167,35 @@ Read **Upgrading** first.
 
 ### Fixes
 
+- Content carried only by a transparent image's alpha channel is now
+  visible. preprocess showed the image composited over mid-gray beside the
+  raw colour, so alpha-only text was invisible when the colour was
+  mid-gray; it now shows the colour with alpha ignored beside the alpha
+  channel itself (transparent black, opaque white, shown linearly). The
+  views are processed separately, so the alpha view cannot flatten faint
+  grayscale content. A grayscale image with alpha stays grayscale, and fully
+  opaque alpha is still dropped. Such images get an `alpha` note in
+  `notes.tsv`.
 - 16-bit colour PNGs (RGB, RGBA and gray+alpha) and 16-bit RGB and CMYK
-  TIFFs are now decoded at full depth, with imagecodecs and tifffile. Pillow
-  kept only their high byte, so 12-bit text rendered near black (near white
-  for CMYK ink) and anything carried only in the low byte was lost. Colour
-  and ink are scaled by the bits they use, as for colour DICOMs; alpha,
-  premultiplied alpha and CMYK are interpreted as Pillow did. A 16-bit
-  gray+alpha PNG is now rendered as grayscale (with adaptive histogram
-  equalization), not as RGB, and a non-conformant 16-bit colour PNG that
-  libpng refuses (for example with a chunk before IHDR) is now `failed`
-  instead of rendered from its high byte. Other rasters, including 8-bit images and 16-bit grayscale PNGs,
-  render exactly as before. `preprocess.json` records the imagecodecs and
-  tifffile versions.
-- Colour and palette DICOMs are now scaled to 8 bits by the bits their
-  samples actually use, not the declared depth. Before, 12-bit values in a
-  16-bit RGB image, or 8-bit palette entries under a 16-bit descriptor,
-  rendered near black, hiding burned-in text; and 16-bit palette entries
-  under an 8-bit descriptor wrapped around instead of clipping. 8-bit images
-  are unchanged. Each image is scaled by its own maximum, so brightness can
-  differ between images of one series. A colour DICOM with float pixel data
-  is now a `failed` input (`unsupported: float colour pixel data`).
+  TIFFs are now decoded at full depth, with imagecodecs and tifffile,
+  instead of through Pillow, which keeps only the high byte. Colour is not
+  adjusted: it is shown at its stored depth (divided by 65535), so it comes
+  out within one level of the high-byte rendering, and an image that uses
+  only part of its range looks dark. What changes is the rest: a 16-bit
+  gray+alpha PNG is rendered as grayscale (with adaptive histogram
+  equalization), not as RGB; associated (premultiplied) alpha in a TIFF is
+  un-premultiplied; and CMYK inks and the alpha view are computed at full
+  depth. A non-conformant 16-bit colour PNG that libpng refuses (for example
+  with a chunk before IHDR) is now `failed` instead of rendered from its
+  high byte. Other rasters, including 8-bit images and 16-bit grayscale
+  PNGs, render exactly as before. `preprocess.json` records the imagecodecs
+  and tifffile versions.
+- Colour DICOM samples that exceed their declared depth now clip to white
+  instead of wrapping around, at 8 bits or fewer (for example 16-bit palette
+  entries under an 8-bit lookup table descriptor). Colour is still scaled by
+  its declared depth alone and is not adjusted. A colour DICOM with float
+  pixel data is now a `failed` input (`unsupported: float colour pixel
+  data`).
 - A float DICOM or mode `F` TIFF with a NaN or infinite pixel value is now a
   `failed` input (`unsupported: non-finite pixel values (1 NaN, 0
   infinite)`). Before, the one value made the min-max scaling collapse the

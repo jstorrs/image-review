@@ -58,8 +58,8 @@ TAIL_FRACTION = 0.10  # output range given to each outlier tail (below bot, abov
 CLAHE_KERNEL_SIZE = 96  # CLAHE tile size in pixels
 JPEG_QUALITY = 95
 JPEG_SUBSAMPLING = 0  # 4:4:4, so small coloured text keeps its edges
-ALPHA_BACKGROUND = 0.5  # mid-gray, so content carried only by alpha stays visible whatever its colour
 SIDE_BY_SIDE_GAP = 4  # pixels between views placed side by side in one rendered image
+SIDE_BY_SIDE_FILL = 0.5  # mid-gray, the gap between the colour and alpha views of a transparent image
 
 SNIFF_BYTES = 132  # enough for the DICOM preamble and its `DICM` prefix
 _DICOM_MAGIC_OFFSET = 128
@@ -137,7 +137,7 @@ _SPAWN = multiprocessing.get_context("spawn")
 Kind = Literal["dicom", "raster"]
 Content = Literal[Kind, "zip"]
 # Something a written input holds that downstream tools should strip, noted whether or not the image shows it
-NoteKind = Literal["overlay-plane", "overlay-unused-bits", "icon-image"]
+NoteKind = Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha"]  # DICOM kinds, then raster kinds
 NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
 
 
@@ -147,6 +147,10 @@ class Note:
 
     kind: NoteKind
     detail: str
+
+
+Views = tuple[np.ndarray, ...]  # float32 [0, 1] (H, W) or (H, W, 3) views of one input, each processed on its own
+AlphaCounts = tuple[int, int]  # pixels not opaque, pixels in the images that were not opaque
 
 
 @dataclass(frozen=True)
@@ -296,20 +300,10 @@ def _compress_tails(img: np.ndarray) -> np.ndarray:
     return np.interp(img, [lo, bot, top, hi], [0, TAIL_FRACTION, 1 - TAIL_FRACTION, 1]).astype(np.float32)
 
 
-def _full_scale(pixels: np.ndarray) -> int:
-    """The value shown at full brightness for non-empty, non-negative colour samples, by the bits they use, not the
-    declared depth: 2**bits - 1, bits being the larger of 8 and the bit length of the maximum. 8-bit data is unchanged;
-    data using fewer bits than declared is stretched to full brightness, so burned-in text stays visible."""
-    return 2 ** max(8, int(pixels.max()).bit_length()) - 1
-
-
-def _to_uint8(pixels: np.ndarray) -> np.ndarray:
-    """Scale colour samples to uint8 by the bits they use (see `_full_scale`). Negative samples (signed,
-    non-conformant) clip to 0."""
-    if pixels.size == 0:
-        return np.zeros(pixels.shape, dtype=np.uint8)
-    pixels = np.maximum(pixels, 0)
-    scaled = pixels.astype(np.float64) * 255 / _full_scale(pixels)
+def _to_uint8(pixels: np.ndarray, bits: int) -> np.ndarray:
+    """Scale colour samples of nominal depth `bits` to uint8, by that depth alone: the data is never consulted, so
+    samples using only part of their range look dark. Samples outside [0, 2**bits - 1] (signed, non-conformant) clip."""
+    scaled = np.maximum(pixels, 0).astype(np.float64) * 255 / (2**bits - 1)
     return np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
 
 
@@ -407,15 +401,18 @@ def _stored_pixels(dcm: pydicom.FileDataset) -> tuple[np.ndarray, tuple[int, ...
 
 def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarray, tuple[int, ...]]:
     """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels, and the unused
-    bits that held content (see `_stored_pixels`; palette indices are masked before the lookup)."""
+    bits that held content (see `_stored_pixels`; palette indices are masked before the lookup). RGB is scaled by
+    BitsStored and palette entries by the lookup table descriptor's depth (see `_to_uint8`)."""
     pixels, unused_bits = _stored_pixels(dcm)
     if pixels.dtype.kind == "f":  # no depth to scale by: 0..1 floats would render near black
         raise Unsupported("float colour pixel data")
+    bits = int(dcm.BitsStored)
     if photometric == "PALETTE COLOR":
         pixels = pydicom.pixels.apply_color_lut(pixels, dcm)
+        bits = int(dcm.RedPaletteColorLookupTableDescriptor[2])  # the entries' declared depth, not the indices'
     if pixels.ndim != 3 or pixels.shape[2] != 3:
         raise Unsupported(f"pixel array with shape {pixels.shape}")
-    return _to_uint8(pixels), unused_bits
+    return _to_uint8(pixels, bits), unused_bits
 
 
 def preprocess_dicom(
@@ -552,19 +549,25 @@ def _side_by_side(views: list[np.ndarray], fill: float) -> np.ndarray:
     return np.concatenate(parts, axis=1)
 
 
-def _with_alpha(color: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-    """Flatten float `color` with float `alpha` (both in [0, 1]).
+def _with_alpha(color: np.ndarray, alpha: np.ndarray) -> tuple[Views, AlphaCounts]:
+    """The views of float `color` with float `alpha` (both in [0, 1]), and the pixels not opaque.
 
-    Opaque alpha is just dropped. Otherwise the result shows the composite over
-    mid-gray (left) beside the raw channels with alpha ignored (right), so
-    content carried only by alpha and content hidden under transparent pixels
-    are both visible.
+    Opaque alpha is just dropped. Otherwise the views are the channels with
+    alpha ignored (shown left) and alpha itself as grayscale, transparent black
+    and opaque white (shown right), so content hidden under transparent pixels
+    and content carried only by alpha are both visible. They are processed
+    separately (see `preprocess_raster`), so alpha cannot flatten the colour.
     """
-    if alpha.min() >= 1:
-        return color
-    a = alpha if color.ndim == 2 else alpha[:, :, None]
-    composited = color * a + ALPHA_BACKGROUND * (1 - a)
-    return _side_by_side([composited, color], fill=ALPHA_BACKGROUND)
+    not_opaque = int((alpha < 1).sum())
+    if not not_opaque:
+        return (color,), (0, 0)
+    return (color, alpha), (not_opaque, alpha.size)
+
+
+def _alpha_notes(counts: AlphaCounts) -> tuple[Note, ...]:
+    """The `alpha` note for pixels that were not opaque, if any."""
+    not_opaque, total = counts
+    return (Note("alpha", f"{not_opaque} of {total} pixels not opaque"),) if not_opaque else ()
 
 
 def _high_bit_gray(im: Image.Image) -> np.ndarray:
@@ -578,13 +581,13 @@ def _high_bit_gray(im: Image.Image) -> np.ndarray:
     return (arr - lo) / (hi - lo) if hi > lo else np.zeros_like(arr)
 
 
-def _decode_frame(im: Image.Image) -> np.ndarray:
-    """Decode the current frame to float32 [0, 1]: (H, W) grayscale or (H, W, 3) RGB."""
+def _decode_frame(im: Image.Image) -> tuple[Views, AlphaCounts]:
+    """Decode the current frame to its views (see `_with_alpha`) and alpha counts."""
     transparency = im.info.get("transparency")
     if im.mode in _HIGH_BIT_GRAY_MODES:
         gray = _high_bit_gray(im)
         if transparency is None:
-            return gray
+            return (gray,), (0, 0)
         alpha = (np.asarray(im) != transparency).astype(np.float32)  # tRNS key on native values
         return _with_alpha(gray, alpha)
     if im.mode in _ALPHA_MODES or transparency is not None:
@@ -593,8 +596,8 @@ def _decode_frame(im: Image.Image) -> np.ndarray:
         color = arr[:, :, 0] if is_gray else arr[:, :, :3]
         return _with_alpha(color, arr[:, :, -1])
     if im.mode in ("1", "L"):
-        return ski.util.img_as_float32(np.asarray(im))
-    return ski.util.img_as_float32(np.asarray(im.convert("RGB")))
+        return (ski.util.img_as_float32(np.asarray(im)),), (0, 0)
+    return (ski.util.img_as_float32(np.asarray(im.convert("RGB"))),), (0, 0)
 
 
 def _pillow_truncates(im: Image.Image) -> bool:
@@ -640,13 +643,13 @@ def _unpremultiplied(colour: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     return np.where(alpha[:, :, None] > 0, np.minimum(straight, 65535), 0).astype(np.uint16)
 
 
-def _decode_tiff(data: bytes) -> np.ndarray:
+def _decode_tiff(data: bytes) -> tuple[Views, AlphaCounts]:
     """Decode the first page of a 16-bit TIFF that Pillow would truncate (see `_pillow_truncates`) to float32
-    [0, 1] (H, W, 3), or side by side with alpha (see `_full_depth`).
+    [0, 1] (H, W, 3), or with its alpha view (see `_full_depth`).
 
     RGB: the first extra sample is alpha when ExtraSamples marks it associated (premultiplied; unpremultiplied as
     Pillow does) or unassociated alpha, or when a fourth sample has no ExtraSamples at all, as Pillow reads it. CMYK:
-    inks scale by the bits they use (see `_full_scale`), then RGB = (1 - [C, M, Y]) * (1 - K), Pillow's conversion.
+    inks scale by 65535, then RGB = (1 - [C, M, Y]) * (1 - K), Pillow's conversion.
     """
     with tifffile.TiffFile(io.BytesIO(data)) as tif:
         page = tif.pages[0]
@@ -658,8 +661,8 @@ def _decode_tiff(data: bytes) -> np.ndarray:
     if samples.ndim != 3:
         raise Unsupported(f"TIFF with shape {samples.shape}")
     if photometric == tifffile.PHOTOMETRIC.SEPARATED:
-        ink = samples.astype(np.float32) / _full_scale(samples)
-        return (1 - ink[:, :, :3]) * (1 - ink[:, :, 3:4])
+        ink = samples.astype(np.float32) / 65535
+        return ((1 - ink[:, :, :3]) * (1 - ink[:, :, 3:4]),), (0, 0)
     colour = samples[:, :, :3]
     first_extra = extra[0] if extra else (tifffile.EXTRASAMPLE.UNASSALPHA if samples.shape[2] == 4 else None)
     if first_extra == tifffile.EXTRASAMPLE.ASSOCALPHA:
@@ -669,27 +672,26 @@ def _decode_tiff(data: bytes) -> np.ndarray:
     return _full_depth(colour, None)
 
 
-def _full_depth(colour: np.ndarray, alpha: np.ndarray | None) -> np.ndarray:
-    """16-bit samples to float32 [0, 1]: colour by the bits it uses (see `_full_scale`), alpha by its declared 16
-    bits (see `_with_alpha`). With alpha, the bits are those of the pixels not nearly transparent (alpha >= 256), if
-    any, so a stray near-transparent pixel cannot dim the rest."""
+def _full_depth(colour: np.ndarray, alpha: np.ndarray | None) -> tuple[Views, AlphaCounts]:
+    """16-bit samples to float32 [0, 1] by their depth alone, colour and alpha alike (see `_with_alpha`); the data is
+    never consulted, so no pixel affects how another is scaled."""
+    scaled = colour.astype(np.float32) / 65535
     if alpha is None:
-        return colour.astype(np.float32) / _full_scale(colour)
-    visible = alpha >= 256
-    scale = _full_scale(colour[visible] if visible.any() else colour)
-    scaled = np.minimum(colour.astype(np.float32) / scale, 1)  # a nearly transparent pixel may exceed the scale
+        return (scaled,), (0, 0)
     return _with_alpha(scaled, alpha.astype(np.float32) / 65535)
 
 
-def decode_raster(data: bytes) -> np.ndarray:
-    """Decode with PIL, branching on mode, to float32 [0, 1] (H, W) grayscale or (H, W, 3) RGB.
+def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
+    """Decode with PIL, branching on mode, to float32 [0, 1] views, (H, W) grayscale or (H, W, 3) RGB, and notes.
 
     Grayscale modes (including 16-bit) stay grayscale; everything else (CMYK,
-    YCbCr, P, ...) becomes RGB; see `_with_alpha` for transparency. A 16-bit
+    YCbCr, P, ...) becomes RGB. There is one view, except for a transparent
+    image's colour and alpha (see `_with_alpha`, which also gives the `alpha`
+    note; counts are summed over an MPO's frames). A 16-bit
     colour or alpha PNG or 16-bit RGB or CMYK TIFF, which Pillow would truncate
     to its high byte, is decoded at full depth instead (see `_full_depth` and
     `_decode_tiff`); its gray+alpha stays grayscale. An MPO (JPEG with extra MPF images: HDR gain
-    maps, previews) renders all its frames side by side; any other multi-frame
+    maps, previews) is one view of all its frames side by side; any other multi-frame
     image is unsupported.
     """
     with Image.open(io.BytesIO(data)) as im:
@@ -697,17 +699,21 @@ def decode_raster(data: bytes) -> np.ndarray:
         if frames > 1 and im.format != "MPO":
             raise Unsupported(f"multi-frame image ({frames} frames)")
         if _pillow_truncates(im):
-            return _full_depth(*_png_samples(data)) if im.format == "PNG" else _decode_tiff(data)
-        views = []
+            views, counts = _full_depth(*_png_samples(data)) if im.format == "PNG" else _decode_tiff(data)
+            return views, _alpha_notes(counts)
+        decoded = []
         for index in range(frames):
             im.seek(index)
             im.load()
-            views.append(_decode_frame(im))
-    return views[0] if len(views) == 1 else _side_by_side(views, fill=0.0)
+            decoded.append(_decode_frame(im))
+    counts = (sum(c[0] for _, c in decoded), sum(c[1] for _, c in decoded))
+    if len(decoded) == 1:
+        return decoded[0][0], _alpha_notes(counts)
+    return (_side_by_side([v for views, _ in decoded for v in views], fill=0.0),), _alpha_notes(counts)
 
 
-def preprocess_raster(img: np.ndarray) -> np.ndarray:
-    """Normalize a decoded raster to (H, W, 3) uint8, applying CLAHE to grayscale."""
+def _preprocess_view(img: np.ndarray) -> np.ndarray:
+    """Normalize one decoded view to (H, W, 3) uint8, applying CLAHE to grayscale."""
     if img.ndim == 2:
         img = ski.util.img_as_float32(img)
         img = ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE)
@@ -716,6 +722,23 @@ def preprocess_raster(img: np.ndarray) -> np.ndarray:
     if img.ndim == 3 and img.shape[2] == 3:
         return ski.util.img_as_ubyte(img)
     raise Unsupported(f"image with shape {img.shape}")
+
+
+def _linear_view(img: np.ndarray) -> np.ndarray:
+    """An alpha view to (H, W, 3) uint8, linearly: transparent black, opaque white, constant alpha its own gray."""
+    gray = ski.util.img_as_ubyte(img)
+    return np.stack([gray] * 3, axis=2)
+
+
+def preprocess_raster(views: Views) -> np.ndarray:
+    """Normalize decoded views to one (H, W, 3) uint8 image. The first view is the image, as it would be by itself
+    (CLAHE if grayscale, which equalizes by the whole image's range, so another view must not set it); a second is
+    alpha, shown linearly (see `_linear_view`). They are placed side by side."""
+    processed = [_preprocess_view(views[0]), *(_linear_view(v) for v in views[1:])]
+    if len(processed) == 1:
+        return processed[0]
+    floats = [ski.util.img_as_float32(p) for p in processed]
+    return ski.util.img_as_ubyte(_side_by_side(floats, fill=SIDE_BY_SIDE_FILL))
 
 
 def _has_preamble(head: bytes) -> bool:
@@ -750,7 +773,7 @@ def read_dicom(data: bytes) -> pydicom.FileDataset:
 def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str, *, draw_overlays: bool = False) -> Rendered:
     """Render one input's image: a DICOM's PixelData only, nothing else embedded in the file.
 
-    A DICOM's rendering carries its notes (see `_dicom_notes`). A failure raises.
+    A rendering carries its notes (see `_dicom_notes`, `decode_raster`). A failure raises.
     """
     match kind:
         case "dicom":
@@ -758,7 +781,8 @@ def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str, *, draw_ov
             rgb, unused_bits = preprocess_dicom(dcm, colormap, draw_overlays=draw_overlays)
             return Rendered(image_id, rgb, _dicom_notes(dcm, unused_bits))
         case "raster":
-            return Rendered(image_id, preprocess_raster(decode_raster(data)), ())
+            img, notes = decode_raster(data)
+            return Rendered(image_id, preprocess_raster(img), notes)
 
 
 # ---------------------------------------------------------------- discovery (IO)

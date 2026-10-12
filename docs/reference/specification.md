@@ -310,9 +310,10 @@ Only rendered images are compared: a `failed` or `ignored` row sharing an
 `image_id` with a `failed` or `ignored` row as `NOT_REVIEWED`).
 
 **Notes.** A note (`Note(kind, detail)`, `kind` a `NoteKind`,
-`Literal["overlay-plane", "overlay-unused-bits", "icon-image"]`, listed in
-that order by `NOTE_KINDS`) records something a rendered input holds that downstream
-tools should strip, written whether or not an overlay is drawn; the kinds and their details are in
+`Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha"]`,
+the DICOM kinds first and then the raster kind, listed in that order by
+`NOTE_KINDS`) records something a rendered input holds that downstream
+tools should know about or strip, written whether or not an overlay is drawn; the kinds and their details are in
 [Input notes](../commands/preprocess.md#input-notes). `render` makes a DICOM's
 notes after rendering it, in `NOTE_KINDS` order, decoding nothing beyond the
 render's own single decode: `overlay-plane` lists the overlay groups (the same
@@ -326,7 +327,10 @@ and `icon-image` reads only the first IconImageSequence item's
 Rows, Columns and PhotometricInterpretation (`?` when missing, each value cut
 to 64 characters plus `…`), inside a
 catch-all so a bad icon gives an `unreadable (<ExceptionClass>)` detail and
-never fails the input. A raster has no notes. Notes travel with the image
+never fails the input. A raster's only note is `alpha` (see the alpha rule
+under *Raster decoding*): `decode_raster` returns it with the image, with
+detail `N of M pixels not opaque`, N the pixels with alpha below 1 and M all
+the pixels of the images that had alpha. Notes travel with the image
 through `Rendered`, `Encoded` (so from pool workers) and the staged image;
 when the JPGs are placed (see *Batching*), each placed input's notes become
 `notes.tsv` rows in manifest order, details cleaned like a `skipped.tsv`
@@ -351,14 +355,16 @@ none. Notes never affect the exit status.
    split into per-frame items. `RGB`, `YBR_*` (pydicom's `pixel_array`
    returns RGB) and `PALETTE COLOR` (expanded with `apply_color_lut`) images
    get step 2's unused-bit masking and skip the rest of steps 2-5: samples
-   are scaled to uint8 by the bits the data uses, not the declared depth:
-   `effective = max(8, bit length of the maximum sample)` and each sample
-   becomes `round(sample * 255 / (2**effective - 1))`, clipped to 0-255
-   (negative samples become 0). Float colour pixel data raises
+   are scaled to uint8 by their nominal depth alone, never by the data:
+   `bits` is BitsStored (for `PALETTE COLOR`, the entry depth declared by the
+   third value of the Red Palette Color Lookup Table Descriptor, not how the
+   table is stored) and each sample becomes `round(sample * 255 / (2**bits
+   - 1))`, clipped to 0-255 (negative samples become 0, larger ones 255,
+   nothing wraps). Float colour pixel data raises
    `unsupported: float colour pixel data`, since it has no bit depth to
-   scale by. So 8-bit data is unchanged and 12-bit values in a 16-bit image
-   are stretched to full brightness, but each image is scaled by its own
-   maximum, so brightness can differ between images of one series. No
+   scale by. So 8-bit data is unchanged, and an image that uses only part of
+   its range (12-bit values stored as 16 bits) looks dark, as in any
+   viewer; colour is not altered. No
    windowing or colormap is applied, and only the crop of step 6 follows.
    Steps 2-5 apply in full to `MONOCHROME1`/`MONOCHROME2`
 2. Extract pixel array, mask its unused bits, convert to float32 (values keep
@@ -438,11 +444,18 @@ at a set bit.
 - Modes with real alpha (`RGBA`, `LA`, `PA`, premultiplied variants, or any
   mode with a `transparency` entry such as a palette with a transparent
   index or a grayscale/RGB colour key): if alpha is fully opaque it is
-  dropped. Otherwise the rendered image shows, side by side with a mid-gray
-  gap, the composite over mid-gray (left; content carried only by alpha stays
-  visible) and the raw colour/gray channels with alpha ignored (right;
-  content hidden under transparent pixels stays visible). Grayscale+alpha
-  stays grayscale
+  dropped, with no note. Otherwise the rendered image shows, side by side
+  with a mid-gray gap, the raw colour/gray channels with alpha ignored
+  (left; content hidden under transparent pixels stays visible) and alpha
+  itself as grayscale, transparent 0 and opaque 1 (right; content carried
+  only by alpha stays visible whatever the colour). Grayscale+alpha stays
+  grayscale. The two views are normalized separately, then placed side by
+  side, so the alpha view cannot flatten the colour view: the colour view as
+  an image of its own (CLAHE if grayscale, none for RGB), alpha linearly
+  (0 black, 1 white, no CLAHE). Any alpha below 1, including a `transparency` colour key, adds
+  an `alpha` note counting those pixels. An MPO's frames are JPEGs and carry
+  no alpha, but if one did, the counts of all its frames would be summed
+  into one note
 - High-bit-depth grayscale (`I;16*` scaled by 65535, `I`/`F` min-max scaled)
   keeps its full range; a mode `F` image holding NaN or infinity raises
   `unsupported: non-finite pixel values (1 NaN, 0 infinite)`; a `tRNS` colour
@@ -462,16 +475,13 @@ at a set bit.
   alpha, or when a fourth sample has no ExtraSamples tag at all (as Pillow
   reads it); associated (premultiplied) alpha is unpremultiplied first,
   `colour * 65535 // alpha` clipped to 65535, with colour 0 where alpha is
-  0, as Pillow does. Colour is scaled by the bits it uses, as for colour
-  DICOMs: `sample / (2**effective - 1)` with `effective = max(8, bit length
-  of the maximum sample)`, the maximum taken over the pixels whose alpha is
-  at least 256 when there are any, so a stray nearly transparent pixel
-  cannot dim the rest (colour above the scale clips to 1); alpha by 65535;
-  then the alpha rule above applies. CMYK inks are scaled the same way (over
-  all four inks), then converted with Pillow's formula `RGB = (1 - [C, M,
-  Y]) * (1 - K)`. Because the inks are stretched before that product, ink
-  under near-full black can come out slightly darker than Pillow's
-  high-byte rendering; everywhere else 12-bit ink is far more visible.
+  0, as Pillow does (colour under alpha 0 in premultiplied data is zero,
+  which un-premultiplying cannot recover). Colour, ink and alpha are all
+  divided by 65535, their nominal depth: nothing is computed from the data,
+  so no pixel (hidden content under transparent pixels, a stray bright
+  pixel) changes how another is scaled, and a colour image that uses only
+  part of its range looks dark. Then the alpha rule above applies. CMYK
+  inks are converted with Pillow's formula `RGB = (1 - [C, M, Y]) * (1 - K)`.
   Gray+alpha stays grayscale. The multi-frame check runs first
 - Grayscale modes (`1`, `L`, `I;16*`, `I`, `F`) stay grayscale; every other
   mode (`RGB`, `CMYK`, `YCbCr`, `P`, ...) is converted to RGB by Pillow (so

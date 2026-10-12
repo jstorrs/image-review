@@ -84,7 +84,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 APPLEDOUBLE = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + bytes(100)
 # SLURM_CPUS_PER_TASK=1 renders in-process, with no worker start-up per run
 CLI_ENV = {"SLURM_CPUS_PER_TASK": "1"}
-NO_NOTES = {"overlay-plane": 0, "overlay-unused-bits": 0, "icon-image": 0}
+NO_NOTES = {"overlay-plane": 0, "overlay-unused-bits": 0, "icon-image": 0, "alpha": 0}
 
 
 def _good_pixels() -> np.ndarray:
@@ -661,6 +661,17 @@ class NotesTest(unittest.TestCase):
         write_dicom(path, _good_pixels(), IconImageSequence=list(items))
         return path.as_posix()
 
+    def test_transparent_raster_is_noted_with_its_pixel_counts(self):
+        alpha = np.full((40, 60), 255, dtype=np.uint8)
+        alpha[:10, :6] = 0
+        alpha[10:20, :6] = 100
+        rgba = np.dstack([np.zeros((40, 60, 3), dtype=np.uint8), alpha])
+        (self.src / "a.png").write_bytes(_png_bytes(rgba, "RGBA"))
+        (self.src / "b.png").write_bytes(_png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)))  # opaque: no note
+        result = self.run_quietly()
+        self.assertEqual(self.notes(), [[(self.src / "a.png").as_posix(), "alpha", "120 of 2400 pixels not opaque"]])
+        self.assertEqual(result.notes, {**NO_NOTES, "alpha": 1})
+
     def test_overlay_plane_is_noted_and_counted(self):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000)
         result = self.run_quietly()
@@ -817,7 +828,7 @@ class NotesTest(unittest.TestCase):
             ],
         )
         self.assertEqual(list(result.notes), list(preprocess_module.NOTE_KINDS))
-        self.assertEqual(result.notes, {"overlay-plane": 1, "overlay-unused-bits": 1, "icon-image": 1})
+        self.assertEqual(result.notes, {**NO_NOTES, "overlay-plane": 1, "overlay-unused-bits": 1, "icon-image": 1})
 
     def test_empty_icon_sequence_is_not_noted(self):
         self.dicom_with_icons()
@@ -1597,52 +1608,87 @@ def _halves(img: np.ndarray, width: int) -> tuple[np.ndarray, np.ndarray]:
     return img[:, :width], img[:, width + SIDE_BY_SIDE_GAP :]
 
 
+def _decode_joined(data: bytes) -> tuple[np.ndarray, tuple[Note, ...]]:
+    """`decode_raster` with its views placed side by side, as `preprocess_raster` places them."""
+    views, notes = decode_raster(data)
+    return preprocess_module._side_by_side(list(views), fill=0.5) if len(views) > 1 else views[0], notes
+
+
+def _decoded(data: bytes) -> np.ndarray:
+    return _decode_joined(data)[0]
+
+
 class DecodeRasterTest(unittest.TestCase):
     def test_cmyk_jpeg_keeps_black_text(self):
         cmyk = np.zeros((40, 60, 4), dtype=np.uint8)
         cmyk[_text_mask(), 3] = 255  # text only in K
         buf = io.BytesIO()
         Image.fromarray(cmyk, mode="CMYK").save(buf, "JPEG", quality=95)
-        img = decode_raster(buf.getvalue())
+        img = _decoded(buf.getvalue())
         self.assertEqual(img.shape, (40, 60, 3))
         self.assertLess(img[_text_mask()].mean(), 0.25)
         self.assertGreater(img[~_text_mask()].mean(), 0.75)
 
-    def test_alpha_only_text_visible_in_composited_left_half(self):
+    def test_alpha_only_text_is_visible_in_the_alpha_view_whatever_the_colour(self):
         alpha = np.where(_text_mask(), 255, 0).astype(np.uint8)
-        rgba = np.dstack([np.zeros((40, 60, 3), dtype=np.uint8), alpha])
-        la = np.dstack([np.zeros((40, 60), dtype=np.uint8), alpha])
+        rgba = np.dstack([np.full((40, 60, 3), 128, dtype=np.uint8), alpha])
+        la = np.dstack([np.full((40, 60), 128, dtype=np.uint8), alpha])
         for arr, mode in ((rgba, "RGBA"), (la, "LA")):
             with self.subTest(mode=mode):
-                img = decode_raster(_png_bytes(arr, mode))
+                img, notes = _decode_joined(_png_bytes(arr, mode))
                 self.assertEqual(
                     img.shape, (40, 120 + SIDE_BY_SIDE_GAP, 3) if mode == "RGBA" else (40, 120 + SIDE_BY_SIDE_GAP)
                 )
                 left, right = _halves(img, 60)
-                self.assertTrue((left[_text_mask()] == 0).all())
-                self.assertTrue((left[~_text_mask()] == 0.5).all())
-                self.assertTrue((right == 0).all())
+                self.assertTrue((left == np.float32(128 / 255)).all())  # the colour view shows nothing
+                self.assertTrue((right[_text_mask()] == 1).all())
+                self.assertTrue((right[~_text_mask()] == 0).all())
+                self.assertEqual(notes, (Note("alpha", f"{int((~_text_mask()).sum())} of 2400 pixels not opaque"),))
+                out = render("raster", "id", _png_bytes(arr, mode), "inferno").rgb  # final uint8, after CLAHE for LA
+                out_right = out[:, 60 + SIDE_BY_SIDE_GAP :]
+                contrast = int(out_right[_text_mask()].min()) - int(out_right[~_text_mask()].max())
+                self.assertGreaterEqual(contrast, 200)
 
-    def test_text_under_transparent_pixels_visible_in_raw_right_half(self):
+    def test_alpha_view_is_rendered_linearly(self):
+        for level, want in ((0, 0), (255, 255), (128, 128)):
+            with self.subTest(alpha=level):
+                alpha = np.full((40, 60), level, dtype=np.uint8)
+                alpha[0, 0] = 0 if level else 255  # keeps the image transparent, or not constant
+                rgba = np.dstack([RNG.integers(0, 255, (40, 60, 3), dtype=np.uint8), alpha])
+                out = render("raster", "id", _png_bytes(rgba, "RGBA"), "x").rgb
+                self.assertEqual(out.shape, (40, 120 + SIDE_BY_SIDE_GAP, 3))
+                alpha_view = _halves(out, 60)[1]
+                np.testing.assert_array_equal(alpha_view[1:, 1:], want)
+                np.testing.assert_array_equal(alpha_view[0, 0], 0 if level else 255)
+                np.testing.assert_array_equal(alpha_view[..., 0], alpha_view[..., 2])
+
+    def test_text_under_transparent_pixels_visible_in_colour_half(self):
         rgb = np.full((40, 60, 3), 255, dtype=np.uint8)
         rgb[_text_mask()] = 0
         rgba = np.dstack([rgb, np.zeros((40, 60), dtype=np.uint8)])  # fully transparent: an erased layer
-        img = decode_raster(_png_bytes(rgba, "RGBA"))
+        img, notes = _decode_joined(_png_bytes(rgba, "RGBA"))
         left, right = _halves(img, 60)
-        self.assertTrue((left == 0.5).all())
-        self.assertTrue((right[_text_mask()] == 0).all())
-        self.assertTrue((right[~_text_mask()] == 1).all())
+        self.assertTrue((left[_text_mask()] == 0).all())
+        self.assertTrue((left[~_text_mask()] == 1).all())
+        self.assertTrue((right == 0).all())  # transparent = black
+        self.assertEqual(notes, (Note("alpha", "2400 of 2400 pixels not opaque"),))
         out = render("raster", "id", _png_bytes(rgba, "RGBA"), "inferno")
         self.assertEqual(out.rgb.shape, (40, 120 + SIDE_BY_SIDE_GAP, 3))
+        self.assertEqual(out.notes, notes)
 
     def test_opaque_alpha_is_dropped(self):
         rgb = RNG.integers(0, 255, (40, 60, 3), dtype=np.uint8)
         rgba = np.dstack([rgb, np.full((40, 60), 255, dtype=np.uint8)])
-        np.testing.assert_array_equal(ski.util.img_as_ubyte(decode_raster(_png_bytes(rgba, "RGBA"))), rgb)
+        img, notes = _decode_joined(_png_bytes(rgba, "RGBA"))
+        np.testing.assert_array_equal(ski.util.img_as_ubyte(img), rgb)
+        self.assertEqual(notes, ())
+        np.testing.assert_array_equal(
+            render("raster", "id", _png_bytes(rgba, "RGBA"), "x").rgb, render("raster", "id", _png_bytes(rgb), "x").rgb
+        )
 
     def test_16_bit_grayscale_png_stays_grayscale(self):
         gray = (np.arange(40 * 60).reshape(40, 60) * 20).astype(np.uint16)
-        img = decode_raster(_png_bytes(gray))
+        img = _decoded(_png_bytes(gray))
         self.assertEqual(img.ndim, 2)
         np.testing.assert_allclose(img, gray / 65535, atol=1e-6)
         out = render("raster", "id", _png_bytes(gray), "inferno")
@@ -1654,21 +1700,21 @@ class DecodeRasterTest(unittest.TestCase):
         gray[:5, :5] = 0  # the transparent key
         buf = io.BytesIO()
         Image.fromarray(gray).save(buf, "PNG", transparency=0)
-        img = decode_raster(buf.getvalue())
+        img, notes = _decode_joined(buf.getvalue())
         self.assertEqual(img.ndim, 2)
         left, right = _halves(img, 60)
-        for view in (left, right):
-            self.assertAlmostEqual(float(view[20, 20]), 50000 / 65535, places=5)
-            self.assertAlmostEqual(float(view[10, 5]), 30000 / 65535, places=5)
-        self.assertEqual(left[0, 0], 0.5)
-        self.assertEqual(right[0, 0], 0)
+        self.assertAlmostEqual(float(left[20, 20]), 50000 / 65535, places=5)
+        self.assertAlmostEqual(float(left[10, 5]), 30000 / 65535, places=5)
+        self.assertEqual(left[0, 0], 0)  # the key's own value, in the colour view
+        np.testing.assert_array_equal(right, (gray != 0).astype(np.float32))  # binary alpha
+        self.assertEqual(notes, (Note("alpha", "25 of 2400 pixels not opaque"),))
 
     def test_mpo_frames_render_side_by_side(self):
         buf = io.BytesIO()
         primary = Image.new("RGB", (60, 40), (255, 255, 255))
         gain_map = Image.new("L", (30, 20), 128)
         primary.save(buf, "MPO", save_all=True, append_images=[gain_map])
-        img = decode_raster(buf.getvalue())
+        img = _decoded(buf.getvalue())
         self.assertEqual(img.shape, (40, 60 + SIDE_BY_SIDE_GAP + 30, 3))
         left, right = _halves(img, 60)
         self.assertGreater(left.min(), 0.95)
@@ -1682,19 +1728,19 @@ class DecodeRasterTest(unittest.TestCase):
         frames = [Image.new("L", (20, 20), v) for v in (0, 255)]
         frames[0].save(buf, "PNG", save_all=True, append_images=frames[1:])
         with self.assertRaisesRegex(Unsupported, r"^unsupported: multi-frame image \(2 frames\)$"):
-            decode_raster(buf.getvalue())
+            _decoded(buf.getvalue())
 
     def test_16_bit_colour_png_keeps_its_low_bits(self):
         rgb = np.zeros((40, 60, 3), dtype=np.uint16)
         rgb[_text_mask()] = 4000
         rgb[0, 0] = [4000, 1, 2]
-        img = decode_raster(imagecodecs.png_encode(rgb))
+        img = _decoded(imagecodecs.png_encode(rgb))
         self.assertEqual(img.dtype, np.float32)
-        np.testing.assert_array_equal(img[0, 0], np.array([4000, 1, 2], dtype=np.float32) / 4095)
+        np.testing.assert_array_equal(img[0, 0], np.array([4000, 1, 2], dtype=np.float32) / 65535)
         self.assertEqual(len(set(img[0, 0].tolist())), 3)
 
-    def test_16_bit_colour_and_alpha_pngs_scale_by_the_bits_used(self):
-        text = _to_uint8(np.array([0, 4000]))[1]  # 12 bits used: the shared colour rule
+    def test_16_bit_colour_and_alpha_pngs_scale_by_their_depth(self):
+        text = _to_uint8(np.array([0, 4000]), 16)[1]  # 16 of 255 whatever else the image holds
         colour = np.where(_text_mask()[..., None], 4000, 0).astype(np.uint16).repeat(3, axis=2)
         opaque = np.full((40, 60, 1), 65535, dtype=np.uint16)
         partly = opaque.copy()
@@ -1707,22 +1753,29 @@ class DecodeRasterTest(unittest.TestCase):
         for name, samples in cases.items():
             with self.subTest(name):
                 out = render("raster", "id", imagecodecs.png_encode(samples), "inferno").rgb
-                raw = _halves(out, 60)[1] if name == "RGBA partly transparent" else out
+                raw = _halves(out, 60)[0] if name == "RGBA partly transparent" else out
                 self.assertEqual(raw.shape, (40, 60, 3))
                 np.testing.assert_array_equal(raw[_text_mask()], text)
                 np.testing.assert_array_equal(raw[~_text_mask()], 0)
-        left, _ = _halves(render("raster", "id", imagecodecs.png_encode(cases["RGBA partly transparent"]), "x").rgb, 60)
-        np.testing.assert_array_equal(left[:, :30][_text_mask()[:, :30]], text)  # opaque: the colour itself
-        np.testing.assert_array_equal(left[:, 30:], 128)  # transparent: the background
+        out = render("raster", "id", imagecodecs.png_encode(cases["RGBA partly transparent"]), "x")
+        _, alpha_view = _halves(out.rgb, 60)
+        np.testing.assert_array_equal(alpha_view[:, :30], 255)  # opaque: white
+        np.testing.assert_array_equal(alpha_view[:, 30:], 0)  # transparent: black
+        self.assertEqual(out.notes, (Note("alpha", "1200 of 2400 pixels not opaque"),))
 
     def test_16_bit_gray_alpha_png_stays_grayscale(self):
         gray = np.where(_text_mask(), 4000, 0).astype(np.uint16)
         for alpha in (65535, 0):
             with self.subTest(alpha=alpha):
-                img = decode_raster(imagecodecs.png_encode(np.dstack([gray, np.full_like(gray, alpha)])))
-                raw = img if alpha else _halves(img, 60)[1]
-                self.assertEqual(raw.shape, (40, 60))
-                np.testing.assert_array_equal(raw, (gray / 4095).astype(np.float32))
+                img, notes = _decode_joined(imagecodecs.png_encode(np.dstack([gray, np.full_like(gray, alpha)])))
+                raw = img if alpha else _halves(img, 60)[0]
+                self.assertEqual(raw.shape, (40, 60))  # still grayscale
+                np.testing.assert_array_equal(raw, (gray / 65535).astype(np.float32))
+                if alpha:
+                    self.assertEqual(notes, ())
+                else:
+                    np.testing.assert_array_equal(_halves(img, 60)[1], 0)
+                    self.assertEqual(notes, (Note("alpha", "2400 of 2400 pixels not opaque"),))
         out = render("raster", "id", imagecodecs.png_encode(np.dstack([gray, np.full_like(gray, 65535)])), "x").rgb
         self.assertEqual(out.shape, (40, 60, 3))
         self.assertTrue((out[_text_mask()] == 255).all())
@@ -1743,12 +1796,15 @@ class DecodeRasterTest(unittest.TestCase):
             + chunk(b"IDAT", zlib.compress(rows))
             + chunk(b"IEND", b"")
         )
-        left, right = _halves(decode_raster(png), 60)
-        np.testing.assert_array_equal(left[:, 30:], 0.5)
-        np.testing.assert_array_equal(right[:, :30], np.float32(4000 / 4095))
+        img, notes = _decode_joined(png)
+        left, right = _halves(img, 60)
+        np.testing.assert_array_equal(left[:, :30], np.float32(4000 / 65535))
+        np.testing.assert_array_equal(right[:, :30], 1)
+        np.testing.assert_array_equal(right[:, 30:], 0)
+        self.assertEqual(notes, (Note("alpha", "1200 of 2400 pixels not opaque"),))
 
-    def test_16_bit_rgb_tiff_scales_by_the_bits_used(self):
-        text = _to_uint8(np.array([0, 4000]))[1]
+    def test_16_bit_rgb_tiff_scales_by_its_depth(self):
+        text = _to_uint8(np.array([0, 4000]), 16)[1]
         rgb = np.where(_text_mask()[..., None], 4000, 0).astype(np.uint16).repeat(3, axis=2)
         rgb[0, 0] = [4000, 1, 2]
         cases = {
@@ -1765,8 +1821,8 @@ class DecodeRasterTest(unittest.TestCase):
                 buf = io.BytesIO()
                 samples = np.moveaxis(rgb, -1, 0) if "planarconfig" in options else rgb
                 tifffile.imwrite(buf, samples, photometric="rgb", **options)
-                img = decode_raster(buf.getvalue())
-                np.testing.assert_array_equal(img[0, 0], np.array([4000, 1, 2], dtype=np.float32) / 4095)
+                img = _decoded(buf.getvalue())
+                np.testing.assert_array_equal(img[0, 0], np.array([4000, 1, 2], dtype=np.float32) / 65535)
                 out = render("raster", "id", buf.getvalue(), "inferno").rgb
                 np.testing.assert_array_equal(out[_text_mask()], text)
                 np.testing.assert_array_equal(out[~_text_mask()][1:], 0)  # but the low-bit pixel at [0, 0]
@@ -1777,9 +1833,12 @@ class DecodeRasterTest(unittest.TestCase):
         alpha[:, 30:] = 0
         buf = io.BytesIO()
         tifffile.imwrite(buf, np.concatenate([rgb, alpha], axis=2), photometric="rgb", extrasamples=["unassalpha"])
-        left, right = _halves(decode_raster(buf.getvalue()), 60)
-        np.testing.assert_array_equal(left[:, 30:], 0.5)
-        np.testing.assert_array_equal(right, (rgb / 4095).astype(np.float32))
+        img, notes = _decode_joined(buf.getvalue())
+        left, right = _halves(img, 60)
+        np.testing.assert_array_equal(left, (rgb / 65535).astype(np.float32))
+        np.testing.assert_array_equal(right[:, :30], 1)
+        np.testing.assert_array_equal(right[:, 30:], 0)
+        self.assertEqual(notes, (Note("alpha", "1200 of 2400 pixels not opaque"),))
 
     def test_16_bit_tiff_fourth_sample_without_extra_samples_is_alpha(self):
         alpha = np.where(_text_mask(), 65535, 0).astype(np.uint16)[..., None]  # content only in the 4th sample
@@ -1790,9 +1849,10 @@ class DecodeRasterTest(unittest.TestCase):
         data[tag : tag + 2] = struct.pack("<H", 65000)  # renamed to an unknown private tag: no ExtraSamples
         with tifffile.TiffFile(io.BytesIO(bytes(data))) as tif:
             self.assertEqual(tif.pages[0].extrasamples, ())
-        left, _ = _halves(decode_raster(bytes(data)), 60)
-        np.testing.assert_array_equal(left[_text_mask()], 0)
-        np.testing.assert_array_equal(left[~_text_mask()], 0.5)
+        left, right = _halves(_decoded(bytes(data)), 60)
+        np.testing.assert_array_equal(left, 0)
+        np.testing.assert_array_equal(right[_text_mask()], 1)
+        np.testing.assert_array_equal(right[~_text_mask()], 0)
 
     def test_16_bit_tiff_associated_alpha_is_unpremultiplied_as_pillow_does(self):
         straight = np.full((40, 60, 3), 40000, dtype=np.uint16)
@@ -1803,13 +1863,13 @@ class DecodeRasterTest(unittest.TestCase):
         tifffile.imwrite(
             buf, np.concatenate([premultiplied, alpha], axis=2), photometric="rgb", extrasamples=["assocalpha"]
         )
-        _, right = _halves(decode_raster(buf.getvalue()), 60)
+        colour, _ = _halves(_decoded(buf.getvalue()), 60)
         with Image.open(io.BytesIO(buf.getvalue())) as im:
             im.load()
             pillow = np.asarray(im)[:, :, :3] / 255
-        np.testing.assert_allclose(right[:, :40], 40000 / 65535, atol=2 / 65535)  # straight colour, not dimmed
-        np.testing.assert_array_equal(right[:, 40:], 0)  # fully transparent: colour dropped, as Pillow does
-        np.testing.assert_allclose(right, pillow, atol=1.5 / 255)
+        np.testing.assert_allclose(colour[:, :40], 40000 / 65535, atol=2 / 65535)  # straight colour, not dimmed
+        np.testing.assert_array_equal(colour[:, 40:], 0)  # fully transparent: colour dropped, as Pillow does
+        np.testing.assert_allclose(colour, pillow, atol=1.5 / 255)
 
     def test_16_bit_cmyk_tiff_matches_pillow_at_full_depth(self):
         ink = RNG.integers(0, 256, (40, 60, 4), dtype=np.uint16)
@@ -1822,13 +1882,13 @@ class DecodeRasterTest(unittest.TestCase):
         out = render("raster", "id", buf.getvalue(), "inferno").rgb.astype(int)
         self.assertLessEqual(np.abs(out - pillow).max(), 1)
 
-    def test_16_bit_cmyk_tiff_keeps_12_bit_black_text(self):
+    def test_16_bit_cmyk_tiff_keeps_12_bit_black_text_dark_ink(self):
         ink = np.zeros((40, 60, 4), dtype=np.uint16)
-        ink[_text_mask(), 3] = 4000  # 12 bits used: Pillow's high byte, 15, was near white
+        ink[_text_mask(), 3] = 4000  # a little ink: shown as such, not stretched
         buf = io.BytesIO()
         tifffile.imwrite(buf, ink, photometric="separated")
-        img = decode_raster(buf.getvalue())
-        np.testing.assert_allclose(img[_text_mask()], 1 - 4000 / 4095, atol=1e-6)
+        img = _decoded(buf.getvalue())
+        np.testing.assert_allclose(img[_text_mask()], 1 - 4000 / 65535, atol=1e-6)
         np.testing.assert_array_equal(img[~_text_mask()], 1)
 
     def test_png_with_a_chunk_before_ihdr_is_not_truncated(self):
@@ -1846,20 +1906,42 @@ class DecodeRasterTest(unittest.TestCase):
             row.reason, {"cannot decode 16-bit PNG: PngError", "cannot decode 16-bit PNG: UnicodeDecodeError"}
         )
 
-    def test_nearly_transparent_pixel_does_not_dim_the_image(self):
-        text = np.where(_text_mask()[..., None], 4000, 0).astype(np.uint16).repeat(3, axis=2)
-        alpha = np.full((40, 60), 65535, dtype=np.uint16)
-        alpha[39, 59] = 9
-        premultiplied, straight = text.copy(), text.copy()
-        premultiplied[39, 59] = 1  # rounding at alpha 9: unpremultiplied to 7281, 13 bits
-        straight[39, 59] = 7281
-        for extra, colour in (("assocalpha", premultiplied), ("unassalpha", straight)):
-            with self.subTest(extra):
-                buf = io.BytesIO()
-                tifffile.imwrite(buf, np.dstack([colour, alpha]), photometric="rgb", extrasamples=[extra])
-                _, right = _halves(decode_raster(buf.getvalue()), 60)
-                np.testing.assert_array_equal(right[_text_mask()], np.float32(4000) / 4095)
-                np.testing.assert_array_equal(right[39, 59], 1)  # above the scale: clipped, still visible
+    def test_content_under_transparent_pixels_does_not_change_the_visible_ones(self):
+        visible = np.where(_text_mask()[..., None], 4000, 0).astype(np.uint16).repeat(3, axis=2)
+        alpha = np.full((40, 60, 1), 65535, dtype=np.uint16)
+        alpha[:, 30:] = 0
+        outs = []
+        for hidden in (0, 65535):
+            colour = visible.copy()
+            colour[:, 30:] = hidden
+            outs.append(
+                render("raster", "id", imagecodecs.png_encode(np.concatenate([colour, alpha], axis=2)), "x").rgb
+            )
+            shown = outs[-1][:, :30]
+            expected = np.where(_text_mask()[:, :30, None], round(4000 / 65535 * 255), 0)
+            np.testing.assert_array_equal(shown, expected.repeat(3, axis=2))
+        np.testing.assert_array_equal(outs[0][:, :30], outs[1][:, :30])
+
+    def test_hidden_content_brighter_than_the_visible_scale_is_not_clipped(self):
+        colour = np.full((40, 60, 3), 50000, dtype=np.uint16)
+        colour[_text_mask()] = 60000
+        alpha = np.zeros((40, 60, 1), dtype=np.uint16)  # everything hidden
+        out = render("raster", "id", imagecodecs.png_encode(np.concatenate([colour, alpha], axis=2)), "x").rgb
+        left = out[:, :60]
+        self.assertNotEqual(int(left[_text_mask()].min()), int(left[~_text_mask()].max()))
+
+    def test_gray_alpha_colour_view_is_rendered_as_an_opaque_image_would_be(self):
+        for gray_level, text_level in ((128, 131), (128, 140)):
+            with self.subTest(text_level=text_level):
+                gray = np.full((40, 60), gray_level, dtype=np.uint8)
+                gray[_text_mask()] = text_level
+                alpha = np.full((40, 60), 255, dtype=np.uint8)
+                alpha[0, 0] = 0  # one transparent pixel: the alpha view appears
+                with_alpha = render("raster", "id", _png_bytes(np.dstack([gray, alpha]), "LA"), "x").rgb
+                opaque = render("raster", "id", _png_bytes(gray), "x").rgb
+                colour_view, alpha_view = _halves(with_alpha, 60)
+                np.testing.assert_array_equal(colour_view, opaque)
+                self.assertEqual(set(np.unique(alpha_view)), {0, 255})  # binary, whatever the colour view holds
 
     def test_multipage_16_bit_rgb_tiff_is_unsupported(self):
         buf = io.BytesIO()
@@ -1867,7 +1949,7 @@ class DecodeRasterTest(unittest.TestCase):
             for _ in range(2):
                 tif.write(np.zeros((20, 20, 3), dtype=np.uint16), photometric="rgb")
         with self.assertRaisesRegex(Unsupported, r"^unsupported: multi-frame image \(2 frames\)$"):
-            decode_raster(buf.getvalue())
+            _decoded(buf.getvalue())
 
     def test_inputs_pillow_decodes_in_full_stay_on_its_path(self):
         gray16 = (np.arange(40 * 60).reshape(40, 60) * 20).astype(np.uint16)
@@ -1882,7 +1964,11 @@ class DecodeRasterTest(unittest.TestCase):
         }.items():
             with self.subTest(name), Image.open(io.BytesIO(data)) as im:
                 im.load()
-                np.testing.assert_array_equal(decode_raster(data), preprocess_module._decode_frame(im))
+                views, _ = decode_raster(data)
+                expected, _ = preprocess_module._decode_frame(im)
+                self.assertEqual(len(views), len(expected))
+                for view, want in zip(views, expected, strict=True):
+                    np.testing.assert_array_equal(view, want)
 
     def test_damaged_16_bit_colour_png_is_a_failed_row(self):
         png = bytearray(imagecodecs.png_encode(RNG.integers(0, 4096, (40, 60, 3)).astype(np.uint16)))
@@ -2212,15 +2298,17 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(out.rgb.max(), 255)
         self.assertEqual(out.rgb.min(), 0)
         pixels[:] = 32768  # the top bit set: unchanged scaling by 16 bits
-        self.assertEqual(preprocess_module._to_uint8(pixels).max(), 128)
+        self.assertEqual(preprocess_module._to_uint8(pixels, 16).max(), 128)
 
-    def test_16_bit_rgb_holding_12_bit_values_is_stretched(self):
+    def test_rgb_dicom_is_scaled_by_bits_stored_alone(self):
         pixels = np.zeros((40, 60, 3), dtype=np.uint16)
         pixels[_text_mask()] = 4095
-        ds = pydicom.dcmread(io.BytesIO(self.dicom_bytes(pixels, "RGB")))
-        self.assertEqual(ds.BitsStored, 16)
-        rgb, _ = preprocess_module._colour_dicom(ds, "RGB")
-        np.testing.assert_array_equal(rgb, np.where(_text_mask()[..., None], 255, 0).repeat(3, axis=2))
+        for stored, text in ((16, round(4095 / 65535 * 255)), (12, 255)):
+            with self.subTest(bits_stored=stored):
+                ds = pydicom.dcmread(io.BytesIO(self.dicom_bytes(pixels, "RGB")))
+                ds.BitsStored, ds.HighBit = stored, stored - 1
+                rgb, _ = preprocess_module._colour_dicom(ds, "RGB")
+                np.testing.assert_array_equal(rgb, np.where(_text_mask()[..., None], text, 0).repeat(3, axis=2))
 
     def _palette_dataset(self, lut_bits: int, entries: np.ndarray) -> pydicom.Dataset:
         ds = pydicom.dcmread(
@@ -2231,29 +2319,37 @@ class RenderTest(unittest.TestCase):
             ds.add_new((0x0028, element + 0x100), "OW", entries.astype("<u2").tobytes())
         return ds
 
-    def test_palette_with_8_bit_entries_in_a_16_bit_descriptor_renders_the_entries(self):
+    def test_palette_entries_are_scaled_by_the_descriptors_depth(self):
         entries = np.arange(256)[::-1]
         rgb, _ = preprocess_module._colour_dicom(self._palette_dataset(16, entries), "PALETTE COLOR")
+        np.testing.assert_array_equal(rgb[..., 0].ravel(), preprocess_module._to_uint8(entries, 16))  # dark, as stored
+
+    def test_palette_with_8_bit_entries_padded_into_16_bit_words_renders_the_entries(self):
+        entries = np.arange(256)[::-1]  # descriptor depth 8: the 16-bit words only pad the entries
+        ds = self._palette_dataset(8, entries)
+        self.assertEqual(pydicom.pixels.apply_color_lut(np.arange(256).reshape(16, 16), ds).dtype, np.uint16)
+        rgb, _ = preprocess_module._colour_dicom(ds, "PALETTE COLOR")
         np.testing.assert_array_equal(rgb[..., 0].ravel(), entries)
 
-    def test_palette_with_16_bit_entries_in_an_8_bit_descriptor_clips_without_wrapping(self):
+    def test_palette_scales_by_the_descriptor_depth_and_clips_larger_entries(self):
         entries = np.arange(256) * 257
         rgb, _ = preprocess_module._colour_dicom(self._palette_dataset(8, entries), "PALETTE COLOR")
         out = rgb[..., 0].ravel()  # indices are sorted, so the outputs must be non-decreasing
         self.assertTrue(np.all(np.diff(out.astype(int)) >= 0))
         self.assertEqual((out[0], out[-1]), (0, 255))
 
-    def test_to_uint8_scales_by_the_bits_used(self):
+    def test_to_uint8_scales_by_the_depth_given(self):
         to_uint8 = preprocess_module._to_uint8
         eight = np.arange(256, dtype=np.uint8)
-        np.testing.assert_array_equal(to_uint8(eight), eight)
-        np.testing.assert_array_equal(to_uint8(eight.astype(np.uint16)), eight)
-        np.testing.assert_array_equal(to_uint8(np.array([0, 2048, 4095], dtype=np.uint16)), [0, 128, 255])
-        np.testing.assert_array_equal(to_uint8(np.array([0, 40000, 65535], dtype=np.uint16)), [0, 156, 255])
-        np.testing.assert_array_equal(to_uint8(np.array([-5, 3, 255], dtype=np.int16)), [0, 3, 255])  # negatives clip
+        np.testing.assert_array_equal(to_uint8(eight, 8), eight)
+        np.testing.assert_array_equal(to_uint8(eight.astype(np.uint16), 8), eight)
+        np.testing.assert_array_equal(to_uint8(np.array([0, 2048, 4095], dtype=np.uint16), 12), [0, 128, 255])
+        np.testing.assert_array_equal(to_uint8(np.array([0, 2048, 4095], dtype=np.uint16), 16), [0, 8, 16])
+        np.testing.assert_array_equal(to_uint8(np.array([0, 40000, 65535], dtype=np.uint16), 16), [0, 156, 255])
+        np.testing.assert_array_equal(to_uint8(np.array([-5, 3, 300], dtype=np.int16), 8), [0, 3, 255])  # clips
 
     def test_to_uint8_accepts_an_empty_array(self):
-        out = preprocess_module._to_uint8(np.zeros((0, 4, 3), dtype=np.uint16))
+        out = preprocess_module._to_uint8(np.zeros((0, 4, 3), dtype=np.uint16), 16)
         self.assertEqual((out.shape, out.dtype), ((0, 4, 3), np.uint8))
 
     def test_bundled_colour_dicoms_render_rgb_uint8(self):
@@ -2749,7 +2845,7 @@ class ParallelTest(unittest.TestCase):
         self.assertEqual(self.serial.written, 12)  # 10 files, 2 zip entries
         self.assertEqual([s.kind for s in self.serial.skipped], ["failed", "ignored", "failed", "failed", "failed"])
         self.assertEqual([s.reason for s in self.serial.skipped].count(COLLISION_REASON), 2)
-        self.assertEqual(self.serial.notes, {"overlay-plane": 1, "overlay-unused-bits": 1, "icon-image": 1})
+        self.assertEqual(self.serial.notes, {**NO_NOTES, "overlay-plane": 1, "overlay-unused-bits": 1, "icon-image": 1})
         pooled_paths = {
             "skipped_path": self.root / "pooled" / "skipped.tsv",
             "notes_path": self.root / "pooled" / "notes.tsv",

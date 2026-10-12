@@ -13,7 +13,7 @@ image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
 Renders each image input to a JPG, in batches, in a new work directory.
 Inputs it cannot render are listed in `skipped.tsv` (see
 [Skipped inputs](#skipped-inputs)); rendered inputs that hold something
-downstream tools should strip are listed in `notes.tsv` (see
+downstream tools should know about or strip are listed in `notes.tsv` (see
 [Input notes](#input-notes)).
 
 | Option | Default | Description |
@@ -234,8 +234,8 @@ inputs as success).
 ## Input notes
 
 `notes.tsv` lists written inputs that hold something that downstream tools
-are expected to strip, whether or not the review image shows it. A note never fails an input and never changes the exit
-status: the image is in `manifest.tsv` and is reviewed as usual. Only
+should know about or strip, whether or not the review image shows it. A note
+never fails an input and never changes the exit status: the image is in `manifest.tsv` and is reviewed as usual. Only
 inputs that are written get notes; a failed or ignored input has none. An
 input can have several notes, one row each. The file's columns are in
 [`notes.tsv`](../reference/work-directory.md#notestsv); like `skipped.tsv` it
@@ -246,6 +246,7 @@ holds source paths.
 | `overlay-plane` | A DICOM with one or more overlay planes (groups 6000-601E with OverlayData) | `group 0x6000`, or `groups 0x6000, 0x6002` |
 | `overlay-unused-bits` | A DICOM whose pixel data holds something above BitsStored other than zeros or sign extension (e.g. a retired overlay) | `bit 15`, `bits 12, 15`, or `bit 15 (overlay 0x6000)` |
 | `icon-image` | A DICOM with an embedded icon image (IconImageSequence (0088,0200)) | `IconImageSequence: 64x64 MONOCHROME2` |
+| `alpha` | A raster with pixels that are not fully opaque | `120 of 2400 pixels not opaque` |
 
 - **`overlay-plane`**: the review image is the pixel data alone, so overlay
   planes are not reviewed (unless `--draw-overlays` draws them; see
@@ -273,12 +274,17 @@ holds source paths.
   plus `…`, and `, N items` when the sequence holds more than one icon. An icon sequence that cannot be read is noted as
   `IconImageSequence: unreadable (ValueError)` (the error's class), and the
   input still renders. An empty sequence gets no note.
+- **`alpha`**: the image is shown with its alpha channel as a second view
+  (see [Rendering pipeline](#rendering-pipeline)), but the alpha channel
+  ships in the file as it is. The detail counts the pixels with alpha below
+  fully opaque, of all the pixels (a `tRNS` colour key counts as alpha).
+  Fully opaque alpha gets no note.
 
 ## Rendering pipeline
 
 The DICOM preprocessing pipeline for grayscale (MONOCHROME1/2) images;
 single-frame colour (RGB, YBR) and palette DICOMs are only converted to 8-bit
-RGB (scaled by the bits the image uses, not the declared depth) and cropped,
+RGB (scaled by the stored depth, BitsStored, without adjustment) and cropped,
 with no windowing or colormap:
 
 1. Converts to float32, corrects photometric interpretation
@@ -310,16 +316,18 @@ Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
 converted to RGB; 16-bit grayscale keeps its full range), get adaptive
 histogram equalization if grayscale, and are saved as RGB JPGs. 16-bit colour
 and alpha PNGs (RGB, RGBA, gray+alpha) and 16-bit RGB and CMYK TIFFs are
-decoded at full depth: colour is scaled by the bits it uses, as for colour
-DICOMs, so 12-bit text on a 16-bit image is shown bright, and gray+alpha
-stays grayscale. 12-bit CMYK ink is far more visible than before, except
-under near-full black, where it can be slightly darker. Some inputs are shown
+decoded at full depth, and gray+alpha stays grayscale. Colour is shown at its
+stored depth without adjustment (16-bit samples divided by 65535, a colour
+DICOM's by 2^BitsStored - 1), whatever the image holds, so a colour image
+that uses only part of its range looks dark, as in any viewer. Some inputs are shown
 as several views side by side in one image (still one item to review):
 
-- **Transparent images**: left is the image composited over mid-gray (so
-  anything drawn only in the alpha channel is visible), right is the raw
-  image with transparency ignored (so anything hidden under transparent
-  pixels is visible). Check both halves.
+- **Transparent images**: left is the colour with transparency ignored (so
+  anything hidden under transparent pixels is visible), right is the alpha
+  channel itself as grayscale, transparent black and opaque white (so
+  anything drawn only in the alpha channel is visible, whatever the colour).
+  Check both halves. A grayscale image with alpha stays grayscale. The input
+  also gets an [`alpha` note](#input-notes).
 - **MPO JPEGs** (HDR gain maps, camera previews embedded in a JPEG): every
   embedded image, left to right.
 
