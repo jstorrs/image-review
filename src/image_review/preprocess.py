@@ -117,6 +117,16 @@ _ALPHA_MODES = {"RGBA", "RGBa", "LA", "La", "PA"}
 _HIGH_BIT_GRAY_MODES = {"I", "F", "I;16", "I;16L", "I;16B", "I;16N"}
 # Pillow's raw modes for 16-bit RGB, gray+alpha and RGBA PNGs, of which it keeps only the high byte
 _PNG_TRUNCATED_RAWMODES = {"RGB;16B", "LA;16B", "RGBA;16B"}
+_PNG_CHUNK_TYPE = re.compile(rb"[A-Za-z0-9_]{4}")  # Pillow stops reading at a chunk type that is not this
+# One input's trailing-data check, all its JPEG walks together, steps over at most this many markers and searches at
+# most FACTOR x its size + SLACK bytes; past either it is not checked, and says so. Real files use a few hundred
+# markers at most (tens, in practice) and search each byte about once.
+JPEG_WALK_MAX_MARKERS = 100_000  # about half a second of walking
+JPEG_WALK_SEARCH_FACTOR = 4
+JPEG_WALK_SEARCH_SLACK = 1 << 20
+TRAILING_DATA_OVER_BUDGET = "not checked: too many JPEG markers or frames"
+# A JPEG marker: FF then a byte that is not stuffing (00), TEM (01), RST0-7 or another FF (fill)
+_JPEG_MARKER = re.compile(rb"\xff[^\x00\x01\xd0-\xd7\xff]")
 _PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
 PROVENANCE_NAME = "preprocess.json"
 NOTES_NAME = "notes.tsv"
@@ -139,7 +149,9 @@ _SPAWN = multiprocessing.get_context("spawn")
 Kind = Literal["dicom", "raster"]
 Content = Literal[Kind, "zip"]
 # Something a written input holds that downstream tools should strip, noted whether or not the image shows it
-NoteKind = Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha", "embedded-thumbnail"]  # DICOM, raster
+NoteKind = Literal[
+    "overlay-plane", "overlay-unused-bits", "icon-image", "alpha", "embedded-thumbnail", "trailing-data"
+]  # DICOM, then raster
 NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
 
 
@@ -683,21 +695,195 @@ def _full_depth(colour: np.ndarray, alpha: np.ndarray | None) -> tuple[Views, Al
     return _with_alpha(scaled, alpha.astype(np.float32) / 65535)
 
 
+def _png_chunks(data: bytes) -> Iterator[tuple[bytes, int, int]]:
+    """(type, start, end) of the data of each chunk of PNG `data`, in file order, through IEND.
+
+    The walk stops at IEND or at a chunk whose header runs past the end of `data`; the declared lengths are trusted
+    only to move along, so a chunk's data may run past the end too.
+    """
+    pos = 8  # after the signature
+    while pos + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[pos : pos + 8])
+        yield kind, pos + 8, pos + 8 + length
+        if kind == b"IEND":
+            return
+        pos += 12 + length  # length, type, data, CRC
+
+
 def _png_exif(data: bytes) -> tuple[bytes, ...]:
     """The data of every `eXIf` chunk of PNG `data`, in file order, found by walking its chunks up to IEND.
 
     No pixels are decoded. Readers differ on which of several chunks counts (Pillow takes the last), so all are kept.
     """
-    chunks: list[bytes] = []
+    return tuple(data[start:end] for kind, start, end in _png_chunks(data) if kind == b"eXIf")
+
+
+def _png_end(data: bytes) -> int:
+    """The offset where Pillow stops reading PNG `data`: just past IEND's 8-byte header, which is all it reads of IEND
+    (or past an empty IEND's CRC, or the end of `data` if that CRC is cut short, so the CRC is not counted), else the
+    start of the first chunk whose type is not four `[A-Za-z0-9_]` bytes or whose data and CRC run past the end, else
+    where the walk ends (a PNG without IEND whose last chunk is whole ends there)."""
     pos = 8  # after the signature
-    while pos + 8 <= len(data):
-        length, kind = struct.unpack(">I4s", data[pos : pos + 8])
-        if kind == b"eXIf":
-            chunks.append(data[pos + 8 : pos + 8 + length])
-        elif kind == b"IEND":
-            break
-        pos += 12 + length  # length, type, data, CRC
-    return tuple(chunks)
+    for kind, start, end in _png_chunks(data):
+        if kind == b"IEND":
+            return min(start + 4, len(data)) if end == start else start
+        if not _PNG_CHUNK_TYPE.fullmatch(kind) or end + 4 > len(data):
+            return start - 8
+        pos = end + 4
+    return pos
+
+
+class _OverBudget(Exception):
+    """A trailing-data check ran out of its `_WalkBudget`."""
+
+
+@dataclass
+class _WalkBudget:
+    """What one input's trailing-data check may still do, all its JPEG walks (an MPO's frames) together: marker steps
+    and bytes searched. Spending past either raises `_OverBudget`, so time and memory stay linear in the file size."""
+
+    markers: int
+    search_bytes: int
+
+    @classmethod
+    def for_data(cls, data: bytes) -> "_WalkBudget":
+        return cls(JPEG_WALK_MAX_MARKERS, JPEG_WALK_SEARCH_FACTOR * len(data) + JPEG_WALK_SEARCH_SLACK)
+
+    def next_marker(self, data: bytes, pos: int) -> int:
+        """The offset of the first JPEG marker (see `_JPEG_MARKER`) at or after `pos` in `data`, or len(data) if none,
+        from one regex search over no more bytes than are left."""
+        self.markers -= 1
+        stop = min(len(data), pos + self.search_bytes + 2)  # a marker's two bytes are not counted
+        found = _JPEG_MARKER.search(data, pos, stop)
+        if self.markers < 0 or (found is None and stop < len(data)):
+            raise _OverBudget
+        marker = found.start() if found else len(data)
+        self.search_bytes -= marker - pos
+        return marker
+
+
+def _jpeg_end(data: bytes, start: int = 0, budget: _WalkBudget | None = None) -> int | None:
+    """The offset just past the first EOI of the JPEG at `start` in `data`, or None when it has none.
+
+    From SOI, marker segments are skipped by their length; any other bytes (entropy-coded data, as in a progressive
+    file's several scans, or stray bytes before a marker, which Pillow and libjpeg skip too) are passed over to the
+    next marker by one regex search. Byte stuffing (FF00), RST0-7, TEM and FF fill bytes are not markers. A segment
+    declaring a length below 2 is passed over after its two length bytes, as Pillow and libjpeg do. There is no end at
+    the end of `data`, at a nested SOI, or at a segment that runs past the end. Every read is bounded by the length of
+    `data` and the position only moves forward. Each marker and each byte searched is spent from `budget` (a fresh
+    one for `data` if None; see `_WalkBudget`).
+    """
+    if data[start : start + 2] != b"\xff\xd8":
+        return None
+    budget = _WalkBudget.for_data(data) if budget is None else budget
+    pos = start + 2
+    while (pos := budget.next_marker(data, pos)) + 1 < len(data):
+        marker = data[pos + 1]
+        if marker == 0xD9:  # EOI
+            return pos + 2
+        if marker == 0xD8 or pos + 4 > len(data):
+            return None
+        length = int.from_bytes(data[pos + 2 : pos + 4], "big")
+        if length >= 2 and pos + 2 + length > len(data):
+            return None
+        pos += 4 if length < 2 else 2 + length
+    return None
+
+
+def _uncovered(length: int, covered: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """The (start, end) runs of [0, `length`) outside every (start, end) range in `covered`, in order."""
+    runs: list[tuple[int, int]] = []
+    pos = 0
+    for start, end in sorted(covered):
+        if start > pos:
+            runs.append((pos, start))
+        pos = max(pos, end)
+    if pos < length:
+        runs.append((pos, length))
+    return tuple(runs)
+
+
+def _mpo_unrendered(
+    data: bytes, first_end: int, offsets: Iterable[int], budget: _WalkBudget
+) -> tuple[tuple[int, int], ...]:
+    """The runs of an MPO `data` that no frame covers: outside [0, `first_end`) and each later frame's [start, EOI).
+
+    `offsets` are where Pillow reads each frame (absolute; the first at 0). A repeated offset is walked once, all from
+    one `budget`; an offset not at `FF D8 FF` (which Pillow rejects) or whose EOI is not found covers nothing, so its
+    bytes are reported.
+    """
+    ends = {
+        start: _jpeg_end(data, start, budget)
+        for start in sorted(set(offsets) - {0})
+        if data[start : start + 3] == b"\xff\xd8\xff"
+    }
+    return _uncovered(len(data), [(0, first_end), *((start, end) for start, end in ends.items() if end is not None)])
+
+
+def _unrendered_detail(data: bytes, runs: Sequence[tuple[int, int]], where: str) -> str:
+    """The `trailing-data` detail for the bytes in `runs` of `data`, `where` they are (fixed text and counts only: the
+    detail goes to a TSV). What they look like is read from the first run's first `SNIFF_BYTES`."""
+    count = sum(end - start for start, end in runs)
+    head = data[runs[0][0] : min(runs[0][1], runs[0][0] + SNIFF_BYTES)]
+    if all(data.count(b"\x00", start, end) == end - start for start, end in runs):
+        what = "; all zero bytes"
+    elif _has_preamble(head):
+        what = "; they begin with a DICOM preamble"
+    elif head.startswith(b"\xff\xd8\xff"):
+        what = "; they begin with a JPEG signature"
+    elif head.startswith(b"\x89PNG\r\n\x1a\n"):
+        what = "; they begin with a PNG signature"
+    elif _is_raster(head):
+        what = "; they begin with another image signature"
+    else:
+        what = ""
+    return f"{count} bytes {where}{what}"
+
+
+def _trailing_data_notes(data: bytes, image_format: str | None, frame_offsets: Sequence[int] = ()) -> tuple[Note, ...]:
+    """The `trailing-data` note for bytes of a JPEG, MPO or PNG image `data` that are not rendered (none for other
+    formats).
+
+    A JPEG's image ends at its first EOI, a PNG's where Pillow stops reading it (see `_png_end`). An MPO's frames,
+    at `frame_offsets` (see `_mpf_offsets`; none given falls back to the first EOI alone), cover their own
+    [SOI, EOI) ranges, and any byte outside them is counted, between frames or after them (see `_mpo_unrendered`). A
+    JPEG whose first EOI is not found gets `JPEG end not found`. The JPEG walks share one `_WalkBudget`; running out
+    of it gives `TRAILING_DATA_OVER_BUDGET` instead. A failure is itself a note, with only fixed text and the exception
+    class.
+    """
+    try:
+        if image_format not in ("JPEG", "MPO", "PNG"):
+            return ()
+        budget = _WalkBudget.for_data(data)
+        end = _png_end(data) if image_format == "PNG" else _jpeg_end(data, 0, budget)
+        if end is None:
+            return (Note("trailing-data", "JPEG end not found"),)
+        if image_format == "MPO":
+            runs = _mpo_unrendered(data, end, frame_offsets, budget)
+        else:
+            runs = _uncovered(len(data), [(0, end)])
+        if not runs:
+            return ()
+        if len(runs) == 1 and runs[0][1] == len(data):  # one run, at the end: a tail
+            return (Note("trailing-data", _unrendered_detail(data, runs, f"after the {image_format} end")),)
+        return (Note("trailing-data", _unrendered_detail(data, runs, "between or after the MPO's frames")),)
+    except _OverBudget:
+        return (Note("trailing-data", TRAILING_DATA_OVER_BUDGET),)
+    except Exception as e:  # noqa: BLE001 - any failure must surface as a note, never fail or hide the input
+        return (Note("trailing-data", f"trailing data unreadable: {type(e).__name__}"),)
+
+
+def _mpf_offsets(im: Image.Image) -> tuple[int, ...]:
+    """Where Pillow reads each frame of an MPO `im` (absolute offsets, the first 0), from its private
+    `_MpoImageFile__mpoffsets` (Pillow 10.3 to 12.3 at least): its `mpoffset` base is deleted once used, and finding it
+    again could disagree with Pillow on a crafted file. () for other images, or when they cannot be read: the
+    trailing-data check then reports everything after the first EOI, which hides nothing."""
+    if im.format != "MPO":
+        return ()
+    try:
+        return tuple(int(offset) for offset in cast(Any, im)._MpoImageFile__mpoffsets)
+    except Exception:  # noqa: BLE001 - a missing or malformed attribute must not fail the input
+        return ()
 
 
 def _raw_profile_exif(text: str) -> bytes:
@@ -818,7 +1004,8 @@ def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
     YCbCr, P, ...) becomes RGB. There is one view, except for a transparent
     image's colour and alpha (see `_with_alpha`, which also gives the `alpha`
     note; counts are summed over an MPO's frames). The notes also hold any `embedded-thumbnail` notes (see
-    `_embedded_image_notes`; an MPO's later frames are prefixed `frame N: `). A 16-bit
+    `_embedded_image_notes`; an MPO's later frames are prefixed `frame N: `), then any `trailing-data` note (see
+    `_trailing_data_notes`), both read from the file without decoding pixels. A 16-bit
     colour or alpha PNG or 16-bit RGB or CMYK TIFF, which Pillow would truncate
     to its high byte, is decoded at full depth instead (see `_full_depth` and
     `_decode_tiff`); its gray+alpha stays grayscale. An MPO (JPEG with extra MPF images: HDR gain
@@ -830,9 +1017,10 @@ def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
         if frames > 1 and im.format != "MPO":
             raise Unsupported(f"multi-frame image ({frames} frames)")
         embedded = _embedded_image_notes(im, data)  # while `im` is open, before the 16-bit branch below returns
+        trailing = _trailing_data_notes(data, im.format, _mpf_offsets(im))
         if _pillow_truncates(im):
             views, counts = _full_depth(*_png_samples(data)) if im.format == "PNG" else _decode_tiff(data)
-            return views, _alpha_notes(counts) + embedded
+            return views, _alpha_notes(counts) + embedded + trailing
         decoded = []
         for index in range(frames):
             im.seek(index)
@@ -842,9 +1030,10 @@ def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
             im.load()
             decoded.append(_decode_frame(im))
     counts = (sum(c[0] for _, c in decoded), sum(c[1] for _, c in decoded))
+    notes = _alpha_notes(counts) + embedded + trailing
     if len(decoded) == 1:
-        return decoded[0][0], _alpha_notes(counts) + embedded
-    return (_side_by_side([v for views, _ in decoded for v in views], fill=0.0),), _alpha_notes(counts) + embedded
+        return decoded[0][0], notes
+    return (_side_by_side([v for views, _ in decoded for v in views], fill=0.0),), notes
 
 
 def _preprocess_view(img: np.ndarray) -> np.ndarray:

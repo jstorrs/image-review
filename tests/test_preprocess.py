@@ -63,7 +63,14 @@ from image_review.preprocess import (
     WorkerCrashed,
     _escape_name,
     _failed,
+    _jpeg_end,
+    _mpo_unrendered,
+    _png_end,
     _to_uint8,
+    _trailing_data_notes,
+    _uncovered,
+    _unrendered_detail,
+    _WalkBudget,
     classify,
     colliding_ids,
     compress_image,
@@ -85,7 +92,14 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 APPLEDOUBLE = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + bytes(100)
 # SLURM_CPUS_PER_TASK=1 renders in-process, with no worker start-up per run
 CLI_ENV = {"SLURM_CPUS_PER_TASK": "1"}
-NO_NOTES = {"overlay-plane": 0, "overlay-unused-bits": 0, "icon-image": 0, "alpha": 0, "embedded-thumbnail": 0}
+NO_NOTES = {
+    "overlay-plane": 0,
+    "overlay-unused-bits": 0,
+    "icon-image": 0,
+    "alpha": 0,
+    "embedded-thumbnail": 0,
+    "trailing-data": 0,
+}
 
 
 def _good_pixels() -> np.ndarray:
@@ -745,6 +759,28 @@ class NotesTest(unittest.TestCase):
         )
         self.assertEqual(result.notes, {**NO_NOTES, "embedded-thumbnail": 2})
         self.assertEqual(len(self.written()), 2)
+
+    def test_trailing_data_is_noted_and_the_input_still_written(self):
+        first, second = (
+            _jpeg_bytes(np.zeros((8, 8, 3), dtype=np.uint8)),
+            _jpeg_bytes(np.ones((8, 8, 3), dtype=np.uint8)),
+        )
+        (self.src / "a.jpg").write_bytes(first + second)
+        (self.src / "b.jpg").write_bytes(first)  # plain: no note
+        result = self.run_quietly()
+        self.assertEqual(
+            self.notes(),
+            [
+                [
+                    (self.src / "a.jpg").as_posix(),
+                    "trailing-data",
+                    f"{len(second)} bytes after the JPEG end; they begin with a JPEG signature",
+                ]
+            ],
+        )
+        self.assertEqual(result.notes, {**NO_NOTES, "trailing-data": 1})
+        self.assertEqual(len(self.written()), 2)
+        self.assertEqual(result.skipped, [])
 
     def test_overlay_plane_is_noted_and_counted(self):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000)
@@ -1690,6 +1726,328 @@ def _decode_joined(data: bytes) -> tuple[np.ndarray, tuple[Note, ...]]:
 
 def _decoded(data: bytes) -> np.ndarray:
     return _decode_joined(data)[0]
+
+
+def _gradient_jpeg(**options) -> bytes:
+    """A JPEG with real entropy-coded data (a gradient, not a flat image), saved with Pillow `options`."""
+    buf = io.BytesIO()
+    Image.linear_gradient("L").resize((200, 150)).convert("RGB").save(buf, "JPEG", **options)
+    return buf.getvalue()
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload))
+
+
+def _mpo_with_frame1_at(mpo: bytes, offset: int) -> bytes:
+    """`mpo` (from `_mpo_bytes`) with its second MPF entry's DataOffset set to `offset` (relative, as stored)."""
+    with Image.open(io.BytesIO(mpo)) as im:
+        entry = im.mpinfo[0xB002][1]
+    old = struct.pack("<LL", entry["Size"], entry["DataOffset"])
+    assert mpo.count(old) == 1
+    return mpo.replace(old, struct.pack("<LL", entry["Size"], offset))
+
+
+class ImageEndTest(unittest.TestCase):
+    """`_jpeg_end`, `_png_end` and `_mpo_unrendered` find where an image's rendered bytes end."""
+
+    def test_jpeg_end_is_the_file_end_for_whole_files(self):
+        for name, options in (
+            ("baseline", {}),
+            ("progressive", {"progressive": True}),
+            ("restart blocks", {"restart_marker_blocks": 1}),
+            ("restart rows", {"restart_marker_rows": 1}),
+        ):
+            with self.subTest(name):
+                data = _gradient_jpeg(**options)
+                self.assertEqual(_jpeg_end(data), len(data))
+                self.assertEqual(_jpeg_end(data + data), len(data))  # the first image's end
+                self.assertEqual(_jpeg_end(b"xyz" + data, 3), 3 + len(data))
+        self.assertIn(b"\xff\xd0", _gradient_jpeg(restart_marker_blocks=1))
+        self.assertEqual(_gradient_jpeg(progressive=True).count(b"\xff\xda"), 10)  # several scans
+
+    def test_jpeg_fill_bytes_stray_bytes_and_short_lengths_are_passed_over(self):
+        data = _gradient_jpeg()
+        sos = data.index(b"\xff\xda")
+        for name, patched in (
+            ("fill before SOS", data[:sos] + b"\xff\xff\xff" + data[sos:]),
+            ("fill before EOI", data[:-2] + b"\xff\xff" + data[-2:]),
+            ("stray before SOS", data[:sos] + b"\x00\x12" + data[sos:]),
+            ("APP1 length 0", data[:2] + b"\xff\xe1\x00\x00" + data[2:]),
+            ("APP0 length 1", data[:2] + b"\xff\xe0\x00\x01" + data[2:]),
+            ("COM length 0", data[:2] + b"\xff\xfe\x00\x00" + data[2:]),
+            ("COM length 1", data[:2] + b"\xff\xfe\x00\x01" + data[2:]),
+        ):
+            with self.subTest(name):
+                self.assertEqual(_jpeg_end(patched), len(patched))
+                self.assertEqual(_jpeg_end(patched + data), len(patched))
+
+    def test_jpeg_end_is_none_when_truncated_or_malformed(self):
+        data = _gradient_jpeg()
+        sos = data.index(b"\xff\xda")
+        for name, bad in (
+            ("empty", b""),
+            ("not a JPEG", b"not a jpeg at all"),
+            ("SOI only", b"\xff\xd8"),
+            ("no EOI", data[:-2]),
+            ("cut in the header", data[:sos]),
+            ("cut in a segment", data[:30]),
+            ("cut in a length", data[:5]),
+            ("length past the end", b"\xff\xd8\xff\xe0\xff\xff\xff\xd9"),
+            ("nested SOI", data[:sos] + b"\xff\xd8" + data[sos:]),
+            ("garbage after SOI", b"\xff\xd8" + bytes(range(256)) * 4),
+        ):
+            with self.subTest(name):
+                self.assertIsNone(_jpeg_end(bad))
+        self.assertIsNone(_jpeg_end(data, len(data) + 10))
+
+    def test_png_end_is_where_pillow_stops_reading(self):
+        png = _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8))
+        with_chunk = _png_with_exif_after_pixels(png, _exif_ifd1([]))  # a chunk after the pixels
+        huge = png[:8] + struct.pack(">I4s", 0xFFFFFFFF, b"tEXt") + png[8:]
+        for name, data, end in (
+            ("whole", png, len(png)),
+            ("bytes after IEND", png + b"tail", len(png)),
+            ("a chunk after the pixels", with_chunk + b"tail", len(with_chunk)),
+            ("no IEND", png[:-12], len(png) - 12),
+            ("IEND's CRC cut", png[:-1], len(png) - 1),
+            ("an invalid chunk type", png[:-12] + b"Patient: DOE^JANE " * 3, len(png) - 12),
+            ("a JPEG before IEND", png[:-12] + _gradient_jpeg() + png[-12:], len(png) - 12),
+            ("a chunk past the end", huge, 8),
+            ("a chunk header cut", png[:-12] + png[-12:-6], len(png) - 12),
+            ("signature only", png[:8], 8),
+            ("an IEND with data", png[:-12] + _png_chunk(b"IEND", b"secret"), len(png) - 4),
+            ("an IEND past the end", png[:-12] + struct.pack(">I4s", 0xFFFFFFF0, b"IEND") + b"secret", len(png) - 4),
+        ):
+            with self.subTest(name):
+                self.assertEqual(_png_end(data), end)
+
+    def test_jpeg_end_spends_its_budget(self):
+        data = _gradient_jpeg(progressive=True)
+        budget = _WalkBudget(markers=10**6, search_bytes=10**9)
+        self.assertEqual(_jpeg_end(data, 0, budget), len(data))
+        markers, searched = 10**6 - budget.markers, 10**9 - budget.search_bytes
+        self.assertGreater(markers, 10)  # one per segment, through every scan
+        self.assertLess(searched, len(data))  # each byte searched at most once, segments skipped
+        for name, budget in (
+            ("too few markers", _WalkBudget(markers=markers - 1, search_bytes=10**9)),
+            ("too few bytes", _WalkBudget(markers=10**6, search_bytes=searched - 1)),
+        ):
+            with self.subTest(name), self.assertRaises(preprocess_module._OverBudget):
+                _jpeg_end(data, 0, budget)
+        self.assertEqual(_jpeg_end(data, 0, _WalkBudget(markers=markers, search_bytes=searched)), len(data))
+
+    def test_uncovered_runs(self):
+        self.assertEqual(_uncovered(10, [(5, 7), (0, 3)]), ((3, 5), (7, 10)))
+        self.assertEqual(_uncovered(10, [(0, 6), (2, 4), (6, 10)]), ())
+        self.assertEqual(_uncovered(10, [(0, 4), (2, 8)]), ((8, 10),))
+
+    def test_mpo_frames_cover_their_own_ranges_only(self):
+        mpo = _mpo_bytes()
+        first = _jpeg_end(mpo)
+        assert first is not None
+        self.assertEqual(_mpo_unrendered(mpo, first, budget=_WalkBudget.for_data(mpo), offsets=(0, first)), ())
+        self.assertEqual(
+            _mpo_unrendered(mpo, first, budget=_WalkBudget.for_data(mpo), offsets=(0, first, first, 0)), ()
+        )  # repeats walked once
+        for name, offsets in (
+            ("no frames", ()),
+            ("first only", (0,)),
+            ("not at FF D8 FF", (0, first + 1)),
+            ("past the end", (0, 10**9)),
+        ):
+            with self.subTest(name):
+                self.assertEqual(
+                    _mpo_unrendered(mpo, first, budget=_WalkBudget.for_data(mpo), offsets=offsets), ((first, len(mpo)),)
+                )
+        twice, second = mpo + b"gap" + mpo, len(mpo) + 3
+        self.assertEqual(
+            _mpo_unrendered(twice, first, budget=_WalkBudget.for_data(twice), offsets=(0, second)),
+            ((first, second), (second + first, len(twice))),
+        )  # the gap and the first file's second frame, then the second file's
+
+    def test_unrendered_details(self):
+        dicom_head = bytes(128) + b"DICM" + b"\x02\x00"
+        for tail, detail in (
+            (bytes(10), "10 bytes after the JPEG end; all zero bytes"),
+            (_gradient_jpeg()[:20], "20 bytes after the JPEG end; they begin with a JPEG signature"),
+            (PNG_MAGIC + b"x", "9 bytes after the JPEG end; they begin with a PNG signature"),
+            (dicom_head, "134 bytes after the JPEG end; they begin with a DICOM preamble"),
+            (b"GIF89a\x01\x00", "8 bytes after the JPEG end; they begin with another image signature"),
+            (b"\tsecret\nname\x00", "13 bytes after the JPEG end"),  # never the bytes themselves
+        ):
+            with self.subTest(detail=detail):
+                data = b"image" + tail
+                self.assertEqual(_unrendered_detail(data, ((5, len(data)),), "after the JPEG end"), detail)
+        data = b"ab\x00\x00cd\x00e"
+        self.assertEqual(_unrendered_detail(data, ((2, 4), (6, 7)), "x"), "3 bytes x; all zero bytes")
+        self.assertEqual(_unrendered_detail(data, ((2, 4), (7, 8)), "x"), "3 bytes x")
+
+
+class TrailingDataTest(unittest.TestCase):
+    """Bytes of a JPEG or PNG that are not rendered are noted, and change nothing else."""
+
+    def assert_noted(self, data: bytes, tail: bytes, detail: str, before: tuple[Note, ...] = ()):
+        self.assertEqual(decode_raster(data)[1], before)
+        self.assert_renders_as(data + tail, data, detail, before)
+
+    def assert_renders_as(self, data: bytes, plain: bytes, detail: str, before: tuple[Note, ...] = ()):
+        """`data` renders as `plain` does, with the `trailing-data` note `detail` after the notes `before`."""
+        views, notes = decode_raster(data)
+        self.assertEqual(notes, (*before, Note("trailing-data", detail)))
+        plain_views = decode_raster(plain)[0]
+        self.assertEqual(len(views), len(plain_views))
+        for view, plain_view in zip(views, plain_views, strict=True):
+            np.testing.assert_array_equal(view, plain_view)
+        np.testing.assert_array_equal(
+            render("raster", "id", data, "inferno").rgb, render("raster", "id", plain, "inferno").rgb
+        )
+
+    def test_a_second_jpeg_appended_to_a_jpeg(self):
+        second = _jpeg_bytes(np.zeros((8, 8, 3), dtype=np.uint8))
+        self.assert_noted(
+            _gradient_jpeg(), second, f"{len(second)} bytes after the JPEG end; they begin with a JPEG signature"
+        )
+
+    def test_a_segment_of_length_0_or_1_does_not_hide_an_appended_jpeg(self):
+        data, second = _gradient_jpeg(), _jpeg_bytes(np.zeros((8, 8, 3), dtype=np.uint8))
+        detail = f"{len(second)} bytes after the JPEG end; they begin with a JPEG signature"
+        for segment in (b"\xff\xe1\x00\x00", b"\xff\xe0\x00\x01", b"\xff\xfe\x00\x00", b"\xff\xfe\x00\x01"):
+            with self.subTest(segment=segment.hex()):
+                patched = data[:2] + segment + data[2:]
+                self.assert_renders_as(patched + second, patched, detail)
+
+    def test_a_jpeg_whose_end_is_not_found_is_noted(self):
+        data, second = _gradient_jpeg(), _jpeg_bytes(np.zeros((8, 8, 3), dtype=np.uint8))
+        for name, bad in (
+            ("text instead of EOI", data[:-2] + b"secret patient name"),
+            ("a comment swallowing EOI", data[:-2] + b"\xff\xfe\xff\xff" + data[-2:] + second),
+        ):
+            with self.subTest(name):
+                self.assertEqual(decode_raster(bad)[1], (Note("trailing-data", "JPEG end not found"),))
+        for bad in (data[:-2] + second, data[:-300]):  # a nested SOI, a cut scan: Pillow fails these
+            self.assertEqual(_trailing_data_notes(bad, "JPEG"), (Note("trailing-data", "JPEG end not found"),))
+
+    def test_bytes_after_a_png(self):
+        for name, png in (
+            ("8-bit", _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8))),
+            ("16-bit", imagecodecs.png_encode(np.full((40, 60, 3), 4000, dtype=np.uint16))),
+        ):
+            with self.subTest(name):
+                self.assert_noted(png, b"secret", "6 bytes after the PNG end")
+                self.assert_noted(png, PNG_MAGIC, "8 bytes after the PNG end; they begin with a PNG signature")
+
+    def test_bytes_where_pillow_stops_reading_a_png(self):
+        png, jpeg = _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)), _gradient_jpeg()
+        text = b"Patient: DOE^JANE MRN 12345 " * 3
+        for name, data, detail in (
+            ("text instead of IEND", png[:-12] + text, f"{len(text)} bytes after the PNG end"),
+            (
+                "a JPEG before IEND",
+                png[:-12] + jpeg + png[-12:],
+                f"{len(jpeg) + 12} bytes after the PNG end; they begin with a JPEG signature",
+            ),
+            (
+                "a JPEG instead of IEND",
+                png[:-12] + jpeg,
+                f"{len(jpeg)} bytes after the PNG end; they begin with a JPEG signature",
+            ),
+        ):
+            with self.subTest(name):
+                self.assert_renders_as(data, png, detail)
+        for name, data in (("no IEND", png[:-12]), ("IEND's CRC cut", png[:-2])):
+            with self.subTest(name):
+                self.assertEqual(decode_raster(data)[1], ())
+
+    def test_data_inside_iend_is_noted(self):
+        jpeg = _gradient_jpeg()
+        for name, png in (
+            ("8-bit", _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8))),
+            ("16-bit", imagecodecs.png_encode(np.full((40, 60, 3), 4000, dtype=np.uint16))),
+        ):
+            for iend, count in (
+                (_png_chunk(b"IEND", jpeg), len(jpeg) + 4),  # its data and CRC
+                (struct.pack(">I4s", 0xFFFFFFF0, b"IEND") + jpeg, len(jpeg)),  # a length past the end
+            ):
+                with self.subTest(name, count=count):
+                    detail = f"{count} bytes after the PNG end; they begin with a JPEG signature"
+                    self.assert_renders_as(png[:-12] + iend, png, detail)
+
+    def test_zero_padding_is_noted(self):
+        self.assert_noted(_gradient_jpeg(), bytes(4096), "4096 bytes after the JPEG end; all zero bytes")
+
+    def test_progressive_jpeg_and_restart_markers_have_no_note(self):
+        for options in ({"progressive": True}, {"restart_marker_blocks": 1}):
+            with self.subTest(options=options):
+                self.assertEqual(decode_raster(_gradient_jpeg(**options))[1], ())
+
+    def test_mpo_frames_are_not_trailing_data(self):
+        self.assertEqual(decode_raster(_mpo_bytes())[1], ())
+        self.assert_noted(_mpo_bytes(), b"junk", "4 bytes after the MPO end")
+        exif = _exif_with_thumbnail()
+        thumbnail = Note("embedded-thumbnail", f"frame 1: EXIF IFD1 thumbnail ({_thumbnail_len(exif)} bytes)")
+        self.assert_noted(_mpo_bytes(exif), bytes(3), "3 bytes after the MPO end; all zero bytes", (thumbnail,))
+
+    def test_bytes_between_mpo_frames_are_noted(self):
+        mpo, jpeg = _mpo_bytes(), _gradient_jpeg()
+        first = _jpeg_end(mpo)
+        assert first is not None
+        with Image.open(io.BytesIO(mpo)) as im:
+            offset = im.mpinfo[0xB002][1]["DataOffset"]
+        inserted = _mpo_with_frame1_at(mpo, offset + len(jpeg))
+        self.assert_renders_as(
+            inserted[:first] + jpeg + inserted[first:],
+            mpo,
+            f"{len(jpeg)} bytes between or after the MPO's frames; they begin with a JPEG signature",
+        )
+        repointed = _mpo_with_frame1_at(mpo, offset + len(mpo) - first) + jpeg  # the second frame is left in a gap
+        _, notes = decode_raster(repointed)
+        detail = f"{len(mpo) - first} bytes between or after the MPO's frames; they begin with a JPEG signature"
+        self.assertEqual(notes, (Note("trailing-data", detail),))
+
+    def test_mpo_with_unreadable_frame_offsets_falls_back_to_the_first_eoi(self):
+        mpo = _mpo_bytes()
+        first = _jpeg_end(mpo)
+        assert first is not None
+        with Image.open(io.BytesIO(mpo)) as im:
+            self.assertEqual(preprocess_module._mpf_offsets(im), (0, first))  # Pillow's own, absolute
+            for offsets in (None, [None], "x"):
+                with self.subTest(offsets=offsets):
+                    im._MpoImageFile__mpoffsets = offsets
+                    self.assertEqual(preprocess_module._mpf_offsets(im), ())
+            del im._MpoImageFile__mpoffsets
+            self.assertEqual(preprocess_module._mpf_offsets(im), ())
+        self.assertEqual(
+            _trailing_data_notes(mpo, "MPO"),
+            (Note("trailing-data", f"{len(mpo) - first} bytes after the MPO end; they begin with a JPEG signature"),),
+        )
+
+    def test_a_check_over_budget_is_a_fixed_text_note_and_the_input_still_renders(self):
+        data, mpo = _gradient_jpeg(), _mpo_bytes()
+        note = (Note("trailing-data", "not checked: too many JPEG markers or frames"),)
+        for name, patches in (
+            ("markers", {"JPEG_WALK_MAX_MARKERS": 3}),
+            ("bytes", {"JPEG_WALK_SEARCH_FACTOR": 0, "JPEG_WALK_SEARCH_SLACK": 10}),
+        ):
+            for plain in (data, mpo):
+                with self.subTest(name, mpo=plain is mpo), mock.patch.multiple(preprocess_module, **patches):
+                    views, notes = decode_raster(plain + b"junk")
+                    self.assertEqual(notes, note)
+                    for view, plain_view in zip(views, decode_raster(plain)[0], strict=True):
+                        np.testing.assert_array_equal(view, plain_view)
+
+    def test_other_formats_are_not_checked(self):
+        buf = io.BytesIO()
+        Image.new("RGB", (60, 40)).save(buf, "GIF")
+        self.assertEqual(decode_raster(buf.getvalue() + b"secret")[1], ())
+        self.assertEqual(_trailing_data_notes(b"anything", "TIFF"), ())
+
+    def test_a_failure_is_a_fixed_text_note_and_the_input_still_renders(self):
+        data = _gradient_jpeg() + b"junk"
+        with mock.patch.object(preprocess_module, "_jpeg_end", side_effect=RuntimeError("tab\there")):
+            views, notes = decode_raster(data)
+        self.assertEqual(notes, (Note("trailing-data", "trailing data unreadable: RuntimeError"),))
+        np.testing.assert_array_equal(views[0], decode_raster(_gradient_jpeg())[0][0])
 
 
 class DecodeRasterTest(unittest.TestCase):

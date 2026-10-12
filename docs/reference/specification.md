@@ -311,7 +311,7 @@ Only rendered images are compared: a `failed` or `ignored` row sharing an
 
 **Notes.** A note (`Note(kind, detail)`, `kind` a `NoteKind`,
 `Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha",
-"embedded-thumbnail"]`,
+"embedded-thumbnail", "trailing-data"]`,
 the DICOM kinds first and then the raster kinds, listed in that order by
 `NOTE_KINDS`) records something a rendered input holds that downstream
 tools should know about or strip, written whether or not an overlay is drawn; the kinds and their details are in
@@ -329,9 +329,11 @@ Rows, Columns and PhotometricInterpretation (`?` when missing, each value cut
 to 64 characters plus `…`), inside a
 catch-all so a bad icon gives an `unreadable (<ExceptionClass>)` detail and
 never fails the input. A raster's notes are `alpha` (see the alpha rule
-under *Raster decoding*) and `embedded-thumbnail` (see *Embedded images*
-under *Raster preprocessing*): `decode_raster` returns them with the image,
-`alpha` first, with detail `N of M pixels not opaque`, N the pixels with
+under *Raster decoding*), `embedded-thumbnail` (see *Embedded images*
+under *Raster preprocessing*) and `trailing-data` (see *Trailing data*
+there): `decode_raster` returns them with the image, in that order (an
+MPO's later-frame `embedded-thumbnail` notes before `trailing-data`),
+`alpha` with detail `N of M pixels not opaque`, N the pixels with
 alpha below 1 and M all the pixels of the images that had alpha. Notes travel with the image
 through `Rendered`, `Encoded` (so from pool workers) and the staged image;
 when the JPGs are placed (see *Batching*), each placed input's notes become
@@ -498,6 +500,78 @@ at a set bit.
   thumbnails, Photoshop APP13 thumbnails, and EXIF so malformed that Pillow
   returns no tags without a warning. A plain JPEG gets no note, nor does an
   MPO without EXIF thumbnails
+- Trailing data (*Trailing data*): `_trailing_data_notes(data, format,
+  frame_offsets)`, called beside `_embedded_image_notes` while the Pillow
+  image is open and before the 16-bit branch, gives one `trailing-data` note
+  when a JPEG, MPO or PNG holds bytes that are not rendered; other formats
+  are not checked. It reads only `data`, `im.format` and (for an MPO)
+  Pillow's frame offsets, so no pixel is decoded and the image is not
+  touched. The rule is that every byte outside the image's segment or
+  chunk structure is counted: over-reporting is acceptable, a miss is not.
+  Payloads inside that structure (JPEG APP and COM segments, PNG ancillary
+  chunks) are not counted, even when they hold an image. The ends are found
+  by pure walkers, every read bounded by the length of `data`, the position
+  only moving forward and nothing allocated from a declared length:
+  - `_jpeg_end(data, start=0, budget=None)`: from SOI, marker segments are
+    skipped by their length. Between them, the next marker is found by a
+    compiled regex search for 0xFF followed by a byte other than 0x00
+    (stuffing), 0x01 (TEM), 0xD0-0xD7 (RSTn) or 0xFF (fill), so
+    entropy-coded data, a progressive file's several SOS and DHT segments
+    between scans, and stray bytes (which Pillow and libjpeg skip too) cost
+    a C-level scan. A segment declaring a length of 0
+    or 1 is passed over after its two length bytes, as Pillow and libjpeg
+    do. The end is just past the first EOI; there is none (None) at the end
+    of `data`, at a nested SOI, or at a segment that runs past the end.
+    Each marker stepped to and each byte searched is spent from a
+    `_WalkBudget`, one per input shared by all its JPEG walks (an MPO's
+    frames): at most `JPEG_WALK_MAX_MARKERS` (100,000) markers and
+    `JPEG_WALK_SEARCH_FACTOR` (4) times the file's size plus
+    `JPEG_WALK_SEARCH_SLACK` (1 MiB) bytes searched, a search never
+    reaching past what is left. Running out raises `_OverBudget`, and the
+    input's note is then `not checked: too many JPEG markers or frames`
+    (`TRAILING_DATA_OVER_BUDGET`), which over-reports and never hides
+    data. Time and memory so stay linear in the file's size. Real files
+    are far under: a 31 MB noise JPEG, progressive and restart-marker
+    files, and a three-frame Pillow MPO step over 10 to 28 markers and
+    search each byte once.
+  - `_png_end(data)`: the chunks (`_png_chunks`, shared with `_png_exif`:
+    length, type, data, CRC after the 8-byte signature) are walked to where
+    Pillow stops: just past IEND's 8-byte header, which is all Pillow reads
+    of it, so data that IEND declares counts (an empty IEND's CRC does not:
+    the end is just past it, or the end of `data` if that CRC is cut short);
+    else the start of the first chunk whose type is not four `[A-Za-z0-9_]`
+    bytes or whose data and CRC run past the end; else where the walk ends.
+    A PNG missing only IEND, with nothing after its last chunk, therefore
+    gets no note.
+  - An MPO's frames are where Pillow reads them: its private
+    `_MpoImageFile__mpoffsets` (absolute, the first 0; present from Pillow
+    10.3 to 12.3), read in `_mpf_offsets` inside a catch-all. Pillow deletes
+    its `mpoffset` base from `info` after use, and finding the base again
+    from the file could disagree with Pillow on a crafted file. If the
+    offsets cannot be read, none are used, so everything after the first
+    EOI is reported. `_mpo_unrendered` covers [0, first EOI) and each later
+    frame's [start, EOI): repeated offsets are walked once, all from the
+    input's one budget, and an offset not at `FF D8 FF` (which Pillow
+    rejects) or whose EOI is not found covers nothing. Every other byte counts (`_uncovered`), between frames or after
+    them. The entries' Size is not used: an end the file declares could
+    cover bytes no frame decodes.
+
+  A JPEG or MPO whose first EOI is not found gets `JPEG end not found`
+  (cut-off JPEGs fail to render, so this reaches only inputs that render
+  while holding bytes the decoder did not need). Otherwise, with no
+  uncovered bytes, there is no note. One run at the end of the file gives
+  `N bytes after the <FORMAT> end` (`JPEG`, `MPO` or `PNG`), any other
+  MPO runs `N bytes between or after the MPO's frames`, N the bytes in all
+  runs (`_unrendered_detail`). Then `; all zero bytes` when every counted
+  byte is zero, or else, from the first `SNIFF_BYTES` of the first run, `;
+  they begin with a DICOM preamble` (`_has_preamble`), `; they begin with a
+  JPEG signature`, `; they begin with a PNG signature` or `; they begin with
+  another image signature` (`_is_raster`); otherwise nothing. A walk over
+  budget gives `not checked: too many JPEG markers or frames`. Any exception
+  gives `trailing data unreadable: <ExceptionClass>` and never changes
+  whether the input renders. The counted bytes are never quoted, so the
+  detail is safe in a TSV. A tables-only `SOI ... EOI` prefix before the
+  image makes the image itself count, which errs on the safe side
 - High-bit-depth grayscale (`I;16*` scaled by 65535, `I`/`F` min-max scaled)
   keeps its full range; a mode `F` image holding NaN or infinity raises
   `unsupported: non-finite pixel values (1 NaN, 0 infinite)`; a `tRNS` colour

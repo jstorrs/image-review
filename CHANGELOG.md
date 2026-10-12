@@ -155,8 +155,17 @@ Read **Upgrading** first.
   `120 of 2400 pixels not opaque`), and `embedded-thumbnail` for a raster with
   an EXIF IFD1 thumbnail (detail `EXIF IFD1 thumbnail (4096 bytes)`) or
   TIFF SubIFDs (`TIFF SubIFDs (2)`), or whose EXIF cannot be read (`EXIF
-  unreadable: corrupt`); the thumbnails are not rendered. Notes never fail an
-  input or change the exit status. When there are any, the summary line ends with
+  unreadable: corrupt`); the thumbnails are not rendered. `trailing-data` is
+  for a JPEG or PNG holding bytes that are not rendered: after the image
+  (detail `2048 bytes after the JPEG end`), between or after an MPO's frames
+  (`N bytes between or after the MPO's frames`), either followed by `; all
+  zero bytes` or `; they begin with a JPEG signature` (or `a PNG
+  signature`, `a DICOM preamble`, `another image signature`); `JPEG end not
+  found` for a JPEG that renders without a findable EOI; `not checked: too
+  many JPEG markers or frames` for one too costly to walk; or `trailing data
+  unreadable: <ExceptionClass>`. Other formats are not checked. Notes
+  never fail an input or change the exit status. When there are any, the
+  summary line ends with
   `; N notes (K overlay-plane, J icon-image; see .../notes.tsv)`, and
   `preprocess.json` gains `counts.notes`, the count of every kind. The file
   holds source paths: treat it like `manifest.tsv`.

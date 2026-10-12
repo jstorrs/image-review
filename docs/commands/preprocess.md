@@ -248,6 +248,7 @@ holds source paths.
 | `icon-image` | A DICOM with an embedded icon image (IconImageSequence (0088,0200)) | `IconImageSequence: 64x64 MONOCHROME2` |
 | `alpha` | A raster with pixels that are not fully opaque | `120 of 2400 pixels not opaque` |
 | `embedded-thumbnail` | A raster with an embedded thumbnail or SubIFDs that are not rendered | `EXIF IFD1 thumbnail (4096 bytes)`, `TIFF SubIFDs (2)`, or `EXIF unreadable: corrupt` (all forms below) |
+| `trailing-data` | A JPEG or PNG holding bytes that are not rendered, such as after the end of its image | `2048 bytes after the JPEG end; they begin with a JPEG signature` (all forms below) |
 
 - **`overlay-plane`**: the review image is the pixel data alone, so overlay
   planes are not reviewed (unless `--draw-overlays` draws them; see
@@ -307,6 +308,43 @@ holds source paths.
   (N from 1). Not detected: JFIF/JFXX APP0 thumbnails, Photoshop APP13
   thumbnails, and a PNG "Raw profile type exif" chunk placed after the
   pixel data.
+- **`trailing-data`**: bytes of a JPEG or PNG that the decoder never reads
+  are not reviewed, whatever they hold (a whole second image appended to
+  the file, say): strip them before releasing files. A JPEG's image ends at
+  its EOI marker; a PNG's at the header of its IEND chunk (data that IEND
+  itself declares is never read, so it counts), or where the decoder stops
+  reading it (a chunk whose type is not four letters, digits or `_`, or one
+  that runs past the end of the file). An MPO's frames (rendered side by
+  side) cover their own bytes, so any byte outside every frame counts:
+  after them or between them. Only the file's bytes are read, and a note
+  may over-report but is not meant to miss anything. The detail is one of
+  these forms, with `JPEG`, `MPO` or `PNG` for the input's format and N the
+  number of bytes:
+  - `N bytes after the JPEG end`: anything at the end of the file. The
+    bytes themselves are never quoted.
+  - `N bytes between or after the MPO's frames`: an MPO's bytes outside
+    its frames that are not one run at the end of the file.
+  - Either of these followed by `; all zero bytes` (padding), or by `; they
+    begin with a JPEG signature`, `a PNG signature`, `a DICOM preamble` or
+    `another image signature`: what the first bytes look like.
+  - `JPEG end not found`: the JPEG renders, but its EOI cannot be found
+    (text in place of EOI, a segment that runs past the end of the file),
+    so the bytes the decoder did not need cannot be told apart.
+  - `not checked: too many JPEG markers or frames`: the JPEG has so many
+    marker segments, or an MPO so many frames, that walking it would take
+    too long (real files are far under the limits: 100,000 markers, and
+    about four times the file's size searched), so it was not checked and
+    may hold anything after its image.
+  - `trailing data unreadable: <ExceptionClass>`: the check failed; the
+    input still renders.
+
+  Not detected: unrendered bytes in any format other than JPEG, MPO and
+  PNG, and payloads inside the file's own structure, which are skipped by
+  their declared length: JPEG APP and COM segments (a COM after the image
+  data holding a whole JPEG, say) and PNG ancillary chunks. A JPEG with
+  tables-only data before its image (`SOI ... EOI` then the image) is
+  reported as if the image itself were trailing data, which errs on the
+  safe side.
 
 ## Rendering pipeline
 
