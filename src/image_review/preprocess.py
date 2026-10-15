@@ -22,7 +22,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from itertools import groupby
+from itertools import groupby, pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, assert_never, cast, get_args
 from zipfile import ZIP_BZIP2, ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, ZipFile, ZipInfo
@@ -34,13 +34,18 @@ import pydicom
 import skimage as ski
 import tifffile
 from PIL import ExifTags, Image, JpegImagePlugin, MpoImagePlugin, PngImagePlugin, TiffImagePlugin
+from pydicom.encaps import generate_fragmented_frames
 from pydicom.errors import InvalidDicomError
 from pydicom.uid import (
     UID,
     ExplicitVRBigEndian,
     ExplicitVRLittleEndian,
     ImplicitVRLittleEndian,
+    JPEG2000TransferSyntaxes,
+    JPEGLSTransferSyntaxes,
+    JPEGTransferSyntaxes,
     MediaStorageDirectoryStorage,
+    RLELossless,
 )
 from scipy import ndimage as ndi
 from tqdm import tqdm
@@ -124,13 +129,42 @@ _PNG_TRUNCATED_RAWMODES = {"RGB;16B", "LA;16B", "RGBA;16B"}
 _PNG_CHUNK_TYPE = re.compile(rb"[A-Za-z0-9_]{4}")  # Pillow stops reading at a chunk type that is not this
 # One input's trailing-data check, all its JPEG walks together, steps over at most this many markers and searches at
 # most FACTOR x its size + SLACK bytes; past either it is not checked, and says so. Real files use a few hundred
-# markers at most (tens, in practice) and search each byte about once.
+# markers at most (tens, in practice) and search each byte about once. A compressed DICOM frame's walk to its JPEG
+# frame header has the same budget.
 JPEG_WALK_MAX_MARKERS = 100_000  # about half a second of walking
 JPEG_WALK_SEARCH_FACTOR = 4
 JPEG_WALK_SEARCH_SLACK = 1 << 20
 TRAILING_DATA_OVER_BUDGET = "not checked: too many JPEG markers or frames"
 # A JPEG marker: FF then a byte that is not stuffing (00), TEM (01), RST0-7 or another FF (fill)
 _JPEG_MARKER = re.compile(rb"\xff[^\x00\x01\xd0-\xd7\xff]")
+# A JPEG or JPEG-LS frame header: SOF0-15 bar DHT (C4), JPG (C8) and DAC (CC); DHP (DE), which gives a hierarchical
+# image's final size; and JPEG-LS SOF55 (F7). Each holds precision, height, width and the number of components.
+_JPEG_FRAME_MARKERS = frozenset({*range(0xC0, 0xD0)} - {0xC4, 0xC8, 0xCC} | {0xDE, 0xF7})
+_JP2_SIGNATURE = b"\x00\x00\x00\x0cjP  \r\n\x87\n"  # the JP2 file format's first box; the codestream is in `jp2c`
+# JPEG 2000 code-blocks, each capped by its precinct, of fewer than 2**this pixels are refused: OpenJPEG allocates a
+# few hundred bytes per code-block, so 1 x 1 blocks need hundreds of bytes per pixel. Coders use 64 x 64 (2**12).
+_J2K_MIN_CODE_BLOCK_LOG2 = 8
+# A COD of more than this many quality layers is refused: OpenJPEG allocates per layer, resolution, component and
+# precinct. Coders write one or a few (the most seen: 6); at 256, OpenJPEG measured no more than for one layer.
+_J2K_MAX_LAYERS = 256
+_J2K_TLM = 0xFF55
+_J2K_MAX_TLM_BYTES = 1 << 20  # TLM bodies, all together: OpenJPEG keeps about 10 bytes per byte; real ones are tiny
+_J2K_MAX_TILE_PARTS = 1 << 20  # tile-parts walked for coding parameters; OpenJPEG decodes at most 65535 tiles
+_J2K_SOT, _J2K_SOD, _J2K_EOC, _J2K_COD, _J2K_COC = 0xFF90, 0xFF93, 0xFFD9, 0xFF52, 0xFF53
+# The marker segments a JPEG 2000 Part 1 or HTJ2K (Part 15) codestream may have after SIZ in its main header (CAP,
+# COD, COC, TLM, PLM, CPF, QCD, QCC, RGN, POC, PPM, CRG, COM) and in a tile-part header (COD, COC, PLT, QCD, QCC, RGN,
+# POC, PPT, COM). Any other is refused: OpenJPEG skips an unknown one by scanning for the next marker it knows, not by
+# its length, so it could find a COD the check steps over; and Part 2's (MCT, MCC, MCO, ATK, ...) are copied into
+# every tile, which DICOM's JPEG 2000 transfer syntaxes that pydicom decodes do not allow anyway. CAP and CPF are
+# allowed because every installed decoder reads them by length (gdcm's OpenJPEG 2.3.0, pylibjpeg, Pillow); a Pillow
+# linked to OpenJPEG before 2.5 would scan them as unknown, but it is pydicom's last fallback.
+_J2K_MAIN_MARKERS = frozenset(
+    {0xFF50, 0xFF52, 0xFF53, 0xFF55, 0xFF57, 0xFF59, 0xFF5C, 0xFF5D, 0xFF5E, 0xFF5F, 0xFF60, 0xFF63, 0xFF64}
+)
+_J2K_TILE_MARKERS = frozenset({0xFF52, 0xFF53, 0xFF58, 0xFF5C, 0xFF5D, 0xFF5E, 0xFF5F, 0xFF61, 0xFF64})
+_RLE_NO_OPS = re.compile(rb"\x80+")  # RLE run headers that decode to nothing
+_RLE_HEADER_BYTES = 64  # the segment count and 15 segment offsets, each a little-endian uint32
+_RLE_MAX_SEGMENTS = 15
 _PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
 PROVENANCE_NAME = "preprocess.json"
 NOTES_NAME = "notes.tsv"
@@ -496,13 +530,276 @@ def _overlay_plane_pixels(dcm: pydicom.FileDataset) -> int:
     return total
 
 
+def _unreadable(what: str) -> Unsupported:
+    """The failure for compressed pixel data whose header cannot be found or parsed; `what` is fixed text, never
+    library text or file bytes."""
+    return Unsupported(f"cannot read compressed pixel data header ({what})")
+
+
+def _jpeg_frame_size(data: bytes) -> tuple[int, int, int]:
+    """(width, height, components) from the first frame header (see `_JPEG_FRAME_MARKERS`) of JPEG or JPEG-LS `data`.
+
+    Only the marker segments between SOI and the frame header are read, stepped over by their length and the next
+    marker found as `_jpeg_end` does, within a `_WalkBudget`. A height of 0, which a DNL marker after the first scan
+    (JPEG) or an LSE marker (JPEG-LS, for oversize dimensions) would set, is refused: the decoders cannot be held to a
+    size the frame header does not give. No SOI, a scan, EOI or a nested SOI before any frame header, or a truncated
+    one, is unreadable.
+    """
+    if data[:2] != b"\xff\xd8":
+        raise _unreadable("no JPEG SOI marker")
+    budget = _WalkBudget.for_data(data)
+    pos = 2
+    try:
+        while (pos := budget.next_marker(data, pos)) + 1 < len(data):
+            marker = data[pos + 1]
+            if marker in _JPEG_FRAME_MARKERS:
+                if pos + 10 > len(data):
+                    raise _unreadable("truncated JPEG frame header")
+                height, width, components = struct.unpack_from(">HHB", data, pos + 5)
+                if height == 0:  # JPEG sets it in a DNL marker, JPEG-LS in an LSE marker
+                    raise _unreadable("JPEG frame header without a height (DNL or LSE)")
+                return width, height, components
+            if marker in (0xD8, 0xD9, 0xDA) or pos + 4 > len(data):  # SOI, EOI, SOS
+                break
+            length = int.from_bytes(data[pos + 2 : pos + 4], "big")
+            pos += 4 if length < 2 else 2 + length
+    except _OverBudget:
+        raise _unreadable("too many JPEG markers") from None
+    raise _unreadable("no JPEG frame header")
+
+
+def _jp2_codestream_start(data: bytes) -> int:
+    """The offset of the codestream in JP2 file `data`: the contents of its first top-level `jp2c` box."""
+    pos = 0
+    while pos + 8 <= len(data):  # every box is at least 8 bytes, so this steps forward at least that far
+        length, box = struct.unpack_from(">L4s", data, pos)
+        header = 8
+        if length == 1:  # a 64-bit length follows the type
+            if pos + 16 > len(data):
+                break
+            length, header = struct.unpack_from(">Q", data, pos + 8)[0], 16
+        elif length == 0:  # the last box, to the end
+            length = len(data) - pos
+        if box == b"jp2c":
+            return pos + header
+        if length < header:
+            raise _unreadable("bad JP2 box length")
+        pos += length
+    raise _unreadable("no JP2 codestream box")
+
+
+def _j2k_coding_segments(data: bytes, pos: int) -> Iterator[tuple[int, int, int]]:
+    """(marker, start, end) of the body of each COD and COC marker segment in JPEG 2000 codestream `data`: in the main
+    header from `pos` (just past SIZ) to the first SOT, then in each tile-part header (SOT to SOD), the next tile-part
+    being Psot bytes on from SOT, as decoders find it. After a tile-part there must be another, EOC or the end of the
+    data, and only the markers of `_J2K_MAIN_MARKERS` and `_J2K_TILE_MARKERS` may come before it. Every step moves
+    forward by at least four bytes, at most `_J2K_MAX_TILE_PARTS` tile-parts are walked, and the TLM bodies may hold at
+    most `_J2K_MAX_TLM_BYTES` in all."""
+    tile_parts = tlm_bytes = 0
+    while pos + 4 <= len(data):
+        marker, length = struct.unpack_from(">HH", data, pos)
+        if marker == _J2K_EOC:
+            return
+        if marker == _J2K_SOT:
+            tile_parts += 1
+            if tile_parts > _J2K_MAX_TILE_PARTS:
+                raise _unreadable("too many JPEG 2000 tile-parts")
+            if pos + 12 > len(data):
+                return
+            (psot,) = struct.unpack_from(">L", data, pos + 6)
+            if 0 < psot < 14:
+                raise _unreadable("bad JPEG 2000 tile-part length")
+            tile_end = len(data) if psot == 0 else pos + psot  # 0: the last tile-part, to the end
+            header = pos + 12
+            while header + 4 <= min(tile_end, len(data)):
+                marker, length = struct.unpack_from(">HH", data, header)
+                if marker == _J2K_SOD:
+                    break
+                if marker not in _J2K_TILE_MARKERS:
+                    raise _unreadable("unexpected JPEG 2000 marker")
+                if length < 2:
+                    raise _unreadable("bad JPEG 2000 marker segment")
+                if marker in (_J2K_COD, _J2K_COC):
+                    yield marker, header + 4, min(header + 2 + length, len(data))
+                header += 2 + length
+            pos = tile_end
+            if pos + 2 <= len(data) and struct.unpack_from(">H", data, pos)[0] not in (_J2K_SOT, _J2K_EOC):
+                raise _unreadable("bad JPEG 2000 tile-part length")
+            continue
+        if marker not in _J2K_MAIN_MARKERS:
+            raise _unreadable("unexpected JPEG 2000 marker")
+        if length < 2:
+            raise _unreadable("bad JPEG 2000 marker segment")
+        if marker == _J2K_TLM:
+            tlm_bytes += length - 2
+            if tlm_bytes > _J2K_MAX_TLM_BYTES:
+                raise Unsupported(f"JPEG 2000 TLM markers over {_J2K_MAX_TLM_BYTES >> 20} MiB")
+        if marker in (_J2K_COD, _J2K_COC):
+            yield marker, pos + 4, min(pos + 2 + length, len(data))
+        pos += 2 + length
+
+
+def _j2k_code_block_log2(data: bytes, start: int, end: int, index_bytes: int) -> int:
+    """log2 of the pixels of the smallest code-block of COD (`index_bytes` 0) or COC (`index_bytes`, the size of its
+    component index) body `data[start:end]`, over its resolutions: 2**(xcb + 2) by 2**(ycb + 2), each side capped by
+    the precinct's in band coordinates (PPx at the lowest resolution, PPx - 1 above; 2**15 without precincts)."""
+    style = start + index_bytes
+    coding = style + (1 if index_bytes else 5)  # COD has progression order, layers and MCT before it
+    if coding + 5 > end:
+        raise _unreadable("truncated JPEG 2000 COD or COC marker")
+    levels, xcb, ycb = data[coding], data[coding + 1] + 2, data[coding + 2] + 2
+    if data[style] & 1:  # precinct sizes follow, one byte (PPy << 4 | PPx) per resolution
+        if coding + 6 + levels > end:
+            raise _unreadable("truncated JPEG 2000 COD or COC marker")
+        precincts = data[coding + 5 : coding + 6 + levels]
+    else:
+        precincts = b"\xff" * (levels + 1)
+    return min(
+        min(xcb, max((size & 0xF) - (r > 0), 0)) + min(ycb, max((size >> 4) - (r > 0), 0))
+        for r, size in enumerate(precincts)
+    )
+
+
+def _check_j2k_coding(data: bytes, pos: int, components: int) -> None:
+    """Raise `Unsupported` if any COD or COC of codestream `data` (see `_j2k_coding_segments`) gives code-blocks of
+    fewer than 2**`_J2K_MIN_CODE_BLOCK_LOG2` pixels (see `_j2k_code_block_log2`), or a COD more than
+    `_J2K_MAX_LAYERS` quality layers; there must be a COD. Every COD and COC is checked, whichever components and
+    tiles it applies to."""
+    index_bytes = 1 if components < 257 else 2
+    has_cod = False
+    for marker, start, end in _j2k_coding_segments(data, pos):
+        has_cod |= marker == _J2K_COD
+        if marker == _J2K_COD and end >= start + 4 and struct.unpack_from(">H", data, start + 2)[0] > _J2K_MAX_LAYERS:
+            raise Unsupported(f"JPEG 2000 quality layers over {_J2K_MAX_LAYERS}")
+        if _j2k_code_block_log2(data, start, end, 0 if marker == _J2K_COD else index_bytes) < _J2K_MIN_CODE_BLOCK_LOG2:
+            raise Unsupported(f"JPEG 2000 code-blocks of fewer than {1 << _J2K_MIN_CODE_BLOCK_LOG2} pixels")
+    if not has_cod:
+        raise _unreadable("no JPEG 2000 COD marker")
+
+
+def _j2k_frame_size(data: bytes) -> tuple[int, int, int]:
+    """(width, height, components) from the SIZ marker of JPEG 2000 or HTJ2K `data`, a codestream or a JP2 file:
+    Xsiz - XOsiz, Ysiz - YOsiz and Csiz. SIZ must follow SOC, as the standard requires. The code-blocks are checked
+    too (see `_check_j2k_coding`), as their number and layers, not only the size, set the decoders' memory."""
+    start = _jp2_codestream_start(data) if data.startswith(_JP2_SIGNATURE) else 0
+    if data[start : start + 4] != b"\xff\x4f\xff\x51":  # SOC, SIZ
+        raise _unreadable("no JPEG 2000 SOC and SIZ markers")
+    if start + 42 > len(data):
+        raise _unreadable("truncated JPEG 2000 SIZ marker")
+    xsiz, ysiz, xosiz, yosiz = struct.unpack_from(">4L", data, start + 8)
+    (components,) = struct.unpack_from(">H", data, start + 40)
+    if xosiz >= xsiz or yosiz >= ysiz:
+        raise _unreadable("empty JPEG 2000 image area")
+    (siz_length,) = struct.unpack_from(">H", data, start + 4)
+    _check_j2k_coding(data, start + 4 + siz_length, components)
+    return xsiz - xosiz, ysiz - yosiz, components
+
+
+def _rle_decoded_length(data: bytes, start: int, end: int, limit: int) -> int:
+    """The bytes that RLE segment `data[start:end]` decodes to, by walking its run headers as pydicom decodes them (a
+    run cut short by the end decodes to what is left), without decoding; the walk stops once past `limit`. A row of
+    no-ops is skipped by one regex match, so every other step but the last decodes at least a byte: the steps are at
+    most about twice `limit`, however long the segment."""
+    end, pos, total = min(end, len(data)), start, 0
+    while pos < end and total <= limit:  # every step moves forward
+        header = data[pos]
+        if header < 128:  # copy the next header + 1 bytes
+            total += min(header + 1, end - pos - 1)
+            pos += header + 2
+        elif header > 128:  # repeat the next byte 257 - header times
+            total += 257 - header if pos + 1 < end else 0
+            pos += 2
+        else:  # 128 is a no-op, as are those after it
+            pos = cast(re.Match[bytes], _RLE_NO_OPS.match(data, pos, end)).end()
+    return total
+
+
+def _check_rle_frame(data: bytes, segment_bytes: int, segments: int) -> None:
+    """Raise `Unsupported` unless RLE Lossless frame `data` has `segments` segments, none of which decodes to more
+    than `segment_bytes` bytes (see `_rle_decoded_length`). pydicom requires the count, and keeps the first
+    `segment_bytes` of a longer segment, having decoded it all."""
+    if len(data) < _RLE_HEADER_BYTES:
+        raise _unreadable("truncated RLE header")
+    (count,) = struct.unpack_from("<L", data)
+    if count > _RLE_MAX_SEGMENTS:
+        raise _unreadable("bad RLE segment count")
+    if count != segments:
+        raise Unsupported(f"RLE pixel data has {count} segments, not SamplesPerPixel x BitsAllocated / 8 ({segments})")
+    offsets = [*struct.unpack_from(f"<{count}L", data, 4), len(data)]
+    for start, end in pairwise(offsets):
+        if _rle_decoded_length(data, start, end, segment_bytes) > segment_bytes:
+            raise Unsupported(f"RLE segment decodes to more than Rows x Columns ({segment_bytes}) bytes")
+
+
+def _encapsulated_frame(dcm: pydicom.FileDataset) -> bytes:
+    """The one frame of `dcm`'s encapsulated PixelData, its fragments joined, split into frames as pydicom's decoder
+    splits them (by the Extended or Basic Offset Table). pydicom also decodes any frame past NumberOfFrames, so a
+    second frame is refused; so are no frame and an encapsulation that cannot be parsed."""
+    try:
+        extended = None
+        if "ExtendedOffsetTable" in dcm and "ExtendedOffsetTableLengths" in dcm:
+            extended = (dcm.ExtendedOffsetTable, dcm.ExtendedOffsetTableLengths)
+            if len(extended[0]) != len(extended[1]):  # pydicom ignores the table then
+                extended = None
+        frames = generate_fragmented_frames(dcm.PixelData, number_of_frames=1, extended_offsets=extended)
+        first = next(frames, None)
+        more = next(frames, None) is not None
+    except Exception:  # noqa: BLE001 - pydicom's text names nothing fixed; the input fails either way
+        raise _unreadable("bad encapsulation") from None
+    if first is None:
+        raise _unreadable("no frame")
+    if more:
+        raise Unsupported("compressed pixel data holds more than one frame")
+    return b"".join(first)
+
+
+def _check_compressed_frame(dcm: pydicom.FileDataset, rows: int, columns: int) -> None:
+    """Raise `Unsupported` unless compressed PixelData decodes to the declared size: a JPEG, JPEG-LS, JPEG 2000 or
+    HTJ2K frame header's size and components must be Columns x Rows and SamplesPerPixel (and JPEG 2000's code-blocks
+    not tiny), and RLE must have the segments `_check_rle_frame` requires. Only headers are read; nothing is decoded.
+    Native pixel data, and a transfer syntax pydicom has no decoder for (it fails before decoding, as before), pass;
+    a compressed one it decodes that cannot be checked fails. A transfer syntax UID that is not one value fails.
+    Missing SamplesPerPixel or BitsAllocated is left to pydicom, which refuses to decode without them."""
+    value = dcm.file_meta.get("TransferSyntaxUID")
+    if value is None:
+        return
+    if not isinstance(value, str):  # several values
+        raise Unsupported("transfer syntax UID is not a single value")
+    syntax = UID(value)  # a value written with a VR other than UI reads as a plain str
+    try:
+        pydicom.pixels.get_decoder(syntax)
+    except NotImplementedError:
+        return
+    if not syntax.is_compressed:
+        return
+    if syntax not in (*JPEGTransferSyntaxes, *JPEGLSTransferSyntaxes, *JPEG2000TransferSyntaxes, RLELossless):
+        raise Unsupported(f"cannot check compressed pixel data dimensions ({syntax.name})")
+    samples, bits = dcm.get("SamplesPerPixel"), dcm.get("BitsAllocated")
+    if samples is None or bits is None:
+        return
+    if "PixelData" not in dcm:
+        raise _unreadable("no PixelData")
+    frame = _encapsulated_frame(dcm)
+    if syntax == RLELossless:
+        _check_rle_frame(frame, rows * columns, int(samples) * (int(bits) // 8))
+        return
+    size = _j2k_frame_size(frame) if syntax in JPEG2000TransferSyntaxes else _jpeg_frame_size(frame)
+    width, height, components = size
+    if (width, height) != (columns, rows):
+        raise Unsupported(f"compressed pixel data is {width} x {height}, not Columns x Rows {columns} x {rows}")
+    if components != int(samples):
+        raise Unsupported(f"compressed pixel data has {components} components, not SamplesPerPixel {samples}")
+
+
 def _check_dicom_memory(dcm: pydicom.FileDataset, path: RenderPath, draw_overlays: bool) -> None:
     """`_check_render_memory` for the single frame of `dcm`, before it is decoded, and for the overlay planes if they
-    are drawn. A missing Rows or Columns is left to the decoder to fail."""
+    are drawn; then `_check_compressed_frame`, so that the frame decodes to no more than that. A missing or zero Rows
+    or Columns is left to the decoder, which refuses it before decoding."""
     rows, columns = dcm.get("Rows"), dcm.get("Columns")
     if rows and columns:
         overlays = _overlay_plane_pixels(dcm) * OVERLAY_BYTES_PER_PIXEL if draw_overlays else 0
         _check_render_memory(f"{columns} x {rows}", path, int(rows) * int(columns), overlays)
+        _check_compressed_frame(dcm, int(rows), int(columns))
 
 
 def preprocess_dicom(
@@ -817,7 +1114,7 @@ def _png_end(data: bytes) -> int:
 
 
 class _OverBudget(Exception):
-    """A trailing-data check ran out of its `_WalkBudget`."""
+    """A JPEG walk (a trailing-data check, or `_jpeg_frame_size`) ran out of its `_WalkBudget`."""
 
 
 @dataclass

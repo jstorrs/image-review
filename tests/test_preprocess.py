@@ -38,9 +38,15 @@ import tifffile
 from PIL import Image, JpegImagePlugin, PngImagePlugin
 from pydicom.data import get_testdata_file, get_testdata_files
 from pydicom.dataset import FileMetaDataset
+from pydicom.encaps import encapsulate
 from pydicom.uid import (
+    MPEG2MPML,
+    UID,
     ExplicitVRLittleEndian,
+    HTJ2KLossless,
     JPEG2000Lossless,
+    JPEGBaseline8Bit,
+    JPEGLSLossless,
     MediaStorageDirectoryStorage,
     RLELossless,
     SecondaryCaptureImageStorage,
@@ -62,11 +68,15 @@ from image_review.preprocess import (
     Unsupported,
     WorkDirExists,
     WorkerCrashed,
+    _check_rle_frame,
     _escape_name,
     _failed,
+    _j2k_frame_size,
     _jpeg_end,
+    _jpeg_frame_size,
     _mpo_unrendered,
     _png_end,
+    _rle_decoded_length,
     _to_uint8,
     _trailing_data_notes,
     _uncovered,
@@ -1928,6 +1938,543 @@ class SizeLimitTest(unittest.TestCase):
             decode_raster(png)
 
 
+HTJ2K_ENCODE = getattr(imagecodecs, "htj2k_encode", None)  # not in the oldest supported imagecodecs
+
+
+def _sof(height: int, width: int, components: int = 1, marker: int = 0xC0) -> bytes:
+    """A JPEG frame header (SOFn, DHP or JPEG-LS SOF55) of 8-bit samples."""
+    body = bytes([8]) + struct.pack(">HHB", height, width, components) + bytes([1, 0x11, 0]) * components
+    return bytes([0xFF, marker]) + struct.pack(">H", 2 + len(body)) + body
+
+
+def _jpeg_segment(marker: int, payload: bytes = b"") -> bytes:
+    return bytes([0xFF, marker]) + struct.pack(">H", 2 + len(payload)) + payload
+
+
+def _jpeg_headers(*segments: bytes) -> bytes:
+    """SOI, the given segments, then a scan header and EOI: enough for `_jpeg_frame_size`, not for a decoder."""
+    return b"\xff\xd8" + b"".join(segments) + _jpeg_segment(0xDA, bytes(6)) + b"\x00\xff\xd9"
+
+
+def _j2k_segment(marker: int, body: bytes) -> bytes:
+    return struct.pack(">HH", marker, 2 + len(body)) + body
+
+
+def _cod(levels: int = 5, xcb: int = 4, ycb: int = 4, precincts: bytes | None = None, layers: int = 1) -> bytes:
+    """A JPEG 2000 COD marker: 2**(xcb + 2) x 2**(ycb + 2) code-blocks, and `precincts` (one PPy << 4 | PPx byte per
+    resolution) if given."""
+    style = bytes([0 if precincts is None else 1, 0]) + struct.pack(">HB", layers, 0)  # Scod, order, layers, MCT
+    return _j2k_segment(0xFF52, style + bytes([levels, xcb, ycb, 0, 1]) + (precincts or b""))
+
+
+def _coc(component: int, xcb: int = 4, ycb: int = 4, index_bytes: int = 1) -> bytes:
+    body = component.to_bytes(index_bytes, "big") + bytes([0, 5, xcb, ycb, 0, 1])
+    return _j2k_segment(0xFF53, body)
+
+
+def _tile_part(*segments: bytes, psot: int | None = None) -> bytes:
+    """A JPEG 2000 tile-part: SOT (its Psot the tile-part's length unless given), `segments`, SOD and 8 bytes."""
+    header = b"".join(segments)
+    length = 12 + len(header) + 2 + 8 if psot is None else psot
+    return struct.pack(">HHHLBB", 0xFF90, 10, 0, length, 0, 1) + header + b"\xff\x93" + bytes(8)
+
+
+def _siz(
+    width: int, height: int, components: int = 1, x0: int = 0, y0: int = 0, cod: bytes | None = None, tail: bytes = b""
+) -> bytes:
+    """A JPEG 2000 codestream's SOC and SIZ marker (image and tile offsets `x0`, `y0`), a COD (`_cod()` unless given),
+    `tail`, then EOC."""
+    siz = struct.pack(">H8LH", 0, width, height, x0, y0, width, height, x0, y0, components)
+    siz += bytes([7, 1, 1]) * components
+    head = b"\xff\x4f\xff\x51" + struct.pack(">H", 2 + len(siz)) + siz
+    return head + (_cod() if cod is None else cod) + tail + b"\xff\xd9"
+
+
+def _jp2_box(kind: bytes, payload: bytes, extended: bool = False) -> bytes:
+    if extended:
+        return struct.pack(">L4sQ", 1, kind, 16 + len(payload)) + payload
+    return struct.pack(">L4s", 8 + len(payload), kind) + payload
+
+
+def _jp2(codestream: bytes, extended: bool = False) -> bytes:
+    """`codestream` in a JP2 file: signature, file type and header boxes, then the `jp2c` box."""
+    return (
+        _jp2_box(b"jP  ", b"\r\n\x87\n")
+        + _jp2_box(b"ftyp", b"jp2 \x00\x00\x00\x00jp2 ")
+        + _jp2_box(b"jp2h", _jp2_box(b"ihdr", bytes(14)), extended)
+        + _jp2_box(b"jp2c", codestream)
+    )
+
+
+def _rle(*segments: bytes) -> bytes:
+    """An RLE Lossless frame: the 64-byte header, then `segments`."""
+    offsets, pos = [], 64
+    for segment in segments:
+        offsets.append(pos)
+        pos += len(segment)
+    return struct.pack(f"<{1 + len(offsets)}L", len(segments), *offsets).ljust(64, b"\x00") + b"".join(segments)
+
+
+def _compressed_dicom(
+    syntax: UID, frames: Sequence[bytes], rows: int, columns: int, samples: int = 1, bits: int = 8, **attrs
+) -> bytes:
+    """A single-frame DICOM (NumberOfFrames absent) whose encapsulated PixelData holds `frames`, with a Basic Offset
+    Table when there is more than one."""
+    ds = pydicom.Dataset()
+    ds.file_meta = FileMetaDataset()
+    ds.file_meta.TransferSyntaxUID = syntax
+    ds.SOPClassUID = SecondaryCaptureImageStorage
+    ds.SOPInstanceUID = generate_uid()
+    ds.file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
+    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.Rows, ds.Columns, ds.SamplesPerPixel = rows, columns, samples
+    ds.PhotometricInterpretation = "MONOCHROME2" if samples == 1 else "RGB"
+    if samples == 3:
+        ds.PlanarConfiguration = 0
+    ds.BitsAllocated, ds.BitsStored, ds.HighBit, ds.PixelRepresentation = bits, bits, bits - 1, 0
+    for name, value in attrs.items():
+        setattr(ds, name, value)
+    ds.PixelData = encapsulate(list(frames), has_bot=len(frames) > 1)
+    ds["PixelData"].VR = "OB"
+    buf = io.BytesIO()
+    ds.save_as(buf, enforce_file_format=True)
+    return buf.getvalue()
+
+
+class CompressedFrameTest(unittest.TestCase):
+    """Compressed pixel data must decode to its declared Rows, Columns and SamplesPerPixel; that is read from the
+    codestream's own headers before anything is decoded."""
+
+    def setUp(self):
+        self.gray = RNG.integers(0, 255, (20, 30), dtype=np.uint8)
+        self.rgb = RNG.integers(0, 255, (20, 30, 3), dtype=np.uint8)
+
+    def assert_unreadable(self, call, what: str):
+        with self.assertRaises(Unsupported) as ctx:
+            call()
+        self.assertEqual(str(ctx.exception), f"unsupported: cannot read compressed pixel data header ({what})")
+
+    def refused(self, data: bytes) -> str:
+        """The reason `render` refuses DICOM `data` with, failing the test if a decoder is reached."""
+        with (
+            quiet(),
+            mock.patch.object(preprocess_module, "_decode_pixels", side_effect=AssertionError("decoded")),
+            self.assertRaises(Unsupported) as ctx,
+        ):
+            render("dicom", ImageId("x"), data, "inferno")
+        return _failed(ImageId("x"), ctx.exception).reason
+
+    # ---- JPEG and JPEG-LS
+
+    def test_jpeg_size_is_read_from_real_codestreams(self):
+        self.assertEqual(_jpeg_frame_size(imagecodecs.jpeg8_encode(self.gray)), (30, 20, 1))
+        self.assertEqual(_jpeg_frame_size(imagecodecs.jpeg8_encode(self.rgb)), (30, 20, 3))
+        self.assertEqual(_jpeg_frame_size(_jpeg_bytes(self.gray)), (30, 20, 1))  # Pillow's, with JFIF APP0
+        self.assertEqual(_jpeg_frame_size(imagecodecs.jpegls_encode(self.gray)), (30, 20, 1))
+
+    def test_every_frame_header_marker_is_read(self):
+        for marker in (*range(0xC0, 0xC4), *range(0xC5, 0xC8), *range(0xC9, 0xCC), *range(0xCD, 0xD0), 0xDE, 0xF7):
+            with self.subTest(marker=f"{marker:02X}"):
+                self.assertEqual(_jpeg_frame_size(_jpeg_headers(_sof(20, 30, 3, marker))), (30, 20, 3))
+
+    def test_tables_and_stray_bytes_before_the_frame_header_are_stepped_over(self):
+        segments = (
+            _jpeg_segment(0xE0, b"JFIF\x00" + bytes(9)),
+            _jpeg_segment(0xC4, bytes(20)),  # DHT, JPG and DAC are not frame headers
+            _jpeg_segment(0xCC, bytes(4)),
+            _jpeg_segment(0xC8),
+            b"junk\xff\xff\xff",  # skipped to the next marker, and fill bytes before it
+            _jpeg_segment(0xDB, bytes(65)),
+            _sof(20, 30),
+        )
+        self.assertEqual(_jpeg_frame_size(_jpeg_headers(*segments)), (30, 20, 1))
+
+    def test_jpeg_height_set_by_a_dnl_marker_is_refused(self):
+        dnl = b"\xff\xdc\x00\x04\x00\x14"
+        data = b"\xff\xd8" + _sof(0, 30) + _jpeg_segment(0xDA, bytes(6)) + b"\x00" + dnl + b"\xff\xd9"
+        self.assert_unreadable(lambda: _jpeg_frame_size(data), "JPEG frame header without a height (DNL or LSE)")
+        lse = _jpeg_headers(_sof(0, 30, marker=0xF7), _jpeg_segment(0xF8, b"\x04\x02" + bytes(8)))  # JPEG-LS
+        self.assert_unreadable(lambda: _jpeg_frame_size(lse), "JPEG frame header without a height (DNL or LSE)")
+
+    def test_truncated_or_garbage_jpeg_is_unreadable(self):
+        whole = _jpeg_headers(_jpeg_segment(0xE0, bytes(14)), _sof(20, 30))
+        sof = whole.index(b"\xff\xc0")
+        cases = {
+            "no JPEG SOI marker": (b"", b"\xff", b"garbage", RNG.integers(0, 255, 4096, dtype=np.uint8).tobytes()),
+            "truncated JPEG frame header": (whole[: sof + 9],),
+            "no JPEG frame header": (
+                whole[:sof],
+                whole[: sof + 1],
+                b"\xff\xd8\xff\xd9" + _sof(20, 30),  # after EOI
+                b"\xff\xd8" + _jpeg_segment(0xDA, bytes(6)) + _sof(20, 30),  # after a scan
+                b"\xff\xd8\xff\xd8" + _sof(20, 30),  # after a nested SOI
+                b"\xff\xd8" + bytes(100),
+            ),
+        }
+        for what, datas in cases.items():
+            for data in datas:
+                with self.subTest(what=what, data=data[:16]):
+                    self.assert_unreadable(lambda data=data: _jpeg_frame_size(data), what)
+
+    def test_marker_walk_is_bounded(self):
+        data = _jpeg_headers(*[_jpeg_segment(0xFE)] * 50, _sof(20, 30))
+        self.assertEqual(_jpeg_frame_size(data), (30, 20, 1))
+        with mock.patch.object(preprocess_module, "JPEG_WALK_MAX_MARKERS", 50):
+            self.assert_unreadable(lambda: _jpeg_frame_size(data), "too many JPEG markers")
+
+    # ---- JPEG 2000 and HTJ2K
+
+    def test_j2k_size_is_read_from_real_codestreams_and_jp2_files(self):
+        for codecformat in ("J2K", "JP2"):
+            with self.subTest(codecformat):
+                encode = partial(imagecodecs.jpeg2k_encode, level=0, codecformat=codecformat)
+                self.assertEqual(_j2k_frame_size(encode(self.gray)), (30, 20, 1))
+                self.assertEqual(_j2k_frame_size(encode(self.rgb)), (30, 20, 3))
+        if HTJ2K_ENCODE is not None:
+            self.assertEqual(_j2k_frame_size(HTJ2K_ENCODE(self.rgb)), (30, 20, 3))
+
+    def test_j2k_size_excludes_the_image_offset(self):
+        self.assertEqual(_j2k_frame_size(_siz(130, 220, 3, x0=100, y0=200)), (30, 20, 3))
+
+    def test_jp2_boxes_are_walked_to_the_codestream(self):
+        self.assertEqual(_j2k_frame_size(_jp2(_siz(30, 20))), (30, 20, 1))
+        self.assertEqual(_j2k_frame_size(_jp2(_siz(30, 20), extended=True)), (30, 20, 1))
+        last = _jp2(b"")[:-8] + struct.pack(">L4s", 0, b"jp2c") + _siz(30, 20)  # a last box of length 0
+        self.assertEqual(_j2k_frame_size(last), (30, 20, 1))
+
+    def test_truncated_or_garbage_j2k_is_unreadable(self):
+        signature = _jp2_box(b"jP  ", b"\r\n\x87\n")
+        cases = {
+            "no JPEG 2000 SOC and SIZ markers": (b"", b"garbage", _siz(30, 20)[2:], b"\xff\x4f\xff\x52" + bytes(40)),
+            "truncated JPEG 2000 SIZ marker": (_siz(30, 20)[:41], _jp2(_siz(30, 20)[:30])),
+            "empty JPEG 2000 image area": (_siz(30, 20, x0=30), _siz(30, 20, y0=21)),
+            "no JP2 codestream box": (signature, signature + _jp2_box(b"jp2h", bytes(20)), _jp2(b"")[:-8]),
+            "bad JP2 box length": (signature + struct.pack(">L4s", 4, b"free") + _jp2_box(b"jp2c", _siz(30, 20)),),
+        }
+        for what, datas in cases.items():
+            for data in datas:
+                with self.subTest(what=what, data=data[:16]):
+                    self.assert_unreadable(lambda data=data: _j2k_frame_size(data), what)
+
+    def test_j2k_code_blocks_of_256_pixels_or_more_pass(self):
+        cods = (
+            _cod(),  # 64 x 64, as coders write
+            _cod(xcb=2, ycb=2),  # 16 x 16
+            _cod(xcb=1, ycb=3),  # 8 x 32
+            _cod(xcb=0, ycb=6),  # 4 x 256
+            _cod(levels=1, precincts=b"\x44\x55"),  # capped at 16 x 16 by the precincts, in band coordinates
+            _cod(levels=0, precincts=b"\x44"),
+        )
+        for cod in cods:
+            with self.subTest(cod=cod.hex()):
+                self.assertEqual(_j2k_frame_size(_siz(30, 20, cod=cod, tail=_tile_part(_cod()))), (30, 20, 1))
+
+    def test_small_j2k_code_blocks_are_refused_wherever_they_are_set(self):
+        tiny = _cod(xcb=0, ycb=0)
+        cases = {
+            "4 x 4": _siz(30, 20, cod=tiny),
+            "8 x 16": _siz(30, 20, cod=_cod(xcb=1, ycb=2)),
+            "1 x 1 precinct at the lowest resolution": _siz(30, 20, cod=_cod(1, 0, 0, b"\x00\x11")),
+            "8 x 8 precinct above it": _siz(30, 20, cod=_cod(levels=1, precincts=b"\x44\x44")),
+            "main-header COC": _siz(30, 20, 3, tail=_coc(2, 0, 0)),
+            "two-byte COC index": _siz(30, 20, 300, tail=_coc(299, 0, 0, index_bytes=2)),
+            "tile-part COD": _siz(30, 20, tail=_tile_part() + _tile_part(tiny)),
+            "tile-part COC": _siz(30, 20, tail=_tile_part(_coc(0, 0, 0))),
+        }
+        for name, data in cases.items():
+            with self.subTest(name), self.assertRaises(Unsupported) as ctx:
+                _j2k_frame_size(data)
+            self.assertEqual(str(ctx.exception), "unsupported: JPEG 2000 code-blocks of fewer than 256 pixels")
+        self.assertEqual(_j2k_frame_size(_siz(30, 20, 300, tail=_coc(299, index_bytes=2))), (30, 20, 300))
+
+    def test_j2k_tile_parts_are_found_by_their_length(self):
+        last = _siz(30, 20, tail=_tile_part() + _tile_part(psot=0))  # 0: the last, to the end
+        self.assertEqual(_j2k_frame_size(last), (30, 20, 1))
+        self.assertEqual(_j2k_frame_size(_siz(30, 20, tail=_tile_part(psot=1000))), (30, 20, 1))  # truncated
+        three = _siz(30, 20, tail=_tile_part() * 3)
+        self.assertEqual(_j2k_frame_size(three), (30, 20, 1))
+        with mock.patch.object(preprocess_module, "_J2K_MAX_TILE_PARTS", 2):
+            self.assert_unreadable(lambda: _j2k_frame_size(three), "too many JPEG 2000 tile-parts")
+
+    def test_bad_j2k_coding_headers_are_unreadable(self):
+        cases = {
+            "no JPEG 2000 COD marker": (_siz(30, 20, cod=b""), _siz(30, 20, cod=b"", tail=_tile_part(_coc(0)))),
+            "truncated JPEG 2000 COD or COC marker": (_siz(30, 20)[:-6], _siz(30, 20, cod=_cod(3, precincts=b"\x55"))),
+            "bad JPEG 2000 marker segment": (
+                _siz(30, 20, cod=b"\xff\x64\x00\x01" + _cod()),
+                _siz(30, 20, tail=_tile_part(b"\xff\x64\x00\x00")),
+            ),
+            "unexpected JPEG 2000 marker": (
+                _siz(30, 20, cod=b"\x12\x34\x00\x04" + _cod()),
+                _siz(30, 20, tail=_tile_part(b"\x00\x00\x00\x04")),
+                _siz(30, 20, tail=_j2k_segment(0xFF51, bytes(4))),  # a second SIZ
+                _siz(30, 20, tail=_j2k_segment(0xFF61, bytes(4))),  # PPT: tile-part headers only
+                _siz(30, 20, tail=_tile_part(_j2k_segment(0xFF60, bytes(4)))),  # PPM: the main header only
+            ),
+            "bad JPEG 2000 tile-part length": (
+                _siz(30, 20, tail=_tile_part(psot=5)),
+                _siz(30, 20, tail=_tile_part() + b"garbage!"),
+            ),
+        }
+        for what, datas in cases.items():
+            for data in datas:
+                with self.subTest(what=what, data=data[-16:]):
+                    self.assert_unreadable(lambda data=data: _j2k_frame_size(data), what)
+
+    def test_j2k_marker_segments_allowed_in_headers_pass(self):
+        main = (0xFF50, 0xFF55, 0xFF57, 0xFF59, 0xFF5C, 0xFF5D, 0xFF5E, 0xFF5F, 0xFF60, 0xFF63, 0xFF64)
+        tile = (0xFF52, 0xFF53, 0xFF58, 0xFF5C, 0xFF5D, 0xFF5E, 0xFF5F, 0xFF61, 0xFF64)
+        # COD and COC aside (checked elsewhere), bodies are read by their length, so a COD marker inside one is not one
+        body = b"\x00\x00\xff\x52\x00\x0c"
+        data = _siz(
+            30,
+            20,
+            tail=b"".join(_j2k_segment(m, body) for m in main) + _tile_part(*(_j2k_segment(m, body) for m in tile[2:])),
+        )
+        self.assertEqual(_j2k_frame_size(data), (30, 20, 1))
+        cap_com = _siz(30, 20, cod=_j2k_segment(0xFF50, bytes(6)) + _cod() + _j2k_segment(0xFF64, b"\x00\x01Kakadu"))
+        self.assertEqual(_j2k_frame_size(cap_com), (30, 20, 1))
+
+    def test_unknown_or_part_2_j2k_markers_are_refused(self):
+        # OpenJPEG steps over an unknown marker by scanning for the next marker it knows, not by its declared length:
+        # here it would find the COD of 1 x 1 code-blocks that a walk by length steps over
+        hidden = _cod(1, 0, 0, b"\x00\x11")
+        desync = _siz(30, 20, tail=b"\xff\x6e" + struct.pack(">H", 2 + len(hidden)) + hidden)
+        mct = _siz(30, 20, tail=_j2k_segment(0xFF74, bytes(6 + 60_000)))  # Part 2 MCT, copied into every tile
+        for name, data in (
+            ("desync", desync),
+            ("MCT", mct),
+            ("tile-part MCC", _siz(30, 20, tail=_tile_part(_j2k_segment(0xFF75, bytes(4))))),
+        ):
+            with self.subTest(name):
+                self.assert_unreadable(lambda data=data: _j2k_frame_size(data), "unexpected JPEG 2000 marker")
+
+    def test_j2k_tlm_bytes_are_capped(self):
+        tlm = _j2k_segment(0xFF55, b"\x00\x10" + bytes(60_000))  # Stlm 0x10, every Ttlm 0
+        under = _siz(30, 20, tail=tlm * 17)  # 1,020,034 body bytes
+        self.assertEqual(_j2k_frame_size(under), (30, 20, 1))
+        with self.assertRaises(Unsupported) as ctx:
+            _j2k_frame_size(_siz(30, 20, tail=tlm * 18))
+        self.assertEqual(str(ctx.exception), "unsupported: JPEG 2000 TLM markers over 1 MiB")
+
+    def test_j2k_quality_layers_are_capped(self):
+        cap = preprocess_module._J2K_MAX_LAYERS
+        self.assertEqual(_j2k_frame_size(_siz(30, 20, cod=_cod(layers=cap))), (30, 20, 1))
+        for data in (_siz(30, 20, cod=_cod(layers=cap + 1)), _siz(30, 20, tail=_tile_part(_cod(layers=65535)))):
+            with self.subTest(data=data[-24:]), self.assertRaises(Unsupported) as ctx:
+                _j2k_frame_size(data)
+            self.assertEqual(str(ctx.exception), f"unsupported: JPEG 2000 quality layers over {cap}")
+
+    # ---- RLE
+
+    def test_rle_decoded_length_matches_pydicom(self):
+        decode = getattr(pydicom.pixels.decoders.rle, "_rle_decode_segment", None)
+        if decode is None:
+            self.skipTest("pydicom's RLE segment decoder moved")
+        rng = np.random.default_rng(1)
+        for size in (*range(8), 64, 1000):
+            for _ in range(20):
+                data = rng.integers(0, 256, size, dtype=np.uint8).tobytes()
+                no_ops = np.where(rng.random(size) < 0.5, 0x80, rng.integers(0, 256, size)).astype(np.uint8).tobytes()
+                for case in (data, no_ops):
+                    with self.subTest(data=case[:16]):
+                        self.assertEqual(_rle_decoded_length(case, 0, size, 1 << 30), len(decode(case)))
+
+    def test_rle_decoded_length_reads_only_the_segment_and_stops_past_the_limit(self):
+        data = b"\x00a\x81b" + b"\x02xyz"  # 1 literal, then 128 repeated; then 3 literals
+        self.assertEqual(_rle_decoded_length(data, 0, 4, 1000), 129)
+        self.assertEqual(_rle_decoded_length(data, 4, 8, 1000), 3)
+        self.assertEqual(_rle_decoded_length(data, 4, 100, 1000), 3)  # an end past the data is the data's end
+        self.assertEqual(_rle_decoded_length(data, 8, 4, 1000), 0)  # an end before the start is empty, as in pydicom
+        self.assertEqual(_rle_decoded_length(b"\x80" * 10, 0, 10, 1000), 0)  # no-ops
+        self.assertEqual(_rle_decoded_length(b"\x81\x00" * 1000, 0, 2000, 300), 384)  # three runs, then stops
+
+    def test_consistent_rle_passes(self):
+        _check_rle_frame(_rle(b"\x81\x00\x7f" + bytes(128)), 256, 1)  # 128 repeated, then 128 literal
+        _check_rle_frame(_rle(b"\x81\x00", b"\x81\x00\x00", b"\x81\x00"), 128, 3)  # a trailing pad byte adds nothing
+        _check_rle_frame(_rle(b"\x81\x00"), 200, 1)  # short: pydicom fails it, having decoded no more than that
+
+    def test_rle_segment_decoding_past_rows_x_columns_is_refused(self):
+        bomb = _rle(b"\x81\x00" * 4_000_000)  # 512 million bytes
+        start = time.monotonic()
+        with self.assertRaises(Unsupported) as ctx:
+            _check_rle_frame(bomb, 256, 1)
+        self.assertLess(time.monotonic() - start, 1.0)
+        self.assertEqual(str(ctx.exception), "unsupported: RLE segment decodes to more than Rows x Columns (256) bytes")
+        with self.assertRaisesRegex(Unsupported, r"\(128\) bytes$"):  # by one byte, in the last segment
+            _check_rle_frame(_rle(b"\x81\x00", b"\x81\x00\x00\x00"), 128, 2)
+
+    def test_rle_walk_is_bounded_by_the_decoded_bytes(self):
+        # 15 segments that all span the same 4 MB of no-ops: each is one regex match, not millions of steps
+        frame = struct.pack("<16L", 15, *[64] * 15) + b"\x80" * 4_000_000
+        start = time.monotonic()
+        _check_rle_frame(frame, 1 << 20, 15)
+        self.assertLess(time.monotonic() - start, 1.0)
+        self.assertEqual(_rle_decoded_length(b"\x80\x80\x00a\x80\x81b\x80", 0, 8, 1000), 129)
+
+    def test_rle_segment_count_must_match_samples_and_bytes(self):
+        with self.assertRaises(Unsupported) as ctx:
+            _check_rle_frame(_rle(b"\x81\x00", b"\x81\x00"), 128, 3)
+        self.assertEqual(
+            str(ctx.exception),
+            "unsupported: RLE pixel data has 2 segments, not SamplesPerPixel x BitsAllocated / 8 (3)",
+        )
+
+    def test_truncated_or_garbage_rle_is_unreadable(self):
+        self.assert_unreadable(lambda: _check_rle_frame(_rle(b"\x81\x00")[:63], 128, 1), "truncated RLE header")
+        self.assert_unreadable(lambda: _check_rle_frame(b"\x10" + bytes(63), 128, 1), "bad RLE segment count")
+        self.assert_unreadable(lambda: _check_rle_frame(b"\xff" * 64, 128, 1), "bad RLE segment count")
+
+    # ---- rendering
+
+    def test_inconsistent_files_fail_before_decoding(self):
+        j2k = partial(imagecodecs.jpeg2k_encode, level=0)
+        cases = {
+            "compressed pixel data is 30 x 20, not Columns x Rows 16 x 16": (
+                (JPEG2000Lossless, j2k(self.gray, codecformat="J2K"), 16, 16, 1),
+                (JPEG2000Lossless, j2k(self.gray, codecformat="JP2"), 16, 16, 1),
+                *([(HTJ2KLossless, HTJ2K_ENCODE(self.gray), 16, 16, 1)] if HTJ2K_ENCODE else []),
+                (JPEGBaseline8Bit, imagecodecs.jpeg8_encode(self.gray), 16, 16, 1),
+                (JPEGLSLossless, imagecodecs.jpegls_encode(self.gray), 16, 16, 1),
+            ),
+            "compressed pixel data is 30 x 20, not Columns x Rows 20 x 30": (
+                (JPEG2000Lossless, j2k(self.gray, codecformat="J2K"), 30, 20, 1),
+            ),
+            "compressed pixel data has 3 components, not SamplesPerPixel 1": (
+                (JPEG2000Lossless, j2k(self.rgb, codecformat="J2K"), 20, 30, 1),
+                (JPEGBaseline8Bit, imagecodecs.jpeg8_encode(self.rgb), 20, 30, 1),
+            ),
+            "RLE segment decodes to more than Rows x Columns (256) bytes": (
+                (RLELossless, _rle(b"\x81\x00" * 100_000), 16, 16, 1),
+            ),
+            "RLE pixel data has 1 segments, not SamplesPerPixel x BitsAllocated / 8 (3)": (
+                (RLELossless, _rle(b"\x81\x00\x81\x00"), 16, 16, 3),
+            ),
+            "cannot read compressed pixel data header (JPEG frame header without a height (DNL or LSE))": (
+                (JPEGBaseline8Bit, _jpeg_headers(_sof(0, 16)), 16, 16, 1),
+            ),
+            "cannot read compressed pixel data header (no JPEG 2000 SOC and SIZ markers)": (
+                (JPEG2000Lossless, b"garbage!", 16, 16, 1),
+            ),
+            "JPEG 2000 code-blocks of fewer than 256 pixels": (
+                # 1 x 1 code-blocks: OpenJPEG needed 9.3 GB for this 4096 x 4096 image of under 1 KB
+                (JPEG2000Lossless, _siz(4096, 4096, cod=_cod(1, 0, 0, b"\x00\x11"), tail=_tile_part()), 4096, 4096, 1),
+            ),
+        }
+        for reason, files in cases.items():
+            for syntax, frame, rows, columns, samples in files:
+                with self.subTest(reason=reason, syntax=syntax.name):
+                    data = _compressed_dicom(syntax, [frame], rows, columns, samples)
+                    self.assertEqual(self.refused(data), f"unsupported: {reason}")
+
+    def test_a_frame_past_number_of_frames_is_refused(self):
+        frame = imagecodecs.jpeg2k_encode(self.gray, level=0, codecformat="J2K")
+        data = _compressed_dicom(JPEG2000Lossless, [frame, frame], 20, 30)  # pydicom would decode both
+        self.assertEqual(self.refused(data), "unsupported: compressed pixel data holds more than one frame")
+
+    def test_extended_offset_table_selects_the_frame_as_pydicom_does(self):
+        small = imagecodecs.jpeg2k_encode(self.gray, level=0, codecformat="J2K")
+        large = imagecodecs.jpeg2k_encode(np.zeros((40, 40), np.uint8), level=0, codecformat="J2K")
+        small, large = (b + bytes(len(b) % 2) for b in (small, large))
+
+        def with_table(offsets: list[int], lengths: list[int]) -> bytes:
+            dcm = pydicom.dcmread(io.BytesIO(_compressed_dicom(JPEG2000Lossless, [small], 20, 30)))
+            dcm.PixelData = encapsulate([small, large], has_bot=False)  # without the table, one frame of both
+            dcm.add_new(0x7FE00001, "OV", struct.pack(f"<{len(offsets)}Q", *offsets))
+            dcm.add_new(0x7FE00002, "OV", struct.pack(f"<{len(lengths)}Q", *lengths))
+            buf = io.BytesIO()
+            dcm.save_as(buf, enforce_file_format=True)
+            return buf.getvalue()
+
+        second = with_table([8 + len(small)], [len(large)])  # the frame is the second fragment
+        self.assertEqual(
+            self.refused(second), "unsupported: compressed pixel data is 40 x 40, not Columns x Rows 30 x 20"
+        )
+        both = with_table([0, 8 + len(small)], [len(small), len(large)])
+        self.assertEqual(self.refused(both), "unsupported: compressed pixel data holds more than one frame")
+        ignored = with_table([8 + len(small)], [len(large), 4])  # lengths that do not match: pydicom ignores it
+        with quiet():
+            self.assertEqual(render("dicom", ImageId("x"), ignored, "inferno").rgb.dtype, np.uint8)
+
+    def test_transfer_syntax_uid_read_as_a_plain_string_is_checked(self):
+        frame = imagecodecs.jpeg2k_encode(self.gray, level=0, codecformat="J2K")
+        lossless = "1.2.840.10008.1.2.4.90"  # JPEG 2000 Lossless, as a plain str
+        for value, rows in ((lossless, 20), (lossless, 16), ([lossless, "1.2.3"], 20)):
+            with self.subTest(value=value, rows=rows):
+                dcm = pydicom.dcmread(io.BytesIO(_compressed_dicom(JPEG2000Lossless, [frame], rows, 30)))
+                dcm.file_meta[0x00020010] = pydicom.DataElement(0x00020010, "LO", value)  # read as str, not UID
+                self.assertNotIsInstance(dcm.file_meta.TransferSyntaxUID, UID)
+                if rows == 20 and isinstance(value, str):
+                    with quiet():
+                        self.assertEqual(preprocess_module.preprocess_dicom(dcm)[0].dtype, np.uint8)
+                    continue
+                reason = (
+                    "unsupported: compressed pixel data is 30 x 20, not Columns x Rows 30 x 16"
+                    if rows == 16
+                    else "unsupported: transfer syntax UID is not a single value"
+                )
+                with self.assertRaises(Unsupported) as ctx:
+                    preprocess_module.preprocess_dicom(dcm)
+                self.assertEqual(str(ctx.exception), reason)
+
+    def test_transfer_syntax_without_a_decoder_fails_as_undecodable(self):
+        data = _compressed_dicom(MPEG2MPML, [bytes(16)], 16, 16)
+        with quiet(), self.assertRaises(DecodeError) as ctx:
+            render("dicom", ImageId("x"), data, "inferno")
+        self.assertTrue(str(ctx.exception).startswith("cannot decode MPEG2 Main Profile / Main Level: "))
+        with mock.patch.object(pydicom.pixels, "get_decoder"):  # as if pydicom had a decoder for it
+            reason = self.refused(data)
+        self.assertEqual(
+            reason, "unsupported: cannot check compressed pixel data dimensions (MPEG2 Main Profile / Main Level)"
+        )
+
+    def test_unparseable_encapsulation_is_unreadable(self):
+        data = _compressed_dicom(JPEG2000Lossless, [_siz(30, 20)], 20, 30)
+        item = b"\xfe\xff\x00\xe0"
+        fragment = data.index(item, data.index(item) + 4)  # after the empty Basic Offset Table
+        reason = self.refused(data[:fragment] + b"\x00" * 4 + data[fragment + 4 :])  # not an item tag
+        self.assertEqual(reason, "unsupported: cannot read compressed pixel data header (bad encapsulation)")
+
+    def test_failures_are_skipped_rows(self):
+        root = temp_dir(self)
+        data = _compressed_dicom(RLELossless, [_rle(b"\x81\x00" * 1000)], 16, 16)
+        (root / "bomb.dcm").write_bytes(data)
+        with quiet():
+            run_preprocess([root / "bomb.dcm"], root / "work")
+        rows = [(r["kind"], r["reason"]) for r in _read_tsv(root / "work" / "skipped.tsv")]
+        self.assertEqual(rows, [("failed", "unsupported: RLE segment decodes to more than Rows x Columns (256) bytes")])
+
+    def test_consistent_compressed_files_render(self):
+        pixels = (np.arange(20 * 30).reshape(20, 30) % 251).astype(np.uint8)
+        j2k = imagecodecs.jpeg2k_encode(pixels, level=0, codecformat="J2K")
+        rle = pydicom.pixels.encoders.RLELosslessEncoder.encode(
+            pixels,
+            encoding_plugin="pydicom",
+            rows=20,
+            columns=30,
+            samples_per_pixel=1,
+            bits_allocated=8,
+            bits_stored=8,
+            pixel_representation=0,
+            photometric_interpretation="MONOCHROME2",
+            number_of_frames=1,
+        )
+        files = {
+            "j2k": (JPEG2000Lossless, j2k),
+            "jp2": (JPEG2000Lossless, imagecodecs.jpeg2k_encode(pixels, level=0, codecformat="JP2")),
+            **({"htj2k": (HTJ2KLossless, HTJ2K_ENCODE(pixels))} if HTJ2K_ENCODE else {}),
+            "rle": (RLELossless, rle),
+            "jpeg": (JPEGBaseline8Bit, imagecodecs.jpeg8_encode(pixels)),
+        }
+        expected = render("dicom", ImageId("x"), _compressed_dicom(JPEG2000Lossless, [j2k], 20, 30), "inferno").rgb
+        for name, (syntax, frame) in files.items():
+            with self.subTest(name), quiet():
+                out = render("dicom", ImageId("x"), _compressed_dicom(syntax, [frame], 20, 30), "inferno")
+                self.assertEqual(out.rgb.dtype, np.uint8)
+                if name != "jpeg":  # lossless
+                    np.testing.assert_array_equal(out.rgb, expected)
+
+
 class EscapeNameTest(unittest.TestCase):
     def test_bad_characters_are_spelled_out_and_others_kept(self):
         self.assertEqual(_escape_name(os.fsdecode(b"/s/a\xff.png")), "/s/a\\xff.png")
@@ -3365,7 +3912,7 @@ class RenderTest(unittest.TestCase):
         self.assertGreater(checked, 0)
 
     def test_undecodable_compressed_dicom_names_its_transfer_syntax(self):
-        path = get_testdata_file("JPEG2000-embedded-sequence-delimiter.dcm", download=False)
+        path = get_testdata_file("JPEG-lossy.dcm", download=False)  # 12-bit JPEG Extended: no installed codec
         if path is None:
             self.skipTest("file not bundled")
         with warnings.catch_warnings():
@@ -3373,7 +3920,7 @@ class RenderTest(unittest.TestCase):
             with self.assertRaises(DecodeError) as ctx:
                 render("dicom", "id", Path(path).read_bytes(), "inferno")
         reason = _failed("id", ctx.exception).reason
-        self.assertTrue(reason.startswith("cannot decode JPEG 2000 Image Compression: "), reason)
+        self.assertTrue(reason.startswith("cannot decode JPEG Extended (Process 2 and 4): "), reason)
         self.assertNotIn("0x", reason)
         self.assertNotIn("\n", reason)
 

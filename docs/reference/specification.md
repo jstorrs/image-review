@@ -356,10 +356,87 @@ and rounded up by about a tenth; `preprocess.json` records them with the two
 limits. The largest square image each path passes is 6345 pixels a side for
 `dicom-gray`, 5675 for `dicom-gray-wide`, 5461 for `dicom-colour`, 4884 for
 `dicom-colour-wide`, 5792 for `dicom-palette`, 8556, 8192, 10033 and 8973 for the raster gray and RGB
-paths, 5181 for `raster-alpha`. The estimate trusts the header: compressed
-DICOM pixel data (JPEG, JPEG 2000, RLE) can decode to more pixel data than
-Rows and Columns declare, which it does not see (a known gap, not yet
-guarded). Neither the budget nor the byte limit changes any input under them.
+paths, 5181 for `raster-alpha`. The estimate trusts the header, so
+compressed DICOM pixel data is then checked against it from the codestream's
+headers, never by decoding (see *Compressed frame check* below). Neither the
+budget nor the byte limit changes any input under them.
+
+**Compressed frame check** (`_check_compressed_frame`, after the budget and
+before `_decode_pixels`). The transfer syntax UID is read as a `UID` even when
+written with another VR (a plain `str`); several values raise `unsupported:
+transfer syntax UID is not a single value`. A syntax that
+`pydicom.pixels.get_decoder` has no decoder for is not checked: pydicom fails
+it before decoding, as `cannot decode <name>: NotImplementedError: ...`. For a
+compressed one it decodes, the one frame is found as pydicom's decoder finds
+it (`generate_fragmented_frames` with one frame and the Extended Offset Table
+if pydicom would use it), its fragments joined; a second frame raises
+`unsupported: compressed pixel data holds more than one frame`, since pydicom
+decodes frames past NumberOfFrames too. Then, by transfer syntax:
+
+- JPEG (`JPEGTransferSyntaxes`) and JPEG-LS: `_jpeg_frame_size` steps from SOI
+  over marker segments by their length to the first frame header (SOF0-15
+  bar DHT, JPG and DAC; DHP; SOF55), finding each marker as `_jpeg_end` does
+  within a `_WalkBudget`, and reads height, width and components. A height
+  of 0 (to be set by DNL, or in JPEG-LS by LSE) is refused.
+- JPEG 2000 and HTJ2K (`JPEG2000TransferSyntaxes`): `_j2k_frame_size` reads
+  the SIZ marker that must follow SOC, after walking a JP2 file's top-level
+  boxes to `jp2c` when the data starts with the JP2 signature, and returns
+  Xsiz - XOsiz, Ysiz - YOsiz and Csiz. `_check_j2k_coding` then reads
+  every COD and COC, in the main header and in each tile-part header
+  (`_j2k_coding_segments`: SOT to SOD, the next tile-part Psot bytes on,
+  which must be SOT, EOC or the end; at most `_J2K_MAX_TILE_PARTS`, 2**20).
+  Only the marker segments a Part 1 or HTJ2K header may hold are allowed:
+  CAP, COD, COC, TLM, PLM, CPF, QCD, QCC, RGN, POC, PPM, CRG and COM in the
+  main header, and COD, COC, PLT, QCD, QCC, RGN, POC, PPT and COM in a
+  tile-part header; any other raises `unsupported: cannot read compressed
+  pixel data header (unexpected JPEG 2000 marker)`. OpenJPEG skips an
+  unknown marker by scanning for the next one it knows rather than by its
+  length, so it could read a COD the walk stepped over, and it copies Part
+  2's MCT into every tile (60 KB of it in 65025 tiles took 4.45 GB). A COD
+  of more than `_J2K_MAX_LAYERS` (256) quality layers raises `unsupported:
+  JPEG 2000 quality layers over 256`: OpenJPEG's packet iterator allocates
+  per layer, resolution, component and precinct (65535 layers of a 2048 x
+  2048 image took 1.9 GB). At 256 layers, with 16 x 16 precincts and
+  code-blocks, the largest images the budget passes (6300 x 6300 gray, 5400
+  x 5400 RGB, 6 or 13 resolutions) peaked no higher than with one layer.
+  The most seen in real files is 6. TLM bodies may hold at most
+  `_J2K_MAX_TLM_BYTES` (1 MiB) in all, else `unsupported: JPEG 2000 TLM
+  markers over 1 MiB`: OpenJPEG keeps about 10 bytes per TLM byte (100 MB
+  of TLM in a 1024 x 1024 file took 1.78 GB), while a real TLM holds a 2 to 6
+  byte entry per tile-part; no file seen has one.
+  For each resolution r the code-block is 2**(xcb + 2) x 2**(ycb + 2), each
+  side capped by the precinct in band coordinates (2**PPx at r = 0,
+  2**(PPx - 1) above; 2**15 without precincts); any of fewer than 2**8
+  pixels raises `unsupported: JPEG 2000 code-blocks of fewer than 256
+  pixels`, whichever components or tiles it applies to. OpenJPEG allocates a
+  few hundred bytes per code-block, so this bounds that to a few bytes per
+  pixel. A missing COD, or a marker segment or tile-part that cannot be
+  parsed, is unreadable. The tile count is not checked: OpenJPEG decodes at
+  most 65535, and 873 MB was measured for a 3-component file of 65025 tiles.
+- RLE Lossless: `_check_rle_frame` requires the header's segment count to be
+  SamplesPerPixel x (BitsAllocated // 8) and walks each segment's run
+  headers as pydicom decodes them (`_rle_decoded_length`), refusing a
+  segment of more than Rows x Columns bytes. pydicom itself would decode it
+  whole and keep the first Rows x Columns. A row of no-ops (128) is skipped
+  by one regex match and the walk stops once past Rows x Columns, so every
+  other step decodes at least a byte: a segment takes at most about 2 x Rows
+  x Columns Python steps, however long it is or however the segments overlap
+  (offsets need not increase).
+
+A size other than Columns x Rows raises `unsupported: compressed pixel data
+is W x H, not Columns x Rows C x R`, and other components `unsupported:
+compressed pixel data has N components, not SamplesPerPixel S`; RLE raises
+`unsupported: RLE pixel data has N segments, not SamplesPerPixel x
+BitsAllocated / 8 (M)` or `unsupported: RLE segment decodes to more than Rows
+x Columns (N) bytes`. Encapsulation or a codestream header that cannot be
+parsed raises `unsupported: cannot read compressed pixel data header
+(<fixed text>)`, never library text or file bytes. A compressed transfer
+syntax pydicom can decode but that is none of the above (there is none in
+pydicom 3.0) would raise `unsupported: cannot check compressed pixel data
+dimensions (<name>)`. Native pixel data is not checked; nor is a missing
+Rows, Columns, SamplesPerPixel or BitsAllocated, which pydicom refuses before
+decoding. The sample depth is not checked: a frame of the declared size
+decodes to at most a few bytes per sample.
 
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
@@ -378,7 +455,8 @@ guarded). Neither the budget nor the byte limit changes any input under them.
    with `--draw-overlays` the overlay planes are added, at OverlayRows x
    OverlayColumns times `OVERLAY_BYTES_PER_PIXEL`. Over `MAX_RENDER_BYTES`
    it raises `unsupported: image too large (C x R, about N.N GiB to render;
-   limit 3.0 GiB)`. A missing Rows or Columns is left to the decoder; frames
+   limit 3.0 GiB)`; compressed pixel data must then pass the *Compressed
+   frame check* above. A missing Rows or Columns is left to the decoder; frames
    are not counted, as a multi-frame image is refused first. No pixel data,
    `NumberOfFrames` above 1 (checked first, whatever the photometric
    interpretation), or a photometric interpretation other than the ones below

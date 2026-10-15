@@ -270,10 +270,47 @@ limits are fixed; there is no option to change them. Pillow's own
 decompression bomb check still applies first, to a raster of more than about
 179 million pixels.
 
-The estimate trusts the header. The pixel data of a compressed DICOM (JPEG,
-JPEG 2000, RLE) can decode to more pixel data than its Rows and Columns
-declare, so a crafted file can get past it. That is a known gap, not yet
-guarded.
+The estimate trusts the header, so a compressed DICOM is first checked
+against it, from the headers inside its pixel data and without decoding
+anything, and fails if it would decode to more than Rows and Columns declare:
+
+- JPEG, JPEG-LS, JPEG 2000 and HTJ2K: the frame header's width, height and
+  number of components must be Columns, Rows and SamplesPerPixel, e.g.
+  `unsupported: compressed pixel data is 12000 x 12000, not Columns x Rows 16
+  x 16`. A JPEG whose frame header gives no height (left to a later DNL
+  marker, or to an LSE marker in JPEG-LS) is refused.
+- JPEG 2000 and HTJ2K: every code-block, as capped by its precinct, must
+  hold at least 256 pixels, in the main header and in every tile-part
+  header (`unsupported: JPEG 2000 code-blocks of fewer than 256 pixels`).
+  The decoder's memory grows with the number of code-blocks: a 738-byte
+  4096 x 4096 file of 1 x 1 code-blocks needed 9.3 GB. Coders write 64 x 64.
+  At most 256 quality layers are allowed (`unsupported: JPEG 2000 quality
+  layers over 256`); coders write one or a few. TLM markers may hold at most
+  1 MiB in all (`unsupported: JPEG 2000 TLM markers over 1 MiB`): a decoder
+  keeps about 10 bytes per TLM byte, and real ones hold a few bytes per
+  tile-part. Only the marker segments a JPEG 2000 Part 1 or HTJ2K
+  codestream may have in its main and tile-part headers are allowed (else
+  `unsupported: cannot read compressed pixel data header (unexpected JPEG
+  2000 marker)`): a decoder skips an unknown marker by searching for the
+  next one it knows, so it could find settings the check stepped over, and
+  the Part 2 markers (MCT and others), which DICOM does not allow here, are
+  copied into every tile.
+- RLE: the frame must have SamplesPerPixel x BitsAllocated / 8 segments, and
+  none may decode to more than Rows x Columns bytes, e.g. `unsupported: RLE
+  segment decodes to more than Rows x Columns (256) bytes`. pydicom would
+  decode such a segment whole and keep only its start.
+- The pixel data must hold a single frame: pydicom decodes frames past
+  NumberOfFrames as well (`unsupported: compressed pixel data holds more than
+  one frame`).
+
+A header that cannot be found or read fails as `unsupported: cannot read
+compressed pixel data header (...)`, with a fixed description in the
+parentheses. Transfer syntaxes pydicom has no decoder for (MPEG, HEVC, the
+retired JPEG processes) are not checked and fail as `cannot decode <transfer
+syntax name>: ...`, as before. Not checked either: the sample depth (a frame
+of the right size decodes to at most a few bytes per sample, well within the
+per-pixel costs) and the number of JPEG 2000 tiles (OpenJPEG decodes at most
+65535; 873 MB was measured for a 3-component file of 65025 tiles).
 
 ## Input notes
 

@@ -194,10 +194,32 @@ Read **Upgrading** first.
   compressed with a method other than stored or deflate (bzip2, LZMA) now fail
   as `unsupported: ZIP compression method bzip2`, since `zipfile` does not
   bound the memory used to decompress them. The limits and costs are recorded
-  in `preprocess.json`; there is no option to change them yet. This bounds
-  the common cases, not every input: the pixel data of a compressed DICOM
-  (JPEG, JPEG 2000, RLE) can decode to more pixel data than its Rows and
-  Columns declare, which the estimate does not see; that is not yet guarded.
+  in `preprocess.json`; there is no option to change them yet. Since the
+  estimate trusts Rows and Columns, a compressed DICOM is first checked
+  against them from its codestream's own headers, without decoding: a JPEG,
+  JPEG-LS, JPEG 2000 or HTJ2K frame must be Columns x Rows with
+  SamplesPerPixel components (else `unsupported: compressed pixel data is
+  12000 x 12000, not Columns x Rows 16 x 16`), JPEG 2000 and HTJ2K
+  code-blocks must hold at least 256 pixels (else `unsupported: JPEG 2000
+  code-blocks of fewer than 256 pixels`; a 738-byte 4096 x 4096 file of 1 x 1
+  code-blocks needed 9.3 GB to decode), and have at most 256 quality layers,
+  at most 1 MiB of TLM markers (else `unsupported: JPEG 2000 TLM markers over
+  1 MiB`; decoders keep about 10 bytes per TLM byte) and only the marker
+  segments of a JPEG 2000 Part 1 or HTJ2K header (else
+  `unsupported: cannot read compressed pixel data header (unexpected JPEG
+  2000 marker)`: decoders skip an unknown marker differently from its
+  length, and Part 2's MCT is copied into every tile), an RLE frame must have
+  SamplesPerPixel x BitsAllocated / 8 segments, none decoding to more than
+  Rows x Columns bytes, and the pixel data must hold one frame, as pydicom
+  decodes any past NumberOfFrames too. A 1 KB JPEG 2000 file declaring 16 x
+  16 used to decode 144 million pixels before failing, and an 8 MB RLE file
+  decoded 512 MB and rendered its first 256 bytes; both now fail before
+  decoding. A header that cannot be read fails as `unsupported: cannot read
+  compressed pixel data header (...)`. A transfer syntax pydicom has no
+  decoder for (MPEG, HEVC, retired JPEG processes) still fails as `cannot
+  decode <name>: ...`. Not checked: the number of JPEG 2000 tiles, which
+  OpenJPEG caps at 65535 (873 MB was measured for a 3-component file of
+  65025 tiles).
 - Content carried only by a transparent image's alpha channel is now
   visible. preprocess showed the image composited over mid-gray beside the
   raw colour, so alpha-only text was invisible when the colour was
