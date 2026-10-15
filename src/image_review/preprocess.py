@@ -33,7 +33,7 @@ import numpy as np
 import pydicom
 import skimage as ski
 import tifffile
-from PIL import ExifTags, Image, PngImagePlugin, TiffImagePlugin
+from PIL import ExifTags, Image, JpegImagePlugin, MpoImagePlugin, PngImagePlugin, TiffImagePlugin
 from pydicom.errors import InvalidDicomError
 from pydicom.uid import (
     UID,
@@ -958,9 +958,10 @@ def _trailing_data_notes(data: bytes, image_format: str | None, frame_offsets: S
 
 def _mpf_offsets(im: Image.Image) -> tuple[int, ...]:
     """Where Pillow reads each frame of an MPO `im` (absolute offsets, the first 0), from its private
-    `_MpoImageFile__mpoffsets` (Pillow 10.3 to 12.3 at least): its `mpoffset` base is deleted once used, and finding it
-    again could disagree with Pillow on a crafted file. () for other images, or when they cannot be read: the
-    trailing-data check then reports everything after the first EOI, which hides nothing."""
+    `_MpoImageFile__mpoffsets` (Pillow 10.3 to 12.3 at least, set when it is opened or adopted as an MPO): its
+    `mpoffset` base is deleted once used, and finding it again could disagree with Pillow on a crafted file. () for
+    other images, or when they cannot be read: the trailing-data check then reports everything after the first EOI,
+    which hides nothing."""
     if im.format != "MPO":
         return ()
     try:
@@ -1080,11 +1081,32 @@ def _embedded_image_notes(im: Image.Image, data: bytes) -> tuple[Note, ...]:
     return tuple(notes)
 
 
+def _open_image(data: bytes) -> Image.Image:
+    """`Image.open` of `data`, with every image an MPF lists readable as a frame on any Pillow.
+
+    Pillow 12 leaves an Ultra HDR file (MPF listing a gain map, XMP with `hdrgm:Version`) a plain JPEG, so its gain map
+    would not be rendered, where Pillow 10.3 opens it as an MPO. A plain JPEG whose MPF lists more than one image is
+    therefore adopted as an MPO, as Pillow does for any other such file. When the MPF is malformed, or adopting fails,
+    the plain JPEG is kept (opened afresh: a failed adoption leaves the first one half converted), and its extra
+    bytes are left to the `trailing-data` note."""
+    im = Image.open(io.BytesIO(data))
+    if type(im) is not JpegImagePlugin.JpegImageFile:
+        return im
+    try:
+        mpheader = cast(Any, im)._getmp()
+        if mpheader is not None and mpheader[45057] > 1:
+            return MpoImagePlugin.MpoImageFile.adopt(im, mpheader)
+    except Exception:  # noqa: BLE001 - a malformed MPF must not fail an input that renders as its primary image
+        im.close()
+        return JpegImagePlugin.JpegImageFile(io.BytesIO(data))
+    return im
+
+
 def _open_raster(data: bytes) -> Image.Image:
-    """`Image.open` of `data`; Pillow's decompression bomb error (over twice `Image.MAX_IMAGE_PIXELS`) is
+    """`_open_image` of `data`; Pillow's decompression bomb error (over twice `Image.MAX_IMAGE_PIXELS`) is
     `Unsupported`, as the estimate (see `_check_raster_memory`) would have found the image too large."""
     try:
-        return Image.open(io.BytesIO(data))
+        return _open_image(data)
     except Image.DecompressionBombError as exc:
         pixels = 2 * (Image.MAX_IMAGE_PIXELS or 0)
         raise Unsupported(f"image too large (over {pixels} pixels, Pillow's decompression bomb limit)") from exc
@@ -1095,7 +1117,7 @@ def _mpo_frame_sizes(data: bytes, frames: int) -> list[tuple[int, int]]:
     header, no pixels. It is done on an image of its own, as seeking the one being rendered back to its first frame
     would parse that frame's EXIF again, unguarded as `Image.open` guards it, and fail where the rendering does not.
     Stops at the first frame that cannot be positioned; the rendering fails there too, before decoding it."""
-    with Image.open(io.BytesIO(data)) as probe:
+    with _open_image(data) as probe:
         sizes = [probe.size]
         for index in range(1, frames):
             try:
@@ -1142,8 +1164,8 @@ def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
     colour or alpha PNG or 16-bit RGB or CMYK TIFF, which Pillow would truncate
     to its high byte, is decoded at full depth instead (see `_full_depth` and
     `_decode_tiff`); its gray+alpha stays grayscale. An MPO (JPEG with extra MPF images: HDR gain
-    maps, previews) is one view of all its frames side by side; any other multi-frame
-    image is unsupported.
+    maps, previews, adopted on any Pillow; see `_open_image`) is one view of all its frames side by side; any
+    other multi-frame image is unsupported.
     """
     with _open_raster(data) as im:
         frames = getattr(im, "n_frames", 1)

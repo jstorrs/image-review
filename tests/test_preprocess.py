@@ -219,6 +219,16 @@ def _mpo_bytes(frame1_exif: bytes | None = None) -> bytes:
     return data[: soi + 2] + segment + data[soi + 2 :]
 
 
+_HDRGM_XMP = b'http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta><rdf:Description hdrgm:Version="1.0"/></x:xmpmeta>'
+
+
+def _with_hdrgm_xmp(mpo: bytes) -> bytes:
+    """`mpo` with an APP1 XMP segment declaring `hdrgm:Version` right after the first frame's SOI: an Ultra HDR file
+    (a base image and its gain map), which Pillow 12 opens as a plain JPEG and Pillow 10.3 as an MPO."""
+    segment = b"\xff\xe1" + struct.pack(">H", len(_HDRGM_XMP) + 2) + _HDRGM_XMP
+    return mpo[:2] + segment + mpo[2:]
+
+
 class MixedSourceTest(unittest.TestCase):
     def setUp(self):
         self.root = temp_dir(self).resolve()
@@ -1885,6 +1895,13 @@ class SizeLimitTest(unittest.TestCase):
         ):
             decode_raster(mpo)
 
+    def test_ultra_hdr_gain_map_counts_toward_the_canvas(self):
+        uhdr = _with_hdrgm_xmp(_mpo_bytes())
+        canvas = (60 + SIDE_BY_SIDE_GAP + 30) * 40
+        with mock.patch.object(preprocess_module, "_decode_frame", side_effect=AssertionError("decoded")):
+            self.assertTrue(self.too_large(partial(decode_raster, uhdr), canvas * 44 - 1))
+        self.assertFalse(self.too_large(partial(decode_raster, uhdr), canvas * 44))
+
     def test_mpo_with_unreadable_exif_in_frame_zero_renders_as_before(self):
         mpo = _bad_exif_in_frame0(_mpo_bytes(_exif_with_thumbnail()))
         views, notes = decode_raster(mpo)
@@ -2318,6 +2335,28 @@ class TrailingDataTest(unittest.TestCase):
         exif = _exif_with_thumbnail()
         thumbnail = Note("embedded-thumbnail", f"frame 1: EXIF IFD1 thumbnail ({_thumbnail_len(exif)} bytes)")
         self.assert_noted(_mpo_bytes(exif), bytes(3), "3 bytes after the MPO end; all zero bytes", (thumbnail,))
+
+    def test_ultra_hdr_renders_both_frames_with_no_note(self):
+        uhdr = _with_hdrgm_xmp(_mpo_bytes())
+        views, notes = decode_raster(uhdr)
+        self.assertEqual(notes, ())
+        self.assertEqual(views[0].shape, (40, 60 + SIDE_BY_SIDE_GAP + 30, 3))
+        plain = decode_raster(_mpo_bytes())[0]
+        np.testing.assert_array_equal(views[0], plain[0])  # as an MPO without the XMP is
+        self.assert_noted(uhdr, b"junk", "4 bytes after the MPO end")
+
+    def test_ultra_hdr_with_malformed_mpf_renders_its_primary_image(self):
+        mpo = _mpo_bytes()
+        mpf = mpo.index(b"MPF\x00") + 4
+        bad = _with_hdrgm_xmp(mpo[:mpf] + b"XX*\x00" + mpo[mpf + 4 :])  # an MPF byte order that is neither II nor MM
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            views, notes = decode_raster(bad)
+        first = _jpeg_end(mpo)
+        assert first is not None
+        detail = f"{len(mpo) - first} bytes after the JPEG end; they begin with a JPEG signature"
+        self.assertEqual(views[0].shape, (40, 60, 3))
+        self.assertEqual(notes, (Note("trailing-data", detail),))
 
     def test_bytes_between_mpo_frames_are_noted(self):
         mpo, jpeg = _mpo_bytes(), _gradient_jpeg()

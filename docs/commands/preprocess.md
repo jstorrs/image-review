@@ -438,8 +438,12 @@ as several views side by side in one image (still one item to review):
   anything drawn only in the alpha channel is visible, whatever the colour).
   Check both halves. A grayscale image with alpha stays grayscale. The input
   also gets an [`alpha` note](#input-notes).
-- **MPO JPEGs** (HDR gain maps, camera previews embedded in a JPEG): every
-  embedded image, left to right.
+- **MPO JPEGs** (a JPEG whose MPF lists more images: Ultra HDR gain maps,
+  camera previews): every image the MPF lists, left to right. Pillow 12
+  leaves an Ultra HDR file as a plain JPEG, so preprocess reads it as an
+  MPO itself; the rendering is the same on every supported Pillow. If the
+  MPF is malformed, the primary image is rendered alone and the extra bytes
+  get a [`trailing-data` note](#input-notes).
 
 Animated PNGs and other multi-frame rasters are listed in `skipped.tsv` as
 unsupported.

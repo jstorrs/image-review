@@ -488,9 +488,15 @@ at a set bit.
 - Each frame is decoded to float [0, 1]. Several views of one input are
   placed side by side in a single rendered image (one manifest row, one
   `image_id`), top-aligned, separated by a 4-pixel gap
-- MPO files (JPEGs carrying extra MPF images: HDR gain maps, camera
+- MPO files (JPEGs carrying extra MPF images: Ultra HDR gain maps, camera
   previews) render every frame side by side at native resolution, padded and
-  separated with black. Any other multi-frame image (animated PNG/GIF,
+  separated with black. Pillow 12 leaves a JPEG whose XMP declares
+  `hdrgm:Version` (Ultra HDR) a plain JPEG, where Pillow 10.3 opens it as an
+  MPO, so `_open_image` adopts any plain JPEG whose MPF lists more than one
+  image with `MpoImageFile.adopt`, on every Pillow. The frame-size check
+  for the memory budget opens the input the same way. A malformed MPF, or
+  an adoption that raises, keeps the plain JPEG (opened afresh), rendered as
+  its primary image with a `trailing-data` note for the extra bytes. Any other multi-frame image (animated PNG/GIF,
   multi-page TIFF) raises `unsupported: multi-frame image (N frames)`
 - Modes with real alpha (`RGBA`, `LA`, `PA`, premultiplied variants, or any
   mode with a `transparency` entry such as a palette with a transparent
@@ -592,7 +598,7 @@ at a set bit.
     gets no note.
   - An MPO's frames are where Pillow reads them: its private
     `_MpoImageFile__mpoffsets` (absolute, the first 0; present from Pillow
-    10.3 to 12.3), read in `_mpf_offsets` inside a catch-all. Pillow deletes
+    10.3 to 12.3, set when Pillow opens or `adopt`s the MPO), read in `_mpf_offsets` inside a catch-all. Pillow deletes
     its `mpoffset` base from `info` after use, and finding the base again
     from the file could disagree with Pillow on a crafted file. If the
     offsets cannot be read, none are used, so everything after the first

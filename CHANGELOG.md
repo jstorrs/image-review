@@ -261,6 +261,12 @@ Read **Upgrading** first.
   `review` exits 1 with "Not recorded: ... changed since it was loaded", and
   `serve` answers that request and later ones with an error until restarted.
   Nothing is written.
+- On Pillow 12, preprocess rendered only the primary image of an Ultra HDR
+  JPEG (the default on recent Android cameras): Pillow 12 does not open it as
+  an MPO, so its HDR gain map was never shown for review. Every image the
+  MPF lists is now rendered side by side on every supported Pillow, as it
+  already was on Pillow 10.3; an Ultra HDR file's gain map no longer gets a
+  `trailing-data` note. A malformed MPF still renders the primary image.
 
 ### Documentation
 
