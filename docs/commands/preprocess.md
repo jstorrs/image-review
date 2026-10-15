@@ -171,6 +171,12 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
   - a ZIP inside a ZIP;
   - an `unsupported:` multi-frame DICOM, or a DICOM object without pixel
     data (structured reports, encapsulated PDFs);
+  - an input too large to render within the memory budget (see [Size
+    limits](#size-limits)): `unsupported: input too large (N bytes; limit
+    1073741824)` for a file or ZIP entry over 1 GiB, `unsupported: image too
+    large (7000 x 6000, about 3.2 GiB to render; limit 3.0 GiB)` for an
+    image, and `unsupported: ZIP compression method bzip2` for a ZIP entry
+    that is neither stored nor deflated;
   - an input whose float pixel data holds NaN or infinity (a float DICOM or a
     mode `F` TIFF), with `unsupported: non-finite pixel values (1 NaN, 0
     infinite)`: scaling by the minimum and maximum would wipe out the
@@ -230,6 +236,44 @@ be shown. Either fix them and preprocess again into a new work directory, or
 accept the result: the work directory has been written and can be reviewed as
 it is (pass `--allow-skipped` up front when a script should treat failed
 inputs as success).
+
+## Size limits
+
+Decoding an image makes several copies of its pixels as floating point, so
+the memory it needs is far out of proportion to the size of the file. To keep
+one huge input from exhausting the memory of a worker, preprocess refuses
+what it estimates to be too large, before it reads or decodes the pixels,
+and records it as `failed`:
+
+- A file or ZIP entry over 1 GiB is not read, and a ZIP entry that large is
+  refused even if it is not an image. The size is the one the file system or
+  the ZIP directory states; `zipfile` never returns more bytes than a ZIP
+  header declares, and fails the entry's CRC check if it understates them.
+  A ZIP entry compressed by a method other than stored or deflate (bzip2,
+  LZMA) is refused, since `zipfile` decompresses those whole before cutting
+  them to the declared size.
+- An image whose estimated memory to render is over 3 GiB. The estimate is
+  its pixels, from the header, times a number of bytes per pixel measured for
+  the way that kind of image is rendered: for a DICOM Rows x Columns (plus
+  the overlay planes, at their OverlayRows x OverlayColumns, with
+  `--draw-overlays`), for a raster width x height, and for an MPO the canvas
+  holding all its frames side by side. The costs run from 32 bytes per pixel
+  for an RGB raster to 80 for a grayscale DICOM, 108 for a colour DICOM and
+  120 for a raster with transparency (all are recorded in
+  [`preprocess.json`](../reference/work-directory.md)). The largest square
+  images that pass are about 10000 pixels a side for an 8-bit RGB raster,
+  8500 for a grayscale raster, 6300 for a grayscale DICOM and 5200 with
+  transparency. A 50-megapixel photo and a 4096 x 5120 mammogram pass.
+
+The budget applies to each worker, so `--jobs N` can use N times as much. The
+limits are fixed; there is no option to change them. Pillow's own
+decompression bomb check still applies first, to a raster of more than about
+179 million pixels.
+
+The estimate trusts the header. The pixel data of a compressed DICOM (JPEG,
+JPEG 2000, RLE) can decode to more pixel data than its Rows and Columns
+declare, so a crafted file can get past it. That is a known gap, not yet
+guarded.
 
 ## Input notes
 

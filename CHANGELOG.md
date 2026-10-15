@@ -179,6 +179,25 @@ Read **Upgrading** first.
 
 ### Fixes
 
+- preprocess now refuses inputs too large to render within a memory budget,
+  before reading or decoding their pixels, as ordinary `failed` rows. One
+  huge input could get preprocess killed by the system for lack of memory,
+  with no message and a `.partial` directory left behind. A file or ZIP entry over
+  1 GiB fails as `unsupported: input too large (N bytes; limit L)` without
+  being read, and a ZIP entry over 1 GiB fails even if it is not an image.
+  An image estimated to need more than 3 GiB to render (its pixels times a
+  per-pixel cost measured for how that kind of image is rendered, for
+  instance about 80 bytes for a grayscale DICOM and 32 for an RGB photo;
+  `--jobs` workers each may use that much) fails as `unsupported: image too
+  large (7000 x 6000, about 3.2 GiB to render; limit 3.0 GiB)`. A 50-megapixel
+  RGB photo and a 4096 x 5120 16-bit grayscale DICOM render. ZIP entries
+  compressed with a method other than stored or deflate (bzip2, LZMA) now fail
+  as `unsupported: ZIP compression method bzip2`, since `zipfile` does not
+  bound the memory used to decompress them. The limits and costs are recorded
+  in `preprocess.json`; there is no option to change them yet. This bounds
+  the common cases, not every input: the pixel data of a compressed DICOM
+  (JPEG, JPEG 2000, RLE) can decode to more pixel data than its Rows and
+  Columns declare, which the estimate does not see; that is not yet guarded.
 - Content carried only by a transparent image's alpha channel is now
   visible. preprocess showed the image composited over mid-gray beside the
   raw colour, so alpha-only text was invisible when the colour was

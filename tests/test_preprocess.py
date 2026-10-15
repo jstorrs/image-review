@@ -26,6 +26,7 @@ from concurrent.futures import Executor, Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from unittest import mock
 
@@ -623,6 +624,9 @@ class ProvenanceTest(unittest.TestCase):
                 "draw_overlays": False,
                 "access": "private",
                 "jobs": 1,
+                "max_input_bytes": preprocess_module.MAX_INPUT_BYTES,
+                "max_render_bytes": preprocess_module.MAX_RENDER_BYTES,
+                "render_bytes_per_pixel": dict(preprocess_module.RENDER_BYTES_PER_PIXEL),
             },
         )
         self.assertLessEqual(
@@ -673,12 +677,12 @@ class ProvenanceTest(unittest.TestCase):
     def test_source_is_read_once(self):
         reads = []
 
-        def counting(path: Path) -> bytes:
+        def counting(path: Path, size: int) -> bytes:
             reads.append(path)
-            return real(path)
+            return real(path, size)
 
-        real = Path.read_bytes
-        with mock.patch.object(Path, "read_bytes", counting), quiet():
+        real = preprocess_module._read_input
+        with mock.patch.object(preprocess_module, "_read_input", counting), quiet():
             run_preprocess([self.src / "icon.dcm"], self.root / "once")
         self.assertEqual(reads, [self.src / "icon.dcm"])
 
@@ -1578,6 +1582,333 @@ class ContentDiscoveryTest(unittest.TestCase):
         [(_, kind, reason)] = self.skipped_rows(work)
         self.assertEqual(kind, "failed")
         self.assertIn(f"pass its target {self.root.as_posix()}/e\\xff as a SOURCE", reason)
+
+
+def _png_header_only(width: int, height: int, color_type: int = 0, bit_depth: int = 8) -> bytes:
+    """A PNG declaring `width` x `height` pixels with empty pixel data: it opens, but cannot be decoded."""
+    header = struct.pack(">IIBBBBB", width, height, bit_depth, color_type, 0, 0, 0)
+    return PNG_MAGIC + _png_chunk(b"IHDR", header) + _png_chunk(b"IDAT", zlib.compress(b"")) + _png_chunk(b"IEND", b"")
+
+
+def _bad_exif_in_frame0(mpo: bytes) -> bytes:
+    """`mpo` with an unreadable EXIF segment inserted before frame 0's MPF segment, so offsets stay valid."""
+    bad = b"Exif\x00\x00XXXXXXXXXXXX"
+    return mpo[:2] + b"\xff\xe1" + struct.pack(">H", len(bad) + 2) + bad + mpo[2:]
+
+
+class SizeLimitTest(unittest.TestCase):
+    """Inputs too large to render safely fail as `failed` rows before their bytes are read or pixels decoded."""
+
+    def setUp(self):
+        self.root = temp_dir(self).resolve()
+        self.png = _png_bytes(RNG.integers(0, 255, (20, 30, 3), dtype=np.uint8))  # 600 pixels
+
+    def run_failed(self, source: Path) -> list[tuple[str, str, str]]:
+        work = Path(tempfile.mkdtemp(dir=self.root)) / "work"
+        with quiet():
+            run_preprocess([source], work)
+        return [(r["image_id"], r["kind"], r["reason"]) for r in _read_tsv(work / "skipped.tsv")]
+
+    def too_large(self, render_call, limit: int) -> bool:
+        """Whether `render_call()` is refused as too large with `MAX_RENDER_BYTES` at `limit`; any other outcome, a
+        success or a failure to decode, means the estimate passed."""
+        with mock.patch.object(preprocess_module, "MAX_RENDER_BYTES", limit), quiet():
+            try:
+                render_call()
+            except Unsupported as exc:
+                return "image too large" in str(exc)
+            except Exception:  # noqa: BLE001
+                return False
+            return False
+
+    def assert_estimated_at(self, render_call, pixels: int, path: str):
+        """The estimate is `pixels` times the factor of `path`: over a limit one byte under it, not over it at it."""
+        estimate = pixels * preprocess_module.RENDER_BYTES_PER_PIXEL[path]
+        self.assertTrue(self.too_large(render_call, estimate - 1), path)
+        self.assertFalse(self.too_large(render_call, estimate), path)
+
+    # ---- files and ZIP entries
+
+    def test_oversized_file_fails_without_being_read(self):
+        path = self.root / "big.png"
+        path.write_bytes(self.png)
+        opened = []
+        real = open
+        with (
+            mock.patch.object(preprocess_module, "MAX_INPUT_BYTES", len(self.png) - 1),
+            mock.patch("builtins.open", lambda f, *a, **k: opened.append(Path(f)) or real(f, *a, **k)),
+        ):
+            rows = self.run_failed(path)
+        self.assertEqual(opened.count(path), 1)  # to sniff its first bytes
+        reason = f"unsupported: input too large ({len(self.png)} bytes; limit {len(self.png) - 1})"
+        self.assertEqual(rows, [(path.as_posix(), "failed", reason)])
+
+    def test_file_at_the_byte_limit_renders(self):
+        path = self.root / "ok.png"
+        path.write_bytes(self.png)
+        with mock.patch.object(preprocess_module, "MAX_INPUT_BYTES", len(self.png)):
+            self.assertEqual(self.run_failed(path), [])
+
+    def test_file_is_read_no_further_than_the_limit(self):
+        path = self.root / "grown.png"
+        path.write_bytes(self.png)
+        with (
+            mock.patch.object(preprocess_module, "MAX_INPUT_BYTES", len(self.png) - 1),
+            self.assertRaisesRegex(Unsupported, r"input too large \(more than \d+ bytes; limit \d+\)"),
+        ):
+            preprocess_module._read_input(path, 1)  # as if stat had said it was small
+
+    def test_file_grown_within_the_limit_is_read_whole(self):
+        path = self.root / "grown.png"
+        path.write_bytes(self.png)
+        self.assertEqual(preprocess_module._read_input(path, 1), self.png)
+
+    def test_encrypted_zip_entries_fail_as_encrypted(self):
+        archive = self.root / "enc.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("aes.png", self.png, zipfile.ZIP_STORED)
+            zf.writestr("crypto.png", self.png, zipfile.ZIP_DEFLATED)
+        data = bytearray(archive.read_bytes())
+        for name, method in ((b"aes.png", 99), (b"crypto.png", None)):
+            entry = data.index(b"PK\x01\x02", 0)
+            while data[entry + 46 : entry + 46 + len(name)] != name:
+                entry = data.index(b"PK\x01\x02", entry + 1)
+            struct.pack_into("<H", data, entry + 8, 1)  # general purpose flags: encrypted
+            if method:
+                struct.pack_into("<H", data, entry + 10, method)
+        archive.write_bytes(data)
+        reason = "unsupported: encrypted ZIP entry (decrypt the archive first)"
+        self.assertEqual(
+            self.run_failed(archive),
+            [
+                (f"{archive.as_posix()}::aes.png", "failed", reason),
+                (f"{archive.as_posix()}::crypto.png", "failed", reason),
+            ],
+        )
+
+    def test_oversized_zip_entry_is_neither_opened_nor_read(self):
+        archive = self.root / "scans.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("big.png", self.png)
+            zf.writestr("big.txt", b"x" * len(self.png))  # not an image, but over the limit all the same
+        with (
+            mock.patch.object(preprocess_module, "MAX_INPUT_BYTES", len(self.png) - 1),
+            mock.patch.object(zipfile.ZipFile, "open", side_effect=AssertionError("opened")) as opened,
+            mock.patch.object(zipfile.ZipFile, "read", side_effect=AssertionError("read")) as read,
+        ):
+            rows = self.run_failed(archive)
+        opened.assert_not_called()
+        read.assert_not_called()
+        reason = f"unsupported: input too large ({len(self.png)} bytes; limit {len(self.png) - 1})"
+        self.assertEqual(
+            rows,
+            [
+                (f"{archive.as_posix()}::big.png", "failed", reason),
+                (f"{archive.as_posix()}::big.txt", "failed", reason),
+            ],
+        )
+
+    def test_zip_entries_compressed_by_unbounded_methods_fail(self):
+        archive = self.root / "methods.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("stored.png", self.png, zipfile.ZIP_STORED)
+            zf.writestr("deflated.png", self.png, zipfile.ZIP_DEFLATED)
+            zf.writestr("bzip2.png", self.png, zipfile.ZIP_BZIP2)
+            zf.writestr("lzma.png", self.png, zipfile.ZIP_LZMA)
+        rows = self.run_failed(archive)
+        self.assertEqual(
+            rows,
+            [
+                (f"{archive.as_posix()}::bzip2.png", "failed", "unsupported: ZIP compression method bzip2"),
+                (f"{archive.as_posix()}::lzma.png", "failed", "unsupported: ZIP compression method lzma"),
+            ],
+        )
+
+    def test_zip_entry_whose_header_understates_its_size_cannot_be_read_past_it(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("lie.png", self.png + bytes(100_000))
+        data = bytearray(buf.getvalue())
+        directory = data.rindex(b"PK\x01\x02")
+        declared = 5000  # past the 4096 bytes that sniffing consumes, so that the read is reached
+        self.assertGreater(len(self.png) + 100_000, declared)
+        struct.pack_into("<I", data, directory + 24, declared)  # the declared uncompressed size
+        archive = self.root / "lie.zip"
+        archive.write_bytes(data)
+        real = zipfile.ZipFile.read
+        reads = []
+        with mock.patch.object(zipfile.ZipFile, "read", lambda *a: reads.append(a) or real(*a)):
+            reasons = [reason for _, _, reason in self.run_failed(archive)]
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(reasons, ["BadZipFile: Bad CRC-32 for file 'lie.png'"])
+
+    # ---- DICOM
+
+    def dicom(self, **attrs) -> Path:
+        path = self.root / f"{len(list(self.root.iterdir()))}.dcm"
+        write_dicom(path, np.zeros((20, 30), dtype=np.uint16), **attrs)
+        return path
+
+    def render_dicom(self, path: Path, **kwargs):
+        return lambda: render("dicom", ImageId("x"), path.read_bytes(), "gray", **kwargs)
+
+    def test_dicom_over_the_budget_fails_before_decoding(self):
+        path = self.dicom(Rows=6000, Columns=7000)  # 42 million pixels of 16-bit gray, about 3.1 GiB
+        with mock.patch.object(preprocess_module, "_decode_pixels", side_effect=AssertionError("decoded")):
+            rows = self.run_failed(path)
+        reason = "unsupported: image too large (7000 x 6000, about 3.2 GiB to render; limit 3.0 GiB)"
+        self.assertEqual(rows, [(path.as_posix(), "failed", reason)])
+
+    def test_dicom_estimate_follows_the_decode_path(self):
+        with mock.patch.object(preprocess_module, "_decode_pixels", side_effect=AssertionError("decoded")):
+            cases = {
+                "dicom-gray": self.dicom(),
+                "dicom-gray-wide": self.dicom(BitsAllocated=32),
+                "dicom-colour": self.dicom(PhotometricInterpretation="YBR_FULL"),
+                "dicom-colour-wide": self.dicom(PhotometricInterpretation="RGB", BitsAllocated=32),
+                "dicom-palette": self.dicom(PhotometricInterpretation="PALETTE COLOR"),
+            }
+            for path, file in cases.items():
+                with self.subTest(path):
+                    self.assert_estimated_at(self.render_dicom(file), 600, path)
+
+    def test_dicom_overlays_are_counted_only_when_drawn(self):
+        path = self.root / "overlay.dcm"
+        ds_pixels = np.zeros((20, 30), dtype=np.uint16)
+        write_dicom(path, ds_pixels)
+        dcm = pydicom.dcmread(path)
+        add_overlay(dcm, np.zeros((20, 30), dtype=bool))
+        dcm[0x6000, 0x0010].value, dcm[0x6000, 0x0011].value = 100, 100  # the plane is declared larger
+        dcm.save_as(path, enforce_file_format=True)
+        image = 600 * preprocess_module.RENDER_BYTES_PER_PIXEL["dicom-gray"]
+        limit = image + 100 * 100 * preprocess_module.OVERLAY_BYTES_PER_PIXEL - 1
+        self.assertFalse(self.too_large(self.render_dicom(path), limit))
+        self.assertTrue(self.too_large(self.render_dicom(path, draw_overlays=True), limit))
+
+    def test_unusable_overlay_dimensions_are_reported_by_the_overlay_decoder(self):
+        for name, value in (("empty", None), ("multi-valued", [10, 10])):
+            with self.subTest(name):
+                path = self.root / f"{name}.dcm"
+                write_dicom(path, np.zeros((20, 30), dtype=np.uint16))
+                dcm = pydicom.dcmread(path)
+                add_overlay(dcm, np.zeros((20, 30), dtype=bool))
+                dcm[0x6000, 0x0010].value = value
+                dcm.save_as(path, enforce_file_format=True)
+                with quiet(), self.assertRaisesRegex(ValueError, "overlay 0x6000 cannot be decoded"):
+                    render("dicom", ImageId("x"), path.read_bytes(), "gray", draw_overlays=True)
+
+    def test_dicom_without_rows_or_columns_is_left_to_the_decoder(self):
+        path = self.dicom()
+        dcm = pydicom.dcmread(path)
+        del dcm.Rows
+        dcm.save_as(path, enforce_file_format=True)
+        self.assertFalse(self.too_large(self.render_dicom(path), 0))
+
+    def test_multi_frame_dicom_is_still_refused_for_its_frames(self):
+        path = self.root / "cine.dcm"
+        write_dicom(path, np.zeros((3, 20, 30), dtype=np.uint16))
+        with mock.patch.object(preprocess_module, "MAX_RENDER_BYTES", 1):
+            rows = self.run_failed(path)
+        self.assertEqual(rows[0][2], "unsupported: multi-frame DICOM (3 frames)")
+
+    def test_failure_is_the_same_for_any_jobs(self):
+        path = self.dicom(Rows=40_000, Columns=40_000)  # workers use the real limit
+        outputs = []
+        for jobs in (1, 2):
+            with quiet():
+                run_preprocess([path], self.root / f"work{jobs}", jobs=jobs)
+            outputs.append((self.root / f"work{jobs}" / "skipped.tsv").read_bytes())
+        self.assertEqual(outputs[0], outputs[1])
+        reason = "unsupported: image too large (40000 x 40000, about 119.3 GiB to render; limit 3.0 GiB)"
+        self.assertIn(reason.encode(), outputs[0])
+
+    # ---- rasters
+
+    def test_raster_over_the_budget_fails_before_decoding(self):
+        png = _png_header_only(10_000, 10_000)  # 100 million pixels of gray: about 4.1 GiB
+        with (
+            quiet(),
+            mock.patch.object(preprocess_module, "_decode_frame", side_effect=AssertionError("decoded")),
+            self.assertRaisesRegex(
+                Unsupported,
+                r"^unsupported: image too large \(10000 x 10000, about 4\.1 GiB to render; limit 3\.0 GiB\)$",
+            ),
+        ):
+            decode_raster(png)
+
+    def test_raster_estimate_follows_the_decode_path(self):
+        def saved(image: Image.Image, **options) -> bytes:
+            out = io.BytesIO()
+            image.save(out, "PNG", **options)
+            return out.getvalue()
+
+        inputs = {
+            "raster-gray8": [saved(Image.new("L", (30, 20), 9)), saved(Image.new("1", (30, 20)))],
+            "raster-gray16": [saved(Image.fromarray(RNG.integers(0, 65535, (20, 30), dtype=np.uint16)))],
+            "raster-rgb8": [self.png, saved(Image.new("P", (30, 20)))],
+            # a palette with a transparent index is decoded as RGBA
+            "raster-alpha": [saved(Image.new("RGBA", (30, 20))), saved(Image.new("P", (30, 20)), transparency=0)],
+        }
+        for path, datas in inputs.items():
+            for data in datas:
+                with self.subTest(path):
+                    self.assert_estimated_at(partial(decode_raster, data), 600, path)
+
+    def test_sixteen_bit_colour_is_checked_before_the_full_depth_decode(self):
+        rgb = RNG.integers(0, 65535, (20, 30, 3), dtype=np.uint16)
+        rgba = RNG.integers(0, 65535, (20, 30, 4), dtype=np.uint16)
+        tiff = io.BytesIO()
+        tifffile.imwrite(tiff, rgb, photometric="rgb")
+        cases = {
+            "raster-rgb16": [imagecodecs.png_encode(rgb), tiff.getvalue()],
+            "raster-alpha": [imagecodecs.png_encode(rgba)],
+        }
+        with (
+            mock.patch.object(preprocess_module, "_png_samples", side_effect=AssertionError("decoded")),
+            mock.patch.object(preprocess_module, "_decode_tiff", side_effect=AssertionError("decoded")),
+        ):
+            for path, datas in cases.items():
+                for data in datas:
+                    with self.subTest(path):
+                        under = 600 * preprocess_module.RENDER_BYTES_PER_PIXEL[path] - 1
+                        self.assertTrue(self.too_large(partial(decode_raster, data), under))
+
+    def test_mpo_frames_are_laid_out_on_one_canvas(self):
+        mpo = _mpo_bytes()  # 60 x 40 RGB and 30 x 20 gray: a canvas of 94 x 40 with the gap
+        canvas = (60 + SIDE_BY_SIDE_GAP + 30) * 40
+        with mock.patch.object(preprocess_module, "_decode_frame", side_effect=AssertionError("decoded")):
+            self.assertTrue(self.too_large(partial(decode_raster, mpo), canvas * 44 - 1))
+        self.assertFalse(self.too_large(partial(decode_raster, mpo), canvas * 44))
+        with (
+            mock.patch.object(preprocess_module, "MAX_RENDER_BYTES", canvas * 44 - 1),
+            self.assertRaisesRegex(Unsupported, r"image too large \(2 frames, 94 x 40 side by side, about "),
+        ):
+            decode_raster(mpo)
+
+    def test_mpo_with_unreadable_exif_in_frame_zero_renders_as_before(self):
+        mpo = _bad_exif_in_frame0(_mpo_bytes(_exif_with_thumbnail()))
+        views, notes = decode_raster(mpo)
+        self.assertEqual(
+            notes,
+            (
+                Note("embedded-thumbnail", "EXIF unreadable: SyntaxError"),
+                Note("embedded-thumbnail", "frame 1: EXIF IFD1 thumbnail (332 bytes)"),
+            ),
+        )
+        self.assertEqual(views[0].shape, (40, 94, 3))
+
+    def test_mpo_cut_inside_frame_zero_fails_as_before(self):
+        mpo = _mpo_bytes()
+        cut = mpo[: mpo.rindex(b"\xff\xd8\xff") - 30]
+        with self.assertRaisesRegex(OSError, r"^image file is truncated \(0 bytes not processed\)$"):
+            decode_raster(cut)
+
+    def test_pillows_decompression_bomb_error_is_the_same_failure(self):
+        png = _png_header_only(20_000, 20_000)  # 400 million pixels, over twice Pillow's limit
+        with self.assertRaisesRegex(
+            Unsupported, r"^unsupported: image too large \(over \d+ pixels, Pillow's decompression bomb limit\)$"
+        ):
+            decode_raster(png)
 
 
 class EscapeNameTest(unittest.TestCase):

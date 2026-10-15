@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import logging
+import math
 import multiprocessing
 import os
 import re
@@ -24,7 +25,7 @@ from functools import partial
 from itertools import groupby
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, assert_never, cast, get_args
-from zipfile import ZipFile
+from zipfile import ZIP_BZIP2, ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, ZipFile, ZipInfo
 
 import imagecodecs
 import matplotlib
@@ -67,6 +68,7 @@ SNIFF_BYTES = 132  # enough for the DICOM preamble and its `DICM` prefix
 _DICOM_MAGIC_OFFSET = 128
 _DICOM_MAGIC = b"DICM"
 _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")  # an archive, or an empty one
+_ZIP_METHODS = {ZIP_BZIP2: "bzip2", ZIP_LZMA: "lzma"}  # compression methods named in a failure; others by number
 _APPLEDOUBLE_MAGIC = b"\x00\x05\x16\x07"  # macOS `._name` metadata files
 _RASTER_MAGIC = (
     b"\x89PNG\r\n\x1a\n",
@@ -85,6 +87,8 @@ _PNM_TYPES = {b"P1", b"P2", b"P3", b"P4", b"P5", b"P6"}
 _OVERLAY_FIRST_GROUP = 0x6000
 _OVERLAY_LAST_GROUP = 0x601E
 _OVERLAY_DATA_ELEMENT = 0x3000
+_OVERLAY_ROWS_ELEMENT = 0x0010
+_OVERLAY_COLUMNS_ELEMENT = 0x0011
 _OVERLAY_ORIGIN_ELEMENT = 0x0050
 _OVERLAY_BIT_POSITION_ELEMENT = 0x0102
 _ICON_IMAGE_SEQUENCE = (0x0088, 0x0200)
@@ -139,6 +143,41 @@ BAD_NAME_REASON = "name is not UTF-8 or holds a control character or line separa
 _LIBRARIES = ("pydicom", "numpy", "scikit-image", "Pillow", "matplotlib", "imagecodecs", "tifffile")
 # Optional pixel-data codecs, recorded when importable: module name -> distribution name
 _CODEC_DISTRIBUTIONS = {"gdcm": "python-gdcm", "pylibjpeg": "pylibjpeg", "openjpeg": "pylibjpeg-openjpeg"}
+MAX_INPUT_BYTES = 1 << 30  # a larger file, or ZIP entry, fails without being read: discovery holds each input whole
+MAX_RENDER_BYTES = 3 << 30  # an input estimated to need more memory than this to render (per worker) fails undecoded
+RenderPath = Literal[
+    "dicom-gray",  # MONOCHROME1/2 of up to 16 bits
+    "dicom-gray-wide",  # MONOCHROME1/2 of 32 bits, or floating point
+    "dicom-colour",  # RGB and YBR_* of up to 16 bits
+    "dicom-colour-wide",  # RGB and YBR_* of 32 bits
+    "dicom-palette",
+    "raster-gray8",  # modes 1 and L
+    "raster-gray16",  # modes I;16, I and F
+    "raster-rgb8",  # RGB, and what converts to it: CMYK, YCbCr, P without transparency
+    "raster-rgb16",  # 16-bit RGB, which Pillow would truncate (see `_pillow_truncates`)
+    "raster-alpha",  # a transparent image, rendered as two views; also a 16-bit CMYK TIFF
+    "raster-mpo",  # per pixel of the canvas holding all of an MPO's frames side by side
+]
+# Peak bytes of memory per pixel for each way an input is rendered, the input's own bytes included. Measured as the
+# peak resident set of `render_and_encode` less the interpreter's after imports, over the pixels, on noisy
+# gradients of 4000 x 4000 to 6800 x 6800 pixels (CPython 3.13, numpy 2.5, Pillow 12.3, pydicom 3.0). The most
+# seen: DICOM gray 73 (up to 16 bits; the colormap's float64 RGBA is most of it), 92 (float64), colour 96 (16 bits
+# with bits above BitsStored set), 120 (32 bits), palette 86; raster gray 40 (8 bits), 43 (16 bits and wider), RGB 29, 16-bit RGB 36, transparent 109 (a 16-bit
+# CMYK TIFF 60), and an MPO 39 per pixel of its canvas. Each is that rounded up by about a tenth.
+RENDER_BYTES_PER_PIXEL: Mapping[RenderPath, int] = {
+    "dicom-gray": 80,
+    "dicom-gray-wide": 100,
+    "dicom-colour": 108,
+    "dicom-colour-wide": 135,
+    "dicom-palette": 96,
+    "raster-gray8": 44,
+    "raster-gray16": 48,
+    "raster-rgb8": 32,
+    "raster-rgb16": 40,
+    "raster-alpha": 120,
+    "raster-mpo": 44,
+}
+OVERLAY_BYTES_PER_PIXEL = 2  # per pixel of each overlay plane drawn with `--draw-overlays`; 1.3 measured, as above
 IN_FLIGHT_PER_JOB = 2  # inputs submitted to the pool and not yet written, per worker: bounds the bytes held in memory
 WORKER_CHECK_SECONDS = 1.0  # how often the parent, waiting on a render, checks that no worker has died
 # Spawned workers read these at numpy import: one BLAS/OpenMP thread each, not one per core per worker
@@ -370,6 +409,22 @@ def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray) -> np
     return img if constant else _crop(ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE))
 
 
+def _gib(size: int) -> str:
+    """`size` in GiB to one decimal, rounded up so that a size over the limit never reads as equal to it."""
+    return f"{math.ceil(size * 10 / (1 << 30)) / 10:.1f}"
+
+
+def _check_render_memory(shape: str, path: RenderPath, pixels: int, extra: int = 0) -> None:
+    """Raise `Unsupported` if rendering `pixels` pixels by `path`, and `extra` bytes besides, is estimated to need
+    more than `MAX_RENDER_BYTES` (see `RENDER_BYTES_PER_PIXEL`): decoding makes many copies of the pixels, as floats,
+    so the memory is out of proportion to the input's size. `shape` describes the image in the reason."""
+    estimate = pixels * RENDER_BYTES_PER_PIXEL[path] + extra
+    if estimate > MAX_RENDER_BYTES:
+        raise Unsupported(
+            f"image too large ({shape}, about {_gib(estimate)} GiB to render; limit {_gib(MAX_RENDER_BYTES)} GiB)"
+        )
+
+
 def _decode_pixels(dcm: pydicom.FileDataset) -> np.ndarray:
     """`dcm.pixel_array` as decoded, bits above BitsStored included (pydicom would clear them for some transfer
     syntaxes only); a compressed file that cannot be decoded is a `DecodeError` naming its transfer syntax."""
@@ -429,6 +484,27 @@ def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarra
     return _to_uint8(pixels, bits), unused_bits
 
 
+def _overlay_plane_pixels(dcm: pydicom.FileDataset) -> int:
+    """The pixels of the overlay planes (see `_overlay_groups`), by their OverlayRows and OverlayColumns, which are
+    decoded at that size whatever the image's."""
+    total = 0
+    for group in _overlay_groups(dcm):
+        rows, columns = dcm.get((group, _OVERLAY_ROWS_ELEMENT)), dcm.get((group, _OVERLAY_COLUMNS_ELEMENT))
+        if rows is not None and columns is not None:
+            with suppress(TypeError, ValueError):  # empty or multi-valued: `_overlay_mask` reports the plane
+                total += int(rows.value) * int(columns.value)
+    return total
+
+
+def _check_dicom_memory(dcm: pydicom.FileDataset, path: RenderPath, draw_overlays: bool) -> None:
+    """`_check_render_memory` for the single frame of `dcm`, before it is decoded, and for the overlay planes if they
+    are drawn. A missing Rows or Columns is left to the decoder to fail."""
+    rows, columns = dcm.get("Rows"), dcm.get("Columns")
+    if rows and columns:
+        overlays = _overlay_plane_pixels(dcm) * OVERLAY_BYTES_PER_PIXEL if draw_overlays else 0
+        _check_render_memory(f"{columns} x {rows}", path, int(rows) * int(columns), overlays)
+
+
 def preprocess_dicom(
     dcm: pydicom.FileDataset, colormap: str = "inferno", *, draw_overlays: bool = False
 ) -> tuple[np.ndarray, tuple[int, ...]]:
@@ -449,6 +525,8 @@ def preprocess_dicom(
     photometric = dcm.get("PhotometricInterpretation")
     match photometric:
         case "MONOCHROME1" | "MONOCHROME2":
+            wide = int(dcm.get("BitsAllocated") or 16) > 16
+            _check_dicom_memory(dcm, "dicom-gray-wide" if wide else "dicom-gray", draw_overlays)
             pixels, unused_bits = _stored_pixels(dcm)
             if pixels.ndim != 2:
                 raise Unsupported(f"pixel array with shape {pixels.shape}")
@@ -465,6 +543,11 @@ def preprocess_dicom(
             | "YBR_ICT"
             | "YBR_RCT"
         ):
+            if photometric == "PALETTE COLOR":
+                path: RenderPath = "dicom-palette"
+            else:
+                path = "dicom-colour-wide" if int(dcm.get("BitsAllocated") or 8) > 16 else "dicom-colour"
+            _check_dicom_memory(dcm, path, draw_overlays)
             rgb, unused_bits = _colour_dicom(dcm, photometric)
             if draw_overlays:
                 rgb[_overlay_mask(dcm, rgb.shape[:2])] = 255
@@ -997,6 +1080,56 @@ def _embedded_image_notes(im: Image.Image, data: bytes) -> tuple[Note, ...]:
     return tuple(notes)
 
 
+def _open_raster(data: bytes) -> Image.Image:
+    """`Image.open` of `data`; Pillow's decompression bomb error (over twice `Image.MAX_IMAGE_PIXELS`) is
+    `Unsupported`, as the estimate (see `_check_raster_memory`) would have found the image too large."""
+    try:
+        return Image.open(io.BytesIO(data))
+    except Image.DecompressionBombError as exc:
+        pixels = 2 * (Image.MAX_IMAGE_PIXELS or 0)
+        raise Unsupported(f"image too large (over {pixels} pixels, Pillow's decompression bomb limit)") from exc
+
+
+def _mpo_frame_sizes(data: bytes, frames: int) -> list[tuple[int, int]]:
+    """(width, height) of each of an MPO's `frames`, from their headers alone: seeking to a frame parses its JPEG
+    header, no pixels. It is done on an image of its own, as seeking the one being rendered back to its first frame
+    would parse that frame's EXIF again, unguarded as `Image.open` guards it, and fail where the rendering does not.
+    Stops at the first frame that cannot be positioned; the rendering fails there too, before decoding it."""
+    with Image.open(io.BytesIO(data)) as probe:
+        sizes = [probe.size]
+        for index in range(1, frames):
+            try:
+                probe.seek(index)
+            except Exception:  # noqa: BLE001 - whatever stops this seek stops the rendering's, which reports it
+                break
+            sizes.append(probe.size)
+    return sizes
+
+
+def _raster_path(im: Image.Image) -> RenderPath:
+    """How `decode_raster` renders the single-frame `im`, by its mode as `_decode_frame` branches on it."""
+    if im.mode in _ALPHA_MODES or im.info.get("transparency") is not None:
+        return "raster-alpha"
+    if _pillow_truncates(im):
+        return "raster-rgb16" if len(im.getbands()) == 3 else "raster-alpha"  # an alpha or CMYK sample as well
+    if im.mode in _HIGH_BIT_GRAY_MODES:
+        return "raster-gray16"
+    return "raster-gray8" if im.mode in ("1", "L") else "raster-rgb8"
+
+
+def _check_raster_memory(im: Image.Image, data: bytes, frames: int) -> None:
+    """`_check_render_memory` for `im`, with `frames` frames (only an MPO has several), from the headers alone. An
+    MPO is one canvas of its frames side by side, as `_side_by_side` places them."""
+    if frames == 1:
+        width, height = im.size
+        _check_render_memory(f"{width} x {height}", _raster_path(im), width * height)
+        return
+    sizes = _mpo_frame_sizes(data, frames)
+    width = sum(w for w, _ in sizes) + SIDE_BY_SIDE_GAP * (len(sizes) - 1)
+    height = max(h for _, h in sizes)
+    _check_render_memory(f"{len(sizes)} frames, {width} x {height} side by side", "raster-mpo", width * height)
+
+
 def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
     """Decode with PIL, branching on mode, to float32 [0, 1] views, (H, W) grayscale or (H, W, 3) RGB, and notes.
 
@@ -1012,10 +1145,11 @@ def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
     maps, previews) is one view of all its frames side by side; any other multi-frame
     image is unsupported.
     """
-    with Image.open(io.BytesIO(data)) as im:
+    with _open_raster(data) as im:
         frames = getattr(im, "n_frames", 1)
         if frames > 1 and im.format != "MPO":
             raise Unsupported(f"multi-frame image ({frames} frames)")
+        _check_raster_memory(im, data, frames)  # before the 16-bit branch and any `load`
         embedded = _embedded_image_notes(im, data)  # while `im` is open, before the 16-bit branch below returns
         trailing = _trailing_data_notes(data, im.format, _mpf_offsets(im))
         if _pillow_truncates(im):
@@ -1222,6 +1356,38 @@ def _candidate(image_id: ImageId, kind: Kind, read: Callable[[], bytes]) -> Cand
         return _failed(image_id, exc)
 
 
+def _check_input_size(size: int) -> None:
+    """Raise `Unsupported` if `size` bytes, as stated by the file system or the ZIP directory, are over
+    `MAX_INPUT_BYTES`: the input is then not read."""
+    if size > MAX_INPUT_BYTES:
+        raise Unsupported(f"input too large ({size} bytes; limit {MAX_INPUT_BYTES})")
+
+
+def _check_zip_entry(info: ZipInfo) -> None:
+    """Raise `Unsupported` for an entry that is not to be opened: over `MAX_INPUT_BYTES` when inflated, even to
+    sniff it, encrypted (said so, as the method check would otherwise name AES's method 99), or compressed by a method for which `zipfile` does not bound the memory it uses (bzip2 and LZMA
+    decompress whole, then cut to the declared size). STORED and DEFLATED are bounded, and a header that
+    understates the size cannot make `zipfile` return more, only fail its CRC."""
+    _check_input_size(info.file_size)
+    if info.flag_bits & 0x1:  # ZipCrypto, or AES (method 99): zipfile would ask for a password, not decrypt
+        raise Unsupported("encrypted ZIP entry (decrypt the archive first)")
+    if info.compress_type not in (ZIP_STORED, ZIP_DEFLATED):
+        raise Unsupported(f"ZIP compression method {_ZIP_METHODS.get(info.compress_type, info.compress_type)}")
+
+
+def _read_input(path: Path, size: int) -> bytes:
+    """The bytes of the file at `path`, of `size` bytes as stat said, read from one descriptor and no further than
+    `MAX_INPUT_BYTES`: a file that has grown past that since is refused, not read to its end."""
+    _check_input_size(size)
+    with open(path, "rb") as f:
+        data = f.read(size + 1)  # not MAX_INPUT_BYTES + 1: the reader would reserve that much for any file
+        if len(data) > size:  # it has grown: read on, to the limit
+            data += f.read(MAX_INPUT_BYTES + 1 - len(data))
+    if len(data) > MAX_INPUT_BYTES:
+        raise Unsupported(f"input too large (more than {MAX_INPUT_BYTES} bytes; limit {MAX_INPUT_BYTES})")
+    return data
+
+
 def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
     zip_id = ImageId(path.as_posix())
     try:
@@ -1242,6 +1408,7 @@ def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
             nth = seen[info.filename]
             image_id = ImageId(f"{zip_id}::{info.filename}" + (f"#{nth}" if nth > 1 else ""))
             try:
+                _check_zip_entry(info)
                 with zf.open(info) as f:
                     head = f.read(SNIFF_BYTES)
             except Exception as exc:  # noqa: BLE001 - an unreadable entry (encrypted, bad compression) is recorded as failed
@@ -1266,7 +1433,8 @@ def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | Skip
     """
     image_id = ImageId(path.as_posix())
     try:
-        if stat.S_ISREG(path.stat().st_mode):  # follows symlinks; a FIFO would block the read
+        info = path.stat()  # follows symlinks
+        if stat.S_ISREG(info.st_mode):  # a FIFO would block the read
             with open(path, "rb") as f:
                 outcome = classify(path.as_posix(), f.read(SNIFF_BYTES))
         else:
@@ -1282,7 +1450,7 @@ def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | Skip
         case Rejected(kind, reason):
             yield SkippedRow(image_id, kind, reason)
         case "dicom" | "raster" as kind:
-            yield _candidate(image_id, kind, path.read_bytes)
+            yield _candidate(image_id, kind, partial(_read_input, path, info.st_size))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1609,6 +1777,9 @@ def provenance(
             "jpeg_quality": JPEG_QUALITY,
             "jpeg_subsampling": JPEG_SUBSAMPLING,
             "draw_overlays": draw_overlays,
+            "max_input_bytes": MAX_INPUT_BYTES,
+            "max_render_bytes": MAX_RENDER_BYTES,
+            "render_bytes_per_pixel": dict(RENDER_BYTES_PER_PIXEL),
             "access": access,
             "jobs": jobs,  # how the run was made, not what it made: the output is the same for any value
         },

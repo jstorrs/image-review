@@ -233,7 +233,8 @@ that `export` accepts, and the run never stops on a name.
 | Source type | Behavior |
 |-------------|----------|
 | Directory | One `os.walk(followlinks=False)`, directory and file names sorted at each level, top-down (a directory's files before its subdirectories). Every file is classified; a ZIP file yields its entries. Symlinked files are read; a dangling symlink is `failed`. A symlinked directory is never entered (it could lead out of the source, e.g. `up -> ..` or a link to `/`); by its resolved target it is: inside `exclude` → skipped silently; the link's own directory or an ancestor of it (so the source root and its ancestors) → `ignored`, `symlink to an enclosing directory`; inside or equal to a directory given as a SOURCE in this run (including the one being walked) → `ignored`, `symlinked directory already included via SOURCE <path>`; anything else → `failed`, `symlinked directory not followed; pass its target <resolved path> as a SOURCE` (both paths escaped like an image_id, see above). A non-regular file (FIFO, socket, device) is `ignored` (`not a regular file`). An unreadable directory (including the source itself) is one `failed` row for that directory's path |
-| ZIP (by content, wherever found) | Every non-directory entry from `infolist()`, classified by its first bytes. A ZIP entry → `failed`, `unsupported: nested zip`. An entry that cannot be read (encrypted, unknown compression) → `failed`. An archive that cannot be opened → one `failed` row for the archive path. An archive with no file entries (empty, or directories only) → one `ignored` row for the archive path, `zip contains no files`. Office Open XML, ODF and EPUB files are ZIPs: their embedded images are reviewed, their XML parts are `ignored`, and embedded workbooks or packages are nested ZIPs (`failed`) |
+| ZIP (by content, wherever found) | Every non-directory entry from `infolist()`, classified by its first bytes. A ZIP entry → `failed`, `unsupported: nested zip`. An entry that cannot be read (encrypted, an unknown compression method) → `failed`; so is one over the size limit, an encrypted one (`unsupported: encrypted ZIP entry (decrypt the archive first)`, checked before the method) or one compressed by a method `zipfile` does not bound (see *Size limits*). An archive that cannot be opened → one `failed` row for the archive path. An archive with no file entries (empty, or directories only) → one `ignored` row for the archive path, `zip contains no files`. Office Open XML, ODF and EPUB files are ZIPs: their embedded images are reviewed, their XML parts are `ignored`, and embedded workbooks or packages are nested ZIPs (`failed`) |
+| Size limits (file or ZIP entry) | A file whose `st_size`, or a ZIP entry whose `file_size` in the directory, is over `MAX_INPUT_BYTES` (1 GiB) → `failed`, `unsupported: input too large (N bytes; limit L)`, without being read. A ZIP entry is checked before it is opened, even to sniff it, so one that large fails even if it is not an image. A file is read from one descriptor, no further than `MAX_INPUT_BYTES + 1` bytes: one that has grown past the limit since `stat` fails as `input too large (more than L bytes; limit L)`. A ZIP entry compressed by a method other than STORED or DEFLATED → `failed`, `unsupported: ZIP compression method <bzip2, lzma or the number>`: `zipfile` decompresses those whole, then cuts to the declared size, so it does not bound their memory. For STORED and DEFLATED it does bound the bytes returned: an entry whose header understates its size cannot make it read more, and the CRC check then fails it (`BadZipFile`) |
 | Single file | Classified like a file in a directory, except that a file that would be `ignored` is `failed` with the same reason (it was named explicitly, e.g. `notes.txt`, a FIFO); AppleDouble stays `ignored`. Rows from inside a named ZIP are unchanged |
 
 `classify(name, head)` is pure over the name and the first 132 bytes (the
@@ -341,6 +342,25 @@ when the JPGs are placed (see *Batching*), each placed input's notes become
 reason (see *Error handling*). A failed input, including a colliding one, has
 none. Notes never affect the exit status.
 
+**Render memory budget.** Rendering holds the decoded pixels and several
+float copies, so its memory is out of proportion to the input's size. An image
+is estimated, from its header and before any pixel is decoded, to need
+`pixels x RENDER_BYTES_PER_PIXEL[path]` bytes (a DICOM's overlay planes
+added), and fails if that is over `MAX_RENDER_BYTES` (3 GiB, per worker). The
+costs per pixel (80 for `dicom-gray`, 100 for `dicom-gray-wide`, 108 for
+`dicom-colour`, 135 for `dicom-colour-wide`, 96 for `dicom-palette`, 44, 48, 32 and 40 for `raster-gray8`,
+`-gray16`, `-rgb8` and `-rgb16`, 120 for `raster-alpha`, 44 per canvas pixel
+for `raster-mpo`) are the peak resident memory of `render_and_encode`,
+input included, measured on synthetic images of 4000 to 6800 pixels a side
+and rounded up by about a tenth; `preprocess.json` records them with the two
+limits. The largest square image each path passes is 6345 pixels a side for
+`dicom-gray`, 5675 for `dicom-gray-wide`, 5461 for `dicom-colour`, 4884 for
+`dicom-colour-wide`, 5792 for `dicom-palette`, 8556, 8192, 10033 and 8973 for the raster gray and RGB
+paths, 5181 for `raster-alpha`. The estimate trusts the header: compressed
+DICOM pixel data (JPEG, JPEG 2000, RLE) can decode to more pixel data than
+Rows and Columns declare, which it does not see (a known gap, not yet
+guarded). Neither the budget nor the byte limit changes any input under them.
+
 **DICOM preprocessing pipeline** (`preprocess_dicom`):
 
 0. Compressed pixel data is decoded by pydicom with the codecs above. A file
@@ -349,7 +369,17 @@ none. Notes never affect the exit status.
    (e.g. `cannot decode JPEG Extended (Process 2 and 4): RuntimeError: Unable to
    decode as exceptions were raised by all available plugins:`); uncompressed
    files keep the plain `<ExceptionClass>: <message>` reason.
-1. Only single-frame images with pixel data are rendered. No pixel data,
+1. Only single-frame images with pixel data are rendered. Before the pixels
+   are decoded, the render memory is estimated (see *Render memory budget*
+   below) as Rows x Columns times the bytes per pixel of the path:
+   `dicom-gray` (MONOCHROME1/2 of up to 16 bits), `dicom-gray-wide` (32 bits
+   or floating point), `dicom-colour` (RGB and YBR_*), `dicom-colour-wide` (the
+   same at 32 bits) or `dicom-palette`;
+   with `--draw-overlays` the overlay planes are added, at OverlayRows x
+   OverlayColumns times `OVERLAY_BYTES_PER_PIXEL`. Over `MAX_RENDER_BYTES`
+   it raises `unsupported: image too large (C x R, about N.N GiB to render;
+   limit 3.0 GiB)`. A missing Rows or Columns is left to the decoder; frames
+   are not counted, as a multi-frame image is refused first. No pixel data,
    `NumberOfFrames` above 1 (checked first, whatever the photometric
    interpretation), or a photometric interpretation other than the ones below
    raises `Unsupported` (e.g.
@@ -438,6 +468,23 @@ at a set bit.
 **Raster preprocessing** (`decode_raster` + `preprocess_raster`, for PNG/JPEG/TIFF/BMP/GIF):
 
 - Decode with Pillow and branch on the image mode, not the channel count
+- Before any pixel is loaded (including by the 16-bit PNG and TIFF
+  branches), the render memory is estimated from the header (see *Render
+  memory budget* below): width x height times the bytes per pixel of the
+  path `_raster_path` picks by mode: `raster-alpha` for the alpha modes, any
+  `transparency` (so a palette with it counts as RGBA) and a 16-bit
+  Pillow-truncated image with a fourth sample, `raster-rgb16` for the other
+  16-bit RGB, `raster-gray16` for I;16, I and F, `raster-gray8` for 1 and L,
+  and `raster-rgb8` for the rest. An MPO is one canvas of its frames side by
+  side with the 4-pixel gaps (its height the tallest frame's), at
+  `raster-mpo`; the frame sizes are read on a second `Image` opened from the
+  same bytes, because seeking the rendering one back to frame 0 would parse
+  that frame's EXIF again without the guard `Image.open` gives it. Over
+  `MAX_RENDER_BYTES` raises `unsupported: image too large (W x H, about N.N
+  GiB to render; limit 3.0 GiB)` (an MPO: `2 frames, W x H side by side`).
+  Pillow's `DecompressionBombError` (over twice `Image.MAX_IMAGE_PIXELS`,
+  179 million pixels) is the same `Unsupported`, `image too large (over N
+  pixels, Pillow's decompression bomb limit)`
 - Each frame is decoded to float [0, 1]. Several views of one input are
   placed side by side in a single rendered image (one manifest row, one
   `image_id`), top-aligned, separated by a 4-pixel gap
