@@ -591,7 +591,7 @@ class TestCli(RemoteTestCase):
 class TestHelpTexts(unittest.TestCase):
     def test_workflow_lists_serve(self):
         out = invoke_cli("--help").output
-        self.assertRegex(out, r"\d\. serve\s+— serve the work directory for browser review")
+        self.assertRegex(out, r"\d\. serve\s+— serve the work directory for review in a browser")
 
     def test_status_remote_reports_and_review_remote_reviews(self):
         status = " ".join(invoke_cli("status", "--help").output.split())
