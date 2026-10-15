@@ -43,6 +43,7 @@ from tests.fixtures import (
     UnixHTTPConnection,
     invoke_cli,
     make_work_dir,
+    requires_node,
     socket_dir,
     start_unix_server,
     temp_dir,
@@ -654,7 +655,7 @@ class TestWebFiles(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout) if result.stdout.strip() else None
 
-    @unittest.skipUnless(shutil.which("node"), "needs node")
+    @requires_node
     def test_script_helpers(self):
         self.run_helpers(r"""
         assert(m.validReviewer("a") && m.validReviewer("\u{1F600}".repeat(64)));
@@ -685,7 +686,7 @@ class TestWebFiles(unittest.TestCase):
         assert.strictEqual(m.countTodo([grid, single("a")], st), 1);
         """)
 
-    @unittest.skipUnless(shutil.which("node"), "needs node")
+    @requires_node
     def test_grid_mode_in_a_stub_page(self):
         # The whole of app.js against a stub DOM: see tests/web_harness.js for the checks
         node = shutil.which("node")
@@ -702,7 +703,7 @@ class TestWebFiles(unittest.TestCase):
         self.assertEqual(ran[1], ran[2])
         self.assertGreaterEqual(int(ran[2]), count)
 
-    @unittest.skipUnless(shutil.which("node"), "needs node")
+    @requires_node
     def test_grid_status_parity(self):
         from image_review.status import grid_clean_refused, grid_status
 
@@ -745,7 +746,7 @@ class TestWebFiles(unittest.TestCase):
         assert found is not None
         self.assertEqual(found[1], INSTANCE_HEADER)
 
-    @unittest.skipUnless(shutil.which("node"), "needs node")
+    @requires_node
     def test_grid_eligibility_parity(self):
         from image_review.controller import ReviewSession, next_batch
         from image_review.store import ManifestRow
@@ -807,7 +808,7 @@ class TestWebFiles(unittest.TestCase):
         )
         self.assertEqual(got, expected)
 
-    @unittest.skipUnless(shutil.which("node"), "needs node")
+    @requires_node
     def test_parse_grid_plan(self):
         self.run_helpers(r"""
         const place = (key, x, y, w, h, more = {}) => ({ key, x, y, w, h, rotated: false, source: [w, h], ...more });
@@ -854,7 +855,7 @@ class TestWebFiles(unittest.TestCase):
         assert.throws(() => m.parseGridPlan(null, sent, 300, 200));
         """)
 
-    @unittest.skipUnless(shutil.which("node"), "needs node")
+    @requires_node
     def test_order_and_demote_grid_items(self):
         self.run_helpers(r"""
         const place = (key) => ({ key, x: 0, y: 0, w: 1, h: 1, rotated: false, source: [1, 1] });
@@ -876,7 +877,7 @@ class TestWebFiles(unittest.TestCase):
         assert.deepStrictEqual(plain(listed.map((item) => item.keys || item.key)), [["e", "f", "g"], ["b", "c"], ["d"], "x", "y", "a"]);
         """)
 
-    @unittest.skipUnless(shutil.which("node"), "needs node")
+    @requires_node
     def test_placement_transform_and_min_scale(self):
         self.run_helpers(r"""
         const apply = ([a, b, c, d, e, f], [u, v]) => [a * u + c * v + e, b * u + d * v + f];
@@ -1065,6 +1066,28 @@ class TestBrowserHelpers(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
+class TestRequiresNode(unittest.TestCase):
+    def decorated(self, node: str | None, require: str | None) -> unittest.TestResult:
+        env = {} if require is None else {"IMAGE_REVIEW_REQUIRE_NODE": require}
+        with mock.patch("shutil.which", return_value=node), mock.patch.dict("os.environ", env, clear=True):
+            Case = type("Case", (unittest.TestCase,), {"test_it": requires_node(lambda self: None)})
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(Case)
+        return unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+
+    def test_runs_when_node_is_present(self):
+        result = self.decorated("/usr/bin/node", "1")
+        self.assertEqual((result.testsRun, len(result.skipped), len(result.failures)), (1, 0, 0))
+
+    def test_skips_without_node(self):
+        result = self.decorated(None, None)
+        self.assertEqual((len(result.skipped), len(result.failures)), (1, 0))
+
+    def test_fails_without_node_when_required(self):
+        result = self.decorated(None, "1")
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("node not found and IMAGE_REVIEW_REQUIRE_NODE=1", result.failures[0][1])
+
+
 class TestPrivateFile(unittest.TestCase):
     def test_failed_write_leaves_no_file(self):
         home = socket_dir(self)

@@ -1,7 +1,9 @@
 import csv
+import functools
 import hashlib
 import http.client
 import io
+import os
 import shutil
 import socket
 import subprocess
@@ -48,6 +50,21 @@ CLEAN_ENV: dict[str, str | None] = {
 def invoke_cli(*args: str, env: dict[str, str | None] | None = None, **kwargs) -> click.testing.Result:
     """Run the CLI in-process with IMAGE_REVIEW_* cleared, plus `env`; `kwargs` go to CliRunner.invoke."""
     return click.testing.CliRunner().invoke(cli, list(args), env={**CLEAN_ENV, **(env or {})}, **kwargs)
+
+
+def requires_node(test):
+    """Skip a browser-page test without node; with IMAGE_REVIEW_REQUIRE_NODE=1 (CI) fail it instead, so CI cannot
+    go green by skipping them."""
+    if shutil.which("node"):
+        return test
+    if os.environ.get("IMAGE_REVIEW_REQUIRE_NODE") != "1":
+        return unittest.skip("needs node")(test)
+
+    @functools.wraps(test)
+    def fail(self: unittest.TestCase) -> None:
+        self.fail("node not found and IMAGE_REVIEW_REQUIRE_NODE=1")
+
+    return fail
 
 
 def make_work_dir(root: Path, hashed: bool = False) -> None:
