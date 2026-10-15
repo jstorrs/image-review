@@ -5,6 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "image-review"
 version = "0.4.0"
+description = "A command-line tool for reviewing medical (DICOM) and general images for burned-in Protected Health Information (PHI)."
+readme = "README.md"
+authors = [{name = "Judd Storrs"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Environment :: Console",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 requires-python = ">=3.12"
 dependencies = [
     # Minimums verified by running the test suite on CPython 3.12, installing wheels only (except
