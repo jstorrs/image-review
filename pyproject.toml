@@ -42,7 +42,7 @@ codecs = [
     "pylibjpeg>=2.0",  # what pydicom 3 supports
     "pylibjpeg-openjpeg>=2.3",  # older releases require numpy < 2
 ]
-# `review`, local or --remote
+# `review`, local or the deprecated --remote
 viewer = [
     "pygame-ce>=2.3.1",
     "Pillow>=10.3,!=11.*",  # 10.3: 16-bit grayscale PNG; 11.x misdecodes an MPO frame after a mode change

@@ -120,13 +120,18 @@ def work_dir_option(f):
     )(f)
 
 
-def remote_option(f):
-    return click.option(
-        "--remote",
-        envvar="IMAGE_REVIEW_REMOTE",
-        default=None,
-        help="Deprecated: review a server started with `image-review serve --https` (ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).",
-    )(f)
+def remote_option(help: str):
+    return click.option("--remote", envvar="IMAGE_REVIEW_REMOTE", default=None, help=help)
+
+
+REVIEW_REMOTE_HELP = (
+    "Deprecated: review a server started with `image-review serve --https` "
+    "(ir:// connection string; also read from $IMAGE_REVIEW_REMOTE)."
+)
+STATUS_REMOTE_HELP = (
+    "Deprecated: report on a server started with `image-review serve --https` "
+    "(ir:// connection string; also read from $IMAGE_REVIEW_REMOTE)."
+)
 
 
 def via_option(f):
@@ -316,7 +321,7 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
 
     \b
       1. preprocess  — convert source DICOMs/images to JPG batches
-      2. review      — interactively classify images as CLEAN or DIRTY
+      2. serve       — serve the work directory for review in a browser (or `review`, to classify locally)
       3. status      — check review progress and counts
       4. export      — write the result: one row per source image (on the machine holding the work dir)
 
@@ -560,7 +565,7 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
     "An unauthenticated claim: it is recorded as given, not verified. Also read from $IMAGE_REVIEW_REVIEWER.",
 )
 @work_dir_option
-@remote_option
+@remote_option(REVIEW_REMOTE_HELP)
 @via_option
 def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, remote, via):
     """Open an interactive review session for classifying images.
@@ -624,7 +629,7 @@ def status_report(
 
 @cli.command()
 @work_dir_option
-@remote_option
+@remote_option(STATUS_REMOTE_HELP)
 @via_option
 @click.option(
     "--check",

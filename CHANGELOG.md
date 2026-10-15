@@ -169,6 +169,9 @@ Read **Upgrading** first.
   `; N notes (K overlay-plane, J icon-image; see .../notes.tsv)`, and
   `preprocess.json` gains `counts.notes`, the count of every kind. The file
   holds source paths: treat it like `manifest.tsv`.
+- **Help texts follow `serve`.** The Workflow list in `image-review --help`
+  now includes `serve`, and `status --help` describes the deprecated
+  `--remote` as reporting on a server, not reviewing it.
 
 ### Wire API (remote review)
 

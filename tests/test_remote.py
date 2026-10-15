@@ -588,6 +588,26 @@ class TestCli(RemoteTestCase):
         self.assertIn("Invalid value for '--work-dir': Path './review_work' does not exist.", result.output)
 
 
+class TestHelpTexts(unittest.TestCase):
+    def test_workflow_lists_serve(self):
+        out = invoke_cli("--help").output
+        self.assertRegex(out, r"\d\. serve\s+— serve the work directory for browser review")
+
+    def test_status_remote_reports_and_review_remote_reviews(self):
+        status = " ".join(invoke_cli("status", "--help").output.split())
+        review = " ".join(invoke_cli("review", "--help").output.split())
+        self.assertIn(
+            "--remote TEXT Deprecated: report on a server started with `image-review serve --https` "
+            "(ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).",
+            status,
+        )
+        self.assertIn(
+            "--remote TEXT Deprecated: review a server started with `image-review serve --https` "
+            "(ir:// connection string; also read from $IMAGE_REVIEW_REMOTE).",
+            review,
+        )
+
+
 class TestRemoteDeprecation(RemoteTestCase):
     def invoke(self, *args, **kwargs):
         return invoke_cli(*args, **kwargs)
