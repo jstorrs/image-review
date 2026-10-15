@@ -207,6 +207,10 @@ Your marks so far are always saved on the server. The page never retries by
 itself; when it stops, it records nothing more until you press Reconnect (or
 `r`).
 
+Before you press Reconnect after a dropped tunnel, make sure ssh is running
+again: see "The laptop side" in
+[the security model](../reference/security-model.md#browser-review-over-a-unix-socket).
+
 - **"Lost connection — your marks so far are saved on the server"**: the
   tunnel dropped or the server is not answering, for example because it was
   stopped or restarted. Reconnect is offered. If Reconnect gives the same

@@ -177,6 +177,17 @@ The points below are its limits.
   `[::1]:8080` could receive the browser and read the token. If you change
   the command, keep the explicit address. Other users on the laptop can reach
   `127.0.0.1:8080` while the command runs, but still need the token.
+  That holds only while the forward is up. If it ends (the laptop slept, the
+  network dropped) and another local user binds `127.0.0.1:8080`, pressing
+  Reconnect sends them the token, in the `Authorization` header of its first
+  request. Reloading the tab does worse: their page runs at the same origin,
+  so its script can read the token from `sessionStorage`, and the token then
+  opens the real server for as long as it lives. The printed command carries
+  `-o ExitOnForwardFailure=yes`, so an ssh restarted on a taken port fails
+  loudly instead of running without a forward. Check that ssh is running (and
+  has not failed) before you press Reconnect or reload, and on a shared laptop
+  close the tab when the tunnel drops. See
+  [Lost connection and Reconnect](../commands/browser.md#lost-connection-and-reconnect).
 - **Images** are held in the browser's memory as blob URLs, each revoked
   once the next item is shown. In grid mode each image is decoded to an
   `ImageBitmap`, drawn into one `<canvas>` and closed once drawn; the canvas

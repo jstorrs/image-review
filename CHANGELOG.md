@@ -299,6 +299,11 @@ Read **Upgrading** first.
   reference is under `docs/commands/`. `SECURITY.md` is now the
   vulnerability-reporting policy; the threat model is
   `docs/reference/security-model.md`.
+- **The security model now qualifies "still need the token" for a dropped
+  tunnel.** If the ssh forward ends and another local user binds the port,
+  Reconnect sends them the token, and a reload runs their page, which can read
+  it from `sessionStorage`. Confirm ssh is running before Reconnect or a
+  reload, and close the tab on a shared laptop.
 
 ## 0.3.0
 
