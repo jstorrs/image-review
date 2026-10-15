@@ -1,0 +1,8 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+# Deliberately no `pip` ecosystem: the dependency floors in pyproject.toml are
+# verified minimums, and version-update PRs would raise them.

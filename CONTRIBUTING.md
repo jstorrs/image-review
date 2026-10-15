@@ -29,12 +29,26 @@ machine.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push and pull request: lint, format
-check, type check and tests on Linux (`ubuntu-latest`) and macOS
-(`macos-latest`) with Python 3.12 and 3.13.
+`.github/workflows/ci.yml` runs on pushes to `main`, on pull requests and on
+manual dispatch: lint, format check, type check and tests on Linux
+(`ubuntu-latest`) and macOS (`macos-latest`) with Python 3.12, 3.13 and 3.14.
+A push to a branch without a pull request does not run CI; open a pull request,
+or start the workflow from the Actions tab (`workflow_dispatch`).
 
-`.github/workflows/docs.yml` runs `sphinx-build -W` on every push and
-pull request, and deploys the site to GitHub Pages from `main` only.
+`.github/workflows/docs.yml` has the same triggers. It runs `sphinx-build -W`
+and deploys the site to GitHub Pages from `main` only; pull requests just prove
+the site builds.
+
+Both workflows cancel an in-progress run for the same ref when a newer one
+starts (never on `main`), cache pip downloads keyed on `pyproject.toml`, and
+set a job timeout: 30 minutes for tests, 15 for the docs build, 10 for deploy.
+
+Every `uses:` is pinned to a full commit SHA with a `# vX.Y.Z` comment.
+Dependabot (`.github/dependabot.yml`) opens a weekly pull request for newer
+action releases; check the release notes and keep the comment in step with the
+SHA. It watches `github-actions` only. Do not enable the `pip` ecosystem: the
+dependency floors in `pyproject.toml` are verified minimums, and version-update
+pull requests would raise them.
 
 ## Documentation
 
