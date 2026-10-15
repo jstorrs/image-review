@@ -32,6 +32,19 @@ The browser-page tests run `web/app.js` under `node` and skip when it is not on
 and installs node 24, so a missing node cannot pass silently. It is test-only
 and the application never reads it.
 
+## Coverage
+
+```
+coverage run -m unittest discover && coverage report
+```
+
+Run it with the same `SDL_*` variables and with `node` on `PATH`, as above.
+The report includes branch coverage, and `fail_under` in `pyproject.toml` sets
+the floor; CI enforces it in the Ubuntu / Python 3.13 job only.
+
+The number is in-process only: the preprocess worker processes and the
+subprocess CLI runs that the tests spawn are not measured.
+
 ## CI
 
 `.github/workflows/ci.yml` runs on pushes to `main`, on pull requests and on

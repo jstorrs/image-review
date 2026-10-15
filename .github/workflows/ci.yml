@@ -46,4 +46,10 @@ jobs:
       - name: Type check
         run: mypy --python-executable "$(which python)"
       - name: Test
+        if: matrix.os != 'ubuntu-latest' || matrix.python != '3.13'
         run: python -m unittest discover
+      - name: Test with branch coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: |
+          coverage run -m unittest discover
+          coverage report

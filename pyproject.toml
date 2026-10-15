@@ -106,3 +106,11 @@ strict_equality = true
 [[tool.mypy.overrides]]
 module = ["rectpack.*", "scipy.*", "skimage.*"]
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["image_review"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 94
+show_missing = true
