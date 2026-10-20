@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Grayscale inputs that would lose pixel values or overflow their intensity
+  range when converted to float32 now fail with an explicit unsupported
+  reason instead of rendering a potentially misleading image.
+
 ## 0.4.0
 
 Browser review over SSH, now `serve`'s default and the recommended way to

@@ -3489,6 +3489,79 @@ class RenderTest(unittest.TestCase):
         ds.save_as(buf, enforce_file_format=True)
         return buf.getvalue()
 
+    def wide_integer_dicom_bytes(self, pixels: np.ndarray) -> bytes:
+        ds = pydicom.Dataset()
+        ds.file_meta = FileMetaDataset()
+        ds.SOPClassUID = SecondaryCaptureImageStorage
+        ds.SOPInstanceUID = generate_uid()
+        ds.file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
+        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        ds.Rows, ds.Columns = pixels.shape
+        ds.SamplesPerPixel = 1
+        ds.PhotometricInterpretation = "MONOCHROME2"
+        ds.BitsAllocated = ds.BitsStored = 32
+        ds.HighBit = 31
+        ds.PixelRepresentation = int(pixels.dtype.kind == "i")
+        ds.PixelData = pixels.astype("<i4" if pixels.dtype.kind == "i" else "<u4").tobytes()
+        buf = io.BytesIO()
+        ds.save_as(buf, enforce_file_format=True)
+        return buf.getvalue()
+
+    def test_gray_float32_accepts_exact_integer_values(self):
+        for pixels in (
+            np.array([[-32768, 32767]], dtype=np.int16),
+            np.array([[0, 65535]], dtype=np.uint16),
+            np.array([[1 << 40, (1 << 40) + (1 << 17)]], dtype=np.int64),
+        ):
+            with self.subTest(dtype=pixels.dtype):
+                gray = preprocess_module._gray_float32(pixels)
+                self.assertEqual(gray.dtype, np.float32)
+                np.testing.assert_array_equal(gray.astype(pixels.dtype), pixels)
+
+    def test_gray_float32_rejects_native_integer_bounds_and_float_overflow(self):
+        values = (
+            np.array([[np.iinfo(np.int64).max]], dtype=np.int64),
+            np.array([[np.iinfo(np.uint64).max]], dtype=np.uint64),
+            np.array([[float(np.finfo(np.float32).max) * 2.0]], dtype=np.float64),
+        )
+        for pixels in values:
+            with self.subTest(dtype=pixels.dtype), warnings.catch_warnings():
+                warnings.simplefilter("error", RuntimeWarning)
+                with self.assertRaisesRegex(
+                    Unsupported,
+                    r"^unsupported: not implemented: grayscale values cannot be processed safely as float32$",
+                ):
+                    preprocess_module._gray_float32(pixels)
+
+    def test_wide_integer_grayscale_precision_loss_fails_and_is_skipped(self):
+        root = temp_dir(self).resolve()
+        src = root / "src"
+        src.mkdir()
+        positive = np.full((40, 60), 1_000_000_000, dtype=np.uint32)
+        positive[20:24, 10:50] += 1
+        negative = positive.astype(np.int32) - 2_000_000_000
+        (src / "uint32.dcm").write_bytes(self.wide_integer_dicom_bytes(positive))
+        (src / "int32.dcm").write_bytes(self.wide_integer_dicom_bytes(negative))
+        mode_i = root / "mode-i.tif"
+        Image.fromarray(positive.astype(np.int32), "I").save(mode_i, "TIFF")
+        good = src / "good.dcm"
+        write_dicom(good, _good_pixels())
+
+        with quiet():
+            result = run_preprocess([src, mode_i], root / "work")
+
+        expected_reason = "unsupported: not implemented: grayscale values cannot be processed safely as float32"
+        skipped = {row["image_id"]: row for row in _read_tsv(root / "work" / "skipped.tsv")}
+        self.assertEqual(
+            set(skipped), {(src / "uint32.dcm").as_posix(), (src / "int32.dcm").as_posix(), mode_i.as_posix()}
+        )
+        self.assertTrue(all(row["kind"] == "failed" and row["reason"] == expected_reason for row in skipped.values()))
+        manifest = _read_tsv(root / "work" / "manifest.tsv")
+        self.assertEqual([row["image_id"] for row in manifest], [good.as_posix()])
+        self.assertEqual(result.written, 1)
+        self.assertEqual(sum(row.kind == "failed" for row in result.skipped), 3)
+
     def test_overlay_is_drawn_at_its_origin(self):
         pixels = RNG.integers(0, 1001, (200, 200)).astype(np.uint16)  # noise: nothing is cropped
         block = np.ones((5, 8), dtype=bool)
@@ -3700,6 +3773,15 @@ class RenderTest(unittest.TestCase):
                 data = self.float_dicom_bytes(self.float_pixels(bad))
                 with self.assertRaisesRegex(Unsupported, rf"^unsupported: non-finite pixel values \({counts}\)$"):
                     render("dicom", "id", data, "inferno")
+
+    def test_float32_grayscale_span_overflow_is_unsupported(self):
+        pixels = np.full((40, 60), 2.0e38, dtype=np.float32)
+        pixels[20:24, 10:50] = -2.0e38
+        with self.assertRaisesRegex(
+            Unsupported,
+            r"^unsupported: not implemented: grayscale values cannot be processed safely as float32$",
+        ):
+            render("dicom", "id", self.float_dicom_bytes(pixels), "gray")
 
     def test_non_finite_float_inputs_are_failed_rows(self):
         root = temp_dir(self).resolve()

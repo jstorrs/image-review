@@ -479,8 +479,11 @@ decodes to at most a few bytes per sample.
    viewer; colour is not altered. No
    windowing or colormap is applied, and only the crop of step 6 follows.
    Steps 2-5 apply in full to `MONOCHROME1`/`MONOCHROME2`
-2. Extract pixel array, mask its unused bits, convert to float32 (values keep
-   their native scale). Float pixel data (`FloatPixelData`, grayscale or
+2. Extract pixel array and mask its unused bits, then convert grayscale to
+   float32 (values keep their native scale) only if every value round-trips
+   exactly and the min-to-max span does not overflow float32. Otherwise raise
+   `unsupported: not implemented: grayscale values cannot be processed
+   safely as float32`. Float pixel data (`FloatPixelData`, grayscale or
    colour) holding NaN or infinity raises
    `unsupported: non-finite pixel values (1 NaN, 0 infinite)` (counts of
    each), as min-max scaling would collapse the whole image. The array is
@@ -704,7 +707,10 @@ at a set bit.
   detail is safe in a TSV. A tables-only `SOI ... EOI` prefix before the
   image makes the image itself count, which errs on the safe side
 - High-bit-depth grayscale (`I;16*` scaled by 65535, `I`/`F` min-max scaled)
-  keeps its full range; a mode `F` image holding NaN or infinity raises
+  keeps its full range. `I`/`F` samples must round-trip exactly through
+  float32 and their min-to-max span must not overflow float32; otherwise the
+  same unsupported reason as DICOM grayscale is raised. A mode `F` image holding
+  NaN or infinity raises
   `unsupported: non-finite pixel values (1 NaN, 0 infinite)`; a `tRNS` colour
   key is matched against the native values to build the alpha mask
 - 16-bit colour and alpha, which Pillow truncates to the high byte, are

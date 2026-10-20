@@ -365,6 +365,24 @@ def _require_finite(arr: np.ndarray) -> None:
         raise Unsupported(f"non-finite pixel values ({n_nan} NaN, {n_inf} infinite)")
 
 
+def _gray_float32(arr: np.ndarray) -> np.ndarray:
+    """Convert grayscale samples to float32 only when every value is exact and the span will not overflow."""
+    _require_finite(arr)
+    with np.errstate(over="ignore", invalid="ignore"):
+        converted = arr.astype(np.float32)
+    if not np.isfinite(converted).all():
+        raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
+    if not np.can_cast(arr.dtype, np.float32, casting="safe"):
+        with np.errstate(over="ignore", invalid="ignore"):
+            restored = converted.astype(arr.dtype)
+        if not np.array_equal(arr, restored):
+            raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
+    lo, hi = float(arr.min()), float(arr.max())
+    if hi - lo > float(np.finfo(np.float32).max):
+        raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
+    return converted
+
+
 def _compress_tails(img: np.ndarray) -> np.ndarray:
     """Map float `img` to [0, 1], squeezing the outlier tails instead of clipping them.
 
@@ -433,7 +451,7 @@ def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray) -> np
 
     Overlay pixels are set to 1.0 after intensity mapping, so they come out at the top of the range.
     """
-    img = pixels.astype(np.float32)
+    img = _gray_float32(pixels)
     if photometric == "MONOCHROME1":
         img = -img
     constant = img.min() >= img.max()
@@ -969,8 +987,7 @@ def _high_bit_gray(im: Image.Image) -> np.ndarray:
     arr = np.asarray(im)
     if im.mode.startswith("I;16"):
         return ski.util.img_as_float32(arr.astype(np.uint16))
-    arr = arr.astype(np.float32)
-    _require_finite(arr)
+    arr = _gray_float32(arr)
     lo, hi = arr.min(), arr.max()
     return (arr - lo) / (hi - lo) if hi > lo else np.zeros_like(arr)
 

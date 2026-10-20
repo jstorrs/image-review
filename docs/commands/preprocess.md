@@ -181,6 +181,11 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
     mode `F` TIFF), with `unsupported: non-finite pixel values (1 NaN, 0
     infinite)`: scaling by the minimum and maximum would wipe out the
     contrast, so nothing readable would be left to review;
+  - grayscale values that cannot be represented exactly as float32, or whose
+    min-to-max span exceeds float32's range, with
+    `unsupported: not implemented: grayscale values cannot be processed
+    safely as float32` (wide-integer or floating-point DICOM and mode `I`/`F`
+    raster inputs);
   - a colour DICOM with float pixel data (`unsupported: float colour pixel
     data`): it has no bit depth to scale by, and values in 0..1 would render
     near black;
@@ -434,7 +439,10 @@ single-frame colour (RGB, YBR) and palette DICOMs are only converted to 8-bit
 RGB (scaled by the stored depth, BitsStored, without adjustment) and cropped,
 with no windowing or colormap:
 
-1. Converts to float32, corrects photometric interpretation
+1. Converts to float32 only when each value is represented exactly and the
+   min-to-max span will not overflow, then corrects photometric
+   interpretation; otherwise the input is `failed` with the unsupported
+   reason above
 2. Compresses intensity outliers (beyond the 1st/99th percentile) into the
    ends of the range instead of clipping them, so bright burned-in text
    stays visible. With `--draw-overlays`, DICOM overlay planes (annotations
