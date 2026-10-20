@@ -35,6 +35,13 @@
   reason instead of rendering a potentially misleading image.
 - Stopping browser review now invalidates pending image reads and decodes, so
   late image work cannot replace the stop or Reconnect state or start a dwell.
+- `export` now refuses while a crash-cut mark is the last thing in
+  `review.tsv` (a grid mark with fewer rows on disk than its `grid_size`).
+  Before, it allowlisted the images whose rows never landed, though the
+  reviewer had judged their grid DIRTY. The rows that landed are kept. As
+  with a torn last line, the next verdict recorded clears the refusal, so
+  re-check the last grid reviewed before the interruption first, then export
+  again.
 
 ## 0.4.0
 

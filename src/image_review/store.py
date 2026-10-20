@@ -373,7 +373,7 @@ class LocalStore:
     def export_rows(self) -> list["ExportRow"]:
         """The study's result, one row per source file (see export_rows). Local only: image_ids never leave the work
         dir's machine. ValueError if skipped.tsv or notes.tsv is malformed, or missing beside a hashed manifest, or
-        review.tsv ends in a torn line."""
+        review.tsv ends in a torn line or its last mark was cut short."""
         skipped = load_skipped(self.work_dir, required=self._hashed)
         notes = load_notes(self.work_dir, required=self._hashed)
         return export_rows(self._entries, self._db.decisions(), skipped, unreviewed_content(notes, frozenset()))

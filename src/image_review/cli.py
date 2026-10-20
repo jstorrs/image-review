@@ -714,9 +714,9 @@ def export(work_dir, output, report, allow_live, remote):
         writer = live_writer(path)
         _refuse_live(writer, allow_live)
         with open_local_store(path, read_only=True) as store:
-            # A torn review.tsv, a malformed or (beside a hashed manifest) missing skipped.tsv or notes.tsv, or an
-            # unsafe field in either text: both are built even without --report, so one unsafe field anywhere refuses
-            # the whole export.
+            # A torn or cut-short review.tsv, a malformed or (beside a hashed manifest) missing skipped.tsv or
+            # notes.tsv, or an unsafe field in either text: both are built even without --report, so one unsafe
+            # field anywhere refuses the whole export.
             try:
                 allowed, denied = split_allowlist(store.export_rows())
                 allowlist_text, report_text = format_allowlist(allowed), format_report(denied)

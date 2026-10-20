@@ -975,6 +975,19 @@ class TestExportLiveOrTorn(ExportTestCase):
                 self.assertEqual(result.stdout, "")
         self.assertEqual((self.work / "review.tsv").read_bytes(), before)
 
+    def test_cut_short_mark_is_refused(self):
+        with open(self.work / "review.tsv", "ab") as f:
+            f.write(b"/src/c.dcm\tb1\tDIRTY\t2\tt9\tal\tgrid\t3\tv\r\n")
+        before = (self.work / "review.tsv").read_bytes()
+        for args in ((), ("--allow-live",)):
+            with self.subTest(args=args):
+                result = self.export(*args)
+                self.assertEqual(result.exit_code, 1)
+                self.assertIn("cut short", result.output)
+                self.assertIn("1 of 3 rows", result.output)
+                self.assertEqual(result.stdout, "")
+        self.assertEqual((self.work / "review.tsv").read_bytes(), before)
+
 
 class TestOversizedField(ExportTestCase):
     """A TSV field over csv's 128 KiB limit is a parse error, never an uncaught csv.Error."""

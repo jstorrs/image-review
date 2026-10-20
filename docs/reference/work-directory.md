@@ -203,12 +203,15 @@ An empty file holds no decisions. A last line cut short by a crash is skipped
 with a warning and dropped on the next rating, unless all of its fields made
 it to disk: then it is kept, and only its last field (`tool_version`, or
 `timestamp` in an old five-column file) may be cut short or empty. A crash
-in the middle of a grid mark can record only some of its images. A bad line
+in the middle of a grid mark can record only some of its images, cut at a line
+ending; the rows that landed are kept and loading logs a warning when the last
+mark has fewer rows than its `grid_size`. `export` refuses only until the next
+verdict is recorded, so re-check that grid first. A bad line
 anywhere else is still an error. A last line with no line ending that holds a
 field longer than 131072 characters (for example the zero-filled tail some
 file systems leave after a crash) counts as cut short; the same field on a
-complete line is a parse error. `export` refuses a file whose last line was cut
-short; see [Refusals](../commands/export.md#refusals-and-output-files).
+complete line is a parse error. `export` refuses a file whose last line or last mark was
+cut short; see [Refusals](../commands/export.md#refusals-and-output-files).
 
 ### Undo rows
 

@@ -864,7 +864,7 @@ Whether `--report` and `--output` name the same file is checked after
   `export_rows()`. The message is `WorkDirLocked`'s, then export's advice
   (both quoted on the export page).
   `--allow-live` turns either refusal into a WARNING.
-- `ReviewDB.decisions()` raises on a torn last line of `review.tsv`, and
+- `ReviewDB.decisions()` raises on a torn last line of `review.tsv` or a last mark cut short, and
   `load_skipped` and `load_notes` on a malformed `skipped.tsv` or `notes.tsv`, or a
   missing one beside a manifest that records hashes (a legacy manifest without
   them may lack both). None is overridable.
@@ -1222,6 +1222,14 @@ truncate happens only if the file still has the inode and size seen when it was
 loaded; otherwise the mark fails with `<file> changed since it was loaded`. A failed append (short
 write then an error, or a failed `fsync`) is cut off the same way, at once if
 possible, else by the next mark. A read-only store warns but never writes.
+
+A crash can also leave only some rows of one multi-row mark, cut at a line
+ending. On load, `incomplete_last_mark` takes the trailing rows equal to the
+last row in `(timestamp, reviewer, mode, grid_size)`; if `grid_size` is set and
+their count is not a multiple of it (so two equal marks in one timestamp stay
+complete), a WARNING names the file (see [what is never logged](security-model.md#the-server-image-review-serve)) and
+`decisions()` raises until the next successful append. The rows are kept. Rows
+without a `grid_size` are never judged.
 
 Every other append is checked too. `ReviewDB` keeps the file's `(st_ino,
 size)` as it last loaded or migrated it, or, after an append, the inode and
@@ -1884,7 +1892,7 @@ by hand.
 | `undo_many(changes, *, reviewer)` | Append the undo rows for one `mark_many` result in one append (see *Undo rows*); an `image_id` listed twice (keys sharing it) gets one row |
 | `migrate()` | Rewrite an old five-column file with the current header, once (see *`review.tsv`*); no-op otherwise |
 | `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*) |
-| `decisions() -> dict[str, Decision]` | A copy of the latest decision per `image_id` (never a tombstone), for `export`; `ValueError` if `review.tsv` ended in a torn line when loaded (not yet dropped by an append) |
+| `decisions() -> dict[str, Decision]` | A copy of the latest decision per `image_id` (never a tombstone), for `export`; `ValueError` if `review.tsv` ended in a torn line, or its last mark was cut short, when loaded (not yet cleared by an append) |
 | `current_pass(image_ids) -> int` | Auto-detect pass number |
 
 ### Pass Logic

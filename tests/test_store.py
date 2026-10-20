@@ -1122,6 +1122,95 @@ class TestTwoWriters(unittest.TestCase):
         self.assert_grid_clean_refused(a, b)
 
 
+class TestCutShortMark(unittest.TestCase):
+    """A crash can leave some rows of a multi-row mark, cut at a line ending; decisions() then refuses."""
+
+    def setUp(self):
+        self.work_dir = temp_dir(self)
+        os.chmod(self.work_dir, 0o700)
+        self.path = self.work_dir / "review.tsv"
+
+    def write(self, *rows: tuple[str, str, int, str, str, str, int | str]) -> None:
+        """Rows are (image_id, status, pass, timestamp, reviewer, mode, grid_size)."""
+        lines = [HEADER] + [[i, "b", st, str(n), ts, rv, md, str(g), "v"] for i, st, n, ts, rv, md, g in rows]
+        self.path.write_bytes("".join("\t".join(line) + "\r\n" for line in lines).encode())
+
+    def test_grid_dirty_cut_to_one_row_refuses_export(self):
+        self.write(
+            ("x", "CLEAN", 1, "t1", "zq_reviewer", "grid", 3),
+            ("y", "CLEAN", 1, "t1", "zq_reviewer", "grid", 3),
+            ("z", "CLEAN", 1, "t1", "zq_reviewer", "grid", 3),
+            ("x", "DIRTY", 2, "t2", "zq_reviewer", "grid", 3),
+        )
+        before = self.path.read_bytes()
+        with self.assertLogs("image_review.review_db", "WARNING") as logs:
+            db = ReviewDB(self.work_dir)
+        message = logs.records[0].getMessage()
+        self.assertIn(str(self.path), message)
+        self.assertNotIn("x", message.replace(str(self.path), ""))  # no image_id, no reviewer
+        with self.assertRaisesRegex(ValueError, r"cut short.*1 of 3 rows.*`review`.*export again") as ctx:
+            db.decisions()
+        self.assertNotIn("zq_reviewer", message + str(ctx.exception))
+        self.assertEqual(self.path.read_bytes(), before)  # the DIRTY that landed stays
+        self.assertEqual(db._rows["x"].status, "DIRTY")
+
+    def test_next_append_clears_it(self):
+        self.write(("x", "CLEAN", 1, "t1", "al", "grid", 2))
+        with self.assertLogs("image_review.review_db", "WARNING"):
+            db = ReviewDB(self.work_dir)
+        with self.assertRaises(ValueError):
+            db.decisions()
+        db.mark_many([("y", "b")], "CLEAN", 1, reviewer="al", mode="single")
+        self.assertEqual(set(db.decisions()), {"x", "y"})
+        with self.assertNoLogs("image_review"):
+            self.assertEqual(set(ReviewDB(self.work_dir).decisions()), {"x", "y"})
+
+    def test_complete_marks_never_trip(self):
+        cases = {
+            "complete group": [("x", "CLEAN", 1, "t", "al", "grid", 2), ("y", "CLEAN", 1, "t", "al", "grid", 2)],
+            "single": [("x", "CLEAN", 1, "t", "al", "single", 1)],
+            "two equal groups in one timestamp": [("x", "CLEAN", 1, "t", "al", "grid", 2)] * 4,
+            "two singles in one timestamp": [("x", "CLEAN", 1, "t", "al", "single", 1)] * 2,
+            "legacy rows": [("x", "CLEAN", 1, "t", "", "", ""), ("y", "CLEAN", 1, "t", "", "", "")],
+            "earlier cut group followed by a complete one": [
+                ("x", "CLEAN", 1, "t1", "al", "grid", 2),
+                ("y", "CLEAN", 1, "t2", "al", "single", 1),
+            ],
+        }
+        for name, rows in cases.items():
+            with self.subTest(name):
+                self.write(*rows)
+                with self.assertNoLogs("image_review"):
+                    db = ReviewDB(self.work_dir)
+                db.decisions()
+
+    def test_undo_group_is_complete(self):
+        db = ReviewDB(self.work_dir)
+        changes = db.mark_many([("x", "b"), ("y", "b"), ("z", "b")], "CLEAN", 1, reviewer="al", mode="grid")
+        db.undo_many(changes, reviewer="al")
+        with self.assertNoLogs("image_review"):
+            self.assertEqual(ReviewDB(self.work_dir).decisions(), {})
+
+    def test_cut_undo_group_is_caught(self):
+        self.write(("x", "CLEAN", 1, "t2", "al", "undo", 3))
+        with self.assertLogs("image_review.review_db", "WARNING"):
+            db = ReviewDB(self.work_dir)
+        with self.assertRaisesRegex(ValueError, "1 of 3 rows"):
+            db.decisions()
+
+    def test_torn_line_and_cut_mark_both_reported(self):
+        self.write(("x", "CLEAN", 1, "t1", "al", "grid", 2))
+        with open(self.path, "ab") as f:
+            f.write(b"y\tb\tCLEAN\t1\tt1\tal\tgr")
+        with self.assertLogs("image_review.review_db", "WARNING") as logs:
+            db = ReviewDB(self.work_dir)
+        self.assertEqual(len(logs.records), 2)
+        with self.assertRaises(ValueError) as ctx:
+            db.decisions()
+        text = str(ctx.exception)
+        self.assertLess(text.index("unfinished line"), text.index("cut short"))
+
+
 class TestReadOnlyTornLog(StoreTestCase):
     def test_read_only_store_never_writes(self):
         mark(self.store, ["batch_001/a.jpg"], "CLEAN")

@@ -307,8 +307,8 @@ world-readable.
   and is not signed: anyone who can write the work directory can edit it.
 - **Export refusals.** `export` refuses while a writer holds the work
   directory (unless `--allow-live`, which exports anyway with a warning),
-  refuses a `review.tsv` whose last line was cut short, refuses a malformed
-  `skipped.tsv` or `notes.tsv` or (beside a manifest with hashes) a missing
+  refuses a `review.tsv` whose last line, or last grid mark, was cut short,
+  refuses a malformed `skipped.tsv` or `notes.tsv` or (beside a manifest with hashes) a missing
   one, so a partial copy cannot drop failed inputs or unreviewed content from
   the decision, and refuses any field
   holding a control character, U+2028/U+2029, or a leading `"`, so a reader

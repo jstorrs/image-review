@@ -186,6 +186,13 @@ not start a field is written as is.
   an interrupted write; the next verdict recorded with `review` (or through
   `serve`) drops that line. Re-check the last image you reviewed before the
   crash.
+- It always refuses (exit 1) a `review.tsv` whose last grid mark (or undo) was
+  cut short by an interrupted write, with fewer rows on disk than its
+  `grid_size`: the images whose rows never landed may have been judged DIRTY.
+  The rows that landed are kept. The refusal lasts only until the next verdict
+  recorded with `review` (or through `serve`), which clears it whether or not
+  you re-checked that grid, so re-check the last grid or image you reviewed
+  before the crash first, then export again.
 - It refuses (exit 1) a malformed `skipped.tsv`, and a missing one when
   `manifest.tsv` records hashes (any work directory made by a current
   version; a manifest with no rows counts as hashed): the error names the

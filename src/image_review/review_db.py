@@ -178,6 +178,29 @@ def latest(decisions: Iterable[Decision]) -> dict[ImageId, Decision]:
     return rows
 
 
+def incomplete_last_mark(decisions: Sequence[Decision]) -> tuple[int, int] | None:
+    """(rows found, grid_size) if the trailing rows of one mark number fewer than its grid_size, else None.
+
+    A mark writes grid_size rows sharing one timestamp, reviewer and mode; a crash can leave some of them on disk,
+    cut at a line ending. The run is the trailing rows equal to the last row in all four; its length not being a
+    multiple of grid_size (two equal marks in one timestamp stay complete) means the last mark is cut short. Rows
+    with no grid_size (from before it was recorded) are never judged.
+    """
+    if not decisions:
+        return None
+    last = decisions[-1]
+    size = last.grid_size
+    if size is None:
+        return None
+    key = (last.timestamp, last.reviewer, last.mode, size)
+    count = 0
+    for d in reversed(decisions):
+        if (d.timestamp, d.reviewer, d.mode, d.grid_size) != key:
+            break
+        count += 1
+    return (count, size) if count % size else None
+
+
 @dataclass(frozen=True)
 class Change:
     """One row mark_many wrote, and the image's decision just before it (None: it had none)."""
@@ -192,6 +215,7 @@ class ReviewDB:
         self.review_path = work_dir / "review.tsv"
         self._rows: dict[ImageId, Decision] = {}  # keyed by image_id; last row wins (see latest(): never a tombstone)
         self._truncate: PendingTruncate | None = None  # a torn tail to drop before the next append
+        self._cut_mark: tuple[int, int] | None = None  # (rows found, grid_size) of a last mark cut short; rows kept
         self._legacy: LegacyLog | None = None  # an old-header file; appends refuse until migrate()
         # review.tsv's (inode, size) as last loaded or written; None: absent when loaded, so only an empty file will do
         self._seen: tuple[int, int] | None = None
@@ -215,6 +239,9 @@ class ReviewDB:
             )  # raises if the problem is not only the last line
             log.warning("ignoring the unfinished last line of %s (an interrupted write): %s", self.review_path, exc)
             self._truncate = PendingTruncate(st.st_ino, len(data), end)
+        self._cut_mark = incomplete_last_mark(decisions)
+        if self._cut_mark is not None:
+            log.warning("the last mark in %s is cut short (an interrupted write); its rows are kept", self.review_path)
         self._rows = latest(decisions)
         self._seen = (st.st_ino, len(data))
         if legacy:
@@ -321,6 +348,7 @@ class ReviewDB:
         finally:
             os.close(fd)
         self._truncate = None
+        self._cut_mark = None
         # what this writer wrote, not the file's size now: bytes another writer appended meanwhile are a change
         self._seen = (st.st_ino, start + len(encoded))
 
@@ -395,15 +423,27 @@ class ReviewDB:
     def decisions(self) -> dict[ImageId, Decision]:
         """The latest decision per image_id (a copy; never a tombstone).
 
-        ValueError if review.tsv ended in an unfinished line when loaded (the next append drops it): the last verdict
-        may be missing, so a result built from these decisions could be wrong.
+        ValueError if review.tsv ended in an unfinished line when loaded (the next append drops it), or its last mark
+        has fewer rows than its grid_size (the next append keeps them): the last verdict may be missing or
+        incomplete, so a result built from these decisions could be wrong. Both messages if both hold.
         """
+        problems = []
         if self._truncate is not None:
-            raise ValueError(
+            problems.append(
                 f"{self.review_path} ends in an unfinished line from an interrupted write, so the last verdict "
                 "may be missing. The next verdict recorded with `review` (or through `serve`) drops it; re-check the "
                 "last image reviewed before the interruption, then export again"
             )
+        if self._cut_mark is not None:
+            found, size = self._cut_mark
+            problems.append(
+                f"the last mark in {self.review_path} was cut short by an interrupted write ({found} of {size} rows "
+                "written), so some images it covered may lack its verdict. The next verdict recorded with `review` "
+                "(or through `serve`) clears this; re-check the last grid or image reviewed before the interruption, "
+                "then export again"
+            )
+        if problems:
+            raise ValueError("; ".join(problems))
         return dict(self._rows)
 
     def get_status(self, image_id: ImageId, current_pass: int) -> Status:
