@@ -4,6 +4,8 @@ review_work/
 manifest.tsv
 review.tsv
 skipped.tsv
+notes.tsv
+.review.tsv.*.tmp
 review.lock
 review.lock.*
 preprocess.json
