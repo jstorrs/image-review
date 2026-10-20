@@ -53,3 +53,27 @@ jobs:
         run: |
           coverage run -m unittest discover
           coverage report
+
+  minimums:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+      PYTHONDONTWRITEBYTECODE: "1"
+      IMAGE_REVIEW_REQUIRE_NODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install the lowest allowed versions
+        run: |
+          python -m pip install uv
+          uv pip install --python "$(which python)" --resolution lowest-direct \
+            --only-binary :all: --no-binary rectpack -e ".[all]"
+      - name: Test
+        run: python -m unittest discover

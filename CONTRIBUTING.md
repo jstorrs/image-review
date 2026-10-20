@@ -53,13 +53,22 @@ manual dispatch: lint, format check, type check and tests on Linux
 A push to a branch without a pull request does not run CI; open a pull request,
 or start the workflow from the Actions tab (`workflow_dispatch`).
 
+The `minimums` job runs the tests on Python 3.12 against the lowest versions that
+`pyproject.toml` allows for the direct dependencies, installed with
+`uv pip install --resolution lowest-direct` and wheels only (rectpack has only
+an sdist, so it is built from source). It runs no lint, format or type checks.
+If it fails, a floor in `pyproject.toml` is too low: raise it, and note the new
+requirement under *Upgrading* in the changelog. It installs with uv, not pip, so
+it does not use the pip cache.
+
 `.github/workflows/docs.yml` has the same triggers. It runs `sphinx-build -W`
 and deploys the site to GitHub Pages from `main` only; pull requests just prove
 the site builds.
 
 Both workflows cancel an in-progress run for the same ref when a newer one
 starts (never on `main`), cache pip downloads keyed on `pyproject.toml`, and
-set a job timeout: 30 minutes for tests, 15 for the docs build, 10 for deploy.
+set a job timeout: 30 minutes for tests (both test jobs), 15 for the docs build,
+10 for deploy.
 
 Every `uses:` is pinned to a full commit SHA with a `# vX.Y.Z` comment.
 Dependabot (`.github/dependabot.yml`) opens a weekly pull request for newer

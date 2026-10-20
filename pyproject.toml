@@ -23,8 +23,8 @@ classifiers = [
 requires-python = ">=3.12"
 dependencies = [
     # Minimums verified by running the test suite on CPython 3.12, installing wheels only (except
-    # rectpack, which has only an sdist). Where no comment says why, the minimum is the oldest
-    # release with a CPython 3.12 wheel.
+    # rectpack, which has only an sdist), and CI's `minimums` job repeats this. Where no comment says
+    # why, the minimum is the oldest release with a CPython 3.12 wheel.
     # Core: what `serve`, `status` and `export` need (and the CLI itself, including --help), plus
     # the grid layout code (layout.py) shared by the viewer and, later, serve's browser client.
     "click>=8.2.2",  # the tests read CliRunner stderr separately; 8.2.2 validates values taken from envvars
