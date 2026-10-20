@@ -132,10 +132,12 @@ def load_manifest(work_dir: Path) -> list[ManifestEntry]:
     FileNotFoundError if absent.
 
     Both the current header and the legacy 3-column one (no hashes) are accepted; every row has the header's width.
+    One image_id has one source_sha256: export vouches for a file per image_id.
     """
     path = work_dir / MANIFEST_NAME
     entries: list[ManifestEntry] = []
     key_lines: dict[str, int] = {}
+    source_hashes: dict[str, tuple[str, int]] = {}  # image_id -> (source_sha256, first line)
     rows = tsv_rows(path, decode_utf8(path, path.read_bytes()))
     _, header = next(rows, (1, None))
     if header not in (MANIFEST_HEADER, LEGACY_MANIFEST_HEADER):
@@ -161,6 +163,12 @@ def load_manifest(work_dir: Path) -> list[ManifestEntry]:
                 f"{path}:{line}: duplicate preprocessed_path {key!r} (first seen on line {key_lines[key]})"
             )
         key_lines[key] = line
+        if source_sha256 is not None:
+            first_sha256, first = source_hashes.setdefault(image_id, (source_sha256, line))
+            if source_sha256 != first_sha256:
+                raise ValueError(
+                    f"{path}:{line}: image_id {image_id!r} has a different source_sha256 than on line {first}"
+                )
         entries.append(ManifestEntry(batch, Key(key), ImageId(image_id), source_sha256, jpeg_sha256))
     return entries
 
@@ -190,10 +198,14 @@ class SkippedRow:
     reason: str
 
 
-def load_skipped(work_dir: Path) -> list[SkippedRow]:
-    """Parse skipped.tsv strictly, in file order; empty if the work dir has none. ValueError (naming file:line, or file and byte offset if not UTF-8) if malformed."""
+def load_skipped(work_dir: Path, *, required: bool = False) -> list[SkippedRow]:
+    """Parse skipped.tsv strictly, in file order; empty if the work dir has none, unless `required`. ValueError (naming file:line, or file and byte offset if not UTF-8) if malformed or required and absent."""
     path = work_dir / SKIPPED_NAME
     if not path.exists():
+        if required:
+            raise ValueError(
+                f"{path}: missing; preprocess writes it beside manifest.tsv, so this work directory is incomplete"
+            )
         return []
     skipped: list[SkippedRow] = []
     rows = tsv_rows(path, decode_utf8(path, path.read_bytes()))
@@ -226,6 +238,7 @@ class LocalStore:
         self.read_only = read_only
         entries = load_manifest(work_dir)  # written once by preprocess; safe to read before locking
         self._entries = entries
+        self._hashed = all(e.source_sha256 is not None for e in entries)  # written by a version that writes skipped.tsv
         self._rows = [ManifestRow(key=e.key, batch=e.batch) for e in entries]
         self._by_key: dict[Key, ManifestEntry] = {e.key: e for e in entries}
         self._keys_by_image_id: dict[ImageId, list[Key]] = {}
@@ -323,8 +336,9 @@ class LocalStore:
 
     def export_rows(self) -> list["ExportRow"]:
         """The study's result, one row per source file (see export_rows). Local only: image_ids never leave the work
-        dir's machine. ValueError if skipped.tsv is malformed or review.tsv ends in a torn line."""
-        return export_rows(self._entries, self._db.decisions(), load_skipped(self.work_dir))
+        dir's machine. ValueError if skipped.tsv is malformed, or missing beside a hashed manifest, or review.tsv ends
+        in a torn line."""
+        return export_rows(self._entries, self._db.decisions(), load_skipped(self.work_dir, required=self._hashed))
 
 
 # The review --filter vocabulary, parsed by the CLI's click.Choice.

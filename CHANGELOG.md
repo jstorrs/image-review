@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `export` now refuses a work directory whose `skipped.tsv` is missing (when `manifest.tsv` records hashes), instead of
+  reporting as if no input had failed or been ignored.
+- A `manifest.tsv` listing one `image_id` with two different `source_sha256` values is now rejected when the work
+  directory is opened, instead of `export` silently using the first.
 - Grid review now pauses when resizing leaves no display area above the status bar, then rebuilds when space returns.
 - Grayscale inputs that would lose pixel values or overflow their intensity
   range when converted to float32 now fail with an explicit unsupported

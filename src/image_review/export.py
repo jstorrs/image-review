@@ -123,12 +123,8 @@ def _fold(image_id: ImageId, main: _Part, icon: _Part | None, source_sha256: str
 
 
 def _manifest_hashes(entries: list[ManifestEntry]) -> dict[ImageId, str]:
-    """The first source_sha256 the manifest records per exact image_id; none for a legacy entry without one."""
-    hashes: dict[ImageId, str] = {}
-    for e in entries:
-        if e.source_sha256 is not None:
-            hashes.setdefault(e.image_id, e.source_sha256)
-    return hashes
+    """The source_sha256 the manifest records per exact image_id (load_manifest allows one); none for a legacy entry."""
+    return {e.image_id: e.source_sha256 for e in entries if e.source_sha256 is not None}
 
 
 def _ambiguous_icons(parts: dict[ImageId, _Part], hashes: dict[ImageId, str]) -> set[ImageId]:
@@ -168,9 +164,9 @@ def export_rows(
     older version, or a file merely so named, has one) is folded into `X`'s row, whose status is the worse of the two
     (DIRTY, then NOT_REVIEWED, then UNREVIEWED, then CLEAN); an icon without its `X` is reported under `X`, as if `X`
     were NOT_REVIEWED. `decisions` is the latest decision per image_id (review_db.latest); ones for image_ids in neither
-    file are ignored. A row's source_sha256 is the first one the manifest records for `X` itself; only if the
-    manifest does not list `X` at all (an icon without its main, or a failed `X`), the first one for `X#icon`; else
-    "" (an `X` listed without a hash never borrows its icon's).
+    file are ignored. `entries` are as load_manifest returns them, at most one source_sha256 per image_id. A row's source_sha256 is
+    the one the manifest records for `X` itself; only if the manifest does not list `X` at all (an icon without its
+    main, or a failed `X`), the one for `X#icon`; else "" (an `X` listed without a hash never borrows its icon's).
 
     If the manifest records a hash for both `X` and `X#icon` and they differ, `X#icon` is ambiguous: an older
     version's DICOM icon has its file's hash, so it may be a different file merely so named, or `X`'s icon. Then

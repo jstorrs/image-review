@@ -179,7 +179,7 @@ class TestExportRows(ExportTestCase):
             MANIFEST_HEADER,
             [("b1", "b1/a.jpg", "/src/a.dcm", same, sha("a")), ("b1", "b1/b.jpg", "/src/b.dcm", same, sha("b"))],
         )
-        (self.work / "skipped.tsv").unlink()
+        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n")
         result = self.export()
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(result.stdout.splitlines()[1:], [])
@@ -217,8 +217,8 @@ class TestExportRows(ExportTestCase):
         self.assertEqual(result.stdout.splitlines()[1], f"{sha('/src/a.dcm')}\t/src/a.dcm\t2\tt2\t")  # no reviewer
         self.assertEqual((self.work / "review.tsv").read_bytes(), before)  # a reader does not migrate it
 
-    def test_without_skipped_or_review_files(self):
-        (self.work / "skipped.tsv").unlink()
+    def test_without_skipped_rows_or_review_file(self):
+        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n")
         (self.work / "review.tsv").unlink()
         rows = [line.split("\t") for line in self.report_lines()]
         files = dict.fromkeys(m[2].removesuffix("#icon") for m in MANIFEST)
@@ -294,6 +294,36 @@ class TestExportRows(ExportTestCase):
         result = self.export("--output", str(out))
         self.assertEqual(result.exit_code, 1)
         self.assertFalse(out.exists())
+
+    def test_hashed_manifest_without_skipped_is_refused(self):
+        (self.work / "skipped.tsv").unlink()
+        out = self.root / "allow.tsv"
+        result = self.export("--output", str(out))
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("skipped.tsv: missing", result.output)
+        self.assertNotIn("Traceback", result.output)
+        self.assertFalse(out.exists())
+        self.assertEqual(invoke("status", "--work-dir", str(self.work)).exit_code, 0)  # status only counts
+
+    def test_legacy_manifest_without_skipped_still_exports(self):
+        write_tsv(self.work / "manifest.tsv", LEGACY_MANIFEST_HEADER, [("b1", "b1/a.jpg", "/src/a.dcm")])
+        (self.work / "skipped.tsv").unlink()
+        self.assertEqual(self.export().exit_code, 0)
+
+    def test_conflicting_source_hashes_for_one_image_id_are_refused(self):
+        write_tsv(
+            self.work / "manifest.tsv",
+            MANIFEST_HEADER,
+            [
+                ("b1", "b1/a.jpg", "/src/a.dcm", sha("x"), sha("a")),
+                ("b1", "b1/b.jpg", "/src/a.dcm", sha("y"), sha("b")),
+            ],
+        )
+        result = self.export()
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn(
+            "manifest.tsv:3: image_id '/src/a.dcm' has a different source_sha256 than on line 2", result.output
+        )
 
     def test_malformed_skipped_is_a_clean_error(self):
         (self.work / "skipped.tsv").write_text("wrong\n")

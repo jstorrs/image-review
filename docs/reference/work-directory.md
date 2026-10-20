@@ -64,7 +64,8 @@ An `image_id` is an absolute path:
   [`skipped.tsv`](#skippedtsv), under an escaped name.
 
 The same `image_id` can appear on more than one row when one file was reached
-through overlapping SOURCES; one verdict covers all of them.
+through overlapping SOURCES; one verdict covers all of them. Such rows have
+the same `source_sha256`.
 
 Work directories from older versions have only the first three columns
 (`batch`, `preprocessed_path`, `image_id`). They still load; their images are
@@ -79,7 +80,8 @@ Cannot read work directory: <file>:<line>: <problem>
 
 if the header is not exactly one of the two above, a row has a missing or
 empty field, a hash is not 64 lowercase hex characters, or a
-`preprocessed_path` repeats. A file that is not valid UTF-8 is named with a
+`preprocessed_path` repeats, or one `image_id` has two different
+`source_sha256` values (the error names the later line and the first). A file that is not valid UTF-8 is named with a
 byte offset instead of a line (`<file>: not valid UTF-8 at byte N`), and a
 field longer than 131072 characters (csv's field limit) is a parse error at its
 line (`field larger than field limit`). The tool never repairs the file: fix or
@@ -106,7 +108,10 @@ What each kind covers, with example reasons, is in
 [Skipped inputs](../commands/preprocess.md#skipped-inputs). `status` counts
 the rows and `export` reports them. Both read the file strictly and stop with
 an error naming the file and line if it is malformed, including a field
-longer than 131072 characters.
+longer than 131072 characters. `status` and `serve` treat an absent file as no
+skipped inputs, but `export` refuses a work directory without it, unless the
+manifest has rows and no hash columns (an older version); see
+[Refusals](../commands/export.md#refusals-and-output-files).
 
 ## `notes.tsv`
 

@@ -160,7 +160,15 @@ not start a field is written as is.
   an interrupted write; the next verdict recorded with `review` (or through
   `serve`) drops that line. Re-check the last image you reviewed before the
   crash.
-- It refuses (exit 1) a malformed `skipped.tsv`.
+- It refuses (exit 1) a malformed `skipped.tsv`, and a missing one when
+  `manifest.tsv` records hashes (any work directory made by a current
+  version; a manifest with no rows counts as hashed): the error names the
+  file, since a partial copy would otherwise drop every failed and ignored
+  input from the report. Only a manifest of an older version, with rows but
+  no hash columns, may lack `skipped.tsv`.
+- It refuses (exit 1) a malformed `manifest.tsv`, as every command that opens
+  the work directory does; see
+  [Strict parsing](../reference/work-directory.md#manifesttsv).
 - It refuses (exit 1, naming the `image_id` and the column, writing nothing)
   if any field of either file (`image_id`, `reviewer`, `reason`, ...), even
   without `--report`, holds a control character (tab, CR, LF and the rest of

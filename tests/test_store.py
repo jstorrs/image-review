@@ -457,6 +457,51 @@ class TestStrictLoading(unittest.TestCase):
             [ManifestEntry("batch_001", "batch_001/a.jpg", "/src/a.dcm", self.SOURCE_HASH, self.JPEG_HASH)],
         )
 
+    def test_conflicting_source_sha256_for_one_image_id_names_both_lines(self):
+        other = hashlib.sha256(b"other").hexdigest()
+        self.write_manifest(
+            self.HASHED_HEADER,
+            f"b\tb/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}",
+            f"b\tb/b.jpg\t/src/b.dcm\t{other}\t{self.JPEG_HASH}",
+            f"b\tb/c.jpg\t/src/a.dcm\t{other}\t{self.JPEG_HASH}",
+        )
+        with self.assertRaisesRegex(
+            ValueError, r"manifest\.tsv:4: image_id '/src/a\.dcm' has a different source_sha256 than on line 2"
+        ):
+            load_manifest(self.work_dir)
+
+    def test_equal_source_sha256_for_one_image_id_loads(self):
+        self.write_manifest(
+            self.HASHED_HEADER,
+            f"b\tb/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}",
+            f"b\tb/b.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}",
+        )
+        self.assertEqual(len(load_manifest(self.work_dir)), 2)
+
+    def test_load_skipped_required_names_missing_file(self):
+        self.assertEqual(load_skipped(self.work_dir), [])
+        with self.assertRaisesRegex(ValueError, r"skipped\.tsv: missing; .*incomplete"):
+            load_skipped(self.work_dir, required=True)
+
+    def test_export_rows_need_skipped_beside_a_hashed_manifest(self):
+        cases = {
+            "hashed": (self.HASHED_HEADER, f"b\tb/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}", True),
+            "legacy": (self.MANIFEST_HEADER, "b\tb/a.jpg\t/src/a.dcm", False),
+            "empty": (self.HASHED_HEADER, None, True),
+            "empty legacy": (self.MANIFEST_HEADER, None, True),  # no rows counts as hashed: the safe direction
+        }
+        for name, (header, row, refused) in cases.items():
+            with self.subTest(name):
+                self.write_manifest(header, *([row] if row else []))
+                (self.work_dir / "skipped.tsv").unlink(missing_ok=True)
+                with LocalStore(self.work_dir, read_only=True) as store:
+                    self.assertEqual(store.skipped(), SkippedCounts(0, 0))  # counts alone never need the file
+                    if refused:
+                        with self.assertRaisesRegex(ValueError, r"skipped\.tsv: missing"):
+                            store.export_rows()
+                    else:
+                        self.assertEqual([r.image_id for r in store.export_rows()], ["/src/a.dcm"])
+
     def test_malformed_hash_names_file_and_line(self):
         good = f"batch_001\tbatch_001/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}"
         row = "batch_001\tbatch_001/b.jpg\t/src/b.dcm\t{}\t{}".format

@@ -864,7 +864,9 @@ Whether `--report` and `--output` name the same file is checked after
   (both quoted on the export page).
   `--allow-live` turns either refusal into a WARNING.
 - `ReviewDB.decisions()` raises on a torn last line of `review.tsv`, and
-  `load_skipped` on a malformed `skipped.tsv`. Neither is overridable.
+  `load_skipped` on a malformed `skipped.tsv`, or a missing one beside a manifest
+  that records hashes (a legacy manifest without them may lack it). Neither is
+  overridable.
 - `format_allowlist`'s or `format_report`'s `ValueError`, naming the
   `image_id` with `repr` and the column, for a field holding a control
   character (Unicode category `Cc`) or U+2028/U+2029, which covers every
@@ -894,9 +896,9 @@ denied `CLEAN` row may come before the row that denies it. Its
 are in [File format](../commands/export.md#file-format). The headers are
 `ALLOWLIST_HEADER` and `REPORT_HEADER`. Fields are joined with tabs, every
 line ends in LF, and there is no quoting or escaping, which the refusals above
-make unambiguous. A row's `source_sha256` is the first one the manifest
+make unambiguous. A row's `source_sha256` is the one the manifest
 records for `X` itself; only if the manifest does not list `X` at all (an
-icon without its main, or a failed `X`), the first one for `X#icon`; else
+icon without its main, or a failed `X`), the one for `X#icon`; else
 empty (an `X` listed without a hash never borrows its icon's).
 
 **Parts and folding.** Every distinct `image_id` of the manifest, and of the
@@ -921,7 +923,7 @@ missing`, or the ignored reason if `X` was ignored, see below), so it is never
 CLEAN.
 
 An older version's DICOM icon has its file's hash, so when the manifest
-records a hash for both `X` and `X#icon` (the first per exact `image_id`) and
+records a hash for both `X` and `X#icon` and
 they differ, `X#icon` is ambiguous: it may be `X`'s icon or a different file
 merely named so (e.g. a ZIP entry `scan.png#icon` beside `scan.png`), and
 either reading can hide a part nobody saw. Then `X#icon` is still folded into
@@ -1089,7 +1091,9 @@ local `export`. Everything else identifies an image by its
 
 The file is parsed strictly (`store.load_manifest`) when the work directory is
 opened, and is never repaired. A legacy three-column manifest loads with both
-hashes `None`. A violation is a `ValueError` naming `<file>:<line>` (or the
+hashes `None`. One `image_id` has one `source_sha256`: a row repeating an
+`image_id` with a different one is a violation (equal hashes are fine; legacy rows
+are not compared), so `export` vouches for one hash per file. A violation is a `ValueError` naming `<file>:<line>` (or the
 byte offset, for a file that is not UTF-8), which the CLI shows as
 `Cannot read work directory: ...` (exit 1).
 
@@ -1124,8 +1128,9 @@ name it.
 Written by `preprocess`, always (header only when nothing was skipped).
 Columns and encoding are in [`skipped.tsv`](work-directory.md#skippedtsv);
 the escaping of bad names and the `ignored` reasons are in *Source loading*.
-It is parsed strictly by `store.load_skipped` (a missing file reads as
-empty).
+It is parsed strictly by `store.load_skipped`. A missing file reads as
+empty, except for `export`, which passes `required=True` when the manifest
+records hashes and refuses with a `ValueError` naming the file.
 
 It contains source paths, so it is as sensitive as `manifest.tsv`. `export`
 makes each `failed` `image_id` `NOT_REVIEWED` with its `reason` (folding a
@@ -1320,7 +1325,7 @@ only: it starts empty and is lost when the store is closed or the process ends,
 so only marks made since the store was opened can be undone. `statuses` and `current_pass`
 delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
 `skipped.tsv` strictly with `load_skipped` (header `image_id`, `kind`, `reason`; `kind` is `failed`
-or `ignored`) and returns only the counts (zero when the file is absent). `export_rows()` (not part of the
+or `ignored`) and returns only the counts (zero when the file is absent, even where `export` would refuse). `export_rows()` (not part of the
 `ReviewStore` Protocol: `image_id`s stay local) returns
 `export.export_rows(entries, ReviewDB.decisions(), load_skipped(...))`;
 see *`image-review export`*.
@@ -1339,8 +1344,8 @@ see *`image-review export`*.
 | `export.format_allowlist(rows: list[AllowedRow]) -> str` | The allowlist as TSV text with `ALLOWLIST_HEADER` (`AllowedRow` is a `NewType` over `ExportRow` that only `split_allowlist` makes, so passing the report's rows is a type error); `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
 | `export.format_report(rows) -> str` | The report as TSV text with `REPORT_HEADER`; the same `ValueError` |
 
-`load_skipped(work_dir)` parses `skipped.tsv` into `SkippedRow`s (empty if
-absent; `ValueError` naming `file:line` if malformed). Two IO helpers serve
+`load_skipped(work_dir, *, required=False)` parses `skipped.tsv` into `SkippedRow`s (empty if
+absent unless `required`, which `LocalStore.export_rows` sets for a hashed manifest and which then raises `ValueError`; `ValueError` naming `file:line` if malformed). Two IO helpers serve
 `export` (see *`image-review export`*): `atomic.write_new_file(path, file_mode,
 group, text)` creates the `--output` and `--report` files, and `lock.live_writer(work_dir) ->
 WorkDirLocked | None` checks the work dir lock.
