@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from functools import partial
 from itertools import groupby, pairwise
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, assert_never, cast, get_args
+from typing import Any, Literal, assert_never, cast
 from zipfile import ZIP_BZIP2, ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, ZipFile, ZipInfo
 
 import imagecodecs
@@ -52,10 +52,19 @@ from tqdm import tqdm
 
 from .access import MANIFEST_NAME, Access, Modes, modes
 from .connection import package_version
-from .export import has_unsafe_char
+from .export import ALL_ZERO_SUFFIX, NOTE_KINDS, NoteKind, has_unsafe_char
 from .review_db import format_tsv
 from .status import ImageId
-from .store import MANIFEST_HEADER, SKIPPED_HEADER, SKIPPED_NAME, SkipKind, SkippedRow, skipped_counts
+from .store import (
+    MANIFEST_HEADER,
+    NOTES_HEADER,
+    NOTES_NAME,
+    SKIPPED_HEADER,
+    SKIPPED_NAME,
+    SkipKind,
+    SkippedRow,
+    skipped_counts,
+)
 
 log = logging.getLogger(__name__)
 
@@ -167,8 +176,6 @@ _RLE_HEADER_BYTES = 64  # the segment count and 15 segment offsets, each a littl
 _RLE_MAX_SEGMENTS = 15
 _PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
 PROVENANCE_NAME = "preprocess.json"
-NOTES_NAME = "notes.tsv"
-NOTES_HEADER = ["image_id", "kind", "detail"]
 NOTE_VALUE_MAX = 64  # characters of one DICOM value quoted in a note detail
 PENDING_NAME = ".pending"  # staging subdirectory holding JPGs until their image_ids are known not to collide
 COLLISION_REASON = "image_id collides with another input (rename one of them)"
@@ -221,11 +228,6 @@ _SPAWN = multiprocessing.get_context("spawn")
 
 Kind = Literal["dicom", "raster"]
 Content = Literal[Kind, "zip"]
-# Something a written input holds that downstream tools should strip, noted whether or not the image shows it
-NoteKind = Literal[
-    "overlay-plane", "overlay-unused-bits", "icon-image", "alpha", "embedded-thumbnail", "trailing-data"
-]  # DICOM, then raster
-NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
 
 
 @dataclass(frozen=True)
@@ -1223,7 +1225,7 @@ def _unrendered_detail(data: bytes, runs: Sequence[tuple[int, int]], where: str)
     count = sum(end - start for start, end in runs)
     head = data[runs[0][0] : min(runs[0][1], runs[0][0] + SNIFF_BYTES)]
     if all(data.count(b"\x00", start, end) == end - start for start, end in runs):
-        what = "; all zero bytes"
+        what = ALL_ZERO_SUFFIX
     elif _has_preamble(head):
         what = "; they begin with a DICOM preamble"
     elif head.startswith(b"\xff\xd8\xff"):

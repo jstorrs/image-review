@@ -327,6 +327,15 @@ input can have several notes, one row each. The file's columns are in
 [`notes.tsv`](../reference/work-directory.md#notestsv); like `skipped.tsv` it
 holds source paths.
 
+Every kind but `alpha` marks content that is not
+rendered into the review image (or, for `overlay-plane` with
+`--draw-overlays`, may not be fully shown) but ships in the file's bytes, so
+nobody reviewed all of it: `export` reports such a file as `NOT_REVIEWED`
+and does not allowlist it (`trailing-data` of zero bytes only is the
+exception; see [export](export.md#what-is-allowlisted)). Stripping the
+content changes the file's hash, so to release it, strip it, preprocess the
+stripped file into a new work directory and review it there.
+
 | Kind | Meaning | Example detail |
 |------|---------|----------------|
 | `overlay-plane` | A DICOM with one or more overlay planes (groups 6000-601E with OverlayData) | `group 0x6000`, or `groups 0x6000, 0x6002` |
@@ -337,8 +346,9 @@ holds source paths.
 | `trailing-data` | A JPEG or PNG holding bytes that are not rendered, such as after the end of its image | `2048 bytes after the JPEG end; they begin with a JPEG signature` (all forms below) |
 
 - **`overlay-plane`**: the review image is the pixel data alone, so overlay
-  planes are not reviewed (unless `--draw-overlays` draws them; see
-  [Rendering pipeline](#rendering-pipeline)): strip them before release.
+  planes are not reviewed (`--draw-overlays` draws them, but export still
+  denies the file; see above and [Rendering
+  pipeline](#rendering-pipeline)).
   The note needs only that OverlayData is present, so an overlay that cannot
   be decoded is noted too.
 - **`overlay-unused-bits`**: the bits of each pixel above BitsStored are
@@ -353,10 +363,10 @@ holds source paths.
   compression overshooting it (e.g. lossy JPEG 2000 coded at a higher
   precision than BitsStored, whose brightest pixels then wrap round to dark
   when masked): check the image against the note. The bits stay in the
-  pixel data as stored, so they ship in the released bytes unless they are
-  stripped (cleared) before release.
+  pixel data as stored, so they ship in the released bytes (see
+  above; clearing them is stripping).
 - **`icon-image`**: icons are not rendered, so text burned into them is not
-  reviewed: remove them before releasing files. The detail gives the first
+  reviewed (see above). The detail gives the first
   icon's rows, columns and photometric interpretation, with `?` for one that
   is missing (`IconImageSequence: ?x? ?`) and each value cut to 64 characters
   plus `…`, and `, N items` when the sequence holds more than one icon. An icon sequence that cannot be read is noted as
@@ -368,9 +378,9 @@ holds source paths.
   fully opaque, of all the pixels (a `tRNS` colour key counts as alpha).
   Fully opaque alpha gets no note.
 - **`embedded-thumbnail`**: a raster can carry smaller images that are never
-  rendered, so text burned into them is not reviewed: strip them before
-  releasing files. This is the raster counterpart of the DICOM `icon-image`
-  note; the kinds stay separate because stripping is format-specific. Only the
+  rendered, so text burned into them is not reviewed (see
+  above). This is the raster counterpart of the DICOM
+  `icon-image` note; the kinds stay separate because stripping is format-specific. Only the
   file's metadata is read. The detail is one of these forms:
   - `EXIF IFD1 thumbnail (N bytes)`: the EXIF IFD1 holds a JPEG thumbnail
     (JPEGInterchangeFormat 0x0201), N the length in
@@ -396,7 +406,8 @@ holds source paths.
   pixel data.
 - **`trailing-data`**: bytes of a JPEG or PNG that the decoder never reads
   are not reviewed, whatever they hold (a whole second image appended to
-  the file, say): strip them before releasing files. A JPEG's image ends at
+  the file, say; see above, which exempts bytes that
+  are all zero). A JPEG's image ends at
   its EOI marker; a PNG's at the header of its IEND chunk (data that IEND
   itself declares is never read, so it counts), or where the decoder stops
   reading it (a chunk whose type is not four letters, digits or `_`, or one
@@ -454,13 +465,16 @@ with no windowing or colormap:
 
 A DICOM's embedded icon image (a thumbnail stored in the file, in
 IconImageSequence (0088,0200)) is not rendered, so text burned into it is not
-reviewed: remove icons before releasing files. `notes.tsv` lists each DICOM
-that has one (see [Input notes](#input-notes)). Only the pixel data is
-reviewed: overlay planes are not drawn by default, so the review image shows
-only the pixel data, and `notes.tsv` lists each DICOM that has
-overlay planes, which still ship in the file (strip them before release). With `--draw-overlays` they are
-drawn onto the image, and a DICOM whose overlay cannot be decoded is `failed`
-as a whole, naming its group; without the flag they are never decoded.
+reviewed: `notes.tsv` lists each DICOM that has one (see [Input
+notes](#input-notes)), and `export` does not allowlist it. Only the pixel
+data is reviewed: overlay planes are not drawn by default, so the review
+image shows only the pixel data, and `notes.tsv` lists each DICOM that has
+overlay planes, which still ship in the file, and `export` does not
+allowlist it. With `--draw-overlays` they are drawn onto the image, but
+`export` still does not allowlist such a file: a drawn plane is clipped to
+the image (one placed outside it is not shown at all) and is drawn at
+maximum brightness, so it can be lost against bright pixels. A DICOM whose
+overlay cannot be decoded is then `failed` as a whole, naming its group; without the flag they are never decoded.
 Overlays stored in the unused bits of the pixel data (bits above
 BitsStored), rather than in overlay planes, are masked for every transfer
 syntax, so they are never drawn, with or without the flag, and are noted as

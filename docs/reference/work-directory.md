@@ -132,8 +132,12 @@ It is encoded like `skipped.tsv`, and the detail is cleaned like a skipped
 reason (no tabs, newlines or other control characters). What each kind means,
 with example details, is in
 [Input notes](../commands/preprocess.md#input-notes). It holds source paths,
-so it is as sensitive as `manifest.tsv`. The tool never reads it back, and
-the server never sends it.
+so it is as sensitive as `manifest.tsv`. Only `export` reads it, to deny
+files holding content their review image does not show (see [What is
+allowlisted](../commands/export.md#what-is-allowlisted)); it refuses a
+malformed `notes.tsv`, naming the file and line, and a missing one under the
+same rule as `skipped.tsv` (so work directories made before 0.4.0, which have
+none, cannot be exported). The server never sends it.
 
 ## `preprocess.json`
 

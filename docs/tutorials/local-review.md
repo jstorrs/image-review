@@ -179,7 +179,8 @@ image-review export --work-dir ./review_work --output allowlist.tsv   # the allo
 
 **Release a file only if both its path and its SHA-256 match a row of the
 allowlist.** Anything not listed is denied: DIRTY, unreviewed, failed and
-ignored files, a file whose bytes have changed, and a ZIP container as a whole
+ignored files, a file holding content its review image does not show (an
+embedded icon or thumbnail, say), a file whose bytes have changed, and a ZIP container as a whole
 (its entries are listed one by one, as `<zip>::<entry>`). The report is for
 audit and follow-up, e.g. what is left to review; never use it to choose what
 to release (for example "everything that is not DIRTY").

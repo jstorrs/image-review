@@ -56,7 +56,7 @@ from pydicom.uid import (
 from image_review import cli as cli_module
 from image_review import preprocess as preprocess_module
 from image_review.cli import default_jobs
-from image_review.export import AMBIGUOUS_ICON, export_rows
+from image_review.export import AMBIGUOUS_ICON, export_rows, unreviewed_content
 from image_review.preprocess import (
     BAD_NAME_REASON,
     COLLISION_REASON,
@@ -95,8 +95,8 @@ from image_review.preprocess import (
 from image_review.review_db import Decision
 from image_review.signals import TERMINATION_SIGNALS, interrupt_on
 from image_review.status import ImageId
-from image_review.store import SkippedRow, load_manifest, load_skipped
-from tests.fixtures import add_overlay, invoke_cli, temp_dir, write_dicom
+from image_review.store import LocalStore, SkippedRow, load_manifest, load_notes, load_skipped
+from tests.fixtures import add_overlay, invoke_cli, mark, temp_dir, write_dicom
 
 RNG = np.random.default_rng(0)
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -531,10 +531,14 @@ class CollisionTest(unittest.TestCase):
             )
             for e in entries
         }
-        rows = export_rows(entries, decisions, load_skipped(self.work))
+        notes = unreviewed_content(load_notes(self.work, required=True), frozenset())
+        rows = export_rows(entries, decisions, load_skipped(self.work), notes)
         self.assertEqual(
             [(r.image_id, r.status, r.reason) for r in rows],
-            [(dicom, "NOT_REVIEWED", AMBIGUOUS_ICON), (f"{dicom}#icon", "NOT_REVIEWED", AMBIGUOUS_ICON)],
+            [
+                (dicom, "NOT_REVIEWED", f"unreviewed embedded content: icon-image; {AMBIGUOUS_ICON}"),
+                (f"{dicom}#icon", "NOT_REVIEWED", AMBIGUOUS_ICON),
+            ],
         )
 
     def test_dicom_with_icon_is_one_row(self):
@@ -805,6 +809,25 @@ class NotesTest(unittest.TestCase):
         self.assertEqual(result.notes, {**NO_NOTES, "trailing-data": 1})
         self.assertEqual(len(self.written()), 2)
         self.assertEqual(result.skipped, [])
+
+    def test_export_denies_a_nonzero_trailing_tail_and_allows_an_all_zero_one(self):
+        first = _jpeg_bytes(np.zeros((8, 8, 3), dtype=np.uint8))
+        (self.src / "zero.jpg").write_bytes(first + bytes(16))
+        (self.src / "tail.jpg").write_bytes(first + _jpeg_bytes(np.ones((8, 8, 3), dtype=np.uint8)))
+        self.run_quietly()
+        self.assertEqual(sorted(kind for _, kind, _ in self.notes()), ["trailing-data", "trailing-data"])
+        with LocalStore(self.work) as store:
+            mark(store, [r.key for r in store.manifest()], "CLEAN")
+        report = self.root / "report.tsv"
+        exported = invoke_cli("export", "--work-dir", str(self.work), "--report", str(report))
+        self.assertEqual(exported.exit_code, 0, exported.output)
+        self.assertEqual(
+            [line.split("\t")[1] for line in exported.stdout.splitlines()[1:]], [(self.src / "zero.jpg").as_posix()]
+        )
+        self.assertEqual(
+            [line.split("\t")[:2] + line.split("\t")[5:6] for line in report.read_text().splitlines()[1:]],
+            [[(self.src / "tail.jpg").as_posix(), "NOT_REVIEWED", "unreviewed embedded content: trailing-data"]],
+        )
 
     def test_overlay_plane_is_noted_and_counted(self):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000)

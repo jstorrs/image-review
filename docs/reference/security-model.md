@@ -307,7 +307,10 @@ world-readable.
   and is not signed: anyone who can write the work directory can edit it.
 - **Export refusals.** `export` refuses while a writer holds the work
   directory (unless `--allow-live`, which exports anyway with a warning),
-  refuses a `review.tsv` whose last line was cut short, and refuses any field
+  refuses a `review.tsv` whose last line was cut short, refuses a malformed
+  `skipped.tsv` or `notes.tsv` or (beside a manifest with hashes) a missing
+  one, so a partial copy cannot drop failed inputs or unreviewed content from
+  the decision, and refuses any field
   holding a control character, U+2028/U+2029, or a leading `"`, so a reader
   cannot be made to split or merge rows
   ([Refusals and output files](../commands/export.md#refusals-and-output-files)).
@@ -324,7 +327,8 @@ world-readable.
   if both match, and deny everything not listed
   ([What is allowlisted](../commands/export.md#what-is-allowlisted)). A file
   is listed only if it was reviewed CLEAN (and, in a work directory made by
-  an older version, its `#icon` row too), the manifest has its hash, and no
+  an older version, its `#icon` row too), `notes.tsv` lists no pixel content
+  of it that its review image does not show, the manifest has its hash, and no
   file that is not CLEAN has the same hash (identical bytes cannot be both
   clean and dirty). So these
   are never listed: inputs that failed to preprocess, inputs that were not
@@ -335,13 +339,19 @@ world-readable.
   icon), CLEAN
   files of a work directory without hashes, a file changed since
   preprocess (its hash no longer matches), and a ZIP or directory as a whole
-  (only its entries are listed). Everything else goes to the optional
-  `--report`, for audit and follow-up; it must never be used to choose what
-  to release (e.g. "everything not DIRTY"). An allowlisted DICOM may still
-  hold an embedded icon image (IconImageSequence (0088,0200)) that nobody
-  reviewed, and so may overlay planes: only the pixel data is reviewed
-  (overlay planes are not drawn unless `preprocess --draw-overlays` was
-  given), so strip overlays and icons before releasing files.
+  (only its entries are listed). Nor is a file holding an embedded icon or
+  thumbnail, overlay planes, pixel bits above BitsStored, or trailing bytes
+  that are not all zero, none of which the review image reliably shows: it
+  is `NOT_REVIEWED`. This holds for overlay planes even with `preprocess
+  --draw-overlays`, since a drawn plane is clipped to the image and can be
+  lost against bright pixels. Stripping such content changes the hash, so
+  the stripped file must be preprocessed into a new work directory and
+  reviewed there. Everything else goes to the optional `--report`, for
+  audit and follow-up; it must never be used to choose what to release
+  (e.g. "everything not DIRTY"). Only what preprocess detects is
+  noted: content it does not look for (see [Input
+  notes](../commands/preprocess.md#input-notes), *Not detected*) can still
+  ship unreviewed in an allowlisted file.
 - **DIRTY-only placeholders.** The viewer shows an image that cannot be
   fetched, read or verified as a placeholder that accepts DIRTY but refuses
   CLEAN, so an image nobody could see is not cleared by the viewer (see the

@@ -16,12 +16,22 @@ from unittest import mock
 from image_review import atomic as atomic_module
 from image_review import cli as cli_module
 from image_review import lock as lock_module
-from image_review.export import AMBIGUOUS_ICON, ExportRow, export_rows, has_unsafe_char, split_allowlist
+from image_review.export import (
+    AMBIGUOUS_ICON,
+    NOTE_KINDS,
+    SHOWN_NOTE_KINDS,
+    UNRENDERED_NOTE_KINDS,
+    ExportRow,
+    export_rows,
+    has_unsafe_char,
+    split_allowlist,
+    unreviewed_content,
+)
 from image_review.lock import boot_id, this_process
 from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADER, Decision
 from image_review.status import ImageId, Key
-from image_review.store import LocalStore, ManifestEntry, SkippedRow
+from image_review.store import LocalStore, ManifestEntry, NoteRow, SkippedRow
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server, temp_dir
 
 KEYS = [key for _, key, _ in ROWS]
@@ -101,6 +111,7 @@ EXPECTED_REPORT = (
     "/src/g.zip::x.dcm\tNOT_REVIEWED\t\t\t\tunsupported: nested zip\t\n"
     "/src/notes.txt\tIGNORED\t\t\t\tnot an image\t\n"  # not an image: reported, never allowlisted
 ).encode()
+NOTES_HEADER_LINE = "image_id\tkind\tdetail\n"
 NO_HASH = "not allowlisted: no source_sha256 (work directory from an older version)"
 
 
@@ -129,6 +140,7 @@ class ExportTestCase(unittest.TestCase):
         write_tsv(self.work / "manifest.tsv", MANIFEST_HEADER, MANIFEST_WITH_HASHES)
         write_tsv(self.work / "review.tsv", HEADER, REVIEW)
         (self.work / "skipped.tsv").write_text(SKIPPED)
+        (self.work / "notes.tsv").write_text(NOTES_HEADER_LINE)
 
     def export(self, *args, env=None):
         return invoke("export", "--work-dir", str(self.work), *args, env=env)
@@ -447,7 +459,7 @@ class TestIconNamedFile(unittest.TestCase):
         for order in ((0, 1), (1, 0)):
             with self.subTest(order=order):
                 entries = self.pair(order)
-                rows = export_rows(entries, self.clean(entries), [])
+                rows = export_rows(entries, self.clean(entries), [], {})
                 self.assertEqual(
                     [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
                     [
@@ -464,7 +476,7 @@ class TestIconNamedFile(unittest.TestCase):
             for other in (sha("1"), sha("2")):
                 with self.subTest(order=order, other=other):
                     entries = [*self.pair(order), self.entry("other.png", other)]
-                    allowed, report = split_allowlist(export_rows(entries, self.clean(entries), []))
+                    allowed, report = split_allowlist(export_rows(entries, self.clean(entries), [], {}))
                     self.assertEqual(allowed, [])
                     denied = next(r for r in report if r.image_id == "other.png")
                     self.assertEqual(denied.status, "CLEAN")
@@ -473,7 +485,7 @@ class TestIconNamedFile(unittest.TestCase):
     def test_a_failed_icon_beside_a_file_named_like_it_is_not_reviewed(self):
         entries = [self.entry("scan.dcm", sha("2")), self.entry("scan.dcm#icon", sha("1"))]
         skipped = [SkippedRow(ImageId("scan.dcm#icon"), "failed", "ValueError: bad icon")]
-        rows = export_rows(entries, self.clean(entries), skipped)
+        rows = export_rows(entries, self.clean(entries), skipped, {})
         self.assertEqual(
             [(r.image_id, r.status, r.reason) for r in rows],
             [
@@ -492,7 +504,7 @@ class TestIconNamedFile(unittest.TestCase):
                     entries = [self.entry("a.dcm#icon", icon), self.entry("a.dcm", main)]
                     if not icon_first:
                         entries.reverse()
-                    rows = export_rows(entries, self.clean(entries), [])
+                    rows = export_rows(entries, self.clean(entries), [], {})
                     self.assertEqual(
                         [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
                         [("a.dcm", "CLEAN", "", main or "")],
@@ -504,7 +516,7 @@ class TestIconNamedFile(unittest.TestCase):
             self.entry("other.png", sha("3")),
             self.entry("scan.png#icon", sha("1")),
         ]
-        rows = export_rows(entries, self.clean(entries), [])
+        rows = export_rows(entries, self.clean(entries), [], {})
         self.assertEqual([r.image_id for r in rows], ["scan.png", "other.png", "scan.png#icon"])
 
     def test_a_dirty_part_of_an_ambiguous_pair_stays_dirty(self):
@@ -513,7 +525,7 @@ class TestIconNamedFile(unittest.TestCase):
                 entries = self.pair((1, 0))
                 decisions = self.clean(entries)
                 decisions[ImageId(dirty)] = dataclasses.replace(decisions[ImageId(dirty)], status="DIRTY")
-                rows = export_rows(entries, decisions, [])
+                rows = export_rows(entries, decisions, [], {})
                 statuses = {r.image_id: r.status for r in rows}
                 self.assertEqual(statuses[dirty], "DIRTY")
                 self.assertTrue(all(AMBIGUOUS_ICON in r.reason for r in rows))
@@ -522,7 +534,7 @@ class TestIconNamedFile(unittest.TestCase):
 
     def test_icon_without_its_main_keeps_the_icons_hash(self):
         entries = [self.entry("a.dcm#icon", sha("1"))]
-        rows = export_rows(entries, self.clean(entries), [])
+        rows = export_rows(entries, self.clean(entries), [], {})
         self.assertEqual(
             [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
             [("a.dcm", "NOT_REVIEWED", "main image missing", sha("1"))],
@@ -530,7 +542,7 @@ class TestIconNamedFile(unittest.TestCase):
 
     def test_icon_of_a_failed_main_folds_as_not_reviewed_with_the_icons_hash(self):
         entries = [self.entry("a.dcm#icon", sha("1"))]
-        rows = export_rows(entries, self.clean(entries), [SkippedRow(ImageId("a.dcm"), "failed", "bad")])
+        rows = export_rows(entries, self.clean(entries), [SkippedRow(ImageId("a.dcm"), "failed", "bad")], {})
         self.assertEqual(
             [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
             [("a.dcm", "NOT_REVIEWED", "bad", sha("1"))],
@@ -538,7 +550,7 @@ class TestIconNamedFile(unittest.TestCase):
 
     def test_a_chain_of_icon_names_gives_each_hash_a_not_reviewed_row(self):
         entries = [self.entry("x", sha("1")), self.entry("x#icon", sha("2")), self.entry("x#icon#icon", sha("3"))]
-        rows = export_rows(entries, self.clean(entries), [])
+        rows = export_rows(entries, self.clean(entries), [], {})
         self.assertEqual(
             [(r.image_id, r.status, r.reason, r.source_sha256) for r in rows],
             [
@@ -549,8 +561,191 @@ class TestIconNamedFile(unittest.TestCase):
         )
         self.assertEqual(len({r.image_id for r in rows}), len(rows))
         others = [self.entry(f"other{n}.png", sha(n)) for n in "123"]
-        allowed, _ = split_allowlist(export_rows(entries + others, self.clean(entries + others), []))
+        allowed, _ = split_allowlist(export_rows(entries + others, self.clean(entries + others), [], {}))
         self.assertEqual(allowed, [])
+
+
+def note(image_id: str, kind: str, detail: str = "d") -> NoteRow:
+    return NoteRow(ImageId(image_id), kind, detail)
+
+
+ZERO_TRAILING = "12 bytes after the JPEG end; all zero bytes"
+
+
+class TestUnreviewedContent(unittest.TestCase):
+    """Notes of pixel content the review image does not show keep a file out of the allowlist."""
+
+    entry = staticmethod(TestIconNamedFile.entry)
+    clean = staticmethod(TestIconNamedFile.clean)
+
+    def test_every_note_kind_is_classified_once(self):
+        self.assertEqual(UNRENDERED_NOTE_KINDS & SHOWN_NOTE_KINDS, frozenset())
+        self.assertEqual(UNRENDERED_NOTE_KINDS | SHOWN_NOTE_KINDS, frozenset(NOTE_KINDS))
+
+    def test_each_unrendered_kind_blocks_and_shown_ones_do_not(self):
+        for kind in NOTE_KINDS:
+            with self.subTest(kind=kind):
+                expected = {} if kind in SHOWN_NOTE_KINDS else {"a": f"unreviewed embedded content: {kind}"}
+                self.assertEqual(unreviewed_content([note("a", kind)], frozenset()), expected)
+
+    def test_kinds_are_deduplicated_in_note_kinds_order(self):
+        notes = [
+            note("a", "trailing-data"),
+            note("b", "alpha"),
+            note("a", "icon-image"),
+            note("a", "trailing-data", "other"),
+            note("a", "overlay-plane"),
+        ]
+        self.assertEqual(
+            unreviewed_content(notes, frozenset()),
+            {"a": "unreviewed embedded content: overlay-plane, icon-image, trailing-data"},
+        )
+
+    def test_all_zero_trailing_data_does_not_block(self):
+        self.assertEqual(unreviewed_content([note("a", "trailing-data", ZERO_TRAILING)], frozenset()), {})
+        not_zero = "12 bytes after the JPEG end; they begin with a JPEG signature"
+        self.assertEqual(
+            unreviewed_content([note("a", "trailing-data", not_zero)], frozenset()),
+            {"a": "unreviewed embedded content: trailing-data"},
+        )
+
+    def test_rendered_kinds_do_not_block(self):
+        notes = [note("a", "overlay-plane"), note("b", "overlay-plane"), note("b", "overlay-unused-bits")]
+        self.assertEqual(
+            unreviewed_content(notes, frozenset({"overlay-plane"})),
+            {"b": "unreviewed embedded content: overlay-unused-bits"},
+        )
+
+    def test_precedence_over_decisions_and_skipped_rows(self):
+        entries = [self.entry(i, sha(i)) for i in ("clean", "dirty", "none", "failed", "ignored", "quiet")]
+        decisions = self.clean(entries)
+        decisions[ImageId("dirty")] = dataclasses.replace(decisions[ImageId("dirty")], status="DIRTY")
+        del decisions[ImageId("none")]
+        skipped = [SkippedRow(ImageId("failed"), "failed", "bad"), SkippedRow(ImageId("ignored"), "ignored", "odd")]
+        why = "unreviewed embedded content: icon-image"
+        unreviewed = {ImageId(i): why for i in ("clean", "dirty", "none", "failed", "ignored", "unknown")}
+        rows = export_rows(entries, decisions, skipped, unreviewed)
+        self.assertEqual(
+            [(r.image_id, r.status, r.pass_number, r.reviewer, r.reason) for r in rows],
+            [
+                ("clean", "NOT_REVIEWED", None, "", why),  # decision fields empty, as for any NOT_REVIEWED
+                ("dirty", "DIRTY", 1, "r", ""),
+                ("none", "NOT_REVIEWED", None, "", why),
+                ("failed", "NOT_REVIEWED", None, "", "bad"),
+                ("ignored", "NOT_REVIEWED", None, "", "odd"),
+                ("quiet", "CLEAN", 1, "r", ""),
+            ],  # "unknown" is in neither file: no row
+        )
+        allowed, _ = split_allowlist(rows)
+        self.assertEqual([r.image_id for r in allowed], ["quiet"])
+
+    def test_a_legacy_icon_folds_with_its_files_note(self):
+        entries = [self.entry("a.dcm", sha("1")), self.entry("a.dcm#icon", sha("1"))]
+        why = "unreviewed embedded content: icon-image"
+        rows = export_rows(entries, self.clean(entries), [], {ImageId("a.dcm"): why})
+        self.assertEqual([(r.image_id, r.status, r.reason) for r in rows], [("a.dcm", "NOT_REVIEWED", why)])
+
+    def test_a_note_on_a_file_named_like_an_icon_folds_into_its_main(self):
+        # equal hashes, so `a.png#icon` folds into `a.png`; its own note makes the folded row NOT_REVIEWED
+        entries = [self.entry("a.png", sha("1")), self.entry("a.png#icon", sha("1"))]
+        unreviewed = unreviewed_content([note("a.png#icon", "trailing-data", "9 bytes after the PNG end")], frozenset())
+        rows = export_rows(entries, self.clean(entries), [], unreviewed)
+        self.assertEqual(
+            [(r.image_id, r.status, r.reason) for r in rows],
+            [("a.png", "NOT_REVIEWED", "icon: unreviewed embedded content: trailing-data")],
+        )
+        self.assertEqual(split_allowlist(rows)[0], [])
+
+
+class TestExportNotes(ExportTestCase):
+    def write_notes(self, *rows: str) -> None:
+        (self.work / "notes.tsv").write_text(NOTES_HEADER_LINE + "".join(f"{r}\n" for r in rows))
+
+    def allowlisted(self) -> list[str]:
+        result = self.export()
+        self.assertEqual(result.exit_code, 0, result.output)
+        return [line.split("\t")[1] for line in result.stdout.splitlines()[1:]]
+
+    def test_notes_deny_clean_files_and_leave_the_rest(self):
+        self.write_notes(
+            "/src/a.dcm\ticon-image\tIconImageSequence: 64x64 MONOCHROME2",
+            "/src/b.dcm\tembedded-thumbnail\tEXIF IFD1 thumbnail (4096 bytes)",
+            "/src/c.dcm\ttrailing-data\t9 bytes after the JPEG end",
+            "/src/j.dcm\ticon-image\tx",
+            f"/src/k.dcm\ttrailing-data\t{ZERO_TRAILING}",
+            "/src/k.dcm\talpha\t1 of 2 pixels not opaque",
+            "/src/gone.dcm\ticon-image\tx",  # not in the manifest: ignored
+        )
+        self.assertEqual(self.allowlisted(), ["/src/k.dcm"])
+        lines = {line.split("\t")[0]: line for line in self.report_lines()}
+        self.assertEqual(
+            lines["/src/a.dcm"],
+            f"/src/a.dcm\tNOT_REVIEWED\t\t\t\tunreviewed embedded content: icon-image\t{sha('/src/a.dcm')}",
+        )
+        self.assertEqual(
+            lines["/src/b.dcm"], f"/src/b.dcm\tDIRTY\t2\t2026-01-02T00:00:05+00:00\tcarol\t\t{sha('/src/b.dcm')}"
+        )
+        self.assertEqual(
+            lines["/src/c.dcm"],
+            f"/src/c.dcm\tNOT_REVIEWED\t\t\t\tunreviewed embedded content: trailing-data\t{sha('/src/c.dcm')}",
+        )
+        self.assertEqual(
+            lines["/src/j.dcm"], f"/src/j.dcm\tNOT_REVIEWED\t\t\t\tDecodeError: truncated\t{sha('/src/j.dcm')}"
+        )
+        self.assertNotIn("/src/gone.dcm", lines)
+
+    def test_overlay_plane_blocks_even_when_drawn(self):
+        # a drawn plane can be clipped to the image or lost against bright pixels: fail closed
+        self.write_notes("/src/a.dcm\toverlay-plane\tgroup 0x6000", "/src/a.dcm\toverlay-unused-bits\tbit 15")
+        for text in ('{"parameters": {"draw_overlays": true}}', None):
+            with self.subTest(preprocess_json=text):
+                (self.work / "preprocess.json").unlink(missing_ok=True)
+                if text is not None:
+                    (self.work / "preprocess.json").write_text(text)
+                self.assertEqual(self.allowlisted(), ["/src/k.dcm"])
+                self.assertIn(
+                    "\tunreviewed embedded content: overlay-plane, overlay-unused-bits\t", self.report_lines()[0]
+                )
+
+    def test_embedded_thumbnail_denies_a_clean_file(self):
+        self.write_notes("/src/k.dcm\tembedded-thumbnail\tEXIF IFD1 thumbnail (4096 bytes)")
+        self.assertEqual(self.allowlisted(), ["/src/a.dcm"])
+        lines = {line.split("\t")[0]: line for line in self.report_lines()}
+        self.assertEqual(
+            lines["/src/k.dcm"],
+            f"/src/k.dcm\tNOT_REVIEWED\t\t\t\tunreviewed embedded content: embedded-thumbnail\t{sha('/src/k.dcm')}",
+        )
+
+    def test_hashed_manifest_without_notes_is_refused(self):
+        (self.work / "notes.tsv").unlink()
+        out = self.root / "allow.tsv"
+        result = self.export("--output", str(out))
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("notes.tsv: missing; work directories made before 0.4.0 have none", result.output)
+        self.assertIn("preprocess the sources again into a new work directory", result.output)
+        self.assertNotIn("Traceback", result.output)
+        self.assertFalse(out.exists())
+
+    def test_legacy_manifest_without_notes_still_exports(self):
+        write_tsv(self.work / "manifest.tsv", LEGACY_MANIFEST_HEADER, [("b1", "b1/a.jpg", "/src/a.dcm")])
+        (self.work / "notes.tsv").unlink()
+        self.assertEqual(self.allowlisted(), [])  # a legacy CLEAN row has no hash: never allowlisted
+
+    def test_malformed_notes_is_a_clean_error(self):
+        cases = {
+            "bad header": (b"image_id\tkind\treason\n", "notes.tsv:1:"),
+            "short row": (b"image_id\tkind\tdetail\n/src/a.dcm\ticon-image\n", "notes.tsv:2:"),
+            "unknown kind": (b"image_id\tkind\tdetail\n/src/a.dcm\tpreamble\tx\n", "notes.tsv:2:"),
+            "not UTF-8": (b"image_id\tkind\tdetail\n\xe9\talpha\tx\n", "notes.tsv: not valid UTF-8"),
+        }
+        for name, (data, message) in cases.items():
+            with self.subTest(name):
+                (self.work / "notes.tsv").write_bytes(data)
+                result = self.export()
+                self.assertEqual(result.exit_code, 1)
+                self.assertIn(message, result.output)
+                self.assertNotIn("Traceback", result.output)
+                self.assertEqual(result.stdout, "")
 
 
 class TestHasUnsafeChar(unittest.TestCase):
@@ -804,6 +999,12 @@ class TestOversizedField(ExportTestCase):
         self.assertIn("unfinished line", export.output)
         self.assertEqual(export.stdout, "")
         self.assertEqual((self.work / "review.tsv").read_bytes(), before)
+
+    def test_oversized_notes_field_names_file_and_line(self):
+        (self.work / "notes.tsv").write_text(f"{NOTES_HEADER_LINE}/a\talpha\t{self.BIG}\n/b\talpha\tr\n")
+        result = self.export()
+        self.assertCleanExit(result, 1)
+        self.assertRegex(result.stderr, r"notes\.tsv:2: field larger")
 
     def test_oversized_field_is_cannot_read_work_directory(self):
         good = "\t".join(MANIFEST_WITH_HASHES[0])

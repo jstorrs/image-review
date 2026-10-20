@@ -2,10 +2,33 @@
 
 ## Unreleased
 
+### Upgrading: breaking and behaviour changes
+
+- **`export` no longer allowlists a file holding content its review image
+  does not show.** A file with an `overlay-plane`, `overlay-unused-bits`,
+  `icon-image`, `embedded-thumbnail` or `trailing-data` note in `notes.tsv`
+  (unless its trailing bytes are all zero) is now `NOT_REVIEWED` with the
+  reason `unreviewed embedded content: <kinds>`, even if it was reviewed
+  CLEAN; DIRTY stays DIRTY, and `alpha` never denies a file. This holds for
+  overlay planes even with `preprocess --draw-overlays`: a drawn plane is
+  clipped to the image and can be lost against bright pixels. Such a file
+  used to be allowlisted under the hash of its unstripped bytes, and
+  stripping it, as the documentation advised, changed the hash so it matched
+  no row. To release one, strip it, preprocess the stripped file into a new
+  work directory and review it there. Re-exporting an existing work
+  directory can therefore deny files it allowlisted before.
+- **`export` now reads `notes.tsv`, and refuses a work directory without it**
+  (when `manifest.tsv` records hashes), or with a malformed one (exit 1,
+  naming the file and line). Work directories made by 0.3.0 have none and
+  can no longer be exported: preprocess the sources again into a new work
+  directory and review them there.
 - `export` now refuses a work directory whose `skipped.tsv` is missing (when `manifest.tsv` records hashes), instead of
   reporting as if no input had failed or been ignored.
 - A `manifest.tsv` listing one `image_id` with two different `source_sha256` values is now rejected when the work
   directory is opened, instead of `export` silently using the first.
+
+### Fixes
+
 - Grid review now pauses when resizing leaves no display area above the status bar, then rebuilds when space returns.
 - Grayscale inputs that would lose pixel values or overflow their intensity
   range when converted to float32 now fail with an explicit unsupported

@@ -8,7 +8,8 @@ Writes the study's result as an **allowlist** to stdout, or to a new `FILE`
 with `--output`: one row per source file that may be released, and nothing
 else. **Release a file only if both its path and its SHA-256 match a row.**
 Anything not listed is denied: DIRTY, unreviewed, failed and ignored files, a
-file whose bytes changed since preprocess, and ZIP containers as a whole
+file holding pixel content its review image does not show, a file whose bytes
+changed since preprocess, and ZIP containers as a whole
 (their entries are listed one by one as `<zip>::<entry>`). A ZIP that cannot
 be opened, or has no file entries, gets one report row under its own path.
 
@@ -34,6 +35,8 @@ A file is allowlisted only if:
 
 - it was reviewed CLEAN (and, in a work directory made by an older version,
   its `#icon` row too);
+- `notes.tsv` lists no content of it that its review image does not show
+  (see below);
 - the manifest has its SHA-256; and
 - no file that is not CLEAN has the same recorded hash (`source_sha256`;
   identical bytes cannot be both clean and dirty, so all copies are denied).
@@ -45,6 +48,29 @@ with one of these notes in `reason`:
   the manifest has no hash for it. So CLEAN files of a work directory made by
   an older version are never allowlisted.
 - `not allowlisted: same content as a file that is not CLEAN`.
+
+A file is `NOT_REVIEWED`, with the reason `unreviewed embedded content:
+<kinds>`, when [`notes.tsv`](preprocess.md#input-notes) has a note for it of
+pixel content that the review image does not (or not fully) show but that
+stays in the file's bytes, so nobody reviewed all of it:
+
+- `overlay-plane`, even with `preprocess --draw-overlays`: a drawn plane is
+  clipped to the image and drawn at maximum brightness, so part or all of it
+  can be outside the image or lost against bright pixels;
+- `overlay-unused-bits` (pixel bits above BitsStored, never drawn);
+- `icon-image` (a DICOM's embedded icon);
+- `embedded-thumbnail` (an EXIF or TIFF thumbnail);
+- `trailing-data`, unless its detail ends in `; all zero bytes` (zero bytes
+  hold nothing).
+
+An `alpha` note never denies a file: the alpha channel is shown as a view of
+its own. The kinds are listed once each, in the order above. A DIRTY verdict
+stays DIRTY; without a verdict, or with a CLEAN one, the file is
+`NOT_REVIEWED`. Its pass, time and reviewer are then empty, as for any
+`NOT_REVIEWED` file. Stripping such content changes the file's hash, so the
+stripped file matches no row: to release it, preprocess the stripped file
+into a new work directory and review it there. Notes for an `image_id` the
+manifest does not list are ignored.
 
 A file whose name ends in `#icon` cannot be told apart from a DICOM's icon
 in a work directory made by an older version (preprocess no longer renders
@@ -89,13 +115,13 @@ for reading.)
 |--------|-------------|
 | `image_id` | The source file's path, as in `manifest.tsv` / `skipped.tsv`; a file inside a ZIP is `<zip>::<entry>`, one row per entry |
 | `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest (in a work directory made by an older version, a DICOM and its icon share it); compare it with the file's own before releasing it. In the report, empty for a file that never rendered (so always for `IGNORED`) or a work directory from an older version. It is derived from the file's content, so treat it like the `image_id` |
-| `status` | (report) `DIRTY`, `UNREVIEWED` (no verdict yet), `NOT_REVIEWED` (preprocess could not render it, or an older version could not render its icon, or it is a file and a file named like its icon whose hashes differ), `IGNORED` (preprocess did not take it for an image, so nobody looked at it), or `CLEAN` for a CLEAN file that was not allowlisted |
-| `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. Also empty when the main image is `NOT_REVIEWED` (preprocess failed on it or ignored it), even if `review.tsv` has a verdict for it, and when there is no main image. After an [undo](../reference/work-directory.md#undo-rows) they are the undo's time and reviewer, with the pass it restored. `reviewer` is the reviewer's unverified claim, and may be empty in rows from an older version |
-| `reason` | (report) Why the row is not simply the main image's verdict, as `; `-separated notes in this order: preprocess's error or ignored reason for a `NOT_REVIEWED` main image; `main image missing` for an icon whose file is neither in the manifest nor a failed input (the row is then at best `NOT_REVIEWED`), or that file's reason if preprocess ignored it; `icon: <error>` for an icon an older version could not render, else `icon DIRTY` / `icon UNREVIEWED`; `ambiguous #icon: the files with and without #icon in their name differ; rename the one ending in #icon` for a file and a file named like its icon whose hashes differ (see below); preprocess's reason for an `IGNORED` file; and last, `not allowlisted: ...` for a CLEAN file that was not allowlisted. Otherwise empty |
+| `status` | (report) `DIRTY`, `UNREVIEWED` (no verdict yet), `NOT_REVIEWED` (preprocess could not render it, or `notes.tsv` lists content its review image does not show, or an older version could not render its icon, or it is a file and a file named like its icon whose hashes differ), `IGNORED` (preprocess did not take it for an image, so nobody looked at it), or `CLEAN` for a CLEAN file that was not allowlisted |
+| `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. Also empty when the main image is `NOT_REVIEWED` (preprocess failed on it or ignored it, or it holds unreviewed embedded content), even if `review.tsv` has a verdict for it, and when there is no main image. After an [undo](../reference/work-directory.md#undo-rows) they are the undo's time and reviewer, with the pass it restored. `reviewer` is the reviewer's unverified claim, and may be empty in rows from an older version |
+| `reason` | (report) Why the row is not simply the main image's verdict, as `; `-separated notes in this order: preprocess's error or ignored reason, or `unreviewed embedded content: <kinds>`, for a `NOT_REVIEWED` main image; `main image missing` for an icon whose file is neither in the manifest nor a failed input (the row is then at best `NOT_REVIEWED`), or that file's reason if preprocess ignored it; `icon: <error>` for an icon an older version could not render, else `icon DIRTY` / `icon UNREVIEWED`; `ambiguous #icon: the files with and without #icon in their name differ; rename the one ending in #icon` for a file and a file named like its icon whose hashes differ (see below); preprocess's reason for an `IGNORED` file; and last, `not allowlisted: ...` for a CLEAN file that was not allowlisted. Otherwise empty |
 
 - A DICOM's embedded icon is not rendered (see
-  [preprocess](preprocess.md#rendering-pipeline)), so nobody reviews it:
-  remove icons before releasing files. A work directory made by an older
+  [preprocess](preprocess.md#rendering-pipeline)), so nobody reviews it: a
+  file with one is `NOT_REVIEWED` (above). A work directory made by an older
   version may list it as `<path>#icon`; that row is folded into its
   file's row: the row is CLEAN only if the image and its icon both are, else
   DIRTY if either is, else NOT_REVIEWED, else UNREVIEWED. Such an icon has
@@ -166,6 +192,16 @@ not start a field is written as is.
   file, since a partial copy would otherwise drop every failed and ignored
   input from the report. Only a manifest of an older version, with rows but
   no hash columns, may lack `skipped.tsv`.
+- It refuses (exit 1) a malformed `notes.tsv` (wrong header or field count,
+  an unknown kind, not UTF-8), naming the file and line, and a missing one
+  under the same rule as `skipped.tsv`. Work directories made before 0.4.0
+  have no `notes.tsv`; preprocess the sources again into a new work
+  directory, and review them there, to export them:
+
+  ```text
+  Error: DIR/notes.tsv: missing; work directories made before 0.4.0 have none: preprocess the sources again into a new work directory and review them there
+  ```
+
 - It refuses (exit 1) a malformed `manifest.tsv`, as every command that opens
   the work directory does; see
   [Strict parsing](../reference/work-directory.md#manifesttsv).

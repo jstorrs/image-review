@@ -310,11 +310,12 @@ Only rendered images are compared: a `failed` or `ignored` row sharing an
 `image_id` with an image changes nothing (`export` already reports an
 `image_id` with a `failed` or `ignored` row as `NOT_REVIEWED`).
 
-**Notes.** A note (`Note(kind, detail)`, `kind` a `NoteKind`,
+**Notes.** A note (`Note(kind, detail)`, `kind` an `export.NoteKind`,
 `Literal["overlay-plane", "overlay-unused-bits", "icon-image", "alpha",
 "embedded-thumbnail", "trailing-data"]`,
 the DICOM kinds first and then the raster kinds, listed in that order by
-`NOTE_KINDS`) records something a rendered input holds that downstream
+`export.NOTE_KINDS`, beside the export policy that must classify each
+kind) records something a rendered input holds that downstream
 tools should know about or strip, written whether or not an overlay is drawn; the kinds and their details are in
 [Input notes](../commands/preprocess.md#input-notes). `render` makes a DICOM's
 notes after rendering it, in `NOTE_KINDS` order, decoding nothing beyond the
@@ -864,9 +865,9 @@ Whether `--report` and `--output` name the same file is checked after
   (both quoted on the export page).
   `--allow-live` turns either refusal into a WARNING.
 - `ReviewDB.decisions()` raises on a torn last line of `review.tsv`, and
-  `load_skipped` on a malformed `skipped.tsv`, or a missing one beside a manifest
-  that records hashes (a legacy manifest without them may lack it). Neither is
-  overridable.
+  `load_skipped` and `load_notes` on a malformed `skipped.tsv` or `notes.tsv`, or a
+  missing one beside a manifest that records hashes (a legacy manifest without
+  them may lack both). None is overridable.
 - `format_allowlist`'s or `format_report`'s `ValueError`, naming the
   `image_id` with `repr` and the column, for a field holding a control
   character (Unicode category `Cc`) or U+2028/U+2029, which covers every
@@ -880,8 +881,9 @@ Whether `--report` and `--output` name the same file is checked after
 
 Then it opens a read-only `LocalStore` (no lock; nothing is written in the
 work directory) and calls its `export_rows()`. That applies the pure
-`export.export_rows` to the manifest entries, `ReviewDB.decisions()` and
-`load_skipped`, giving one row per source file (below), which
+`export.export_rows` to the manifest entries, `ReviewDB.decisions()`,
+`load_skipped` and `export.unreviewed_content` of `load_notes` (below), giving
+one row per source file, which
 `export.split_allowlist` splits into the allowlist and the report.
 
 **Split** (`export.split_allowlist(rows) -> (allowed, report)`) implements
@@ -909,8 +911,30 @@ empty (an `X` listed without a hash never borrows its icon's).
   A manifest `image_id` with an `ignored` row (and no `failed` one) is
   likewise `NOT_REVIEWED`, with the first `ignored` reason: the two files
   disagree, so nobody can vouch for it.
-- Otherwise its status is its latest decision's (CLEAN or DIRTY; a tombstone
-  leaves none), or `UNREVIEWED` without one.
+- Otherwise it is `DIRTY` if its latest decision is.
+- Otherwise it is `NOT_REVIEWED` if `notes.tsv` lists unreviewed content for
+  it, with the reason `unreviewed embedded content: <kinds>`, whether its
+  decision is CLEAN or it has none. `export.unreviewed_content(notes,
+  rendered)` derives that reason per `image_id`: the note kinds in
+  `export.UNRENDERED_NOTE_KINDS` (`overlay-plane`, `overlay-unused-bits`,
+  `icon-image`, `embedded-thumbnail`, `trailing-data`) that are not in
+  `rendered`, leaving out a `trailing-data` note whose detail ends in
+  `export.ALL_ZERO_SUFFIX` (`; all zero bytes`, which preprocess also writes),
+  each kind once, in `NOTE_KINDS` order. `export.SHOWN_NOTE_KINDS`
+  (`alpha`, shown as a view of its own) never block; the two sets partition
+  `NOTE_KINDS`, so a new kind must be put in one. `rendered` is the set of
+  kinds known to be fully shown in the review image; `LocalStore` passes it
+  empty. `overlay-plane` blocks even with `--draw-overlays`: a drawn plane
+  is clipped to the image (one placed outside it is not drawn at all) and
+  drawn at maximum brightness, so it can be lost against bright pixels.
+  Notes for `image_id`s that are not parts are ignored. preprocess writes
+  notes under the main `image_id`, and a work directory old enough to have
+  an older version's DICOM `X#icon` parts has no `notes.tsv`; but a real
+  file named `X#icon` gets notes of its own, and when it is folded into
+  `X`'s row (equal hashes) its `NOT_REVIEWED` part makes that row
+  `NOT_REVIEWED` with `icon: unreviewed embedded content: <kinds>`.
+- Otherwise its status is its latest decision's (CLEAN; a tombstone leaves
+  none), or `UNREVIEWED` without one.
 
 Status is not pass-aware: a DIRTY from an earlier pass that is FLAGGED in the
 current one is `DIRTY` (it still contains PHI as far as anyone has said).
@@ -1146,8 +1170,14 @@ the policy's file mode like the other files. Columns and encoding are in
 `preprocess.json`'s `counts.notes` holds its row count per kind, and the
 summary line the same counts.
 
-It contains source paths, so it is as sensitive as `manifest.tsv`. Nothing
-reads it back and the server never serves it (no JPG key can name it).
+It is parsed strictly by `store.load_notes` into `NoteRow(image_id, kind,
+detail)`s, `kind` one of `NOTE_KINDS`; like `skipped.tsv`, `export` passes
+`required=True` when the manifest records hashes, so a work directory made
+before 0.4.0 (which has none) cannot be exported.
+
+It contains source paths, so it is as sensitive as `manifest.tsv`. `export`
+makes a file with unreviewed content `NOT_REVIEWED` (see *Parts and
+folding*); the server never serves it (no JPG key can name it).
 
 ### `review.lock`
 
@@ -1270,7 +1300,7 @@ by that rule (not a `StoreUnavailable`).
 | Name | Description |
 |------|-------------|
 | `Key` | `NewType("Key", str)`: a manifest key, the `preprocessed_path` (see *Key versus `image_id`*). A string becomes a `Key` only where it is parsed (`load_manifest`, the client's `parse_manifest` and `parse_statuses`, the server's `parse_mark` and `/image` check), so the type checker keeps keys and source paths apart |
-| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the escaped bad-name ids derived there; preprocess mints no `#icon` id), `parse_decision`, `load_manifest`, `load_skipped`, and `export_rows` (a file's id with `#icon` removed, or an ambiguous `X#icon` kept as a file of its own). Server, client and controller never see one |
+| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the escaped bad-name ids derived there; preprocess mints no `#icon` id), `parse_decision`, `load_manifest`, `load_skipped`, `load_notes`, and `export_rows` (a file's id with `#icon` removed, or an ambiguous `X#icon` kept as a file of its own). Server, client and controller never see one |
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
@@ -1327,7 +1357,8 @@ delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
 `skipped.tsv` strictly with `load_skipped` (header `image_id`, `kind`, `reason`; `kind` is `failed`
 or `ignored`) and returns only the counts (zero when the file is absent, even where `export` would refuse). `export_rows()` (not part of the
 `ReviewStore` Protocol: `image_id`s stay local) returns
-`export.export_rows(entries, ReviewDB.decisions(), load_skipped(...))`;
+`export.export_rows(entries, ReviewDB.decisions(), load_skipped(...), unreviewed_content(load_notes(...), frozenset()))`,
+`required` set for both loaders when the manifest records hashes;
 see *`image-review export`*.
 
 ### Pure functions
@@ -1339,13 +1370,16 @@ see *`image-review export`*.
 | `batch_summary(rows, statuses)` | The same per batch: `dict[str, Counter[Status]]` |
 | `skipped_counts(rows) -> SkippedCounts` | The failed/ignored split of `SkippedRow`s; the one derivation behind `skipped()`, preprocess's summary line and `preprocess.json` counts |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
-| `export.export_rows(entries, decisions, skipped) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id` and the `skipped.tsv` rows: one row per source file, icons (from a work directory made by an older version) folded in; an `X#icon` whose hash differs from `X`'s also gets its own row, and both are at least `NOT_REVIEWED` |
+| `export.unreviewed_content(notes, rendered) -> dict[ImageId, str]` | Per `image_id`, `unreviewed embedded content: <kinds>` for its notes of kinds in `UNRENDERED_NOTE_KINDS` but not in `rendered` (all-zero `trailing-data` left out); see *Parts and folding* |
+| `export.export_rows(entries, decisions, skipped, unreviewed) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id`, the `skipped.tsv` rows and `unreviewed_content`'s mapping: one row per source file, icons (from a work directory made by an older version) folded in; an `X#icon` whose hash differs from `X`'s also gets its own row, and both are at least `NOT_REVIEWED` |
 | `export.split_allowlist(rows) -> tuple[list[AllowedRow], list[ExportRow]]` | (allowed, report) in input order, every row in exactly one: allowed only if `CLEAN`, with a `source_sha256` that no row that is not `CLEAN` shares; a denied `CLEAN` row's `reason` says why |
 | `export.format_allowlist(rows: list[AllowedRow]) -> str` | The allowlist as TSV text with `ALLOWLIST_HEADER` (`AllowedRow` is a `NewType` over `ExportRow` that only `split_allowlist` makes, so passing the report's rows is a type error); `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |
 | `export.format_report(rows) -> str` | The report as TSV text with `REPORT_HEADER`; the same `ValueError` |
 
 `load_skipped(work_dir, *, required=False)` parses `skipped.tsv` into `SkippedRow`s (empty if
-absent unless `required`, which `LocalStore.export_rows` sets for a hashed manifest and which then raises `ValueError`; `ValueError` naming `file:line` if malformed). Two IO helpers serve
+absent unless `required`, which `LocalStore.export_rows` sets for a hashed manifest and which then raises `ValueError`; `ValueError` naming `file:line` if malformed).
+`load_notes(work_dir, *, required)` parses `notes.tsv` into `NoteRow`s the same way (the missing-file
+error says work directories made before 0.4.0 have none). Two IO helpers serve
 `export` (see *`image-review export`*): `atomic.write_new_file(path, file_mode,
 group, text)` creates the `--output` and `--report` files, and `lock.live_writer(work_dir) ->
 WorkDirLocked | None` checks the work dir lock.

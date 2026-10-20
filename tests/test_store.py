@@ -30,11 +30,13 @@ from image_review.store import (
     LocalStore,
     ManifestEntry,
     ManifestRow,
+    NoteRow,
     SkippedCounts,
     SkippedRow,
     batch_summary,
     filter_rows,
     load_manifest,
+    load_notes,
     load_skipped,
     skipped_counts,
     summary,
@@ -140,6 +142,46 @@ class TestSkipped(StoreTestCase):
         (self.work_dir / "skipped.tsv").write_bytes(b"image_id\tkind\treason\n\xe9\tfailed\tx\n")
         with self.assertRaisesRegex(ValueError, r"skipped\.tsv: not valid UTF-8"):
             self.store.skipped()
+
+
+class TestNotes(StoreTestCase):
+    def write(self, text: str) -> None:
+        (self.work_dir / "notes.tsv").write_text(text)
+
+    def test_absent_is_empty_unless_required(self):
+        self.assertEqual(load_notes(self.work_dir, required=False), [])
+        with self.assertRaisesRegex(ValueError, r"notes\.tsv: missing; work directories made before 0\.4\.0 have none"):
+            load_notes(self.work_dir, required=True)
+
+    def test_rows_in_file_order(self):
+        self.write("image_id\tkind\tdetail\n/b\ticon-image\tIconImageSequence\n/a\talpha\t\n/b\ticon-image\tagain\n")
+        self.assertEqual(
+            load_notes(self.work_dir, required=True),
+            [
+                NoteRow(ImageId("/b"), "icon-image", "IconImageSequence"),
+                NoteRow(ImageId("/a"), "alpha", ""),
+                NoteRow(ImageId("/b"), "icon-image", "again"),
+            ],
+        )
+
+    def test_malformed_names_file_and_line(self):
+        cases = {
+            "bad header": ("image_id\tkind\treason\n", 1),
+            "empty file": ("", 1),
+            "unknown kind": ("image_id\tkind\tdetail\na\talpha\tx\nb\tpreamble\ty\n", 3),
+            "short row": ("image_id\tkind\tdetail\na\talpha\n", 2),
+            "long row": ("image_id\tkind\tdetail\na\talpha\tx\ty\n", 2),
+        }
+        for name, (text, line) in cases.items():
+            with self.subTest(name=name):
+                self.write(text)
+                with self.assertRaisesRegex(ValueError, rf"notes\.tsv:{line}:"):
+                    load_notes(self.work_dir, required=False)
+
+    def test_non_utf8_names_file(self):
+        (self.work_dir / "notes.tsv").write_bytes(b"image_id\tkind\tdetail\n\xe9\talpha\tx\n")
+        with self.assertRaisesRegex(ValueError, r"notes\.tsv: not valid UTF-8"):
+            load_notes(self.work_dir, required=False)
 
 
 class TestMarkAndStatuses(StoreTestCase):
@@ -482,6 +524,24 @@ class TestStrictLoading(unittest.TestCase):
         self.assertEqual(load_skipped(self.work_dir), [])
         with self.assertRaisesRegex(ValueError, r"skipped\.tsv: missing; .*incomplete"):
             load_skipped(self.work_dir, required=True)
+
+    def test_export_rows_need_notes_beside_a_hashed_manifest(self):
+        cases = {
+            "hashed": (self.HASHED_HEADER, f"b\tb/a.jpg\t/src/a.dcm\t{self.SOURCE_HASH}\t{self.JPEG_HASH}", True),
+            "legacy": (self.MANIFEST_HEADER, "b\tb/a.jpg\t/src/a.dcm", False),
+            "empty": (self.HASHED_HEADER, None, True),
+        }
+        for name, (header, row, refused) in cases.items():
+            with self.subTest(name):
+                self.write_manifest(header, *([row] if row else []))
+                (self.work_dir / "skipped.tsv").write_text("image_id\tkind\treason\n")
+                (self.work_dir / "notes.tsv").unlink(missing_ok=True)
+                with LocalStore(self.work_dir, read_only=True) as store:
+                    if refused:
+                        with self.assertRaisesRegex(ValueError, r"notes\.tsv: missing"):
+                            store.export_rows()
+                    else:
+                        self.assertEqual([r.image_id for r in store.export_rows()], ["/src/a.dcm"])
 
     def test_export_rows_need_skipped_beside_a_hashed_manifest(self):
         cases = {

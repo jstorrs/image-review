@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, Protocol, Self, get_args
 
 from .access import MANIFEST_NAME
-from .export import ExportRow, export_rows
+from .export import NOTE_KINDS, ExportRow, NoteKind, export_rows, unreviewed_content
 from .lock import LockHolder, acquire_lock, release_lock
 from .review_db import Change, ReviewDB, decode_utf8, tsv_rows
 from .status import (
@@ -219,6 +219,42 @@ def load_skipped(work_dir: Path, *, required: bool = False) -> list[SkippedRow]:
     return skipped
 
 
+NOTES_NAME = "notes.tsv"
+NOTES_HEADER = ["image_id", "kind", "detail"]
+
+
+@dataclass(frozen=True)
+class NoteRow:
+    """One row of notes.tsv: something a written input holds. image_id is the main image's, as in the manifest."""
+
+    image_id: ImageId
+    kind: NoteKind
+    detail: str
+
+
+def load_notes(work_dir: Path, *, required: bool) -> list[NoteRow]:
+    """Parse notes.tsv strictly, in file order; empty if the work dir has none, unless `required`. ValueError (naming
+    file:line, or file and byte offset if not UTF-8) if malformed or required and absent."""
+    path = work_dir / NOTES_NAME
+    if not path.exists():
+        if required:
+            raise ValueError(
+                f"{path}: missing; work directories made before 0.4.0 have none: preprocess the sources again into "
+                "a new work directory and review them there"
+            )
+        return []
+    notes: list[NoteRow] = []
+    rows = tsv_rows(path, decode_utf8(path, path.read_bytes()))
+    if next(rows, (1, None))[1] != NOTES_HEADER:
+        raise ValueError(f"{path}:1: header must be {', '.join(NOTES_HEADER)}")
+    for line, fields in rows:
+        kind = parse_choice(fields[1], NOTE_KINDS) if len(fields) == len(NOTES_HEADER) else None
+        if kind is None:
+            raise ValueError(f"{path}:{line}: expected image_id, kind ({', '.join(NOTE_KINDS)}), detail")
+        notes.append(NoteRow(ImageId(fields[0]), kind, fields[2]))
+    return notes
+
+
 def skipped_counts(rows: Iterable[SkippedRow]) -> SkippedCounts:
     """The one place the failed/ignored split is derived, so every report of it agrees."""
     kinds = [r.kind for r in rows]
@@ -336,9 +372,11 @@ class LocalStore:
 
     def export_rows(self) -> list["ExportRow"]:
         """The study's result, one row per source file (see export_rows). Local only: image_ids never leave the work
-        dir's machine. ValueError if skipped.tsv is malformed, or missing beside a hashed manifest, or review.tsv ends
-        in a torn line."""
-        return export_rows(self._entries, self._db.decisions(), load_skipped(self.work_dir, required=self._hashed))
+        dir's machine. ValueError if skipped.tsv or notes.tsv is malformed, or missing beside a hashed manifest, or
+        review.tsv ends in a torn line."""
+        skipped = load_skipped(self.work_dir, required=self._hashed)
+        notes = load_notes(self.work_dir, required=self._hashed)
+        return export_rows(self._entries, self._db.decisions(), skipped, unreviewed_content(notes, frozenset()))
 
 
 # The review --filter vocabulary, parsed by the CLI's click.Choice.

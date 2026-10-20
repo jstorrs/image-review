@@ -1,17 +1,17 @@
-"""Export rows: one per source file, folded from the manifest, skipped.tsv and decisions; split into the allowlist of
-releasable files and the report of the rest (stdlib only)."""
+"""Export rows: one per source file, folded from the manifest, skipped.tsv, notes.tsv and decisions; split into the
+allowlist of releasable files and the report of the rest (stdlib only)."""
 
 from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal, NewType
+from typing import TYPE_CHECKING, Literal, NewType, get_args
 
 from .status import ImageId
 
 if TYPE_CHECKING:
     from .review_db import Decision
-    from .store import ManifestEntry, SkipKind, SkippedRow
+    from .store import ManifestEntry, NoteRow, SkipKind, SkippedRow
 
 # What an export says about one source file. NOT_REVIEWED: preprocess failed to render it (or part of it), so nobody
 # saw that part. IGNORED: preprocess did not take it for an image (e.g. a PDF), so nobody looked at it at all.
@@ -24,6 +24,20 @@ ICON_SUFFIX = "#icon"  # a DICOM's icon image, from a work directory made by an 
 AMBIGUOUS_ICON = (
     "ambiguous #icon: the files with and without #icon in their name differ; rename the one ending in #icon"
 )
+# Something a written input holds that downstream tools should strip, noted whether or not the image shows it
+NoteKind = Literal[
+    "overlay-plane", "overlay-unused-bits", "icon-image", "alpha", "embedded-thumbnail", "trailing-data"
+]  # DICOM, then raster
+NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
+ALL_ZERO_SUFFIX = "; all zero bytes"  # ends a `trailing-data` detail whose bytes are all zero: they hold nothing
+# Note kinds for pixel content the review image does not show but the released bytes keep: a file with one is never
+# CLEAN (see unreviewed_content). Every kind is in exactly one of the two sets. `overlay-plane` is here even when
+# `--draw-overlays` drew it: a drawn plane can be clipped to the image or lost against bright pixels.
+UNRENDERED_NOTE_KINDS: frozenset[NoteKind] = frozenset(
+    {"overlay-plane", "overlay-unused-bits", "icon-image", "embedded-thumbnail", "trailing-data"}
+)
+SHOWN_NOTE_KINDS: frozenset[NoteKind] = frozenset({"alpha"})  # shown as a view of its own
+UNREVIEWED_CONTENT = "unreviewed embedded content"
 # A part's status: never IGNORED, since an ignored input that is not a part gets a row of its own, never folded.
 _PartStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]
 # The worst part decides a file's status: CLEAN only if every part is CLEAN.
@@ -53,7 +67,21 @@ class _Part:
 
     status: _PartStatus
     decision: Decision | None  # None for UNREVIEWED and NOT_REVIEWED
-    reason: str  # the skip reason, for NOT_REVIEWED
+    reason: str  # the skip reason, or the unreviewed content, for NOT_REVIEWED
+
+
+def unreviewed_content(notes: list[NoteRow], rendered: frozenset[NoteKind]) -> dict[ImageId, str]:
+    """Per image_id with notes of content nobody reviewed, `unreviewed embedded content: <kinds>` (in NOTE_KINDS
+    order), in notes order: kinds in UNRENDERED_NOTE_KINDS but not `rendered`, and not a `trailing-data` of zero bytes
+    only. `rendered` is the kinds known to be fully shown in the review image this time: none yet (a drawn overlay
+    plane can be clipped or lost against bright pixels), kept so a preprocess.json flag can later add one."""
+    kinds: dict[ImageId, set[NoteKind]] = {}
+    for n in notes:
+        if n.kind in UNRENDERED_NOTE_KINDS - rendered and not (
+            n.kind == "trailing-data" and n.detail.endswith(ALL_ZERO_SUFFIX)
+        ):
+            kinds.setdefault(n.image_id, set()).add(n.kind)
+    return {i: f"{UNREVIEWED_CONTENT}: {', '.join(k for k in NOTE_KINDS if k in ks)}" for i, ks in kinds.items()}
 
 
 def _first_reasons(skipped: list[SkippedRow], kind: SkipKind) -> dict[ImageId, str]:
@@ -70,10 +98,12 @@ def _parts(
     decisions: dict[ImageId, Decision],
     failed: dict[ImageId, str],
     ignored: dict[ImageId, str],
+    unreviewed: dict[ImageId, str],
 ) -> dict[ImageId, _Part]:
     """Each manifest or failed image_id once, manifest order then failed order. A `failed` row makes it NOT_REVIEWED
     (with its reason), even if the manifest has it too; so does an `ignored` row for a manifest image_id (the two
-    disagree, so nobody can vouch for it)."""
+    disagree, so nobody can vouch for it); then a DIRTY decision makes it DIRTY; then `unreviewed` content makes it
+    NOT_REVIEWED (with that reason), whatever else its decision."""
     parts: dict[ImageId, _Part] = {}
     for image_id in dict.fromkeys([*(e.image_id for e in entries), *failed]):
         decision = decisions.get(image_id)
@@ -81,6 +111,8 @@ def _parts(
             parts[image_id] = _Part("NOT_REVIEWED", None, failed[image_id])
         elif image_id in ignored:
             parts[image_id] = _Part("NOT_REVIEWED", None, ignored[image_id])
+        elif image_id in unreviewed and (decision is None or decision.status != "DIRTY"):
+            parts[image_id] = _Part("NOT_REVIEWED", None, unreviewed[image_id])
         elif decision is None:
             parts[image_id] = _Part("UNREVIEWED", None, "")
         else:
@@ -152,21 +184,26 @@ def _files(parts: dict[ImageId, _Part], ambiguous_icons: set[ImageId]) -> dict[I
 
 
 def export_rows(
-    entries: list[ManifestEntry], decisions: dict[ImageId, Decision], skipped: list[SkippedRow]
+    entries: list[ManifestEntry],
+    decisions: dict[ImageId, Decision],
+    skipped: list[SkippedRow],
+    unreviewed: dict[ImageId, str],
 ) -> list[ExportRow]:
     """One row per source file (a ZIP entry counts as one), in order of first appearance: manifest, then the
     `failed` rows of skipped.tsv, then the `ignored` rows (inputs that are not images) that no earlier row covers.
 
     A part (manifest or failed image_id) is NOT_REVIEWED if skipped.tsv has a `failed` row for it, or an `ignored`
-    one (the first `failed` reason wins, else the first `ignored` one); else its latest decision's status (CLEAN or
-    DIRTY), else UNREVIEWED. A DIRTY from an earlier pass not yet re-reviewed (FLAGGED in `status`) is DIRTY: it still
-    contains PHI. A DICOM's icon (`X#icon`: preprocess no longer renders icons, so only a work directory made by an
-    older version, or a file merely so named, has one) is folded into `X`'s row, whose status is the worse of the two
-    (DIRTY, then NOT_REVIEWED, then UNREVIEWED, then CLEAN); an icon without its `X` is reported under `X`, as if `X`
-    were NOT_REVIEWED. `decisions` is the latest decision per image_id (review_db.latest); ones for image_ids in neither
-    file are ignored. `entries` are as load_manifest returns them, at most one source_sha256 per image_id. A row's source_sha256 is
-    the one the manifest records for `X` itself; only if the manifest does not list `X` at all (an icon without its
-    main, or a failed `X`), the one for `X#icon`; else "" (an `X` listed without a hash never borrows its icon's).
+    one (the first `failed` reason wins, else the first `ignored` one); else DIRTY if its latest decision is; else
+    NOT_REVIEWED if `unreviewed` (see unreviewed_content) has it, with that reason, since nobody saw that content;
+    else its latest decision's status (CLEAN), else UNREVIEWED. A DIRTY from an earlier pass not yet re-reviewed
+    (FLAGGED in `status`) is DIRTY: it still contains PHI. A DICOM's icon (`X#icon`: preprocess no longer renders
+    icons, so only a work directory made by an older version, or a file merely so named, has one) is folded into
+    `X`'s row, whose status is the worse of the two (DIRTY, then NOT_REVIEWED, then UNREVIEWED, then CLEAN); an icon
+    without its `X` is reported under `X`, as if `X` were NOT_REVIEWED. `decisions` is the latest decision per
+    image_id (review_db.latest); ones (and `unreviewed` entries) for image_ids in neither file are ignored. `entries`
+    are as load_manifest returns them, at most one source_sha256 per image_id. A row's source_sha256 is the one the
+    manifest records for `X` itself; only if the manifest does not list `X` at all (an icon without its main, or a
+    failed `X`), the one for `X#icon`; else "" (an `X` listed without a hash never borrows its icon's).
 
     If the manifest records a hash for both `X` and `X#icon` and they differ, `X#icon` is ambiguous: an older
     version's DICOM icon has its file's hash, so it may be a different file merely so named, or `X`'s icon. Then
@@ -182,7 +219,7 @@ def export_rows(
     """
     failed = _first_reasons(skipped, "failed")
     ignored = _first_reasons(skipped, "ignored")
-    parts = _parts(entries, decisions, failed, ignored)
+    parts = _parts(entries, decisions, failed, ignored, unreviewed)
     manifest_ids = {e.image_id for e in entries}
     hashes = _manifest_hashes(entries)
     ambiguous_icons = _ambiguous_icons(parts, hashes)

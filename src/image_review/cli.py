@@ -697,7 +697,8 @@ def export(work_dir, output, report, allow_live, remote):
     directory made by an older version, its `#icon` row too), the manifest has its hash, and no file that is not
     CLEAN has the same recorded hash. --report writes the rest as TSV (image_id, status, pass_number, timestamp,
     reviewer, reason, source_sha256): DIRTY (a FLAGGED image is DIRTY), UNREVIEWED, NOT_REVIEWED when preprocess
-    failed on it, IGNORED when preprocess did not take it for an image, and CLEAN ones not allowlisted, with why.
+    failed on it or notes.tsv lists content its review image does not show (an icon, thumbnail, overlay or trailing
+    data), IGNORED when preprocess did not take it for an image, and CLEAN ones not allowlisted, with why.
     image_ids are source paths and may hold PHI, so export runs only where the work directory is, never with
     --remote; $IMAGE_REVIEW_REMOTE is ignored.
     """
@@ -713,8 +714,9 @@ def export(work_dir, output, report, allow_live, remote):
         writer = live_writer(path)
         _refuse_live(writer, allow_live)
         with open_local_store(path, read_only=True) as store:
-            # A torn review.tsv, a malformed or (beside a hashed manifest) missing skipped.tsv, or an unsafe field in
-            # either text: both are built even without --report, so one unsafe field anywhere refuses the whole export.
+            # A torn review.tsv, a malformed or (beside a hashed manifest) missing skipped.tsv or notes.tsv, or an
+            # unsafe field in either text: both are built even without --report, so one unsafe field anywhere refuses
+            # the whole export.
             try:
                 allowed, denied = split_allowlist(store.export_rows())
                 allowlist_text, report_text = format_allowlist(allowed), format_report(denied)
