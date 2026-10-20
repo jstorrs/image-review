@@ -22,6 +22,8 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
   const grids = { inFlight: 0, most: 0, sent: [] };
   const posts = []; // {path, body, instance} of every /mark and /undo
   const revoked = []; // blob URLs revoked
+  const createdUrls = [];
+  let nextUrl = 0;
   const removedAttrs = []; // [element id, attribute] of each removeAttribute
   const unhidden = []; // what the page held each time the canvas was unhidden
 
@@ -100,7 +102,10 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
     history: { replaceState() {} },
     sessionStorage: { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v), removeItem: (k) => storage.delete(k) },
     fetch,
-    URL: { createObjectURL: () => "blob:x", revokeObjectURL: (url) => revoked.push(url) },
+    URL: {
+      createObjectURL: () => { const url = "blob:x" + ++nextUrl; createdUrls.push(url); return url; },
+      revokeObjectURL: (url) => revoked.push(url),
+    },
     requestAnimationFrame: (fn) => frames.push(fn),
     setTimeout: (fn, ms) => { const t = { at: clock + ms, fn }; timers.push(t); return t; },
     clearTimeout: (t) => { const i = timers.indexOf(t); if (i >= 0) timers.splice(i, 1); },
@@ -127,7 +132,8 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
     blob: async () => ({ tag, size, arrayBuffer: async () => Uint8Array.from(JPEG).buffer }),
   });
   const page = {
-    els, draws, bitmaps, grids, posts, unhidden, pending, context, storage, revoked, removedAttrs, shift: 0, bitmapGate: null, reloads: 0,
+    els, draws, bitmaps, grids, posts, unhidden, pending, context, storage, revoked, createdUrls, removedAttrs,
+    shift: 0, bitmapGate: null, reloads: 0,
     autoFlash: true, // respond("/mark", ok) also lets the mark's flash pass
     instance: "A", // the X-Review-Instance the stub server's replies carry: a test swaps servers by changing it
     get state() { return ctx.__state; },
@@ -1325,9 +1331,185 @@ tests["a grid image decoded after the loss starts no further fetch"] = async () 
   await page.respond("/grids", page.json(200, { grids: [rows.map((row, i) => place(row.key, i * 100))], left_out: [] }));
   await page.image200("b", [200, 200]); // fetched before the loss, still decoding
   await page.fail("/image?key=a");
+  assert.strictEqual(page.els.status.textContent, LOST);
+  const stoppedMessage = page.els.message.textContent;
+  const shownBeforeRelease = page.els.grid.hidden;
   release();
   await page.advance(0);
   assert.deepStrictEqual(page.pending.map((r) => r.path), ["/image?key=c", "/image?key=d"], "e is never asked for");
+  assert.strictEqual(page.els.status.textContent, LOST);
+  assert.strictEqual(page.els.message.textContent, stoppedMessage, "stale decode does not replace the stop message");
+  assert.strictEqual(page.els.grid.hidden, shownBeforeRelease, "stale decode does not show the grid");
+  assert.strictEqual(page.bitmaps.length, 1);
+  assert(page.bitmaps[0].closed, "bitmap created after the stop is disposed");
+  assert.deepStrictEqual(page.draws, [], "stale bitmap is not drawn");
+};
+
+tests["stopping invalidates pending paint and running dwell while preserving the displayed image"] = async () => {
+  const page = makePage({ manifest, statuses });
+  await page.boot();
+  const shownUrl = page.state.objectUrl;
+  await page.paint();
+  assert.strictEqual(page.state.dwell, "running");
+  page.run("lose()");
+  assert.strictEqual(page.state.dwell, "none");
+  assert.strictEqual(page.els.image.hidden, false);
+  assert.strictEqual(page.state.objectUrl, shownUrl, "the displayed image stays in place");
+  await page.advance(200);
+  assert.strictEqual(page.state.dwell, "none", "the old timer cannot end a dwell after stop");
+
+  const pendingPaint = makePage({ manifest, statuses });
+  await pendingPaint.boot();
+  pendingPaint.run("lose()");
+  await pendingPaint.paint();
+  await pendingPaint.advance(200);
+  assert.strictEqual(pendingPaint.state.dwell, "none", "a paint already queued before stop cannot start dwell");
+
+  const resized = makePage({ manifest, statuses });
+  await resized.boot();
+  resized.run("lose()");
+  await resized.resize(400, 300);
+  await resized.paint();
+  await resized.advance(200);
+  assert.strictEqual(resized.state.dwell, "none", "resize cannot restart dwell after stop");
+
+  const resizedGrid = makePage({ manifest, statuses });
+  await showPlan(resizedGrid);
+  resizedGrid.run("lose()");
+  const gridItems = resizedGrid.state.items;
+  const gridMessage = resizedGrid.els.message.textContent;
+  await resizedGrid.resize(300, 250);
+  await resizedGrid.paint();
+  await resizedGrid.advance(200);
+  assert.strictEqual(resizedGrid.state.dwell, "none", "grid resize cannot restart dwell after stop");
+  assert.strictEqual(resizedGrid.els.grid.hidden, false, "a stopped grid stays displayed through resize");
+  assert.strictEqual(resizedGrid.state.items, gridItems, "a stopped resize does not rebuild its items");
+  assert.strictEqual(resizedGrid.els.message.textContent, gridMessage, "a stopped resize preserves its notice");
+  assert.deepStrictEqual(resizedGrid.pending, [], "a stopped resize sends no layout or image request");
+};
+
+tests["stale image bytes cannot affect a stopped or reconnected display"] = async () => {
+  for (const rejectBytes of [false, true]) {
+    for (const reconnect of [false, true]) {
+      const page = makePage({ manifest, statuses });
+      await page.boot();
+      await page.key("ArrowRight");
+      const stalePath = page.pending.find((request) => request.path.startsWith("/image?")).path;
+      const key = decodeURIComponent(stalePath.slice("/image?key=".length));
+      let release;
+      let entered;
+      const started = new Promise((resolve) => { entered = resolve; });
+      const gate = new Promise((resolve, reject) => { release = rejectBytes ? () => reject(new Error("late bytes failure")) : resolve; });
+      const reply = page.image(key, [100, 50]);
+      reply.blob = async () => ({ tag: key, size: [100, 50], arrayBuffer: async () => {
+        entered();
+        await gate;
+        return Uint8Array.from(JPEG).buffer;
+      } });
+      await page.respond("/image?key=" + key, reply);
+      await started;
+      page.run("lose()");
+      assert.strictEqual(page.els.status.textContent, LOST);
+      let expected = {
+        message: page.els.message.textContent,
+        hidden: page.els.image.hidden,
+        loaded: page.state.loaded,
+        objectUrl: page.state.objectUrl,
+        dwell: page.state.dwell,
+      };
+      if (reconnect) {
+        await page.click("reconnect");
+        await reload(page, statuses);
+        const reloadedKey = page.state.items[page.state.index].key;
+        await page.image200(reloadedKey, [100, 50]);
+        await page.paint();
+        expected = {
+          message: page.els.message.textContent,
+          hidden: page.els.image.hidden,
+          loaded: page.state.loaded,
+          objectUrl: page.state.objectUrl,
+          dwell: page.state.dwell,
+        };
+        assert.strictEqual(page.els.status.textContent, "Reconnected");
+      }
+      const revokedCount = page.revoked.length;
+      release();
+      await page.advance(0);
+      assert.strictEqual(page.els.status.textContent, reconnect ? "Reconnected" : LOST);
+      assert.deepStrictEqual({
+        message: page.els.message.textContent,
+        hidden: page.els.image.hidden,
+        loaded: page.state.loaded,
+        objectUrl: page.state.objectUrl,
+        dwell: page.state.dwell,
+      }, expected, "late byte completion or rejection leaves display state unchanged");
+      assert.strictEqual(page.revoked.length, revokedCount, "stale bytes create no URL to revoke");
+    }
+  }
+};
+
+tests["a decoded image released while stopped or after Reconnect is revoked without changing the display"] = async () => {
+  for (const rejectDecode of [false, true]) {
+    for (const reconnect of [false, true]) {
+      const page = makePage({ manifest, statuses });
+      await page.boot();
+      await page.key("ArrowRight");
+      const stalePath = page.pending.find((request) => request.path.startsWith("/image?")).path;
+      const key = decodeURIComponent(stalePath.slice("/image?key=".length));
+      let release;
+      let entered;
+      const started = new Promise((resolve) => { entered = resolve; });
+      const gate = new Promise((resolve, reject) => {
+        release = rejectDecode ? () => reject(new Error("late decode failure")) : resolve;
+      });
+      let decodes = 0;
+      page.els.image.decode = async () => {
+        if (++decodes === 1) {
+          entered();
+          await gate;
+        }
+      };
+      await page.image200(key, [100, 50]);
+      await started;
+      const staleUrl = page.createdUrls.at(-1);
+      page.run("lose()");
+      assert.strictEqual(page.els.status.textContent, LOST);
+      if (reconnect) {
+        await page.click("reconnect");
+        await reload(page, statuses);
+        const reloadedKey = page.state.items[page.state.index].key;
+        await page.image200(reloadedKey, [100, 50]);
+        await page.paint();
+      }
+      const expected = {
+        message: page.els.message.textContent,
+        hidden: page.els.image.hidden,
+        src: page.els.image.src,
+        loaded: page.state.loaded,
+        objectUrl: page.state.objectUrl,
+        dwell: page.state.dwell,
+      };
+      const currentUrl = page.state.objectUrl;
+      const removeCount = page.removedAttrs.filter(([id, attr]) => id === "image" && attr === "src").length;
+      release();
+      await page.advance(0);
+      assert(page.revoked.includes(staleUrl), "the stale decoded URL is revoked");
+      assert.deepStrictEqual({
+        message: page.els.message.textContent,
+        hidden: page.els.image.hidden,
+        src: page.els.image.src,
+        loaded: page.state.loaded,
+        objectUrl: page.state.objectUrl,
+        dwell: page.state.dwell,
+      }, expected, "late decode leaves display state unchanged");
+      assert.strictEqual(page.removedAttrs.filter(([id, attr]) => id === "image" && attr === "src").length,
+        removeCount, "stale decode failure does not remove the current image source");
+      assert.strictEqual(page.els.status.textContent, reconnect ? "Reconnected" : LOST);
+      if (currentUrl !== null) {
+        assert(!page.revoked.includes(currentUrl), "the current image URL remains live");
+      }
+    }
+  }
 };
 
 // ---- Done with this server (q) ----
@@ -1381,7 +1563,7 @@ tests["q in single mode waits for the next server: stale replies change nothing,
   const shown = page.state.items[page.state.index].key;
   await page.key("c"); // /mark in flight
   await page.key("q");
-  assert.deepStrictEqual(page.revoked, ["blob:x"]);
+  assert.deepStrictEqual(page.revoked, ["blob:x1"]);
   await assertWaiting(page);
   await page.respond("/mark", page.json(200, { [shown]: "CLEAN" }));
   assert.strictEqual(page.state.statuses.size, 0);

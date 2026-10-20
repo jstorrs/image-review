@@ -475,6 +475,8 @@ class HttpError extends Error {
 
 function stop(text) {
   state.epoch++;
+  state.showSeq++; // pending image reads, decodes and grid draws no longer apply
+  clearDwell(); // invalidate both a running timer and a dwell waiting for paint
   state.dead = true;
   state.busy = false;
   if (state.atEnd) {
@@ -591,7 +593,20 @@ async function loadJpeg(key) {
     return null;
   }
   const blob = await readBody(response, "blob");
-  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const epoch = epochOf.get(response);
+  let buffer;
+  try {
+    buffer = await blob.arrayBuffer();
+  } catch (error) {
+    if (epoch !== state.epoch) {
+      throw stale();
+    }
+    throw error;
+  }
+  if (epoch !== state.epoch) {
+    throw stale();
+  }
+  const bytes = new Uint8Array(buffer);
   return isCompleteJpeg(bytes) ? blob : null;
 }
 
@@ -810,7 +825,7 @@ function clearDwell() {
 // c/d count only after MIN_DWELL_MS with the item on screen.
 async function startDwell(seq) {
   await nextPaint();
-  if (seq !== state.showSeq || state.dwell !== "none" || state.overlay !== null) {
+  if (seq !== state.showSeq || state.dead || state.dwell !== "none" || state.overlay !== null) {
     return; // (under an overlay: closing it starts the dwell)
   }
   refreshScale();
@@ -834,7 +849,7 @@ async function startDwell(seq) {
 // leaving it (z or an arrow) repacks first.
 function onResize() {
   const endScreen = state.index < 0 && state.items.length > 0 && state.repackTimer === null;
-  if (gridMode() && !endScreen && (state.repackTimer !== null || gridSizeChanged())) {
+  if (!state.dead && gridMode() && !endScreen && (state.repackTimer !== null || gridSizeChanged())) {
     scheduleRepack();
     return;
   }

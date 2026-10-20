@@ -6,6 +6,8 @@
 - Grayscale inputs that would lose pixel values or overflow their intensity
   range when converted to float32 now fail with an explicit unsupported
   reason instead of rendering a potentially misleading image.
+- Stopping browser review now invalidates pending image reads and decodes, so
+  late image work cannot replace the stop or Reconnect state or start a dwell.
 
 ## 0.4.0
 

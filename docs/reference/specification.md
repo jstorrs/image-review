@@ -2455,8 +2455,12 @@ empties the rest of the stack.
   until the reviewer presses Reconnect (or `r`); it is never retried
   automatically. The reply, body or failure of a request sent before the
   page stopped changes nothing (no statuses, message, item, stack or busy
-  state), so a later failure never replaces "token rejected" and never
-  stops a reconnected page. Reconnect stops the page first, as a loss does
+  state). Pending image byte reads, image decodes and grid decodes are also
+  invalidated: they cannot show an image, start a dwell, draw a grid or replace
+  the stop or Reconnect message, and any URL or bitmap they produce is
+  released. The image or grid already on screen stays visible at the stop;
+  its dwell is cleared. A late failure cannot replace "token rejected" or
+  stop a reconnected page. Reconnect stops the page first, as a loss does
   (at the end of the pass too), hides the button, says
   "Reconnecting...", takes the item off screen (its dwell with it), empties
   the stack of marked keys (the server may have restarted, or others marked
