@@ -43,8 +43,8 @@ _SOS, _EOI = 0xDA, 0xD9
 def jpeg_size(buf: bytes) -> tuple[int, int]:
     """(width, height) of a JPEG from its frame header; no pixels are decoded. Raises ValueError if unreadable.
 
-    The walk goes on past the frame header to a complete start-of-scan header, so a file cut short before its scan
-    is rejected here, as PIL.Image.open rejects it, rather than failing later at decode.
+    The walk goes on past the frame header to a complete start-of-scan header, so a file cut short before that header
+    is rejected here, at least wherever PIL.Image.open rejects it, rather than failing later at decode.
     """
     if buf[:2] != b"\xff\xd8":
         raise ValueError("not a JPEG: no SOI marker")

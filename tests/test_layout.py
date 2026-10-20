@@ -132,12 +132,16 @@ class JpegSizeTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(jpeg_size(buf), pil_size(buf))
 
-    def test_truncation_rejected_exactly_where_pillow_rejects_it(self):
-        cases = {
+    @staticmethod
+    def truncation_cases() -> dict[str, bytes]:
+        return {
             "baseline": jpeg((40, 24)),
             "progressive with EXIF": jpeg((40, 24), progressive=True, exif=b"Exif\x00\x00" + bytes(300)),
         }
-        for name, buf in cases.items():
+
+    def test_truncation_rejected_wherever_pillow_rejects_it(self):
+        # jpeg_size may be stricter than Pillow (newer Pillow opens some prefixes older ones reject), never looser
+        for name, buf in self.truncation_cases().items():
             for cut in range(len(buf) + 1):
                 prefix = buf[:cut]
                 try:
@@ -148,7 +152,22 @@ class JpegSizeTest(unittest.TestCase):
                     if expected is None:
                         self.assertRaises(ValueError, jpeg_size, prefix)
                     else:
-                        self.assertEqual(jpeg_size(prefix), expected)
+                        try:
+                            actual = jpeg_size(prefix)
+                        except ValueError:
+                            continue
+                        self.assertEqual(actual, expected)
+
+    def test_truncation_accepted_exactly_from_the_end_of_the_sos_header(self):
+        for name, buf in self.truncation_cases().items():
+            sos = buf.index(b"\xff\xda")
+            sos_end = sos + 2 + int.from_bytes(buf[sos + 2 : sos + 4], "big")
+            for cut in range(len(buf) + 1):
+                with self.subTest(name, cut=cut):
+                    if cut < sos_end:
+                        self.assertRaises(ValueError, jpeg_size, buf[:cut])
+                    else:
+                        self.assertEqual(jpeg_size(buf[:cut]), (40, 24))
 
     def test_skips_fill_bytes_and_standalone_markers(self):
         buf = jpeg((71, 43))
