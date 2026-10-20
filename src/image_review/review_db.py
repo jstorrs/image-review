@@ -1,6 +1,5 @@
 import contextlib
 import csv
-import errno
 import io
 import logging
 import os
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 from .access import policy_of_dir
+from .atomic import DIR_FSYNC_UNSUPPORTED, fsync_dir  # noqa: F401 (re-export)
 from .connection import MAX_PASS, package_version, parse_reviewer
 from .status import MARK_MODES, TODO_STATUSES, VERDICTS, ImageId, MarkMode, Status, Verdict, parse_choice
 
@@ -20,9 +20,6 @@ log = logging.getLogger(__name__)
 
 HEADER = ["image_id", "batch", "status", "pass_number", "timestamp", "reviewer", "mode", "grid_size", "tool_version"]
 LEGACY_HEADER = HEADER[:5]  # before the audit columns; migrate() rewrites such a file with HEADER
-
-# fsync errors that only mean a directory cannot be synced on this filesystem
-DIR_FSYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF})
 
 # A row's mode in review.tsv: a MarkMode, or "undo" for a row written by undo_many (a restore or a tombstone).
 RowMode = MarkMode | Literal["undo"]
@@ -278,15 +275,7 @@ class ReviewDB:
         self._legacy = None
         self._truncate = None  # the torn tail was not copied
         self._seen = (st.st_ino, st.st_size)
-        try:  # make the rename itself durable, where the filesystem can
-            dir_fd = os.open(self.work_dir, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError as exc:
-            if exc.errno not in DIR_FSYNC_UNSUPPORTED:
-                raise
+        fsync_dir(self.work_dir)  # make the rename itself durable, where the filesystem can
 
     def _append(self, decisions: list[Decision]) -> None:
         """Append decisions to review.tsv as one buffer (written in a loop that handles short writes), then fsync.
@@ -324,6 +313,10 @@ class ReviewDB:
                 start = self._truncate.offset
             elif (st.st_ino, st.st_size) != (self._seen if self._seen is not None else (st.st_ino, 0)):
                 raise ReviewLogChanged(changed)
+            if start == 0:
+                # a new (or empty) file: make its name durable before anything is written, so a failure leaves no rows
+                # on disk that memory lacks; the empty file left behind loads as no rows and the retry reopens it
+                fsync_dir(self.work_dir)
             if start == 0:
                 if stat.S_IMODE(st.st_mode) != file_mode:
                     os.fchmod(fd, file_mode)  # the umask may have stripped group bits teammates need to read it

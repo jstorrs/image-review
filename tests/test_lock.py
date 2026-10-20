@@ -25,7 +25,7 @@ from image_review.cli import unknown_batch_message
 from image_review.lock import LOCK_NAME, WorkDirLocked, acquire_lock, boot_id, release_lock, this_process
 from image_review.review_db import ReviewDB, ReviewLogChanged
 from image_review.store import LocalStore
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, temp_dir
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, recorded_dir_fsyncs, temp_dir
 
 THIS_BOOT = boot_id()
 
@@ -88,6 +88,65 @@ class TestWorkDirLock(LockTestCase):
         with mock.patch("os.link", link_then_fail):
             self.open()
         self.assertEqual(self.holder()["pid"], os.getpid())
+
+    def test_publish_syncs_the_directory_on_each_success_path(self):
+        real_link = os.link
+
+        def link_then_fail(src, dst):
+            real_link(src, dst)
+            raise OSError(errno.EIO, "simulated lost reply")
+
+        paths = {
+            "link": mock.patch("os.link", wraps=os.link),
+            "lost reply": mock.patch("os.link", link_then_fail),
+            "direct create": mock.patch("os.link", side_effect=OSError(errno.EPERM, "no hard links")),
+        }
+        for name, patch in paths.items():
+            with self.subTest(path=name), recorded_dir_fsyncs() as synced, patch:
+                target = self.work_dir / f"out-{name}"
+                atomic_module.write_new_file(target, 0o600, None, "text")
+                self.assertEqual(target.read_text(), "text")
+                self.assertEqual(len(synced), 1)
+
+    def test_publish_does_not_sync_the_directory_on_failure(self):
+        (self.work_dir / "taken").write_text("x")
+        with recorded_dir_fsyncs() as synced, self.assertRaises(FileExistsError):
+            atomic_module.write_new_file(self.work_dir / "taken", 0o600, None, "text")
+        self.assertEqual(synced, [])
+
+    def test_fsync_dir_tolerates_unsupported_errnos_and_raises_others(self):
+        for err in sorted(atomic_module.DIR_FSYNC_UNSUPPORTED):
+            with self.subTest(errno=errno.errorcode[err]), recorded_dir_fsyncs(err) as synced:
+                atomic_module.fsync_dir(self.work_dir)
+                self.assertEqual(len(synced), 1)
+        with recorded_dir_fsyncs(errno.EIO), self.assertRaises(OSError) as ctx:
+            atomic_module.fsync_dir(self.work_dir)
+        self.assertEqual(ctx.exception.errno, errno.EIO)
+
+    def test_publish_keeps_the_file_and_warns_when_the_directory_sync_fails(self):
+        target = self.work_dir / "out"
+        with recorded_dir_fsyncs(errno.EIO), self.assertLogs("image_review.atomic", "WARNING") as logs:
+            atomic_module.write_new_file(target, 0o600, None, "text")
+        self.assertEqual(target.read_text(), "text")
+        self.assertIn("EIO", logs.output[0])
+        self.assertIn(str(target), logs.output[0])
+        with recorded_dir_fsyncs(errno.EIO), self.assertLogs("image_review.atomic", "WARNING"):
+            self.open()  # the lock is acquired, not left stale behind a failure
+        self.assertEqual(self.holder()["pid"], os.getpid())
+
+    def test_publish_warns_when_the_directory_cannot_be_opened(self):
+        real_open = os.open
+
+        def open_(path, flags, *args, **kwargs):
+            if flags & getattr(os, "O_DIRECTORY", 0):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+            return real_open(path, flags, *args, **kwargs)
+
+        target = self.work_dir / "out"
+        with mock.patch("os.open", open_), self.assertLogs("image_review.atomic", "WARNING") as logs:
+            atomic_module.write_new_file(target, 0o600, None, "text")
+        self.assertEqual(target.read_text(), "text")
+        self.assertIn("EACCES", logs.output[0])
 
     @unittest.skipUnless(THIS_BOOT, "no boot_id on this platform")
     def test_stale_lock_on_this_machine_is_reclaimed(self):

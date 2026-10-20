@@ -1,3 +1,4 @@
+import contextlib
 import csv
 import functools
 import hashlib
@@ -6,6 +7,7 @@ import io
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -45,6 +47,24 @@ CLEAN_ENV: dict[str, str | None] = {
     "IMAGE_REVIEW_ACCESS": None,
     "IMAGE_REVIEW_REVIEWER": None,
 }
+
+
+@contextlib.contextmanager
+def recorded_dir_fsyncs(error: int | None = None):
+    """Yield a list that gets one entry per os.fsync of a directory (identified by fstat, not fd number); with `error`,
+    such a sync fails with that errno."""
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            synced.append(fd)
+            if error is not None:
+                raise OSError(error, os.strerror(error))
+        real_fsync(fd)
+
+    with mock.patch("os.fsync", fsync):
+        yield synced
 
 
 def invoke_cli(*args: str, env: dict[str, str | None] | None = None, **kwargs) -> click.testing.Result:

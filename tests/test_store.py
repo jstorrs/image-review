@@ -42,7 +42,7 @@ from image_review.store import (
     summary,
 )
 from image_review.util import load_surface
-from tests.fixtures import ROWS, StoreTestCase, _jpeg_bytes, make_work_dir, mark, temp_dir
+from tests.fixtures import ROWS, StoreTestCase, _jpeg_bytes, make_work_dir, mark, recorded_dir_fsyncs, temp_dir
 
 
 def _skimage_reference(buf: bytes) -> np.ndarray:
@@ -634,6 +634,33 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(lines[0], self.HEADER_LINE)
         self.assertEqual(len(lines), 4)
         self.assertEqual(self.reload()._rows, db._rows)
+
+    def test_creating_review_tsv_syncs_the_directory_but_a_later_append_does_not(self):
+        db = ReviewDB(self.work_dir)
+        with recorded_dir_fsyncs() as synced:
+            db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+            self.assertEqual(len(synced), 1)
+            db.mark_many([("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+            self.assertEqual(len(synced), 1)
+        with recorded_dir_fsyncs() as synced:  # an existing file, freshly loaded
+            ReviewDB(self.work_dir).mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        self.assertEqual(synced, [])
+
+    def test_directory_sync_error_on_creation_writes_nothing_and_a_retry_works(self):
+        db = ReviewDB(self.work_dir)
+        with recorded_dir_fsyncs(errno.EINVAL):  # unsupported: tolerated
+            db.mark_many([("w", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        self.path.unlink()
+        db = ReviewDB(self.work_dir)
+        with recorded_dir_fsyncs(errno.EIO), self.assertRaises(OSError):
+            db.mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
+        self.assertEqual(self.path.read_bytes(), b"")  # nothing written; memory matches
+        self.assertEqual(db._rows, {})
+        self.assertEqual(ReviewDB(self.work_dir)._rows, {})
+        db.mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")  # retry on the same db
+        self.assertEqual(db._rows["x"].status, "DIRTY")
+        self.assertEqual(ReviewDB(self.work_dir)._rows, db._rows)
+        self.assertEqual(self.path.read_bytes().splitlines()[0] + b"\r\n", self.HEADER_LINE)
 
     def test_same_image_twice_last_wins(self):
         db = ReviewDB(self.work_dir)

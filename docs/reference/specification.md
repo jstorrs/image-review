@@ -1192,7 +1192,10 @@ naming the holder. Its user-facing rules are in
 
 An append-only log written by `ReviewDB`. Each mark action encodes its rows
 into one buffer and writes it to a file opened `O_APPEND`, looping until a short
-`write` has written it all, then `fsync`s. Appends never change earlier bytes
+`write` has written it all, then `fsync`s. The append that creates the file
+first `fsync`s the work directory, so the new name is durable before any row
+is written; if that fails, the append fails with nothing written and the
+empty file is reused by the retry. Appends never change earlier bytes
 or the inode, with two exceptions: a torn tail (see below) is cut off before
 the next append, and an old five-column file is migrated once (see below),
 which replaces the file with a new inode. A crash mid-write can therefore record only some rows
@@ -1265,7 +1268,8 @@ loaded row, in order, under the new header with the four new columns empty, to
 a temp file `.review.tsv.*.tmp` in the work directory (`mkstemp`, then
 `fchmod` to the policy's `file_mode`), `fsync`s it, and `os.replace`s it over
 `review.tsv`, then `fsync`s the directory (ignoring only `EINVAL`, `ENOTSUP`/
-`EOPNOTSUPP` and `EBADF`, where a filesystem cannot sync directories). If
+`EOPNOTSUPP` and `EBADF`, where a filesystem cannot sync directories; every
+other directory sync in this tool follows the same rule). If
 writing or renaming fails, the temp file is removed and the old file is left
 as it was; a `LocalStore` open then fails and releases the lock (the CLI shows
 `Cannot update work directory: ...` for a `changed since it was loaded`). This happens once: the result has the new
@@ -2075,7 +2079,9 @@ works as follows:
   0600 private, 0660 group, so teammates can read who holds it; then
   `fsync`ed), which is hard-linked to `review.lock` and then removed (the same
   helper as `export --output`). A lock is therefore never seen empty or
-  half-written. If `link` reports an error but
+  half-written. Afterwards the directory is `fsync`ed (on each path below),
+  best effort: a failure there, such as `EIO` or a directory that can be
+  written but not read, is logged as a warning and the file stays. If `link` reports an error but
   `os.path.samefile(sibling, review.lock)` holds (a lost NFS reply), the lock
   was acquired. Where hard links are unsupported (`link` fails with `EPERM`,
   `ENOTSUP`/`EOPNOTSUPP` or `ENOSYS`: vfat/exFAT, SMB, many FUSE mounts),

@@ -36,6 +36,9 @@
 
 ### Fixes
 
+- A new `review.tsv`, `review.lock` or `export --output` file is now made durable with an `fsync` of its directory.
+  For the lock and export files this is best effort (a failure is logged as a warning); creating `review.tsv` fails
+  before writing any row if it cannot be synced.
 - A second signal while `serve` (Ctrl-C, SIGTERM, SIGHUP) or `review` (Ctrl-C, SIGHUP; SDL turns SIGTERM into a quit
   event) is cleaning up no longer leaves `review.lock` behind. Before, it
   raised inside the lock release, or while waiting for a mark's fsync, so the store was never closed; on a
