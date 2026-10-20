@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Grid review now pauses when resizing leaves no display area above the status bar, then rebuilds when space returns.
 - Grayscale inputs that would lose pixel values or overflow their intensity
   range when converted to float32 now fail with an explicit unsupported
   reason instead of rendering a potentially misleading image.

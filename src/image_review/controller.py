@@ -177,6 +177,7 @@ class ReviewSession:
         self.autoplay = False
         self._cursor: int | None = None  # None: nothing shown yet
         self._ui_state = UIState.REVIEWING
+        self._items: list[ReviewItem] = []
         self._shown_at: int | None = None  # ticks when the current item was first painted
         self._advance_pending = False  # a post-mark advance is due; an already-queued ADVANCE_EVENT obeys this
         self._todo_only = False
@@ -186,6 +187,7 @@ class ReviewSession:
         # The last pack_into_grids result and its key, so switching modes back and forth packs once;
         # kept across single mode within a batch, dropped by b
         self._grid_cache: tuple[GridCacheKey, list[GridSpec], list[Key]] | None = None
+        self._grid_suspended = False  # the display has no area left for grids; rebuild when it returns
 
         self._viewer = ImageViewer()
         # Gamepads with an SDL game controller mapping, by instance id. SDL also sends JOYDEVICEADDED
@@ -278,9 +280,20 @@ class ReviewSession:
         """Build the items for the current mode and batch, then drop verdict input queued while blocked."""
         try:
             if self.mode == "grid":
+                grid_size = self._grid_size()
+                if any(size <= 0 for size in grid_size):
+                    if not self._review_rows(self.batch):
+                        self._grid_suspended = False
+                        self._items = []
+                        return
+                    self._grid_suspended = True
+                    self._stop_timers()
+                    self._viewer.show_message("Window too small for grids - resize or press [s] for single mode")
+                    return
                 self._viewer.show_message("Computing grids...")
-                self._items = self._grid_items()
+                self._items = self._grid_items(grid_size)
             else:
+                self._grid_suspended = False
                 self._items = self._single_items()
         finally:
             pg.event.clear(VERDICT_INPUT_EVENTS)  # pressed while blocked, before anything new was shown
@@ -294,8 +307,10 @@ class ReviewSession:
             self._viewer.show_message(f"Computing grids... {done}/{total}")  # also flips the display
             pg.event.pump()  # keeps the OS from flagging the window; leaves queued key events alone
 
-    def _grid_items(self) -> list[ReviewItem]:
-        grid_w, grid_h = self._grid_size()
+    def _grid_items(self, grid_size: tuple[int, int]) -> list[ReviewItem]:
+        grid_w, grid_h = grid_size
+        if grid_w <= 0 or grid_h <= 0:
+            raise RuntimeError("grid items require a positive display area")
 
         # Packing exactly the cache key's keys means a cached grid never holds a key the current
         # snapshot excludes (e.g. one now DIRTY): a mark that changes the eligible rows changes the key
@@ -363,6 +378,7 @@ class ReviewSession:
         self._stop_timers()
         self.mode = new_mode
         self._cursor = None
+        self._items = []
         self._undoable = 0  # z only undoes marks it can show; the old mode's items are gone
         self._shown_at = None
         try:
@@ -372,6 +388,10 @@ class ReviewSession:
         except StoreUnavailable as exc:
             self._items = []  # half-switched state: nothing consistent to show
             self._store_lost(exc)
+            return
+
+        if self._grid_suspended:
+            self._ui_state = UIState.REVIEWING
             return
 
         if not self._items:
@@ -628,6 +648,8 @@ class ReviewSession:
 
     def _resume(self):
         """Leave the splash or display-select screen for the current image."""
+        if self._grid_suspended:
+            return
         self._ui_state = UIState.REVIEWING
         if self._cursor is None:
             self.next_image()
@@ -636,6 +658,14 @@ class ReviewSession:
 
     def _handle_mode_key(self, key: int, mod: int) -> bool:
         """Switch mode on m (shift+m: no rotation) or s. Returns whether `key` was one of them."""
+        if self._grid_suspended and self.mode == "grid":
+            if key == pg.K_m:
+                self.rotation = "never" if mod & pg.KMOD_SHIFT else self._default_rotation
+                return True
+            if key == pg.K_s:
+                self._switch_to_single()
+                return True
+            return False
         match key:
             case pg.K_m if mod & pg.KMOD_SHIFT:
                 self._switch_to_grid("never")
@@ -745,7 +775,7 @@ class ReviewSession:
                 self._handle_review_key(key, now)
 
     def run(self):
-        if not self._items:
+        if not self._items and not self._grid_suspended:
             filter_msg = f" (filter: {self.status_filter})" if self.status_filter != "unreviewed" else ""
             print(
                 self._held_back_message(self.batch, in_session=False)
@@ -759,7 +789,9 @@ class ReviewSession:
             f"Starting {self.mode} review, pass {self.pass_number}{batch_info}{filter_info}, {len(self._items)} items"
         )
 
-        if self._ui_state != UIState.SPLASH:
+        if self._grid_suspended:
+            self._viewer.show_message("Window too small for grids - resize or press [s] for single mode")
+        elif self._ui_state != UIState.SPLASH:
             self._show_splash()
 
         clock = pg.time.Clock()
@@ -777,22 +809,41 @@ class ReviewSession:
 
     def _handle_event(self, event: pg.event.Event, now: int) -> bool:
         """Apply one event of a batch read at tick `now`. Returns True to quit."""
+        if (
+            self.mode == "grid"
+            and self._ui_state == UIState.REVIEWING
+            and not self._grid_suspended
+            and not self._grid_area_available()
+        ):
+            self._suspend_grids()
         match event.type:
             case pg.CONTROLLERBUTTONDOWN:
+                if self._grid_suspended and self._ui_state == UIState.REVIEWING:
+                    return event.button == pg.CONTROLLER_BUTTON_START
                 return self._handle_button(event.button, now)
             case pg.KEYDOWN:
                 if event.key in (pg.K_ESCAPE, pg.K_q):
                     return True
-                if self._ui_state == UIState.DISCONNECTED or self._handle_mode_key(event.key, event.mod):
+                if self._ui_state == UIState.DISCONNECTED:
+                    return False
+                if self._grid_suspended and self._ui_state == UIState.REVIEWING:
+                    if event.key == pg.K_f:
+                        pg.display.toggle_fullscreen()
+                    else:
+                        self._handle_mode_key(event.key, event.mod)
+                    return False
+                if self._handle_mode_key(event.key, event.mod):
                     return False
                 self._handle_screen_key(event.key, now)
             case pg.WINDOWRESIZED:
                 self._viewer.resize()  # grid mode repacks on the next tick if the size changed
+                if self._ui_state == UIState.REVIEWING and self.mode == "grid" and not self._grid_area_available():
+                    self._suspend_grids()
             case x if x == AUTOPLAY_EVENT:
-                if self.autoplay and self._ui_state == UIState.REVIEWING:
+                if not self._grid_suspended and self.autoplay and self._ui_state == UIState.REVIEWING:
                     self.next_image()
             case x if x == ADVANCE_EVENT:
-                if self._advance_pending and self._ui_state == UIState.REVIEWING:
+                if not self._grid_suspended and self._advance_pending and self._ui_state == UIState.REVIEWING:
                     self._advance_pending = False
                     self.next_image()
             case pg.CONTROLLERDEVICEADDED:
@@ -811,12 +862,25 @@ class ReviewSession:
         w, h = self._viewer.screen.get_size()
         return w, h - self._viewer.border
 
+    def _grid_area_available(self) -> bool:
+        return all(size > 0 for size in self._grid_size())
+
+    def _suspend_grids(self):
+        """Stop review while the window has no usable grid area, retaining the current inventory."""
+        if self._grid_suspended:
+            return
+        self._grid_suspended = True
+        self._stop_timers()
+        self._shown_at = None
+        self._viewer.show_message("Window too small for grids - resize or press [s] for single mode")
+
     def _rebuild_grids_for_resize(self):
         """Repack the grids at the new window size (one rebuild however many resize events came).
         The cursor stays on the grid holding the current item's first key, else goes to the start; the
         dwell restarts, so a verdict never lands on a re-composited grid that has not been seen."""
-        if not self._items:
+        if not self._items and not self._grid_suspended:
             return  # nothing to rebuild
+        self._grid_suspended = False
         self._stop_timers()
         self._undoable = 0  # a repack drops grids marked DIRTY, so z could no longer show what it undoes
         current = self._items[self._cursor].keys[0] if self._cursor is not None else None
@@ -826,12 +890,22 @@ class ReviewSession:
             self._items = []
             self._store_lost(exc)
             return
+        if self._grid_suspended:
+            return
         if not self._items:  # everything left was marked meanwhile (or is held back): as _restart_in_mode
             self._show_end(
                 self._held_back_message(self.batch, in_session=True) or self._end_message(END_OF_LIST_MESSAGE)
             )
             return
         self._cursor = next((i for i, item in enumerate(self._items) if current in item.keys), 0)
+        size = self._grid_size()
+        if any(dimension <= 0 for dimension in size):
+            self._suspend_grids()
+            return
+        if self._grid_cache is not None and self._grid_cache[0].size != size:
+            self._shown_at = None
+            self._viewer.show_message("Computing grids...")
+            return
         self._show_current()
 
     def refresh_if_needed(self):
@@ -839,10 +913,26 @@ class ReviewSession:
         message screens are painted once by the viewer and a repaint would cover them."""
         if self._ui_state != UIState.REVIEWING:
             return
+        if self.mode == "grid":
+            if not self._grid_area_available():
+                self._suspend_grids()
+                return
+            if self._grid_suspended:
+                self._rebuild_grids_for_resize()
+                if (
+                    self._ui_state != UIState.REVIEWING
+                    or self._grid_suspended
+                    or (self._grid_cache is not None and self._grid_cache[0].size != self._grid_size())
+                ):
+                    return
         # Grid mode repacks when the window size is no longer the one the cached grids were packed for
         if self.mode == "grid" and self._grid_cache is not None and self._grid_cache[0].size != self._grid_size():
             self._rebuild_grids_for_resize()
-            if self._ui_state != UIState.REVIEWING:  # the rebuild ended on a message screen
+            if (
+                self._ui_state != UIState.REVIEWING
+                or self._grid_suspended
+                or (self._grid_cache is not None and self._grid_cache[0].size != self._grid_size())
+            ):
                 return
         # The dwell runs only while paints show the item's pixels: bars alone stop it, and it
         # restarts once the pixels return

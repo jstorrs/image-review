@@ -1078,6 +1078,202 @@ class TestScaleAndResize(EventLoopTestCase):
         self.assertFalse(s.autoplay)
         self.assertFalse(s._advance_pending)
 
+    def test_grid_resize_to_no_content_suspends_review_until_restored(self):
+        s = self.reviewing("grid", status_filter="all")
+        key_before = s._items[s._cursor].keys[0]
+        status_before = dict(s._statuses)
+        size = pg.display.get_surface().get_size()
+        s.autoplay = True
+        s._advance_pending = True
+        with mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack:
+            pg.display.set_mode((size[0], s._viewer.border))
+            s.handle_events(
+                [
+                    self.resized,
+                    key(pg.K_c),
+                    key(pg.K_d),
+                    button(pg.CONTROLLER_BUTTON_B),
+                    button(pg.CONTROLLER_BUTTON_Y),
+                    pg.event.Event(ADVANCE_EVENT),
+                ]
+            )
+            for _ in range(3):
+                s.refresh_if_needed()
+            pack.assert_not_called()
+            self.assertTrue(s._grid_suspended)
+            self.assertFalse(s.autoplay)
+            self.assertFalse(s._advance_pending)
+            self.assertEqual(s._statuses, status_before)
+            self.mark.assert_not_called()
+
+            pg.display.set_mode((size[0] // 2, size[1] // 2))
+            s.handle_events([self.resized])
+            s.refresh_if_needed()
+            pack.assert_called_once()
+
+            # A negative content height is suspended too, and repeated invalid ticks do no work.
+            pg.display.set_mode((size[0] // 2, s._viewer.border - 10))
+            s.handle_events([self.resized, key(pg.K_c), pg.event.Event(ADVANCE_EVENT)])
+            s.refresh_if_needed()
+            s.refresh_if_needed()
+            pack.assert_called_once()
+            self.assertTrue(s._grid_suspended)
+            self.assertEqual(s._statuses, status_before)
+            self.mark.assert_not_called()
+            pg.display.set_mode((size[0] // 2, size[1] // 2))
+            s.handle_events([self.resized])
+            s.refresh_if_needed()
+            self.assertFalse(s._grid_suspended)
+
+        self.assertFalse(s._grid_suspended)
+        self.assertIn(key_before, s._items[s._cursor].keys)
+        self.assertEqual(s._statuses, status_before)
+        self.assertEqual(s._shown_at, self.now)
+        s.handle_events([key(pg.K_c)])
+        self.mark.assert_not_called()
+
+    def test_grid_startup_defers_packing_until_content_area_returns(self):
+        with (
+            mock.patch.object(pg.display, "get_desktop_sizes", return_value=[(800, 50)]),
+            mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack,
+        ):
+            s = ReviewSession(self.store, reviewer="tester", mode="grid")
+            self.assertTrue(s._grid_suspended)
+            self.assertEqual(s._items, [])
+            pack.assert_not_called()
+            with (
+                mock.patch.object(s, "handle_events", return_value=False) as handle,
+                mock.patch("sys.stdout", io.StringIO()) as stdout,
+            ):
+                s.run()
+            handle.assert_called_once()
+            self.assertNotIn("No images to review", stdout.getvalue())
+            pg.display.set_mode((800, 600))
+            s.refresh_if_needed()
+            pack.assert_called_once()
+        self.assertFalse(s._grid_suspended)
+        self.assertTrue(s._items)
+
+    def test_resize_during_recovery_pack_keeps_suspension_message(self):
+        with mock.patch.object(pg.display, "get_desktop_sizes", return_value=[(800, 50)]):
+            s = ReviewSession(self.store, reviewer="tester", mode="grid")
+        pg.display.set_mode((800, 600))
+        s.refresh_if_needed()
+        self.assertFalse(s._grid_suspended)
+
+        pg.display.set_mode((800, 50))
+        s.handle_events([self.resized])
+        self.assertTrue(s._grid_suspended)
+        pg.display.set_mode((700, 600))
+        real_pack = controller_module.pack_into_grids
+
+        def pack_then_shrink(*args, **kwargs):
+            result = real_pack(*args, **kwargs)
+            pg.display.set_mode((700, 40))
+            return result
+
+        with (
+            mock.patch.object(controller_module, "pack_into_grids", side_effect=pack_then_shrink) as pack,
+            mock.patch.object(s._viewer, "refresh") as refresh,
+            mock.patch.object(s._viewer, "show_message", wraps=s._viewer.show_message) as message,
+        ):
+            s.refresh_if_needed()
+            pack.assert_called_once()
+            self.assertTrue(s._grid_suspended)
+            self.assertIn("too small", message.call_args.args[0])
+            message_count = message.call_count
+            for _ in range(3):
+                s.refresh_if_needed()
+            pack.assert_called_once()
+            refresh.assert_not_called()
+            self.assertEqual(message.call_count, message_count)
+
+    def test_empty_grid_review_does_not_suspend_at_small_size(self):
+        with (
+            mock.patch.object(pg.display, "get_desktop_sizes", return_value=[(800, 50)]),
+            mock.patch.object(ReviewSession, "_review_rows", return_value=[]),
+        ):
+            s = ReviewSession(self.store, reviewer="tester", mode="grid")
+        self.assertFalse(s._grid_suspended)
+        self.assertEqual(s._items, [])
+        with mock.patch.object(s, "handle_events", return_value=False) as handle:
+            s.run()
+        handle.assert_not_called()
+
+    def test_grid_rebuild_that_becomes_invalid_retains_items_for_recovery(self):
+        s = self.reviewing("grid")
+        current_key = s._items[s._cursor].keys[0]
+        with mock.patch.object(s, "_grid_size", return_value=(800, 0)):
+            s._rebuild_grids_for_resize()
+        self.assertTrue(s._grid_suspended)
+        self.assertIn(current_key, s._items[s._cursor].keys)
+        size = pg.display.get_surface().get_size()
+        pg.display.set_mode((size[0] // 2, size[1] // 2))
+        s.refresh_if_needed()
+        self.assertFalse(s._grid_suspended)
+        self.assertIn(current_key, s._items[s._cursor].keys)
+
+    def test_grid_with_zero_width_is_suspended_without_packing(self):
+        s = self.reviewing("grid")
+        with (
+            mock.patch.object(s, "_grid_size", return_value=(0, 400)),
+            mock.patch.object(controller_module, "pack_into_grids", wraps=controller_module.pack_into_grids) as pack,
+        ):
+            s.refresh_if_needed()
+            self.assertTrue(s._grid_suspended)
+            pack.assert_not_called()
+        s.refresh_if_needed()
+        self.assertFalse(s._grid_suspended)
+
+    def test_invalid_grid_area_without_resize_event_blocks_verdict_and_advance(self):
+        s = self.reviewing("grid")
+        size = pg.display.get_surface().get_size()
+        pg.display.set_mode((size[0], s._viewer.border - 10))
+        s.handle_events([key(pg.K_c), key(pg.K_d), pg.event.Event(ADVANCE_EVENT)])
+        self.assertTrue(s._grid_suspended)
+        self.assertFalse(s._advance_pending)
+        self.mark.assert_not_called()
+
+    def test_grid_resize_during_splash_keeps_splash_until_review_resumes(self):
+        s = ReviewSession(self.store, reviewer="tester", mode="grid")
+        s._show_splash()
+        size = pg.display.get_surface().get_size()
+        pg.display.set_mode((size[0], s._viewer.border))
+        s.handle_events([self.resized])
+        self.assertEqual(s._ui_state, UIState.SPLASH)
+        self.assertFalse(s._grid_suspended)
+        s.handle_events([key(pg.K_SPACE)])
+        s.refresh_if_needed()
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertTrue(s._grid_suspended)
+        pg.display.set_mode(size)
+        s.refresh_if_needed()
+        self.assertFalse(s._grid_suspended)
+        self.assertIsNotNone(s._shown_at)
+
+    def test_grid_mode_switch_from_end_defers_and_resumes(self):
+        s = self.reviewing("single")
+        s._show_end("finished")
+        size = pg.display.get_surface().get_size()
+        pg.display.set_mode((size[0], s._viewer.border))
+        s.handle_events([key(pg.K_m)])
+        self.assertEqual(s._ui_state, UIState.REVIEWING)
+        self.assertTrue(s._grid_suspended)
+        pg.display.set_mode(size)
+        s.refresh_if_needed()
+        self.assertFalse(s._grid_suspended)
+        self.assertTrue(s._items)
+
+    def test_disconnected_grid_session_ignores_resize_and_mode_keys(self):
+        s = self.reviewing("grid")
+        s._store_lost(store_module.StoreUnavailable("down"))
+        size = pg.display.get_surface().get_size()
+        pg.display.set_mode((size[0], s._viewer.border))
+        s.handle_events([self.resized, key(pg.K_s), key(pg.K_m)])
+        self.assertEqual(s._ui_state, UIState.DISCONNECTED)
+        self.assertFalse(s._grid_suspended)
+        self.assertEqual(s.mode, "grid")
+
     def test_two_resize_events_in_a_batch_repack_once(self):
         s = self.reviewing("grid")
         w, h = s._viewer.screen.get_size()

@@ -17,6 +17,9 @@ grid contains as many images as possible. While they are packed the screen
 says "Computing grids... i/N". Resizing the window in grid mode recomputes
 the grids for the new size. Images are shuffled at review time to counter
 attention fatigue; in grid mode the grids are then shown largest first.
+If the window has no content area above the status bar, grid review pauses
+without packing or accepting verdicts. Resize the window to resume, or press
+`s` to switch to single mode.
 
 The status bar is green for CLEAN, red for DIRTY, gray for UNREVIEWED and
 orange for FLAGGED (marked DIRTY in an earlier pass, awaiting this pass's

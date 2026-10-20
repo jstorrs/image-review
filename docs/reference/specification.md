@@ -1504,6 +1504,17 @@ the session goes to the lost-connection screen, which is not repainted over.
 Single mode only rescales. A restart (mode switch, `b`, display change) packs
 at the current size, so it leaves nothing to repack.
 
+When either grid dimension is zero or negative (including a window no taller
+than the status bar), grid packing is suspended. The session keeps its items
+and status snapshot, stops autoplay and pending advances, and accepts only
+quit, fullscreen, and mode-switch input; in particular, verdicts and
+navigation cannot act on pixels that are no longer visible. It does not pack
+or fetch grid images while suspended. When a positive content area returns,
+the session rebuilds once, follows the current item's first key when possible,
+and restarts its dwell. Startup or a mode switch into grid mode at an unusable
+size defers the initial build the same way, so an empty deferred list is not
+treated as a genuinely empty review.
+
 ### Unloadable Images
 
 An image whose bytes are missing (`KeyError`, e.g. a 404 from the server),
