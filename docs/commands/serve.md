@@ -260,6 +260,11 @@ On the way out, `serve` removes the connection file or URL file, closes the
 socket (removing the socket file in socket mode) and releases the work
 directory's lock once any mark in progress has been saved.
 
+Only the first signal counts. While `serve` cleans up, a further Ctrl-C or
+SIGTERM does nothing, so it cannot cut the cleanup short and leave
+`review.lock` behind; wait for the process to exit. `kill -9` still stops it
+at once, but then `review.lock` and the socket file stay behind.
+
 A hard kill (SIGKILL, a node crash) skips all of this and leaves behind:
 
 - the connection file or URL file, which holds the token. It stays in

@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import shlex
+import signal
 import socket
 import sys
 from collections import Counter
@@ -22,7 +23,7 @@ from .connection import MAX_PASS, RemoteTarget, Token, parse_reviewer, parse_tok
 from .export import ExportRow, ExportStatus, format_allowlist, format_report, split_allowlist
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
 from .review_db import ReviewLogChanged
-from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on
+from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on, interrupt_once
 from .status import MarkMode, Rotation, Status
 from .store import LocalStore, ReviewStore, SkippedCounts, StatusFilter, batch_summary, skipped_counts, summary
 
@@ -582,7 +583,8 @@ def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, 
 
         from .controller import ReviewSession
 
-    with interrupt_on(*HANGUP_SIGNALS), open_store(work_dir, remote, via) as store:  # terminal or ssh session dropped
+    # a dropped terminal or ssh session, or Ctrl-C (SDL leaves SIGINT alone); a second signal must not cut the cleanup
+    with interrupt_once(signal.SIGINT, *HANGUP_SIGNALS), open_store(work_dir, remote, via) as store:
         if batch is not None and (problem := unknown_batch_message(batch, {row.batch for row in store.manifest()})):
             raise click.BadParameter(problem, param_hint="'--batch'")
         # after the store: SDL must not steal terminal focus during ssh password/MFA prompts
@@ -863,8 +865,9 @@ def serve(work_dir, https_mode, bind, port, socket_path, via, direct, ssh_host):
 
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
-        # Installed before the lock is taken, so every exit path releases it.
-        with interrupt_on(*TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
+        # Installed before the lock is taken, so every exit path releases it. Only the first signal counts: a second
+        # one during cleanup would cut short the lock release or the wait for a mark in flight.
+        with interrupt_once(signal.SIGINT, *TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
             store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
             if not https_mode:
                 server, announce = _serve_socket(store, socket_path, token, via, direct, ssh_host, stack)

@@ -36,6 +36,11 @@
 
 ### Fixes
 
+- A second signal while `serve` (Ctrl-C, SIGTERM, SIGHUP) or `review` (Ctrl-C, SIGHUP; SDL turns SIGTERM into a quit
+  event) is cleaning up no longer leaves `review.lock` behind. Before, it
+  raised inside the lock release, or while waiting for a mark's fsync, so the store was never closed; on a
+  cluster the next job usually lands on another node, which cannot reclaim the stale lock. Only the first signal
+  now counts; later ones are ignored until the process exits.
 - `serve` now holds at most 64 connections at once, gives each request 60 s to arrive in full (request line,
   headers and body, counted from when the server starts waiting for it), and reads at most 64 KiB of request line
   and headers per request (a body only after the token check). A connection without the token gets one request, the

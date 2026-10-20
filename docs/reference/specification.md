@@ -46,7 +46,7 @@ server.py           bearer-token server exposing a ReviewStore: plain HTTP on a 
 connection.py       RemoteTarget: the ir:// connection string; API_VERSION, package_version, parse_reviewer
 remote.py           RemoteStore: ReviewStore client with certificate pinning (deprecated client)
 tunnel.py           SSH local port-forward for --via (deprecated client)
-signals.py          interrupt_on: SIGTERM/SIGHUP to KeyboardInterrupt, shared by serve, review and the tunnel
+signals.py          interrupt_on / interrupt_once: signals to KeyboardInterrupt, shared by serve, review and the tunnel
 controller.py       Review session orchestration and event loop
 viewer.py           Fullscreen pygame display
 layout.py           Pure grid layout: jpeg_size, fit_size, plan_grids (stdlib and rectpack only)
@@ -1086,8 +1086,10 @@ quoted twice, as the remote shell parses it again.
 
 **Cleanup**: the option checks and parsing run first. Everything after
 them (opening the store, binding, announcing, serving) runs under
-`interrupt_on(*TERMINATION_SIGNALS)`, installed before the lock is taken, so
-SIGTERM and SIGHUP unwind like Ctrl-C. Cleanup is registered on one
+`interrupt_once(SIGINT, *TERMINATION_SIGNALS)`, installed before the lock is
+taken, so SIGTERM and SIGHUP unwind like Ctrl-C, and only the first signal
+counts: its handler sets all of them to `SIG_IGN` before raising, so a second
+one cannot interrupt the cleanup below. Cleanup is registered on one
 `ExitStack`: `_close_with` registers the store's close
 (`_close_store_after_marks`, which waits for a mark in flight under
 `server.store_lock`) and then `server_close` as soon as the server is bound,
@@ -2107,11 +2109,13 @@ works as follows:
 - `close()` removes the file only if it still names this process (host,
   `boot_id` and pid) and is still the file it read (held open the same way);
   it is idempotent.
-- `serve` turns SIGTERM and SIGHUP into `KeyboardInterrupt` before taking the
-  lock, and closes the store last, while holding the server's store lock, so a
-  mark in progress finishes first and later ones fail (500). `review` turns
-  SIGHUP (lost terminal or ssh session) into `KeyboardInterrupt` while the store
-  is open.
+- `serve` turns SIGINT, SIGTERM and SIGHUP into `KeyboardInterrupt` before
+  taking the lock (`interrupt_once`: the first one raises and the others are
+  ignored until the block exits, so cleanup is not cut short), and closes the
+  store last, while holding the server's store lock, so a mark in progress
+  finishes first and later ones fail (500). `review` does the same for SIGINT
+  and SIGHUP (lost terminal or ssh session) while the store is open; SDL
+  leaves both alone, and turns SIGTERM into a quit event.
 
 The server additionally assumes one reviewer per server. Its undo stack is
 one, in the server's store, shared by every client: if several clients use one
