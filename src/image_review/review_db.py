@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 from .access import policy_of_dir
-from .connection import package_version, parse_reviewer
+from .connection import MAX_PASS, package_version, parse_reviewer
 from .status import MARK_MODES, TODO_STATUSES, VERDICTS, ImageId, MarkMode, Status, Verdict, parse_choice
 
 log = logging.getLogger(__name__)
@@ -71,6 +71,8 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) 
         raise ValueError(f"{where}: pass_number must be an integer, got {pass_text!r}") from None
     if pass_number < 1:
         raise ValueError(f"{where}: pass_number must be at least 1, got {pass_number}")
+    if pass_number > MAX_PASS:
+        raise ValueError(f"{where}: pass_number must be at most {MAX_PASS}, got {pass_number}")
     row_mode = parse_choice(mode, DECISION_MODES)
     if row_mode is None:
         raise ValueError(f"{where}: mode must be one of {', '.join(get_args(MarkMode))}, undo or empty, got {mode!r}")
@@ -363,8 +365,8 @@ class ReviewDB:
             raise ValueError(f"Invalid status {status!r}, must be one of {get_args(Verdict)}")
         if mode not in get_args(MarkMode):
             raise ValueError(f"Invalid mode {mode!r}, must be one of {get_args(MarkMode)}")
-        if pass_number < 1:  # parse_decision would refuse the row when review.tsv is next loaded
-            raise ValueError(f"Invalid pass_number {pass_number!r}, must be at least 1")
+        if not 1 <= pass_number <= MAX_PASS:  # parse_decision would refuse the row when review.tsv is next loaded
+            raise ValueError(f"Invalid pass_number {pass_number!r}, must be from 1 to {MAX_PASS}")
         reviewer = parse_reviewer(reviewer)  # a tab or newline would corrupt the log
         ts = datetime.now(UTC).isoformat()
         tool_version = package_version()
@@ -458,7 +460,7 @@ class ReviewDB:
         """Auto-detect the current pass number.
 
         If any manifest image has no row in _rows, we're on pass 1.
-        Otherwise, next pass = max pass_number + 1.
+        Otherwise, next pass = max pass_number + 1, at most MAX_PASS.
         """
         ids = set(image_ids)
         if any(image_id not in self._rows for image_id in ids):
@@ -467,4 +469,4 @@ class ReviewDB:
         # Stay on max_pass if it still has unfinished work
         if any(self.get_status(i, max_pass) in TODO_STATUSES for i in ids):
             return max_pass
-        return max_pass + 1
+        return min(max_pass + 1, MAX_PASS)  # never a pass the server would refuse

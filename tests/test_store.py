@@ -20,7 +20,7 @@ import pygame as pg
 import skimage as ski
 
 from image_review import review_db as review_db_module
-from image_review.connection import package_version
+from image_review.connection import MAX_PASS, package_version
 from image_review.controller import ReviewSession
 from image_review.export import split_allowlist
 from image_review.lock import LOCK_NAME
@@ -372,6 +372,7 @@ class TestStrictLoading(unittest.TestCase):
             "bad status": (self.REVIEW_HEADER, good, f"/src/b.dcm\tbatch_001\tdirty\t1\t{ts}"),
             "bad pass": (self.REVIEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\tone\t{ts}"),
             "zero pass": (self.REVIEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t0\t{ts}"),
+            "pass above the maximum": (self.REVIEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t{MAX_PASS + 1}\t{ts}"),
             "empty image_id": (self.REVIEW_HEADER, good, f"\tbatch_001\tCLEAN\t1\t{ts}"),
         }
         for name, lines in cases.items():
@@ -379,6 +380,10 @@ class TestStrictLoading(unittest.TestCase):
                 self.write_review(*lines)
                 with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
                     LocalStore(self.work_dir)
+
+    def test_review_row_at_the_maximum_pass_loads(self):
+        self.write_review(self.REVIEW_HEADER, f"/src/a.dcm\tbatch_001\tCLEAN\t{MAX_PASS}\t{self.GOOD_TS}")
+        LocalStore(self.work_dir)
 
     def test_review_header_problems(self):
         for header in (
@@ -972,7 +977,7 @@ class TestAuditColumns(StoreTestCase):
         self.assertFalse((self.work_dir / "review.tsv").exists())
 
     def test_bad_pass_number_is_refused_before_writing(self):
-        for pass_number in (0, -1):
+        for pass_number in (0, -1, MAX_PASS + 1):
             with self.subTest(pass_number=pass_number), self.assertRaises(ValueError):
                 self.store.mark(["batch_001/a.jpg"], "CLEAN", pass_number, reviewer="alice", mode="single")
         self.assertFalse((self.work_dir / "review.tsv").exists())
@@ -1248,6 +1253,12 @@ class TestPassMonotonic(StoreTestCase):
     def mark_all(self, status, pass_number, keys):
         for key in keys:
             mark(self.store, [key], status, pass_number)
+
+    def test_current_pass_stops_at_the_maximum_pass(self):
+        keys = [r[1] for r in ROWS]
+        self.mark_all("CLEAN", MAX_PASS, keys)  # accepted, and a fresh load takes the row back
+        self.assertEqual(LocalStore(self.work_dir, read_only=True).current_pass(), MAX_PASS)
+        self.assertEqual(self.store.current_pass(), MAX_PASS)  # not MAX_PASS + 1: the server would refuse it
 
     def test_current_pass_transitions(self):
         keys = [r[1] for r in ROWS]

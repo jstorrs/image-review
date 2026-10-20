@@ -18,7 +18,7 @@ import click
 
 from .access import Access, access_of, modes, world_access_warning
 from .atomic import write_new_file
-from .connection import RemoteTarget, Token, parse_reviewer, parse_token
+from .connection import MAX_PASS, RemoteTarget, Token, parse_reviewer, parse_token
 from .export import ExportRow, ExportStatus, format_allowlist, format_report, split_allowlist
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
 from .review_db import ReviewLogChanged
@@ -531,9 +531,9 @@ def unknown_batch_message(batch: str, known: set[str]) -> str | None:
 @click.option(
     "--pass",
     "pass_number",
-    type=click.IntRange(min=1),
+    type=click.IntRange(1, MAX_PASS),
     default=None,
-    help="Pass number, 1 or more (auto-detected if omitted).",
+    help=f"Pass number, 1 to {MAX_PASS} (auto-detected if omitted).",
 )
 @click.option(
     "--batch",

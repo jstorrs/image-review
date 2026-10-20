@@ -332,6 +332,7 @@ class TestParsing(unittest.TestCase):
             (parse_pass, b"{}"),
             (parse_pass, b'{"pass": "1"}'),
             (parse_pass, b'{"pass": true}'),
+            (parse_pass, b'{"pass": 1000001}'),
             (parse_pass, b'{"pass": 0}'),
             (parse_pass, b"\xff"),
             (parse_version, b"[]"),
@@ -518,8 +519,8 @@ class TestCli(RemoteTestCase):
             self.store.check_api()
 
     def test_older_server_is_refused(self):
-        # v7 added /mark's 409 and v8 its single-key rule; an older server would accept a multi-key single CLEAN
-        # (and, before v7, a grid CLEAN over a DIRTY key)
+        # v9 bounded the pass at MAX_PASS; a v8 server accepts a larger one (and, before v8, a multi-key single CLEAN,
+        # and before v7 a grid CLEAN over a DIRTY key)
         old = API_VERSION - 1
         with mock.patch("image_review.server.API_VERSION", old), self.assertRaises(ApiMismatch) as ctx:
             self.store.check_api()

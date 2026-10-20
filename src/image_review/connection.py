@@ -9,9 +9,10 @@ from urllib.parse import parse_qsl, urlsplit
 
 # Wire API version, shared by client and server. Any change to request/response
 # shapes or to the Status vocabulary must bump it.
-API_VERSION = 8
+API_VERSION = 9
 
 MAX_REVIEWER_LENGTH = 64
+MAX_PASS = 10**6  # a pass number above this is refused everywhere, and current_pass() never answers above it
 MIN_TOKEN_LENGTH = 22  # 128 bits as base64url; 32 hex characters also pass
 MAX_TOKEN_LENGTH = 256
 

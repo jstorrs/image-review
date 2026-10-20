@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Self, get_args
 from urllib.parse import urlencode
 
-from .connection import API_VERSION, RemoteTarget, cert_fingerprint, is_int_at_least
+from .connection import API_VERSION, MAX_PASS, RemoteTarget, cert_fingerprint, is_int_at_least
 from .status import GridCleanRefused, Key, MarkMode, Status, Verdict
 from .store import (
     ManifestRow,
@@ -115,7 +115,7 @@ def parse_statuses(data: bytes) -> dict[Key, Status]:
 def parse_pass(data: bytes) -> int:
     payload = _load_json(data)
     value = payload.get("pass") if isinstance(payload, dict) else None
-    if not is_int_at_least(value, 1):
+    if not is_int_at_least(value, 1) or value > MAX_PASS:
         raise RemoteError("malformed pass number from server")
     return value
 

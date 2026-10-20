@@ -39,7 +39,7 @@ grid.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--mode` | `single` | Display mode |
-| `--pass` | auto-detected | Pass number, 1 or more; see [Passes](#passes) |
+| `--pass` | auto-detected | Pass number, 1 to 1000000; see [Passes](#passes) |
 | `--batch` | the first batch with images matching the filter | Restrict the session to this batch; `b` at the end of the list never leaves it. An empty or unknown name is rejected (exit 2) with a list of up to five known batches |
 | `--filter` | `unreviewed` | Which images to show; `unreviewed` = images still to do (UNREVIEWED and FLAGGED) |
 | `--rotate` | `auto` | Rotate images 90 degrees in grids: `auto` = only when that saves a grid, `always` or `never` |
@@ -207,7 +207,7 @@ Without `--pass`, the pass is detected from `review.tsv`:
 - pass 1 while any image has never been reviewed;
 - otherwise the highest recorded pass while it still has todo images
   (UNREVIEWED or FLAGGED);
-- otherwise the next pass.
+- otherwise the next pass, but never above 1000000.
 
 An image's status in a pass comes from its latest verdict:
 

@@ -34,6 +34,7 @@ from cryptography.x509.oid import NameOID
 
 from .connection import (
     API_VERSION,
+    MAX_PASS,
     RemoteTarget,
     Token,
     cert_fingerprint,
@@ -103,13 +104,16 @@ def _one(query: dict[str, list[str]], name: str) -> str:
     return values[0]
 
 
+_PASS_MESSAGE = f"pass must be an integer from 1 to {MAX_PASS}"
+
+
 def parse_pass(raw: str) -> int:
     try:
         value = int(raw)
     except ValueError:
         value = 0
-    if value < 1:
-        raise BadRequest("pass must be an integer >= 1")
+    if not 1 <= value <= MAX_PASS:
+        raise BadRequest(_PASS_MESSAGE)
     return value
 
 
@@ -124,8 +128,8 @@ def _json_object(body: bytes) -> dict:
 
 
 def _pass_field(value: object) -> int:
-    if not is_int_at_least(value, 1):
-        raise BadRequest("pass must be an integer >= 1")
+    if not is_int_at_least(value, 1) or value > MAX_PASS:
+        raise BadRequest(_PASS_MESSAGE)
     return value
 
 

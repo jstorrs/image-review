@@ -165,7 +165,7 @@ is created by the first verdict.
 | `image_id` | As in `manifest.tsv` |
 | `batch` | Batch the image belongs to |
 | `status` | `CLEAN` or `DIRTY`; `UNREVIEWED` only in an undo row (see [Undo rows](#undo-rows)) |
-| `pass_number` | Pass (an integer, at least 1) in which the verdict was given; in an undo row, the restored verdict's pass, or for a tombstone the undone mark's pass |
+| `pass_number` | Pass (an integer from 1 to 1000000) in which the verdict was given; in an undo row, the restored verdict's pass, or for a tombstone the undone mark's pass |
 | `timestamp` | ISO 8601 UTC time |
 | `reviewer` | Who gave the verdict: `review --reviewer`, by default the login name. An unverified claim made by the client, recorded as given |
 | `mode` | `single` or `grid`: the display mode the verdict was given in; `undo` for a row written by `z` |
@@ -192,7 +192,7 @@ the old first five), and every row has all nine (or five) fields, with:
 
 - a non-empty `image_id`;
 - a `status` of `CLEAN` or `DIRTY`, or `UNREVIEWED` with `mode` `undo`;
-- a `pass_number` of at least 1;
+- a `pass_number` from 1 to 1000000;
 - a `mode` of `single`, `grid`, `undo` or empty;
 - a `grid_size` that is empty or at least 1.
 

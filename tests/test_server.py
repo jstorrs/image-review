@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
-from image_review.connection import API_VERSION, RemoteTarget
+from image_review.connection import API_VERSION, MAX_PASS, RemoteTarget
 from image_review.review_db import ReviewLogChanged
 from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
 from image_review.store import LocalStore, load_manifest
@@ -625,9 +625,9 @@ class TestReads(ServerTestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
 
-    def test_api_version_is_8(self):
-        self.assertEqual(API_VERSION, 8)
-        self.assertEqual(self.get_json("/version")["api"], 8)
+    def test_api_version_is_9(self):
+        self.assertEqual(API_VERSION, 9)
+        self.assertEqual(self.get_json("/version")["api"], 9)
 
     def test_skipped_absent_is_zero_counts(self):
         resp, data, _ = self.request("GET", "/skipped")
@@ -651,9 +651,31 @@ class TestReads(ServerTestCase):
         self.assertEqual(statuses, {key: "UNREVIEWED" for _, key, _ in ROWS})
 
     def test_statuses_bad_pass_is_400(self):
-        for path in ("/statuses", "/statuses?pass=x", "/statuses?pass=0", "/statuses?pass=-1"):
+        for path in (
+            "/statuses",
+            "/statuses?pass=x",
+            "/statuses?pass=0",
+            "/statuses?pass=-1",
+            f"/statuses?pass={MAX_PASS + 1}",
+        ):
             with self.subTest(path=path):
                 self.assertEqual(self.request("GET", path)[0].status, 400)
+
+    def test_pass_maximum_is_accepted(self):
+        self.assertEqual(self.request("GET", f"/statuses?pass={MAX_PASS}")[0].status, 200)
+        resp, _ = self.post_mark(
+            {"keys": ["batch_001/a.jpg"], "status": "DIRTY", "pass": MAX_PASS, "reviewer": "tester", "mode": "single"}
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(self.post_undo({"pass": MAX_PASS, "reviewer": "tester"})[0].status, 200)
+        self.assertEqual(self.get_json("/current_pass"), {"pass": 1})
+
+    def test_current_pass_answers_at_the_maximum_pass_when_every_key_is_marked_there(self):
+        keys = [key for _, key, _ in ROWS]
+        resp, _ = self.mark(keys, "CLEAN", mode="grid", pass_number=MAX_PASS)
+        self.assertEqual(resp.status, 200)
+        resp, data, _ = self.request("GET", "/current_pass")
+        self.assertEqual((resp.status, json.loads(data)), (200, {"pass": MAX_PASS}))
 
     def test_repeated_query_parameter_is_400(self):
         for path in ("/statuses?pass=1&pass=1", "/image?key=batch_001%2Fa.jpg&key=batch_001%2Fb.jpg", "/image"):
@@ -741,6 +763,7 @@ class TestMark(ServerTestCase):
             "pass not int": {**good, "pass": "1"},
             "pass bool": {**good, "pass": True},
             "pass zero": {**good, "pass": 0},
+            "pass above the maximum": {**good, "pass": MAX_PASS + 1},
             "missing field": {k: v for k, v in good.items() if k != "status"},
             "not an object": [good],
             "invalid json": b"{not json",
@@ -895,6 +918,7 @@ class TestUndo(ServerTestCase):
         bad = {
             "missing pass": {"reviewer": "tester"},
             "pass zero": {**good, "pass": 0},
+            "pass above the maximum": {**good, "pass": MAX_PASS + 1},
             "pass not int": {**good, "pass": "1"},
             "pass bool": {**good, "pass": True},
             "missing reviewer": {"pass": 1},

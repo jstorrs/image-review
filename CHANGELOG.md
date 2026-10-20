@@ -26,9 +26,19 @@
   reporting as if no input had failed or been ignored.
 - A `manifest.tsv` listing one `image_id` with two different `source_sha256` values is now rejected when the work
   directory is opened, instead of `export` silently using the first.
+- **Wire API v9: client and server must be upgraded together.** `/statuses`,
+  `POST /mark` and `POST /undo` now answer 400 for a pass above one million.
+  A v9 client refuses a server of any other version (0.4.0 speaks v8), and
+  older clients refuse a v9 server.
+- A `review.tsv` already holding a `pass_number` above one million is now
+  refused when the work directory is opened; edit it by hand to remove or
+  correct those rows.
 
 ### Fixes
 
+- A pass number is now bounded at one million (`review --pass`, the serve API and `review.tsv`). Before, a client
+  holding the token could record a pass with thousands of digits, after which `/current_pass` answered 500 on every
+  later serve until `review.tsv` was edited by hand. `current_pass` now stops at one million.
 - Grid review now pauses when resizing leaves no display area above the status bar, then rebuilds when space returns.
 - Grayscale inputs that would lose pixel values or overflow their intensity
   range when converted to float32 now fail with an explicit unsupported

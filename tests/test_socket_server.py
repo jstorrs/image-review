@@ -22,7 +22,7 @@ from unittest import mock
 import image_review
 from image_review import cli
 from image_review.cli import PACKAGE_LOGGER, browser_url, ssh_forward_command
-from image_review.connection import parse_token
+from image_review.connection import MAX_PASS, parse_token
 from image_review.server import (
     INSTANCE_HEADER,
     SUN_PATH_SIZE,
@@ -229,6 +229,26 @@ class TestSocketRequests(SocketServerTestCase):
         self.assertEqual((resp.status, json.loads(data)), (200, {"batch_001/a.jpg": "UNREVIEWED"}))
         resp, data = self.request("GET", "/statuses?pass=1")
         self.assertEqual(json.loads(data)["batch_001/a.jpg"], "UNREVIEWED")
+
+    def test_pass_boundary(self):
+        mark = {
+            "keys": ["batch_001/a.jpg"],
+            "status": "CLEAN",
+            "pass": MAX_PASS + 1,
+            "reviewer": "tester",
+            "mode": "single",
+        }
+        for path, method, body in (
+            (f"/statuses?pass={MAX_PASS + 1}", "GET", None),
+            ("/mark", "POST", json.dumps(mark).encode()),
+            ("/undo", "POST", json.dumps({"pass": MAX_PASS + 1, "reviewer": "tester"}).encode()),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.request(method, path, body=body)[0].status, 400)
+        self.assertEqual(self.request("GET", f"/statuses?pass={MAX_PASS}")[0].status, 200)
+        self.assertEqual(
+            self.request("POST", "/mark", body=json.dumps({**mark, "pass": MAX_PASS}).encode())[0].status, 200
+        )
 
     def test_grid_clean_over_dirty_key_is_409(self):
         def mark(keys, status, mode):

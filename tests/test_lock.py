@@ -403,9 +403,10 @@ class TestLockCli(LockTestCase):
         self.assertFalse(self.lock_path.exists())
         return result
 
-    def test_review_rejects_nonpositive_pass(self):
-        for value in ("0", "-1"):
-            self.assert_rejected("--pass", value)
+    def test_review_rejects_out_of_range_pass(self):
+        for value in ("0", "-1", "1000001"):
+            with self.subTest(value=value):
+                self.assert_rejected("--pass", value)
 
     def test_review_rejects_unknown_batch_listing_known(self):
         result = self.assert_rejected("--batch", "nope")
