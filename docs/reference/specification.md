@@ -1940,7 +1940,9 @@ the no-wildcard and advertisable-host checks (see `serve`) and leaves no
 listener behind when it raises.
 `ReviewServer` is a `ThreadingHTTPServer` (daemon threads) holding the store,
 the token, a store lock, and the sets of known keys and batches taken from the
-manifest at start.
+manifest at start. It runs at most 64 connections at once, each with a 60 s
+deadline per request ([Headers and connection
+handling](#headers-and-connection-handling)); `UnixReviewServer` inherits both.
 
 ### TLS and certificate lifecycle
 
@@ -2004,7 +2006,8 @@ malformed reply or a 404.
 | 503 | Socket mode: `POST /grids` while another `/grids` request is being computed; retry later |
 
 400, 401, 412, 500 and unknown-route 404 replies send `Connection: close`,
-because a request body may be unread; an image 404, a `/mark` 409 and a
+because a request body may be unread, and so does a public page file (socket
+mode) requested without the token, so a tokenless connection lasts one request; an image 404, a `/mark` 409 and a
 `/grids` 503 (sent after the body is read) keep the connection open.
 
 The 409 check runs under the store lock, so no other mark can land between
@@ -2016,8 +2019,20 @@ once per grid CLEAN, small beside the synced append the mark itself does.
 
 Every response, including stdlib error pages, carries `Cache-Control:
 no-store` and `X-Content-Type-Options: nosniff`. The server speaks HTTP/1.1
-with keep-alive; Nagle is disabled (headers and body are separate writes) and
-idle connections time out after 60 s. The TLS handshake is deferred to the
+with keep-alive; Nagle is disabled (headers and body are separate writes).
+Each request (request line, headers and body) must be read within 60 s of the
+server starting to wait for its request line, so time a keep-alive connection
+spends idle counts toward its next request; past that the connection is closed
+with no reply and no log line. The request line and headers may total at most
+64 KiB (bytes received, counted per request); a body adds its `Content-Length`
+(at most 1 MiB) once the token is checked. Over that, too, the connection is
+closed with no reply and no log line. A store failure that is itself a timeout
+(e.g. `ETIMEDOUT` on NFS) is still a 500. Each receive and each send also has its own 60 s
+timeout, so a slow image download is bounded per write, not by the request
+deadline. At most 64 connections are open at once (both modes): the next one is
+closed at `accept()`, before it gets a thread, and a WARNING `connection limit
+(64) reached; refusing connections until one closes` is logged once each time
+the server fills. The TLS handshake is deferred to the
 handler thread (so a stalled client cannot block `accept()`) and gets a 10 s
 deadline before authentication; a failed handshake is logged as
 `connection error: <ExceptionClass>` and the connection closed. The client's

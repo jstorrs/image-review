@@ -1,10 +1,13 @@
+import contextlib
 import getpass
 import hashlib
+import http.client
 import io
 import itertools
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -26,6 +29,7 @@ from image_review.connection import MAX_PASS, parse_token
 from image_review.server import (
     INSTANCE_HEADER,
     SUN_PATH_SIZE,
+    ReviewHandler,
     ReviewServer,
     UnixReviewServer,
     clear_stale_socket,
@@ -413,6 +417,18 @@ class TestPublicAssets(SocketServerTestCase):
                 self.assertIn("default-src 'none'", resp.getheader("Content-Security-Policy"))
                 self.assertEqual(data, (WEB_DIR / name).read_bytes())
 
+    def test_tokenless_asset_request_closes_its_connection(self):
+        # Else a client re-fetching a file within each request deadline could hold a connection slot for good
+        resp, _ = self.request("GET", "/app.css", token=None)
+        self.assertEqual((resp.status, resp.getheader("Connection")), (200, "close"))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(str(self.path))
+            sock.sendall(b"GET /app.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            reply = read_until_closed(sock, 5)  # the server closes after the reply, well before the deadline
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200 "), reply[:60])
+        resp, _ = self.request("GET", "/app.css")  # with the token the connection stays open
+        self.assertEqual((resp.status, resp.getheader("Connection")), (200, None))
+
     def test_query_is_ignored(self):
         resp, data = self.request("GET", "/?x=1", token=None)
         self.assertEqual(resp.status, 200)
@@ -457,6 +473,122 @@ class TestPublicAssets(SocketServerTestCase):
                 resp, _ = self.request("GET", "/current_pass", token=token)
                 self.assertIn("frame-ancestors 'none'", resp.getheader("Content-Security-Policy"))
                 self.assertEqual(resp.getheader("Referrer-Policy"), "no-referrer")
+
+
+def read_until_closed(sock: socket.socket, limit: float) -> bytes:
+    """Everything the server sends before it closes; fails (TimeoutError) if it is still open after `limit` s."""
+    sock.settimeout(limit)
+    chunks = []
+    try:
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
+    except (BrokenPipeError, ConnectionResetError):  # closed with our bytes unread
+        pass
+    return b"".join(chunks)
+
+
+class TestSocketConnectionLimit(SocketServerTestCase):
+    CAP = 3
+
+    def setUp(self):
+        patcher = mock.patch.object(ReviewServer, "max_connections", self.CAP)  # read when the server is made
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def connect(self) -> socket.socket:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(sock.close)
+        sock.settimeout(10)
+        sock.connect(str(self.path))
+        return sock
+
+    def test_full_server_refuses_at_accept_and_warns_once(self):
+        held = [self.connect() for _ in range(self.CAP)]  # idle, waiting for a request line: each holds a slot
+        with self.assertLogs(SERVER_LOGGER, "WARNING") as logs:
+            for _ in range(3):
+                start = time.monotonic()
+                # Given a thread it would wait out the 60 s request deadline; refused, it closes at once
+                self.assertEqual(read_until_closed(self.connect(), 5), b"")
+                self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(
+            [r.getMessage() for r in logs.records],
+            ["connection limit (3) reached; refusing connections until one closes"],
+        )
+        held[0].close()  # its thread sees EOF and frees the slot
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                resp, data = self.request("GET", "/current_pass")
+                break
+            except (OSError, http.client.HTTPException):
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+        self.assertEqual((resp.status, data), (200, b'{"pass": 1}'))
+
+
+class TestSocketRequestDeadline(SocketServerTestCase):
+    DEADLINE = 1.0
+
+    def setUp(self):
+        patcher = mock.patch.object(ReviewHandler, "request_deadline", self.DEADLINE)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def connect(self) -> socket.socket:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(sock.close)
+        sock.settimeout(10)
+        sock.connect(str(self.path))
+        return sock
+
+    def test_trickled_request_line_cut_off_at_the_deadline(self):
+        sock = self.connect()
+        start = time.monotonic()
+        # A byte every 0.1 s, far inside the per-receive timeout, until the server closes
+        for byte in b"GET /" + b"a" * 1000:
+            self.assertLess(time.monotonic() - start, 10 * self.DEADLINE, "still open after trickling")
+            try:
+                sock.sendall(bytes([byte]))
+            except (BrokenPipeError, ConnectionResetError):
+                break
+            if select.select([sock], [], [], 0.1)[0]:  # readable: the server sent something or closed
+                self.assertEqual(read_until_closed(sock, 5), b"")
+                break
+        self.assertGreater(time.monotonic() - start, self.DEADLINE / 2)
+
+    def test_slow_grids_body_closed_without_reply_or_error_log(self):
+        sock = self.connect()
+        head = (
+            f"POST /grids HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {self.token}\r\n"
+            f"{INSTANCE_HEADER}: {self.server.instance}\r\nContent-Length: 100\r\n\r\n"
+        )
+        with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
+            sock.sendall(head.encode() + b'{"keys": ')  # the rest of the body never comes
+            self.assertEqual(read_until_closed(sock, 10 * self.DEADLINE), b"")
+        resp, _ = self.request("GET", "/current_pass")  # the server carries on
+        self.assertEqual(resp.status, 200)
+
+    def test_keep_alive_requests_each_get_the_deadline(self):
+        deadline = 2.0  # longer than the class's, for headroom on slow runners
+        conn = UnixHTTPConnection(self.path)
+        self.addCleanup(conn.close)
+        headers = {"Authorization": f"Bearer {self.token}", INSTANCE_HEADER: self.server.instance}
+        with mock.patch.object(ReviewHandler, "request_deadline", deadline):
+            for _ in range(4):  # together longer than one deadline; each request alone well within it
+                conn.request("GET", "/current_pass", headers=headers)
+                self.assertEqual(conn.getresponse().read(), b'{"pass": 1}')
+                time.sleep(deadline / 3)
+
+    def test_headers_over_the_budget_closed_without_reply(self):
+        sock = self.connect()
+        pad = "".join(f"X-Pad-{i}: {'a' * 30000}\r\n" for i in range(3))
+        with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):  # it may close mid-send
+                sock.sendall(f"GET / HTTP/1.1\r\nHost: localhost\r\n{pad}\r\n".encode())
+            self.assertEqual(read_until_closed(sock, 10), b"")
 
 
 class TestWebFiles(unittest.TestCase):

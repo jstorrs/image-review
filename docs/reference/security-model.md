@@ -88,6 +88,22 @@ in [its own section](#browser-review-over-a-unix-socket).
   snapshot of the statuses and may not see another client's marks until it
   refetches; in `review.tsv` the last row for an image wins. Serving several
   clients at once is out of scope.
+- **Connection limits.** The server holds at most 64 connections at once and
+  closes the next at accept, before it gets a thread. Each request must be
+  read whole within 60 s, however slowly its bytes arrive, and its request
+  line and headers may total at most 64 KiB; only after the token check may a
+  body (at most 1 MiB) follow. A connection without the token gets one
+  request: every reply to it closes the connection. In the deprecated HTTPS
+  mode any user on the cluster can connect to the port without the token, so
+  one can fill the 64 slots and keep the reviewer out. Each connection lasts
+  at most one request deadline (60 s), but by reconnecting as slots free they
+  can keep the reviewer out for as long as they keep at it. What they can no
+  longer do is exhaust the serve user's processes on the node (each
+  connection used to start a thread, counted against `RLIMIT_NPROC`, with no
+  cap) or its memory: a tokenless request can make the server read at most
+  64 KiB, 4 MiB across all 64 slots plus the parser's copies (each connection
+  used to be able to make it buffer about 6.5 MB of headers, over 50 MB while
+  parsing them).
 - **`--via` (deprecated).** `review --via` and `status --via` run `ssh` to
   forward a local port to the compute node. ssh protects the hop to the login
   node; TLS with the pinned certificate covers the whole path to the compute
@@ -177,6 +193,12 @@ The points below are its limits.
   `[::1]:8080` could receive the browser and read the token. If you change
   the command, keep the explicit address. Other users on the laptop can reach
   `127.0.0.1:8080` while the command runs, but still need the token.
+  Without it they can still fill the server's 64 connection slots through
+  the forward (see [Connection limits](#the-server-image-review-serve)) and
+  keep the browser out: each tokenless connection lasts one request, the
+  public page files included, and at most 60 s, but by reconnecting they can
+  keep the slots full for as long as they keep at it. They can no longer
+  exhaust your processes or memory on the node.
   That holds only while the forward is up. If it ends (the laptop slept, the
   network dropped) and another local user binds `127.0.0.1:8080`, pressing
   Reconnect sends them the token, in the `Authorization` header of its first

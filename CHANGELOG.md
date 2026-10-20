@@ -36,6 +36,14 @@
 
 ### Fixes
 
+- `serve` now holds at most 64 connections at once, gives each request 60 s to arrive in full (request line,
+  headers and body, counted from when the server starts waiting for it), and reads at most 64 KiB of request line
+  and headers per request (a body only after the token check). A connection without the token gets one request, the
+  public page files included. Before, the 60 s timeout applied to each receive, so a client sending a byte every 59 s
+  was never cut off; every connection got its own thread with no cap, and could make the server buffer about 6.5 MB
+  of headers: anyone able to connect, without the token, could exhaust the serve user's processes (`RLIMIT_NPROC`)
+  and memory on the node. Such a client can still fill the 64 slots and, by reconnecting, keep the reviewer out, but
+  each connection now lasts at most one request and 60 s, and holds about 64 KiB.
 - A pass number is now bounded at one million (`review --pass`, the serve API and `review.tsv`). Before, a client
   holding the token could record a pass with thousands of digits, after which `/current_pass` answered 500 on every
   later serve until `review.tsv` was edited by hand. `current_pass` now stops at one million.

@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import hmac
 import importlib.resources
+import io
 import ipaddress
 import json
 import logging
@@ -21,8 +22,9 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -60,8 +62,19 @@ log = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1 << 20
 CERT_VALIDITY = datetime.timedelta(days=30)
-HANDLER_TIMEOUT_SECONDS = 60
+HANDLER_TIMEOUT_SECONDS = 60  # each socket receive or send
 HANDSHAKE_TIMEOUT_SECONDS = 10
+# Reading one whole request (request line, headers, body) must finish this long after the server starts waiting
+# for its request line, so idle keep-alive time counts too. Unlike the per-receive timeout, a trickle can't reset it.
+REQUEST_DEADLINE_SECONDS = 60
+# Bytes of request line and headers one request may send; its body adds its Content-Length once the token is checked.
+# Bounds what a client without the token can make the server buffer and parse (the stdlib alone allows 100 lines of
+# 64 KiB). A browser's or the Python client's headers, token and instance id included, take a few hundred bytes to
+# 2 KiB; cookies other localhost apps set (socket mode) can add a few KiB.
+MAX_HEAD_BYTES = 64 * 1024
+# Open connections at once; the next is closed at accept, before it gets a thread. Clients use about 9 (remote's 8
+# workers, a browser's ~6 per origin); headroom keeps a few idle or stray sockets from locking the reviewer out.
+MAX_CONNECTIONS = 64
 MAX_GRID_KEYS = 1000
 MIN_GRID_SIDE = 256
 MAX_GRID_SIDE = 16384
@@ -276,9 +289,54 @@ def json_reply(payload) -> Reply:
 GRID_CLEAN_REFUSED = Reply(409, json.dumps({"error": "grid holds a DIRTY or FLAGGED image"}).encode())
 
 
+class _RequestCutOff(TimeoutError):
+    """A request read stopped by DeadlineReader: its deadline passed, a receive timed out, or its budget ran out.
+
+    A TimeoutError, so BaseHTTPRequestHandler.handle_one_request closes the connection without a reply; a subclass,
+    so _handle can tell it from a store's own TimeoutError (e.g. ETIMEDOUT on NFS), which stays a 500.
+    """
+
+
+class DeadlineReader(io.RawIOBase):
+    """A connection's reads, refused with _RequestCutOff once `deadline` (a time.monotonic() value) has passed or
+    `budget` bytes have been received.
+
+    Each receive waits at most until the deadline and at most `timeout` (the handler's per-receive timeout); the
+    socket's timeout is then restored to `timeout`, so writes keep their own. On an SSLSocket recv_into returns
+    already-decrypted bytes first. The budget counts bytes received, including any BufferedReader reads ahead.
+    """
+
+    def __init__(self, sock: socket.socket, timeout: float):
+        self._sock = sock
+        self._timeout = timeout
+        # The handler sets both for each request
+        self.deadline = time.monotonic() + REQUEST_DEADLINE_SECONDS
+        self.budget = MAX_HEAD_BYTES
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise _RequestCutOff("request deadline passed")
+        if self.budget <= 0:
+            raise _RequestCutOff("request too large")
+        self._sock.settimeout(min(remaining, self._timeout))
+        try:
+            received = self._sock.recv_into(memoryview(buffer).cast("B")[: self.budget])
+        except TimeoutError as e:
+            raise _RequestCutOff("receive timed out") from e
+        finally:
+            self._sock.settimeout(self._timeout)
+        self.budget -= received
+        return received
+
+
 class ReviewHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = HANDLER_TIMEOUT_SECONDS
+    request_deadline: float = REQUEST_DEADLINE_SECONDS  # read per request, so tests can patch it
     disable_nagle_algorithm = True  # headers and body are separate writes
     server: "ReviewServer"
 
@@ -288,6 +346,20 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self.request.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
         self.request.do_handshake()
         super().setup()  # applies the normal timeout
+        self._bound_reads()
+
+    def _bound_reads(self) -> None:
+        """Replace StreamRequestHandler's rfile (nothing read from it yet) with one bounded by the request deadline."""
+        self.rfile.close()  # only drops its reference to the socket
+        self._reader = DeadlineReader(self.connection, self.timeout)
+        self.rfile = io.BufferedReader(self._reader)
+
+    def handle_one_request(self) -> None:
+        # A TimeoutError from the reader reaches the stdlib's own handling: the connection closes, nothing is
+        # sent, and log_error goes to log_message, which logs nothing
+        self._reader.deadline = time.monotonic() + self.request_deadline
+        self._reader.budget = MAX_HEAD_BYTES  # bytes already read ahead into rfile are not counted again
+        super().handle_one_request()
 
     def end_headers(self) -> None:
         # Here rather than in _send so stdlib send_error responses carry them too
@@ -326,6 +398,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
             reply = self._route(method)
         except BadRequest:
             reply = Reply(400, close=True)
+        except _RequestCutOff:
+            raise  # the body ran out of time or budget: handle_one_request closes the connection, no reply
         except Exception as e:  # noqa: BLE001 - any store failure must become a 500, not a dead connection
             log.error("internal error: %s", type(e).__name__)  # noqa: TRY400 - class name only, never the message
             reply = Reply(500, close=True)
@@ -409,6 +483,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             length = -1
         if not 0 <= length <= MAX_BODY_BYTES:
             raise BadRequest("missing, repeated or oversized Content-Length")
+        self._reader.budget += length  # after the token check (_handle): only a token holder may send a body
         return self.rfile.read(length)
 
     def do_GET(self) -> None:
@@ -439,6 +514,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
 
 class ReviewServer(ThreadingHTTPServer):
     daemon_threads = True
+    max_connections = MAX_CONNECTIONS  # read in __init__, so tests can patch it
 
     def __init__(
         self,
@@ -454,7 +530,32 @@ class ReviewServer(ThreadingHTTPServer):
         self.store = store
         self.token = token
         self.store_lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(self.max_connections)  # one per open connection
+        self._full = False  # the limit warning was logged and no connection has been accepted since
         super().__init__(address, handler)  # type: ignore[arg-type]  # typeshed omits AF_UNIX path addresses
+
+    def process_request(self, request, client_address) -> None:
+        # On the serve_forever thread only, so _full needs no lock
+        if not self._slots.acquire(blocking=False):
+            if not self._full:  # once per time the server fills, not per refused connection
+                self._full = True
+                log.warning(
+                    "connection limit (%d) reached; refusing connections until one closes", self.max_connections
+                )
+            self.shutdown_request(request)
+            return
+        self._full = False
+        try:
+            super().process_request(request, client_address)
+        except Exception:  # not BaseException: an interrupt inside Thread.start() may have started the thread
+            self._slots.release()  # no thread started to release it
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def handle_error(self, request, client_address) -> None:
         exc_type = sys.exc_info()[0]
@@ -513,8 +614,9 @@ class UnixReviewHandler(ReviewHandler):
     disable_nagle_algorithm = False  # TCP_NODELAY fails on AF_UNIX
 
     def setup(self) -> None:
-        # No TLS handshake to bound: skip ReviewHandler.setup. The handler timeout still bounds pre-auth time.
+        # No TLS handshake to bound: skip ReviewHandler.setup. The request deadline still bounds pre-auth time.
         socketserver.StreamRequestHandler.setup(self)
+        self._bound_reads()
 
     def _peer(self) -> str:
         return "unix"  # accept() gives no peer address on AF_UNIX
@@ -534,7 +636,10 @@ class UnixReviewHandler(ReviewHandler):
             except BadRequest:
                 self._send(Reply(400, close=True))
                 return
-            self._send(self.server.assets[path])
+            asset = self.server.assets[path]
+            # Without the token, one request per connection, as a 401 is: a client re-fetching a file within each
+            # request deadline could otherwise hold its connection slot for good
+            self._send(asset if self._authorized() else replace(asset, close=True))
             return
         super()._handle(method)
 

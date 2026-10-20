@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import select
 import signal
 import socket
 import socketserver
@@ -21,7 +22,7 @@ from unittest import mock
 from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, MAX_PASS, RemoteTarget
 from image_review.review_db import ReviewLogChanged
-from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewServer, make_server
+from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewHandler, ReviewServer, make_server
 from image_review.store import LocalStore, load_manifest
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server, temp_dir, wait_for_file
 
@@ -237,6 +238,17 @@ class TestConnectionHandling(ServerTestCase):
         conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {self.target.token}"})
         self.assertEqual(conn.getresponse().status, 200)
 
+    def test_store_timeout_is_500_not_a_silent_close(self):
+        # A store's own TimeoutError (e.g. ETIMEDOUT on NFS) is not a request read cut off
+        with (
+            self.assertLogs(SERVER_LOGGER, "INFO") as logs,
+            mock.patch.object(self.server.store, "current_pass", side_effect=TimeoutError("secret-detail")),
+        ):
+            resp, data, _ = self.request("GET", "/current_pass")
+        self.assertEqual((resp.status, data), (500, b""))
+        errors = [r.getMessage() for r in logs.records if r.levelno == logging.ERROR]
+        self.assertEqual(errors, ["internal error: TimeoutError"])
+
     def test_review_log_changed_is_500_naming_the_class(self):
         body = json.dumps(
             {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
@@ -332,6 +344,186 @@ class TestPreAuthIdleSockets(ServerTestCase):
         self.assertEqual((resp.status, data), (200, b'{"pass": 1}'))
         # Blocked behind the idle sockets, the request would wait out the handshake timeout.
         self.assertLess(time.perf_counter() - start, HANDSHAKE_TIMEOUT_SECONDS / 2)
+
+
+def read_until_closed(sock: socket.socket, limit: float) -> bytes:
+    """Everything the server sends before it closes; fails (TimeoutError) if it is still open after `limit` s."""
+    sock.settimeout(limit)
+    chunks = []
+    try:
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
+    except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):  # closed with our bytes unread
+        pass
+    return b"".join(chunks)
+
+
+def trickle_until_closed(sock: socket.socket, data: bytes, limit: float) -> tuple[float, int]:
+    """Send `data` a byte every 0.1 s, far inside the per-receive timeout, until the server closes.
+
+    Returns the seconds taken and the bytes sent. A TLS 1.3 socket is readable right after the handshake (session
+    tickets) though no application data comes, so readability alone does not mean the server closed.
+    """
+    start = time.monotonic()
+    for sent, byte in enumerate(data):
+        if time.monotonic() - start > limit:
+            break
+        try:
+            sock.sendall(bytes([byte]))
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+            return time.monotonic() - start, sent
+        if not select.select([sock], [], [], 0.1)[0]:
+            continue
+        sock.setblocking(False)
+        try:
+            reply = sock.recv(65536)
+        except (ssl.SSLWantReadError, BlockingIOError):
+            continue  # only TLS records with no data in them
+        except (ConnectionResetError, ssl.SSLEOFError):
+            reply = b""
+        finally:
+            sock.settimeout(10)
+        if reply != b"":
+            raise AssertionError("server replied to a trickled request")
+        return time.monotonic() - start, sent + 1
+    raise AssertionError(f"server still open after {limit} s of trickling")
+
+
+class TestConnectionLimit(ServerTestCase):
+    CAP = 3
+
+    def setUp(self):
+        patcher = mock.patch.object(ReviewServer, "max_connections", self.CAP)  # read when the server is made
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def hold(self) -> ssl.SSLSocket:
+        """A connection past its handshake, waiting idle for its request line: it holds a slot."""
+        sock = socket.create_connection(("127.0.0.1", self.target.port), timeout=10)
+        tls = self.ctx.wrap_socket(sock)
+        self.addCleanup(tls.close)
+        return tls
+
+    def assert_refused(self):
+        start = time.monotonic()
+        with socket.create_connection(("127.0.0.1", self.target.port), timeout=10) as sock:
+            # Given a thread it would sit in the handshake for HANDSHAKE_TIMEOUT_SECONDS; refused, it closes at once
+            self.assertEqual(read_until_closed(sock, HANDSHAKE_TIMEOUT_SECONDS / 2), b"")
+        self.assertLess(time.monotonic() - start, HANDSHAKE_TIMEOUT_SECONDS / 2)
+
+    def get_when_free(self) -> None:
+        """GET /current_pass, retried while the server is still full; the connection then holds a slot."""
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                resp, data, _ = self.request("GET", "/current_pass")
+            except (OSError, http.client.HTTPException):
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+                continue
+            self.assertEqual((resp.status, data), (200, b'{"pass": 1}'))
+            return
+
+    def limit_warnings(self, logs) -> list[str]:
+        return [r.getMessage() for r in logs.records if "connection limit" in r.getMessage()]
+
+    def test_full_server_refuses_at_accept_and_warns_once(self):
+        held = [self.hold() for _ in range(self.CAP)]
+        with self.assertLogs(SERVER_LOGGER, "WARNING") as logs:
+            for _ in range(3):
+                self.assert_refused()
+        self.assertEqual(
+            [r.getMessage() for r in logs.records],
+            ["connection limit (3) reached; refusing connections until one closes"],
+        )
+        held[0].close()  # its thread ends and frees the slot
+        self.get_when_free()  # keeps its connection, so the server is full again
+        with self.assertLogs(SERVER_LOGGER, "WARNING") as logs:
+            self.assert_refused()
+            self.assert_refused()
+        self.assertEqual(len(self.limit_warnings(logs)), 1)  # warned again: it filled again
+
+
+class TestRequestDeadline(ServerTestCase):
+    DEADLINE = 1.0
+
+    def setUp(self):
+        patcher = mock.patch.object(ReviewHandler, "request_deadline", self.DEADLINE)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def connect(self) -> ssl.SSLSocket:
+        sock = socket.create_connection(("127.0.0.1", self.target.port), timeout=10)
+        tls = self.ctx.wrap_socket(sock)
+        self.addCleanup(tls.close)
+        return tls
+
+    def test_trickled_headers_cut_off_at_the_deadline(self):
+        tls = self.connect()
+        tls.sendall(b"GET /current_pass HTTP/1.1\r\nHost: x\r\n")
+        elapsed, sent = trickle_until_closed(tls, b"X-Pad: " + b"a" * 1000, limit=10 * self.DEADLINE)
+        self.assertGreater(elapsed, self.DEADLINE / 2)
+        self.assertGreater(sent, 3)  # trickled for a while, not closed as idle
+
+    def test_slow_body_closed_without_reply_or_error_log(self):
+        tls = self.connect()
+        head = f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Content-Length: 100\r\n\r\n"
+        with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
+            tls.sendall(head.encode() + b'{"keys": ')  # the rest of the body never comes
+            self.assertEqual(read_until_closed(tls, 10 * self.DEADLINE), b"")
+        self.get_json("/current_pass")  # the server carries on
+
+    def test_keep_alive_requests_each_get_the_deadline(self):
+        deadline = 2.0  # longer than the class's, for headroom on slow runners
+        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
+        self.addCleanup(conn.close)
+        headers = {"Authorization": f"Bearer {self.target.token}"}
+        with mock.patch.object(ReviewHandler, "request_deadline", deadline):
+            for _ in range(4):  # together longer than one deadline; each request alone well within it
+                conn.request("GET", "/current_pass", headers=headers)
+                self.assertEqual(conn.getresponse().read(), b'{"pass": 1}')
+                time.sleep(deadline / 3)
+
+    def test_idle_keep_alive_connection_closed_after_the_deadline(self):
+        _, _, conn = self.request("GET", "/current_pass")
+        start = time.monotonic()
+        self.assertEqual(read_until_closed(conn.sock, 10 * self.DEADLINE), b"")
+        self.assertGreater(time.monotonic() - start, self.DEADLINE / 2)
+
+
+class TestRequestBudget(ServerTestCase):
+    MARK = json.dumps(
+        {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
+    ).encode()
+
+    def send(self, head: str, body: bytes = b"") -> bytes:
+        """Send one request (with `Connection: close`) and read until the server closes."""
+        sock = socket.create_connection(("127.0.0.1", self.target.port), timeout=10)
+        tls = self.ctx.wrap_socket(sock)
+        self.addCleanup(tls.close)
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError, ssl.SSLError):  # it may close mid-send
+            tls.sendall(f"{head}Connection: close\r\n\r\n".encode() + body)
+        return read_until_closed(tls, 10)
+
+    def test_headers_over_the_budget_closed_without_reply(self):
+        pad = "".join(f"X-Pad-{i}: {'a' * 30000}\r\n" for i in range(3))  # each line and the count within stdlib limits
+        with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
+            self.assertEqual(self.send(f"GET /current_pass HTTP/1.1\r\nHost: x\r\n{pad}"), b"")
+        self.get_json("/current_pass")  # the server carries on
+
+    def test_body_beyond_the_head_budget_is_read_after_the_token(self):
+        # Headers near the budget, then a body (padded JSON) larger than it: the Content-Length raises the budget
+        body = self.MARK + b" " * 100_000
+        head = (
+            f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}X-Pad: {'a' * 60000}\r\n"
+            f"Content-Length: {len(body)}\r\n"
+        )
+        reply = self.send(head, body)
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200 "), reply[:60])
+        self.assertEqual(json.loads(reply.partition(b"\r\n\r\n")[2]), {"batch_001/a.jpg": "CLEAN"})
 
 
 class TestNoKeyFilesLeft(unittest.TestCase):
