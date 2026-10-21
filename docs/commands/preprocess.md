@@ -169,6 +169,11 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
   - a `.jpg`/`.png`/... or `.zip` whose content is not one;
   - a `.tar.gz` or other non-ZIP archive;
   - a ZIP inside a ZIP;
+  - a ZIP holding bytes outside its listed entries (two ZIPs joined with
+    `cat`, a self-extracting archive, a damaged one): `unsupported: ZIP holds
+    N bytes outside its listed entries (concatenated, self-extracting or
+    damaged archive)`. One row, under the ZIP's path, and none for its
+    entries, since what sits outside the listing would never be reviewed;
   - an `unsupported:` multi-frame DICOM, or a DICOM object without pixel
     data (structured reports, encapsulated PDFs);
   - an input too large to render within the memory budget (see [Size

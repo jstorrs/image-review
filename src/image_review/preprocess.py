@@ -1812,6 +1812,47 @@ def _read_input(path: Path, size: int) -> bytes:
     return data
 
 
+_ZIP_LOCAL_HEADER = struct.Struct(
+    "<4s2B4HL2L2H"
+)  # the 30-byte local file header; the last two are name and extra lengths
+_ZIP_DATA_DESCRIPTOR_MAX = 24  # 12 or 16 bytes (signature optional), 20 or 24 for ZIP64
+
+
+def _zip_entry_span(info: ZipInfo, name_len: int, extra_len: int) -> tuple[int, int]:
+    """The (start, end) bytes an entry takes in its archive: local header (with the lengths read from it, which may
+    differ from the central directory's), data, and, if general-purpose flag bit 3 is set, up to a data descriptor."""
+    end = info.header_offset + _ZIP_LOCAL_HEADER.size + name_len + extra_len + info.compress_size
+    return info.header_offset, end + (_ZIP_DATA_DESCRIPTOR_MAX if info.flag_bits & 0x8 else 0)
+
+
+def _check_zip_covered(path: Path, zf: ZipFile) -> None:
+    """Raise `Unsupported` if the archive at `path` holds bytes before its central directory that no listed entry
+    covers: `zipfile` reads only the directory, so what a concatenated, self-extracting or damaged archive holds
+    elsewhere would be reviewed by nobody and mentioned nowhere. A local header that cannot be read fails it too."""
+    # `start_dir` (where the central directory starts, adjusted for prepended bytes) is undocumented but has been set
+    # by `ZipFile._RealGetContents` for as long as `zipfile` has handled such archives; without it, fail closed.
+    start_dir = getattr(zf, "start_dir", None)
+    if not isinstance(start_dir, int):
+        raise Unsupported("ZIP directory offset unavailable, so its entries cannot be checked for hidden bytes")
+    spans: list[tuple[int, int]] = []
+    with open(path, "rb") as f:
+        for info in zf.infolist():
+            f.seek(info.header_offset)
+            header = f.read(_ZIP_LOCAL_HEADER.size)
+            if len(header) < _ZIP_LOCAL_HEADER.size or not header.startswith(b"PK\x03\x04"):
+                raise Unsupported(
+                    f"ZIP entry has no readable local header at byte {info.header_offset} (concatenated, "
+                    "self-extracting or damaged archive)"
+                )
+            *_, name_len, extra_len = _ZIP_LOCAL_HEADER.unpack(header)
+            spans.append(_zip_entry_span(info, name_len, extra_len))
+    outside = sum(end - start for start, end in _uncovered(start_dir, spans))
+    if outside:
+        raise Unsupported(
+            f"ZIP holds {outside} bytes outside its listed entries (concatenated, self-extracting or damaged archive)"
+        )
+
+
 def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
     zip_id = ImageId(path.as_posix())
     try:
@@ -1820,6 +1861,11 @@ def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
         yield _failed(zip_id, exc)
         return
     with zf:
+        try:
+            _check_zip_covered(path, zf)
+        except Exception as exc:  # noqa: BLE001 - an archive that cannot be checked is recorded as failed
+            yield _failed(zip_id, exc)
+            return
         # Repeated names are distinct entries: read each by its ZipInfo and give
         # later ones `#2`, `#3`, ... An entry literally named `a.png#2` can still
         # clash with the second `a.png`; `colliding_ids` catches that after rendering.

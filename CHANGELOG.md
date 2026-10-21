@@ -57,6 +57,10 @@
 
 ### Fixes
 
+- A ZIP holding bytes outside its listed entries (two ZIPs joined with `cat`, a self-extracting or damaged archive)
+  now fails as a whole: one `failed` row under the ZIP's path (`unsupported: ZIP holds N bytes outside its listed
+  entries ...`) and no entry rows. Before, only the entries in its central directory were found, so the others were
+  reviewed by nobody and the report did not mention them. Split such an archive and preprocess the parts.
 - DICOM palette images whose 8-bit lookup table entries sit under a 16-bit descriptor no longer render near
   black (text at 255 on 0 became 0 and 1 and looked clean). When every red, green and blue entry is at most 255,
   they are scaled as 8-bit; tables with larger entries, and 8-bit descriptors, are unchanged. Preprocess again.

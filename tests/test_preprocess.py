@@ -69,6 +69,7 @@ from image_review.preprocess import (
     WorkDirExists,
     WorkerCrashed,
     _check_rle_frame,
+    _discover_zip,
     _escape_name,
     _failed,
     _j2k_frame_size,
@@ -1525,6 +1526,88 @@ class ContentDiscoveryTest(unittest.TestCase):
             result.skipped,
             [SkippedRow(p.as_posix(), "ignored", "zip contains no files") for p in (empty, dirs_only)],
         )
+
+    def _found(self, archive: Path) -> list[Candidate | SkippedRow]:
+        with quiet():
+            return list(discover([archive]))
+
+    def test_zip_holding_bytes_outside_its_entries_is_one_failed_row(self):
+        png = _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8))
+        first, second, plain = self.root / "a.zip", self.root / "b.zip", self.root / "plain.zip"
+        for archive, name in ((first, "hidden_phi.png"), (second, "b.png"), (plain, "p.png")):
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr(name, png)
+        joined, prefixed = self.root / "joined.zip", self.root / "prefixed.zip"
+        joined.write_bytes(first.read_bytes() + second.read_bytes())
+        prefixed.write_bytes(b"#!/bin/sh\n" + plain.read_bytes())
+        tail = "bytes outside its listed entries (concatenated, self-extracting or damaged archive)"
+        self.assertEqual(
+            self._found(joined),
+            [SkippedRow(joined.as_posix(), "failed", f"unsupported: ZIP holds {first.stat().st_size} {tail}")],
+        )
+        # Junk before the first entry hides the archive from classify (it sniffs the start), which fails it too;
+        # the same archive reached by `_discover_zip` is failed for its bytes.
+        self.assertEqual([(r.image_id, r.kind) for r in self._found(prefixed)], [(prefixed.as_posix(), "failed")])
+        with quiet():
+            self.assertEqual(
+                list(_discover_zip(prefixed)),
+                [SkippedRow(prefixed.as_posix(), "failed", f"unsupported: ZIP holds 10 {tail}")],
+            )
+
+    def test_zip_with_a_bad_local_header_is_failed(self):
+        archive = self.root / "bad.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("a.png", _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)))
+        with quiet():
+            archive.write_bytes(b"PK\x03\x05" + archive.read_bytes()[4:])
+            rows = list(_discover_zip(archive))
+        self.assertEqual([(r.image_id, r.kind) for r in rows], [(archive.as_posix(), "failed")])
+
+    def test_ordinary_zips_have_no_outside_bytes(self):
+        png = _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8))
+
+        class Unseekable(io.RawIOBase):  # zipfile then writes a data descriptor (flag bit 3)
+            def __init__(self, path: Path) -> None:
+                self._f = open(path, "wb")  # noqa: SIM115 - closed in close()
+
+            def writable(self) -> bool:
+                return True
+
+            def write(self, b) -> int:
+                return self._f.write(b)
+
+            def close(self) -> None:
+                self._f.close()
+                super().close()
+
+        def stored(zf):
+            zf.writestr("a.png", png)
+
+        def deflated(zf):
+            zf.writestr("a.png", png, compress_type=zipfile.ZIP_DEFLATED)
+
+        def with_directory(zf):
+            zf.mkdir("d")
+            zf.writestr("d/a.png", png)
+
+        for name, fill in (("stored", stored), ("deflated", deflated), ("directory", with_directory)):
+            with self.subTest(name):
+                archive = self.root / f"{name}.zip"
+                with zipfile.ZipFile(archive, "w") as zf:
+                    fill(zf)
+                self.assertEqual([r.kind for r in self._found(archive)], ["raster"])
+        with self.subTest("data descriptor"):
+            archive = self.root / "descriptor.zip"
+            with zipfile.ZipFile(Unseekable(archive), "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("a.png", png)
+            with zipfile.ZipFile(archive) as zf:
+                self.assertTrue(zf.infolist()[0].flag_bits & 0x8)
+            self.assertEqual([r.kind for r in self._found(archive)], ["raster"])
+        with self.subTest("empty"):
+            archive = self.root / "none.zip"
+            with zipfile.ZipFile(archive, "w"):
+                pass
+            self.assertEqual(self._found(archive), [SkippedRow(archive.as_posix(), "ignored", "zip contains no files")])
 
     def test_unrecognized_file_named_as_source_is_failed(self):
         notes = self.root / "notes.txt"

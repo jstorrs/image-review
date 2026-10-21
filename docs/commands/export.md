@@ -11,7 +11,8 @@ Anything not listed is denied: DIRTY, unreviewed, failed and ignored files, a
 file holding pixel content its review image does not show, a file whose bytes
 changed since preprocess, and ZIP containers as a whole
 (their entries are listed one by one as `<zip>::<entry>`). A ZIP that cannot
-be opened, or has no file entries, gets one report row under its own path.
+be opened, holds bytes outside its listed entries (such as two ZIPs joined
+with `cat`), or has no file entries, gets one report row under its own path.
 
 `--report FILE` also writes every other file to a new `FILE`, with its status
 and why. The report is for audit and follow-up (what is left to review, what
