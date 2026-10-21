@@ -54,6 +54,9 @@
 - A `review.tsv` already holding a `pass_number` above one million is now
   refused when the work directory is opened; edit it by hand to remove or
   correct those rows.
+- **The click minimum is now 8.3.0.** The previous minimum, 8.2.2, was yanked
+  on PyPI, so it could not be installed by default. Only the tests need it
+  (see Minimum dependency versions in the install guide).
 
 ### Fixes
 

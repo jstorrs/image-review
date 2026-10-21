@@ -27,7 +27,7 @@ dependencies = [
     # why, the minimum is the oldest release with a CPython 3.12 wheel.
     # Core: what `serve`, `status` and `export` need (and the CLI itself, including --help), plus
     # the grid layout code (layout.py) shared by the viewer and, later, serve's browser client.
-    "click>=8.2.2",  # the tests read CliRunner stderr separately; 8.2.2 validates values taken from envvars
+    "click>=8.3.0",  # tests: separate CliRunner stderr, envvar values validated (8.2.2 has both but is yanked)
     "cryptography>=41",  # 3.1 is the oldest that runs; 41 is a floor without old known CVEs
     "rectpack==0.2.2",  # unmaintained, sdist only; grid packing results depend on its exact behaviour
 ]

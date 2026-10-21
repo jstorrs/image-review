@@ -83,12 +83,13 @@ These are declared in `pyproject.toml` and checked by running the test suite
 on CPython 3.12. Most are the oldest release with a CPython 3.12 wheel. numpy
 2.1 is what imagecodecs 2026.5.10 and later require, and matplotlib,
 scikit-image, scipy, tifffile and pylibjpeg-openjpeg are the oldest releases
-that work with it. click 8.2.2
+that work with it. click 8.3.0
 is needed only by the tests (`CliRunner` with separate stderr, and values
-from environment variables validated); pydicom 3.0.1 is the first release
+from environment variables validated); 8.2.2 would do but is yanked on PyPI,
+so 8.3.0, the next release, is the minimum. pydicom 3.0.1 is the first release
 that decodes float pixel data without BitsStored; and python-gdcm 3.0.25 is the first release that reports a
 corrupt JPEG 2000 codestream instead of decoding it without an error. The
-minimums are: click >= 8.2.2, imagecodecs >= 2024.6.1, matplotlib >= 3.8.4,
+minimums are: click >= 8.3.0, imagecodecs >= 2024.6.1, matplotlib >= 3.8.4,
 numpy >= 2.1, pydicom >= 3.0.1, Pillow >= 10.3 except 11.x (which misdecodes
 an MPO frame whose mode differs from the one before), scikit-image >= 0.23.1,
 scipy >= 1.13, tifffile >= 2024.1.30, tqdm >= 4.60, pygame-ce >= 2.3.1,
