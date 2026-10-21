@@ -330,7 +330,13 @@ and `icon-image` reads only the first IconImageSequence item's
 Rows, Columns and PhotometricInterpretation (`?` when missing, each value cut
 to 64 characters plus `…`), inside a
 catch-all so a bad icon gives an `unreadable (<ExceptionClass>)` detail and
-never fails the input. A raster's notes are `alpha` (see the alpha rule
+never fails the input; and `trailing-data` notes native (not encapsulated)
+PixelData longer than `pydicom.pixels.utils.get_expected_length(dcm, "bytes")`
+by more than the one pad byte allowed when that length is odd, which pydicom
+renders the first frame of without a word, with the detail `N bytes of
+PixelData after its frame` and the endings of a raster's (see *Trailing
+data*), or `trailing data unreadable: <ExceptionClass>` if the check fails (so
+export denies the file, and the input still renders). A raster's notes are `alpha` (see the alpha rule
 under *Raster decoding*), `embedded-thumbnail` (see *Embedded images*
 under *Raster preprocessing*) and `trailing-data` (see *Trailing data*
 there): `decode_raster` returns them with the image, in that order (an

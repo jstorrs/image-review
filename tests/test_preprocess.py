@@ -846,6 +846,60 @@ class NotesTest(unittest.TestCase):
             [[bits, "NOT_REVIEWED", "unreviewed embedded content: overlay-unused-bits"]],
         )
 
+    def write_with_tail(self, name: str, size: int, tail: bytes) -> Path:
+        """A size x size 8-bit DICOM whose PixelData is its one frame followed by `tail`."""
+        path = self.src / name
+        pixels = np.arange(size * size, dtype=np.uint8).reshape(size, size)
+        write_dicom(path, pixels, PixelData=pixels.tobytes() + tail)
+        return path
+
+    def test_native_pixel_data_past_its_frame_is_noted_and_export_denies_it(self):
+        path = self.write_with_tail("tail.dcm", 100, (b"\x01\x02" * 2500))
+        self.assertEqual(len(pydicom.dcmread(path).PixelData), 15000)
+        plain = self.write_with_tail("plain.dcm", 100, b"")
+        result = self.run_quietly()
+        self.assertEqual(self.notes(), [[path.as_posix(), "trailing-data", "5000 bytes of PixelData after its frame"]])
+        self.assertEqual(result.notes, {**NO_NOTES, "trailing-data": 1})
+        self.assertEqual(result.skipped, [])
+        with LocalStore(self.work) as store:
+            mark(store, [r.key for r in store.manifest()], "CLEAN")
+        report = self.root / "report.tsv"
+        exported = invoke_cli("export", "--work-dir", str(self.work), "--report", str(report))
+        self.assertEqual(exported.exit_code, 0, exported.output)
+        self.assertEqual([line.split("\t")[1] for line in exported.stdout.splitlines()[1:]], [plain.as_posix()])
+        self.assertEqual(
+            [line.split("\t")[:2] + line.split("\t")[5:6] for line in report.read_text().splitlines()[1:]],
+            [[path.as_posix(), "NOT_REVIEWED", "unreviewed embedded content: trailing-data"]],
+        )
+
+    def test_all_zero_pixel_data_past_its_frame_is_allowlisted_by_export(self):
+        path = self.write_with_tail("zero.dcm", 100, bytes(5000))
+        self.run_quietly()
+        self.assertEqual(
+            self.notes(),
+            [[path.as_posix(), "trailing-data", "5000 bytes of PixelData after its frame; all zero bytes"]],
+        )
+        with LocalStore(self.work) as store:
+            mark(store, [r.key for r in store.manifest()], "CLEAN")
+        exported = invoke_cli("export", "--work-dir", str(self.work), "--report", str(self.root / "report.tsv"))
+        self.assertEqual(exported.exit_code, 0, exported.output)
+        self.assertEqual([line.split("\t")[1] for line in exported.stdout.splitlines()[1:]], [path.as_posix()])
+
+    def test_pixel_data_of_exactly_its_frame_or_with_one_pad_byte_has_no_tail_note(self):
+        self.write_with_tail("exact.dcm", 100, b"")
+        self.write_with_tail("odd.dcm", 5, b"\x00")  # 25 bytes expected, one pad byte
+        self.write_with_tail("even.dcm", 6, b"")
+        self.run_quietly()
+        self.assertEqual(self.notes(), [])
+
+    def test_a_fault_in_the_tail_check_is_noted_and_the_input_still_renders(self):
+        path = self.write_with_tail("a.dcm", 100, b"")
+        with mock.patch.object(pydicom.pixels.utils, "get_expected_length", side_effect=ValueError("boom")):
+            result = self.run_quietly()
+        self.assertEqual(self.notes(), [[path.as_posix(), "trailing-data", "trailing data unreadable: ValueError"]])
+        self.assertEqual(len(self.written()), 1)
+        self.assertEqual(result.skipped, [])
+
     def test_overlay_plane_is_noted_and_counted(self):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000)
         result = self.run_quietly()

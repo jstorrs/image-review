@@ -36,6 +36,8 @@
   no row. To release one, strip it, preprocess the stripped file into a new
   work directory and review it there. Re-exporting an existing work
   directory can therefore deny files it allowlisted before.
+- **A DICOM whose uncompressed PixelData runs past its frame now gets a `trailing-data` note**, so `export` denies it
+  unless the extra bytes are all zero (pydicom rendered the frame and ignored the rest). Preprocess again to get it.
 - **`export` now reads `notes.tsv`, and refuses a work directory without it**
   (when `manifest.tsv` records hashes), or with a malformed one (exit 1,
   naming the file and line). Work directories made by 0.3.0 have none and

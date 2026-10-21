@@ -992,10 +992,28 @@ def _icon_note(dcm: pydicom.FileDataset) -> Note | None:
     return Note("icon-image", detail)
 
 
+def _pixel_data_tail_note(dcm: pydicom.FileDataset) -> Note | None:
+    """The `trailing-data` note for native PixelData that runs past its one frame, which pydicom renders the first
+    frame of without a word: more than the frame's expected length, except one pad byte when that length is odd. Its
+    detail is `_unrendered_detail`'s. Encapsulated PixelData is skipped (the compressed-frame checks cover it, and
+    multi-frame inputs never get here). Any failure of the check is itself a note, so export denies the file."""
+    try:
+        syntax = dcm.file_meta.get("TransferSyntaxUID")
+        if syntax is None or syntax.is_compressed or "PixelData" not in dcm:
+            return None
+        data = bytes(dcm.PixelData)
+        expected = pydicom.pixels.utils.get_expected_length(dcm, "bytes")
+        if len(data) <= expected + expected % 2:
+            return None
+        return Note("trailing-data", _unrendered_detail(data, ((expected, len(data)),), "of PixelData after its frame"))
+    except Exception as exc:  # noqa: BLE001 - an unreadable check must never fail the input, only be noted
+        return Note("trailing-data", f"trailing data unreadable: {type(exc).__name__}")
+
+
 def _dicom_notes(dcm: pydicom.FileDataset, unused_bits: tuple[int, ...]) -> tuple[Note, ...]:
     """What `dcm` holds that downstream tools should strip, in NOTE_KINDS order; `unused_bits` are the positions above
     BitsStored that held content, from the decode that rendered it (see `preprocess_dicom`)."""
-    notes = (_overlay_note(dcm), _unused_bits_note(dcm, unused_bits), _icon_note(dcm))
+    notes = (_overlay_note(dcm), _unused_bits_note(dcm, unused_bits), _icon_note(dcm), _pixel_data_tail_note(dcm))
     return tuple(note for note in notes if note is not None)
 
 

@@ -347,7 +347,7 @@ stripped file into a new work directory and review it there.
 | `icon-image` | A DICOM with an embedded icon image (IconImageSequence (0088,0200)) | `IconImageSequence: 64x64 MONOCHROME2` |
 | `alpha` | A raster with pixels that are not fully opaque | `120 of 2400 pixels not opaque` |
 | `embedded-thumbnail` | A raster with an embedded thumbnail or SubIFDs that are not rendered | `EXIF IFD1 thumbnail (4096 bytes)`, `TIFF SubIFDs (2)`, or `EXIF unreadable: corrupt` (all forms below) |
-| `trailing-data` | A JPEG or PNG holding bytes that are not rendered, such as after the end of its image | `2048 bytes after the JPEG end; they begin with a JPEG signature` (all forms below) |
+| `trailing-data` | A JPEG or PNG holding bytes that are not rendered, such as after the end of its image, or a DICOM whose uncompressed PixelData runs past its frame | `2048 bytes after the JPEG end; they begin with a JPEG signature` (all forms below) |
 
 - **`overlay-plane`**: the review image is the pixel data alone, so overlay
   planes are not reviewed (`--draw-overlays` draws them, but export still
@@ -412,8 +412,8 @@ stripped file into a new work directory and review it there.
   (N from 1). Not detected: JFIF/JFXX APP0 thumbnails, Photoshop APP13
   thumbnails, and a PNG "Raw profile type exif" chunk placed after the
   pixel data.
-- **`trailing-data`**: bytes of a JPEG or PNG that the decoder never reads
-  are not reviewed, whatever they hold (a whole second image appended to
+- **`trailing-data`**: bytes of a JPEG or PNG that the decoder never reads,
+  or of a DICOM's uncompressed PixelData past its one frame, are not reviewed, whatever they hold (a whole second image appended to
   the file, say; see above, which exempts bytes that
   are all zero). A JPEG's image ends at
   its EOI marker; a PNG's at the header of its IEND chunk (data that IEND
@@ -440,11 +440,17 @@ stripped file into a new work directory and review it there.
     too long (real files are far under the limits: 100,000 markers, and
     about four times the file's size searched), so it was not checked and
     may hold anything after its image.
+  - `N bytes of PixelData after its frame`: a DICOM with an uncompressed
+    transfer syntax whose PixelData is longer than its one frame (from Rows,
+    Columns, SamplesPerPixel and BitsAllocated), apart from the one pad
+    byte allowed when the frame's length is odd. pydicom renders the frame
+    and ignores the rest. It takes the same `; all zero bytes` and signature
+    endings. Compressed PixelData is not checked this way.
   - `trailing data unreadable: <ExceptionClass>`: the check failed; the
     input still renders.
 
-  Not detected: unrendered bytes in any format other than JPEG, MPO and
-  PNG, and payloads inside the file's own structure, which are skipped by
+  Not detected: unrendered bytes in any format other than JPEG, MPO, PNG
+  and DICOM PixelData, and payloads inside the file's own structure, which are skipped by
   their declared length: JPEG APP and COM segments (a COM after the image
   data holding a whole JPEG, say) and PNG ancillary chunks. A JPEG with
   tables-only data before its image (`SOI ... EOI` then the image) is
