@@ -124,8 +124,8 @@ The points below are its limits.
   require `connect()` to check it and some older systems ignored it, so do
   not rely on it outside Linux. On a `--socket-path` you choose, only that
   check protects the socket. Root and your own processes can connect.
-- **The page is public; the API is not.** `/`, `/app.js` and `/app.css`
-  carry no PHI or secret and need no token. Every API route needs the token.
+- **The page is public; the API is not.** `/`, `/helpers.js`, `/app.js` and
+  `/app.css` carry no PHI or secret and need no token. Every API route needs the token.
   The `Host` header must be `localhost`, `127.0.0.1` or `[::1]` (with an
   optional port), which defends against DNS rebinding. Responses carry a Content-Security-Policy and
   `Referrer-Policy: no-referrer`. The page reviews single images and

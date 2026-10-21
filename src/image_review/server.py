@@ -578,6 +578,7 @@ def is_local_host(values: list[str]) -> bool:
 
 WEB_ASSETS = {
     "/": ("index.html", "text/html"),
+    "/helpers.js": ("helpers.js", "text/javascript"),
     "/app.js": ("app.js", "text/javascript"),
     "/app.css": ("app.css", "text/css"),
 }

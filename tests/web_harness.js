@@ -1,11 +1,10 @@
 "use strict";
-// Runs app.js (path in argv[2]) against a minimal stub DOM and checks grid mode's
+// Runs helpers.js then app.js (paths in argv[2], argv[3], as the page loads them) against a minimal stub DOM and checks grid mode's
 // display and verdict rules end to end. Run by tests/test_socket_server.py; exits non-zero on failure.
 const assert = require("assert");
 const fs = require("fs");
 const vm = require("vm");
 
-const APP = fs.readFileSync(process.argv[2], "utf8");
 const JPEG = [0xff, 0xd8, 1, 2, 0xff, 0xd9];
 const MARK_FLASH_MS = 200; // app.js's: a marked item stays up this long before the next
 const REPACK_MS = 300; // app.js REPACK_DELAY_MS
@@ -118,7 +117,10 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
   };
   vm.createContext(ctx);
   if (fixedOrder) vm.runInContext("Math.random = () => 0.99;", ctx);
-  vm.runInContext(APP + "\n;globalThis.__state = state;", ctx, { filename: process.argv[2] }); // named, so V8 coverage attributes lines to app.js
+  // Both scripts in one context, as the page runs them: app.js sees helpers.js's top-level names.
+  // Named, so V8 coverage attributes lines to the files.
+  for (const path of process.argv.slice(2)) vm.runInContext(fs.readFileSync(path, "utf8"), ctx, { filename: path });
+  vm.runInContext("globalThis.__state = state;", ctx);
 
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
   // Reply headers as the socket server sends them: the content type and the serving instance (page.instance)

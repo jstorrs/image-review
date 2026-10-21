@@ -2278,8 +2278,8 @@ with an optional port of 1-5 digits in 1-65535; anything else (including a
 missing or repeated header) is 400 and the connection closed, a defence
 against DNS rebinding.
 
-Three static files are served without the token: `GET /` (`index.html`),
-`/app.js` and `/app.css`, from `web/` in the package, read once by
+Four static files are served without the token: `GET /` (`index.html`),
+`/helpers.js`, `/app.js` and `/app.css`, from `web/` in the package, read once by
 `load_assets()` at startup so no request path touches the filesystem. They
 hold no PHI and no secret, and the page cannot send the token before it has
 loaded. Only these exact GET paths (a query string is ignored) are public,
@@ -2376,6 +2376,7 @@ not fit, it is returned anyway and `parse_socket_path` raises its usual error.
 ### Browser client
 
 `web/app.js` (plain ES2020, no build step) reviews single images and grids,
+with the page's pure helpers (no DOM) in `web/helpers.js`, loaded before it,
 following the pygame client (see *Single Mode*, *Grid Mode*, *Unloadable
 Images*, *Undo*). Its keys, screens and messages as the reviewer sees them
 are on [The browser page](../commands/browser.md). It obeys the CSP above:

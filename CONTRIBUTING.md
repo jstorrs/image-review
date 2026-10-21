@@ -27,7 +27,7 @@ CI sets `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy` so pygame needs no
 display or sound device. Set them too when running the tests on a headless
 machine.
 
-The browser-page tests run `web/app.js` under `node` and skip when it is not on
+The browser-page tests run `web/helpers.js` and `web/app.js` under `node` and skip when it is not on
 `PATH`. Set `IMAGE_REVIEW_REQUIRE_NODE=1` to make them fail instead; CI sets it
 and installs node 24, so a missing node cannot pass silently. It is test-only
 and the application never reads it.

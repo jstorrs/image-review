@@ -57,10 +57,18 @@ from tests.fixtures import (
 WEB_DIR = Path(image_review.__file__).parent / "web"
 ASSETS = [
     ("/", "index.html", "text/html; charset=utf-8"),
+    ("/helpers.js", "helpers.js", "text/javascript; charset=utf-8"),
     ("/app.js", "app.js", "text/javascript; charset=utf-8"),
     ("/app.css", "app.css", "text/css; charset=utf-8"),
 ]
+SCRIPT_NAMES = ["helpers.js", "app.js"]  # in the order the page loads them
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
+
+
+def web_scripts() -> str:
+    """Both of the page's scripts as one text."""
+    return "\n".join((WEB_DIR / name).read_text() for name in SCRIPT_NAMES)
+
 
 # As TestAuth in test_server.py
 ROUTES = [
@@ -594,7 +602,7 @@ class TestSocketRequestDeadline(SocketServerTestCase):
 class TestWebFiles(unittest.TestCase):
     def test_load_assets(self):
         assets = load_assets()
-        self.assertEqual(sorted(assets), ["/", "/app.css", "/app.js"])
+        self.assertEqual(sorted(assets), ["/", "/app.css", "/app.js", "/helpers.js"])
         for reply in assets.values():
             self.assertTrue(reply.body)
 
@@ -603,15 +611,17 @@ class TestWebFiles(unittest.TestCase):
         self.assertNotRegex(html, r"<script(?![^>]*\bsrc=)[^>]*>")
         self.assertNotRegex(html, r"<script[^>]*>\s*\S[^<]*</script>")
         self.assertNotRegex(html, r"(?i)\son\w+\s*=")
-        for name in ["index.html", "app.js", "app.css"]:
+        for name in ["index.html", "helpers.js", "app.js", "app.css"]:
             text = (WEB_DIR / name).read_text()
             with self.subTest(name=name):
                 # \b: a style attribute or `.style = "..."`, not a canvas's fillStyle or `.style.width =`
                 self.assertNotRegex(text, r"(?i)\bstyle\s*=|https?://")
         self.assertIsNone(re.search(r"<style", html, re.IGNORECASE))
+        # The helpers load first (deferred scripts run in document order), then the app
+        self.assertEqual(re.findall(r'<script src="([^"]+)" defer></script>', html), ["/helpers.js", "/app.js"])
 
     def test_script_is_csp_clean(self):
-        script = (WEB_DIR / "app.js").read_text()
+        script = web_scripts()
         forbidden = [
             "innerHTML",
             "outerHTML",
@@ -651,7 +661,7 @@ class TestWebFiles(unittest.TestCase):
         for token in ["--stop:", "--stop-fg:", "fill: var(--stop);"]:
             with self.subTest(token=token):
                 self.assertIn(token, css)
-        script = (WEB_DIR / "app.js").read_text()
+        script = web_scripts()
         self.assertNotIn("End of list", script)
         self.assertNotIn("Start of list", script)
 
@@ -782,23 +792,21 @@ class TestWebFiles(unittest.TestCase):
         self.assertIn("@media (prefers-color-scheme: light)", css)
 
     def run_helpers(self, checks: str, data: object = None) -> object:
-        """Run `checks` under node with `m`, a context holding app.js's pure helpers (those before the
-        "---- Token" section, which touch no DOM), and `data` as parsed JSON; returns what the checks
-        print as JSON (None if nothing)."""
+        """Run `checks` under node with `m`, a context holding helpers.js's pure helpers (no DOM), and
+        `data` as parsed JSON; returns what the checks print as JSON (None if nothing)."""
         prelude = r"""
         const vm = require("vm");
         const assert = require("assert");
         const src = require("fs").readFileSync(process.argv[1], "utf8");
-        assert(src.includes("// ---- Token"), "app.js lost its '// ---- Token' marker after the pure helpers");
         const m = vm.createContext({});
-        vm.runInContext(src.slice(0, src.indexOf("// ---- Token")), m);
+        vm.runInContext(src, m);
         const data = JSON.parse(process.argv[2]);
         const plain = (value) => JSON.parse(JSON.stringify(value)); // into this realm, for deepStrictEqual
         """
         node = shutil.which("node")
         assert node is not None
         result = subprocess.run(
-            [node, "-e", prelude + checks, str(WEB_DIR / "app.js"), json.dumps(data)],
+            [node, "-e", prelude + checks, str(WEB_DIR / "helpers.js"), json.dumps(data)],
             capture_output=True,
             text=True,
             timeout=60,
@@ -840,12 +848,16 @@ class TestWebFiles(unittest.TestCase):
 
     @requires_node
     def test_grid_mode_in_a_stub_page(self):
-        # The whole of app.js against a stub DOM: see tests/web_harness.js for the checks
+        # Both scripts, as the page loads them, against a stub DOM: see tests/web_harness.js for the checks
         node = shutil.which("node")
         assert node is not None
         harness = Path(__file__).with_name("web_harness.js")
         result = subprocess.run(
-            [node, str(harness), str(WEB_DIR / "app.js")], capture_output=True, text=True, timeout=60, check=False
+            [node, str(harness), *(str(WEB_DIR / name) for name in SCRIPT_NAMES)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         # Every test ran to the end (one stuck on an unsettled promise would end node early)
@@ -884,7 +896,7 @@ class TestWebFiles(unittest.TestCase):
     def test_verdict_message_parity(self):
         from image_review import controller
 
-        script = (WEB_DIR / "app.js").read_text()
+        script = web_scripts()
         for name in ["GRID_HAS_DIRTY", "IMAGE_HAS_DIRTY", "NOTHING_TO_UNDO", "UNLOADABLE_CLEAN"]:
             with self.subTest(name=name):
                 found = re.search(rf'^const {name} = "([^"]*)";$', script, re.MULTILINE)
@@ -894,14 +906,14 @@ class TestWebFiles(unittest.TestCase):
     def test_instance_header_name_matches_the_server(self):
         from image_review.server import INSTANCE_HEADER
 
-        found = re.search(r'^const INSTANCE_HEADER = "([^"]*)";', (WEB_DIR / "app.js").read_text(), re.MULTILINE)
+        found = re.search(r'^const INSTANCE_HEADER = "([^"]*)";', web_scripts(), re.MULTILINE)
         assert found is not None
         self.assertEqual(found[1], INSTANCE_HEADER)
 
     def test_copied_limits_match_python(self):
         from image_review import connection, controller, server
 
-        script = (WEB_DIR / "app.js").read_text()
+        script = web_scripts()
         for name, module in [
             ("MIN_DWELL_MS", controller),
             ("MAX_REVIEWER_LENGTH", connection),
