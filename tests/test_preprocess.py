@@ -2,6 +2,7 @@
 
 import contextlib
 import csv
+import errno
 import faulthandler
 import hashlib
 import io
@@ -97,7 +98,7 @@ from image_review.review_db import Decision
 from image_review.signals import TERMINATION_SIGNALS, interrupt_on
 from image_review.status import ImageId
 from image_review.store import LocalStore, SkippedRow, load_manifest, load_notes, load_skipped
-from tests.fixtures import add_overlay, invoke_cli, mark, temp_dir, write_dicom
+from tests.fixtures import add_overlay, invoke_cli, mark, recorded_dir_fsyncs, temp_dir, write_dicom
 
 RNG = np.random.default_rng(0)
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -305,6 +306,106 @@ class MixedSourceTest(unittest.TestCase):
         )
         self.assertEqual(result.batches, 2)
         self.assertEqual(sorted(p.name for p in work.glob("batch_*")), ["batch_001", "batch_002"])
+
+
+class DurabilityTest(unittest.TestCase):
+    def setUp(self):
+        self.root = temp_dir(self).resolve()
+        self.src = self.root / "src"
+        self.src.mkdir()
+        write_dicom(self.src / "a.dcm", _good_pixels())
+        write_dicom(self.src / "b.dcm", _good_pixels())
+        self.work = self.root / "work"
+
+    def run_quietly(self):
+        with quiet():
+            return run_preprocess([self.src], self.work, batch_size=1)
+
+    @staticmethod
+    def identity(path: Path) -> tuple[int, int]:
+        st = os.stat(path)
+        return st.st_dev, st.st_ino
+
+    def failing_sync_of(self, target: Path):
+        """Patch os.fsync so a directory sync of `target` (by identity) fails with EIO; the others run."""
+        real_fsync = os.fsync
+        wanted = self.identity(target)
+
+        def fsync(fd):
+            st = os.fstat(fd)
+            if stat.S_ISDIR(st.st_mode) and (st.st_dev, st.st_ino) == wanted:
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            real_fsync(fd)
+
+        return mock.patch("os.fsync", fsync)
+
+    def test_a_run_syncs_every_batch_dir_the_work_dir_and_its_parent(self):
+        with recorded_dir_fsyncs() as synced:
+            self.run_quietly()
+        expected = [self.identity(self.work / "batch_001"), self.identity(self.work / "batch_002")]
+        expected += [self.identity(self.work), self.identity(self.root)]  # the rename kept the staging dir's inode
+        self.assertCountEqual(synced, expected)
+
+    def test_a_run_syncs_exactly_the_four_metadata_files_and_no_jpg(self):
+        synced: list[tuple[int, int]] = []
+        real_fsync = os.fsync
+
+        def fsync(fd):
+            st = os.fstat(fd)
+            if not stat.S_ISDIR(st.st_mode):
+                synced.append((st.st_dev, st.st_ino))
+            real_fsync(fd)
+
+        with mock.patch("os.fsync", fsync):
+            self.run_quietly()
+        names = ("manifest.tsv", "skipped.tsv", "notes.tsv", "preprocess.json")
+        self.assertCountEqual(synced, [self.identity(self.work / name) for name in names])
+
+    def assert_run_fails_with_eio_leaving_nothing(self):
+        with quiet(), self.assertRaises(OSError) as ctx:
+            run_preprocess([self.src], self.work, batch_size=1)
+        self.assertEqual(ctx.exception.errno, errno.EIO)
+        self.assertFalse(self.work.exists())
+        self.assertFalse((self.root / ".work.partial").exists())
+
+    def test_a_failed_batch_dir_sync_fails_the_run_leaving_nothing(self):
+        with recorded_dir_fsyncs(errno.EIO):  # the first directory synced is a batch dir
+            self.assert_run_fails_with_eio_leaving_nothing()
+
+    def test_a_failed_staging_dir_sync_fails_the_run_leaving_nothing(self):
+        real_fsync_dir = preprocess_module.fsync_dir
+
+        def fsync_dir(path: Path) -> None:
+            if path.name == ".work.partial":
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            real_fsync_dir(path)
+
+        with mock.patch.object(preprocess_module, "fsync_dir", fsync_dir):
+            self.assert_run_fails_with_eio_leaving_nothing()
+
+    def test_a_failed_metadata_file_sync_fails_the_run_leaving_nothing(self):
+        real_fsync = os.fsync
+
+        def fsync(fd):
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            real_fsync(fd)
+
+        with mock.patch("os.fsync", fsync):
+            self.assert_run_fails_with_eio_leaving_nothing()
+
+    def test_a_failed_parent_sync_after_the_rename_keeps_the_work_dir_and_warns(self):
+        with (
+            self.failing_sync_of(self.root),
+            quiet(),
+            self.assertLogs("image_review.atomic", "WARNING") as logs,
+        ):
+            result = run_preprocess([self.src], self.work, batch_size=1)
+        self.assertEqual(result.written, 2)
+        self.assertIn("EIO", logs.output[0])
+        self.assertIn(str(self.work), logs.output[0])
+        self.assertEqual(len(_read_tsv(self.work / "manifest.tsv")), 2)
+        self.assertFalse((self.root / ".work.partial").exists())
 
 
 class EmptySkippedTest(unittest.TestCase):

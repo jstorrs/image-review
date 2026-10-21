@@ -29,14 +29,15 @@ def fsync_dir(path: Path) -> None:
             raise
 
 
-def _sync_parent(path: Path) -> None:
-    """Sync path's directory so its new name is durable, best effort: the file is already in place, so a failure
-    (EIO, or EACCES opening a write-only drop directory) is only logged, never turned into a failed publish."""
+def sync_parent(path: Path) -> None:
+    """Sync path's parent directory so its new name (a file's or a directory's) is durable, best effort: path is
+    already in place, so a failure (EIO, or EACCES opening a write-only drop directory) is only logged, never turned
+    into a failed publish or run."""
     try:
         fsync_dir(path.parent)
     except OSError as e:
         log.warning(
-            "created %s but could not sync its directory (%s %s); the file may not survive a power loss",
+            "created %s but could not sync its directory (%s %s); it may not survive a power loss",
             path,
             errno.errorcode.get(e.errno or 0, e.errno),
             e.strerror,
@@ -92,7 +93,7 @@ def publish(path: Path, tmp: Path, file_mode: int, group: int | None, text: str)
                 if e.errno not in LINK_UNSUPPORTED:
                     raise
                 _write_file(path, file_mode, group, text)
-        _sync_parent(path)  # the new name itself, not just the file's bytes
+        sync_parent(path)  # the new name itself, not just the file's bytes
     finally:
         tmp.unlink(missing_ok=True)
 

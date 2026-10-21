@@ -178,6 +178,18 @@ directory is never created. There is no `--force`. Existing work directories
 are never modified (what that means for users is in
 [`image-review preprocess`](../commands/preprocess.md)).
 
+The work directory is synced before success is reported, in this order: each
+batch directory once its JPGs are renamed in (`fsync_dir`), each of
+`manifest.tsv`, `skipped.tsv`, `notes.tsv` and `preprocess.json` as it is
+written (`os.fsync` of the file), then the staging directory, then the rename,
+then the parent of the work directory (`sync_parent`). A failure before the
+rename (an `OSError` from any of these syncs) fails the run through the
+cleanup above, leaving no work or staging directory. The parent sync after the
+rename is best effort: the work directory is complete by then, and failing
+would leave one the next run refuses, so a failure is logged as a warning. The
+JPGs' contents are not fsynced: a JPG lost in a power cut fails its hash check
+and is visible, and a sync per JPG is slow on cluster filesystems.
+
 **Access policy** (`access.py`, stdlib only). `run_preprocess(..., access)`
 takes `Access = Literal["private", "group"]` (CLI `--access`, env
 `IMAGE_REVIEW_ACCESS`, default `private`). `modes(access)` returns frozen

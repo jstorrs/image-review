@@ -51,6 +51,7 @@ from scipy import ndimage as ndi
 from tqdm import tqdm
 
 from .access import MANIFEST_NAME, Access, Modes, modes
+from .atomic import fsync_dir, sync_parent
 from .connection import package_version
 from .export import ALL_ZERO_SUFFIX, NOTE_KINDS, NoteKind, has_unsafe_char
 from .review_db import format_tsv
@@ -2189,8 +2190,8 @@ def _worker_pool(jobs: int) -> Iterator[Executor]:
             pool.shutdown(wait=True, cancel_futures=True)
 
 
-def _write_new(path: Path, perm: int, data: bytes) -> None:
-    """Create `path` exclusively with `perm` as its creation mode, and write `data` to it.
+def _write_new(path: Path, perm: int, data: bytes, *, sync: bool = True) -> None:
+    """Create `path` exclusively with `perm` as its creation mode, write `data` to it, and fsync it unless not `sync`.
 
     A POSIX default ACL on the parent makes Linux ignore the umask, so the mode
     is given explicitly (an ACL's other entry can only narrow it).
@@ -2198,6 +2199,9 @@ def _write_new(path: Path, perm: int, data: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, perm)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
+        if sync:
+            f.flush()
+            os.fsync(f.fileno())
 
 
 def _write_tsv(path: Path, header: list[str], rows: Sequence[tuple[str, ...]], perm: int) -> None:
@@ -2371,7 +2375,10 @@ def run_preprocess(
             )
             if output_dir.exists():
                 output_dir.rmdir()  # an empty directory the user made
+            fsync_dir(staging)  # the work dir's entries, before it gets its final name
             os.rename(staging, output_dir)
+            # Best effort: the work dir is complete, and failing would leave one the next run refuses.
+            sync_parent(output_dir)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -2424,7 +2431,7 @@ def _stage(
                 continue
             count += 1
             path = pending / f"{count:08d}.jpg"
-            _write_new(path, policy.file_mode, outcome.jpeg)
+            _write_new(path, policy.file_mode, outcome.jpeg, sync=False)  # a lost JPG fails its hash check; see spec
             jpeg_sha256 = hashlib.sha256(outcome.jpeg).hexdigest()
             inputs.append(Staged(outcome.image_id, path, outcome.source_sha256, jpeg_sha256, outcome.notes))
     return inputs
@@ -2448,6 +2455,7 @@ def _place(
     manifest_rows: list[tuple[str, str, str, str, str]] = []
     skipped: list[SkippedRow] = []
     notes: list[tuple[str, NoteKind, str]] = []
+    batch_dirs: list[Path] = []
     for row in inputs:
         if isinstance(row, SkippedRow):
             skipped.append(row)
@@ -2463,11 +2471,14 @@ def _place(
         if slot == 0:
             batch_dir.mkdir()
             os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
+            batch_dirs.append(batch_dir)
         img_path = batch_dir / f"img_{slot + 1:05d}.jpg"
         os.rename(row.path, img_path)
         key = img_path.relative_to(staging).as_posix()
         manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
         notes.extend((row.image_id, note.kind, _clean_reason(note.detail)) for note in row.notes)
+    for batch_dir in batch_dirs:
+        fsync_dir(batch_dir)  # the renamed-in entries; the JPGs' contents are not synced (a lost one fails its hash)
     return manifest_rows, skipped, notes
 
 

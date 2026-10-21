@@ -51,14 +51,15 @@ CLEAN_ENV: dict[str, str | None] = {
 
 @contextlib.contextmanager
 def recorded_dir_fsyncs(error: int | None = None):
-    """Yield a list that gets one entry per os.fsync of a directory (identified by fstat, not fd number); with `error`,
-    such a sync fails with that errno."""
-    synced: list[int] = []
+    """Yield a list that gets the `(st_dev, st_ino)` of each directory passed to os.fsync (fd numbers are reused);
+    with `error`, such a sync fails with that errno."""
+    synced: list[tuple[int, int]] = []
     real_fsync = os.fsync
 
     def fsync(fd):
-        if stat.S_ISDIR(os.fstat(fd).st_mode):
-            synced.append(fd)
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode):
+            synced.append((st.st_dev, st.st_ino))
             if error is not None:
                 raise OSError(error, os.strerror(error))
         real_fsync(fd)
