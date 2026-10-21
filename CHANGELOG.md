@@ -57,6 +57,7 @@
 
 ### Fixes
 
+- The browser page now rejects a pass number above 1,000,000 from the server, as the other clients already did.
 - The status bar's centre message no longer draws over the status word and the red scale warning on a narrow
   display. It is centred between the left and right texts, shrunk to as small as 18 px to fit, and cut with "…" if
   still too wide (the controller also logs it as a warning).

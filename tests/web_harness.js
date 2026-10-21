@@ -2051,6 +2051,16 @@ tests["a 412 on a read stops the page the same way"] = async () => {
   }
 };
 
+tests["a /current_pass reply with a pass outside 1..1000000 is an unexpected reply"] = async () => {
+  for (const pass of [0, 1000001, 1.5, "1"]) {
+    const page = makePage({ manifest, statuses });
+    await page.respond("/current_pass", page.json(200, { pass }));
+    assert.strictEqual(page.els.status.textContent, "unexpected reply from the server", String(pass));
+    assert.strictEqual(page.state.dead, true, String(pass));
+    assert.deepStrictEqual(page.pending, [], String(pass));
+  }
+};
+
 tests["a /current_pass reply naming no instance is an unexpected reply"] = async () => {
   const page = makePage({ manifest, statuses });
   page.instance = null;

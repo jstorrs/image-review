@@ -11,6 +11,7 @@ const MAX_REVIEWER_LENGTH = 64;
 // A grid verdict covers every image in it, so grids hold only images not yet judged DIRTY or
 // FLAGGED (status.GRID_ELIGIBLE); with the todo filter that leaves UNREVIEWED.
 const GRID_ELIGIBLE = new Set(["UNREVIEWED", "CLEAN"]);
+const MAX_PASS = 1000000; // connection.MAX_PASS
 const MAX_GRID_KEYS = 1000; // server.MAX_GRID_KEYS
 const MIN_GRID_SIDE = 256; // server.MIN_GRID_SIDE
 const MAX_GRID_SIDE = 16384; // server.MAX_GRID_SIDE
@@ -318,7 +319,7 @@ class BadReply extends Error {}
 
 function parsePass(reply) {
   const value = reply && reply.pass;
-  if (!Number.isInteger(value) || value < 1) {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_PASS) {
     throw new BadReply("pass");
   }
   return value;

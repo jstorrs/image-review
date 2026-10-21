@@ -898,6 +898,23 @@ class TestWebFiles(unittest.TestCase):
         assert found is not None
         self.assertEqual(found[1], INSTANCE_HEADER)
 
+    def test_copied_limits_match_python(self):
+        from image_review import connection, controller, server
+
+        script = (WEB_DIR / "app.js").read_text()
+        for name, module in [
+            ("MIN_DWELL_MS", controller),
+            ("MAX_REVIEWER_LENGTH", connection),
+            ("MAX_PASS", connection),
+            ("MAX_GRID_KEYS", server),
+            ("MIN_GRID_SIDE", server),
+            ("MAX_GRID_SIDE", server),
+        ]:
+            with self.subTest(name=name):
+                found = re.search(rf"^const {name} = (\d+);", script, re.MULTILINE)
+                assert found is not None, name
+                self.assertEqual(int(found[1]), getattr(module, name))
+
     @requires_node
     def test_grid_eligibility_parity(self):
         from image_review.controller import ReviewSession, next_batch
