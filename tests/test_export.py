@@ -586,7 +586,7 @@ class TestUnreviewedContent(unittest.TestCase):
         for kind in NOTE_KINDS:
             with self.subTest(kind=kind):
                 expected = {} if kind in SHOWN_NOTE_KINDS else {"a": f"unreviewed embedded content: {kind}"}
-                self.assertEqual(unreviewed_content([note("a", kind)], frozenset()), expected)
+                self.assertEqual(unreviewed_content([note("a", kind)]), expected)
 
     def test_kinds_are_deduplicated_in_note_kinds_order(self):
         notes = [
@@ -597,23 +597,16 @@ class TestUnreviewedContent(unittest.TestCase):
             note("a", "overlay-plane"),
         ]
         self.assertEqual(
-            unreviewed_content(notes, frozenset()),
+            unreviewed_content(notes),
             {"a": "unreviewed embedded content: overlay-plane, icon-image, trailing-data"},
         )
 
     def test_all_zero_trailing_data_does_not_block(self):
-        self.assertEqual(unreviewed_content([note("a", "trailing-data", ZERO_TRAILING)], frozenset()), {})
+        self.assertEqual(unreviewed_content([note("a", "trailing-data", ZERO_TRAILING)]), {})
         not_zero = "12 bytes after the JPEG end; they begin with a JPEG signature"
         self.assertEqual(
-            unreviewed_content([note("a", "trailing-data", not_zero)], frozenset()),
+            unreviewed_content([note("a", "trailing-data", not_zero)]),
             {"a": "unreviewed embedded content: trailing-data"},
-        )
-
-    def test_rendered_kinds_do_not_block(self):
-        notes = [note("a", "overlay-plane"), note("b", "overlay-plane"), note("b", "overlay-unused-bits")]
-        self.assertEqual(
-            unreviewed_content(notes, frozenset({"overlay-plane"})),
-            {"b": "unreviewed embedded content: overlay-unused-bits"},
         )
 
     def test_precedence_over_decisions_and_skipped_rows(self):
@@ -648,7 +641,7 @@ class TestUnreviewedContent(unittest.TestCase):
     def test_a_note_on_a_file_named_like_an_icon_folds_into_its_main(self):
         # equal hashes, so `a.png#icon` folds into `a.png`; its own note makes the folded row NOT_REVIEWED
         entries = [self.entry("a.png", sha("1")), self.entry("a.png#icon", sha("1"))]
-        unreviewed = unreviewed_content([note("a.png#icon", "trailing-data", "9 bytes after the PNG end")], frozenset())
+        unreviewed = unreviewed_content([note("a.png#icon", "trailing-data", "9 bytes after the PNG end")])
         rows = export_rows(entries, self.clean(entries), [], unreviewed)
         self.assertEqual(
             [(r.image_id, r.status, r.reason) for r in rows],
@@ -706,6 +699,15 @@ class TestExportNotes(ExportTestCase):
                 self.assertIn(
                     "\tunreviewed embedded content: overlay-plane, overlay-unused-bits\t", self.report_lines()[0]
                 )
+
+    def test_unused_bits_deny_a_clean_file(self):
+        # shown as a view of their own, but the view cannot vouch that every bit pattern was seen
+        self.write_notes("/src/k.dcm\toverlay-unused-bits\tbits 8, 9, 10, 11")
+        self.assertEqual(self.allowlisted(), ["/src/a.dcm"])
+        self.assertIn(
+            f"/src/k.dcm\tNOT_REVIEWED\t\t\t\tunreviewed embedded content: overlay-unused-bits\t{sha('/src/k.dcm')}",
+            self.report_lines(),
+        )
 
     def test_embedded_thumbnail_denies_a_clean_file(self):
         self.write_notes("/src/k.dcm\tembedded-thumbnail\tEXIF IFD1 thumbnail (4096 bytes)")

@@ -12,6 +12,16 @@
   were divided by 65535 or min-max scaled, so one bright pixel could hide all the text. `parameters.tail_fraction`
   is no longer written to `preprocess.json`, and `parameters.range_trim` is new. Preprocess again to get the new
   rendering.
+- **DICOM pixel bits above BitsStored are now shown, and a HighBit other
+  than BitsStored - 1 is refused.** A DICOM whose unused high bits hold
+  content renders with an extra grayscale view of those bits to the right of
+  the image (the image itself is unchanged), so the reviewer sees there is
+  hidden content; preprocess again to get it. `export` still denies such a
+  file (`overlay-unused-bits`): to release it, strip the bits and preprocess
+  the stripped file again. A DICOM whose HighBit is not BitsStored - 1 is
+  now `failed` (`unsupported: HighBit H with BitsStored S is not
+  supported`), since bits below the stored ones would go unseen and
+  unnoted.
 - **`export` no longer allowlists a file holding content its review image
   does not show.** A file with an `overlay-plane`, `overlay-unused-bits`,
   `icon-image`, `embedded-thumbnail` or `trailing-data` note in `notes.tsv`
@@ -19,8 +29,9 @@
   reason `unreviewed embedded content: <kinds>`, even if it was reviewed
   CLEAN; DIRTY stays DIRTY, and `alpha` never denies a file. This holds for
   overlay planes even with `preprocess --draw-overlays`: a drawn plane is
-  clipped to the image and can be lost against bright pixels. Such a file
-  used to be allowlisted under the hash of its unstripped bytes, and
+  clipped to the image and can be lost against bright pixels; and for
+  unused pixel bits even though they are now shown as a view (see above).
+  Such a file used to be allowlisted under the hash of its unstripped bytes, and
   stripping it, as the documentation advised, changed the hash so it matched
   no row. To release one, strip it, preprocess the stripped file into a new
   work directory and review it there. Re-exporting an existing work

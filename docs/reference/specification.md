@@ -353,7 +353,9 @@ costs per pixel (80 for `dicom-gray`, 100 for `dicom-gray-wide`, 108 for
 `-gray16`, `-rgb8` and `-rgb16`, 120 for `raster-alpha`, 44 per canvas pixel
 for `raster-mpo`) are the peak resident memory of `render_and_encode`,
 input included, measured on synthetic images of 4000 to 6800 pixels a side
-and rounded up by about a tenth; `preprocess.json` records them with the two
+(for DICOM, also with content in every pixel's bits above `BitsStored`, and
+so their view, which stays within the same figures) and rounded up by about
+a tenth; `preprocess.json` records them with the two
 limits. The largest square image each path passes is 6345 pixels a side for
 `dicom-gray`, 5675 for `dicom-gray-wide`, 5461 for `dicom-colour`, 4884 for
 `dicom-colour-wide`, 5792 for `dicom-palette`, 8556, 8192, 10033 and 8973 for the raster gray and RGB
@@ -496,8 +498,11 @@ decodes to at most a few bytes per sample.
    above `BitsStored` for native, deflated, RLE and JPEG data but not for
    JPEG-LS or JPEG 2000. `_split_unused_bits` (pure) then keeps each
    integer sample's low `BitsStored` bits, sign-extended when the dtype is
-   signed (PixelRepresentation 1), and returns the positions above
-   `BitsStored` where a raw sample with content there differs from that. A
+   signed (PixelRepresentation 1), and returns with them the content of the
+   bits above: unsigned, of the sample's width, `where(content, raw ^
+   masked, 0) >> BitsStored`, or None when no sample has content there;
+   `_unused_bit_positions` ORs it into the positions above `BitsStored`
+   where a raw sample with content there differs from the masked value. A
    sample whose bits above `BitsStored` are all zero, or (signed) the sign
    extension, has no content there: writers fill unused bits either way, and
    clearing them in a sign-extended file gives the zero form. The note can
@@ -505,8 +510,26 @@ decodes to at most a few bytes per sample.
    compression overshooting it (lossy JPEG 2000 coded at a higher precision
    than `BitsStored`: masking wraps its brightest pixels). Rendering uses
    the masked array for every transfer syntax; the positions become the
-   `overlay-unused-bits` note (see *Notes*). HighBit is taken as
-   `BitsStored` - 1, as pydicom does. Float samples, and integer samples
+   `overlay-unused-bits` note (see *Notes*). When there is content, it is
+   also rendered as a view of its own to the right of the image, placed
+   after the colormap of step 7 and before the JPG is encoded:
+   `_unused_bits_view` (pure) reduces colour samples by their maximum across
+   channels and maps 0 to black and any other value `v` to
+   `UNUSED_BITS_FLOOR + (1 - UNUSED_BITS_FLOOR) * v / max` (the floor is
+   0.25, so one set bit is clearly visible beside much larger values, and the
+   largest is white), float32 [0, 1]; it is cropped on its own (step 6's
+   `_crop`) and shown linearly as an alpha view is, and `_beside` places the
+   two uint8 views side by side, top-aligned, padded and separated by
+   `SIDE_BY_SIDE_GAP` pixels of `SIDE_BY_SIDE_FILL` mid-gray (128), as
+   `preprocess_raster` places an alpha view. The image itself is the same as
+   without the view. Lossy JPEG 2000 overshoot shows there too. The view
+   shows that the bits hold something, not every pattern they hold, so
+   `export` still denies the file (see *Parts and folding*). HighBit must be
+   `BitsStored` - 1 (the stored bits are the low ones): `_check_high_bit`
+   raises `unsupported: HighBit H with BitsStored S is not supported` before
+   decoding when HighBit is present and differs, since otherwise bits below
+   the stored ones, which can hold text, would be neither shown nor noted.
+   Float samples, and integer samples
    whose dtype has no bits above `BitsStored` (`BitsStored` equal to
    `BitsAllocated`), are left as they are and give no positions. Colour and
    palette images are masked too, palette indices before `apply_color_lut`.
@@ -548,7 +571,8 @@ whole file (fail-closed: a reviewer who asked for overlays drawn never
 reviews an image missing one):
 `ValueError: overlay 0x6002 cannot be decoded: ...`. Overlays embedded in the
 unused bits of PixelData (retired; PS3.5 §8.1.1 lets receivers assume nothing
-about those bits) are never drawn, with or without the flag: those bits are masked (step 2) and noted as
+about those bits) are never drawn onto the image, with or without the flag: those bits are masked
+(step 2), shown as a view of their own beside the image, and noted as
 `overlay-unused-bits`, naming any 60xx group whose OverlayBitPosition points
 at a set bit.
 
@@ -924,19 +948,22 @@ empty (an `X` listed without a hash never borrows its icon's).
 - Otherwise it is `DIRTY` if its latest decision is.
 - Otherwise it is `NOT_REVIEWED` if `notes.tsv` lists unreviewed content for
   it, with the reason `unreviewed embedded content: <kinds>`, whether its
-  decision is CLEAN or it has none. `export.unreviewed_content(notes,
-  rendered)` derives that reason per `image_id`: the note kinds in
+  decision is CLEAN or it has none. `export.unreviewed_content(notes)`
+  derives that reason per `image_id`: the note kinds in
   `export.UNRENDERED_NOTE_KINDS` (`overlay-plane`, `overlay-unused-bits`,
-  `icon-image`, `embedded-thumbnail`, `trailing-data`) that are not in
-  `rendered`, leaving out a `trailing-data` note whose detail ends in
+  `icon-image`, `embedded-thumbnail`, `trailing-data`), leaving out a
+  `trailing-data` note whose detail ends in
   `export.ALL_ZERO_SUFFIX` (`; all zero bytes`, which preprocess also writes),
   each kind once, in `NOTE_KINDS` order. `export.SHOWN_NOTE_KINDS`
   (`alpha`, shown as a view of its own) never block; the two sets partition
-  `NOTE_KINDS`, so a new kind must be put in one. `rendered` is the set of
-  kinds known to be fully shown in the review image; `LocalStore` passes it
-  empty. `overlay-plane` blocks even with `--draw-overlays`: a drawn plane
-  is clipped to the image (one placed outside it is not drawn at all) and
-  drawn at maximum brightness, so it can be lost against bright pixels.
+  `NOTE_KINDS`, so a new kind must be put in one. `overlay-plane` blocks
+  even with `--draw-overlays`: a drawn plane is clipped to the image (one
+  placed outside it is not drawn at all) and drawn at maximum brightness, so
+  it can be lost against bright pixels. `overlay-unused-bits` blocks though
+  preprocess shows those bits as a view of their own: the view is scaled by
+  their largest value, so different bit patterns can render at nearly the
+  same gray (a bit-15 box holding bit-8 text: 254 against 255), and it
+  cannot vouch that all of them were seen.
   Notes for `image_id`s that are not parts are ignored. preprocess writes
   notes under the main `image_id`, and a work directory old enough to have
   an older version's DICOM `X#icon` parts has no `notes.tsv`; but a real
@@ -1381,7 +1408,7 @@ delegate to `ReviewDB.get_status` / `current_pass`. `skipped` parses
 `skipped.tsv` strictly with `load_skipped` (header `image_id`, `kind`, `reason`; `kind` is `failed`
 or `ignored`) and returns only the counts (zero when the file is absent, even where `export` would refuse). `export_rows()` (not part of the
 `ReviewStore` Protocol: `image_id`s stay local) returns
-`export.export_rows(entries, ReviewDB.decisions(), load_skipped(...), unreviewed_content(load_notes(...), frozenset()))`,
+`export.export_rows(entries, ReviewDB.decisions(), load_skipped(...), unreviewed_content(load_notes(...)))`,
 `required` set for both loaders when the manifest records hashes;
 see *`image-review export`*.
 
@@ -1394,7 +1421,7 @@ see *`image-review export`*.
 | `batch_summary(rows, statuses)` | The same per batch: `dict[str, Counter[Status]]` |
 | `skipped_counts(rows) -> SkippedCounts` | The failed/ignored split of `SkippedRow`s; the one derivation behind `skipped()`, preprocess's summary line and `preprocess.json` counts |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
-| `export.unreviewed_content(notes, rendered) -> dict[ImageId, str]` | Per `image_id`, `unreviewed embedded content: <kinds>` for its notes of kinds in `UNRENDERED_NOTE_KINDS` but not in `rendered` (all-zero `trailing-data` left out); see *Parts and folding* |
+| `export.unreviewed_content(notes) -> dict[ImageId, str]` | Per `image_id`, `unreviewed embedded content: <kinds>` for its notes of kinds in `UNRENDERED_NOTE_KINDS` (all-zero `trailing-data` left out); see *Parts and folding* |
 | `export.export_rows(entries, decisions, skipped, unreviewed) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id`, the `skipped.tsv` rows and `unreviewed_content`'s mapping: one row per source file, icons (from a work directory made by an older version) folded in; an `X#icon` whose hash differs from `X`'s also gets its own row, and both are at least `NOT_REVIEWED` |
 | `export.split_allowlist(rows) -> tuple[list[AllowedRow], list[ExportRow]]` | (allowed, report) in input order, every row in exactly one: allowed only if `CLEAN`, with a `source_sha256` that no row that is not `CLEAN` shares; a denied `CLEAN` row's `reason` says why |
 | `export.format_allowlist(rows: list[AllowedRow]) -> str` | The allowlist as TSV text with `ALLOWLIST_HEADER` (`AllowedRow` is a `NewType` over `ExportRow` that only `split_allowlist` makes, so passing the report's rows is a type error); `ValueError` if a field holds a control character or U+2028/U+2029, or starts with `"` |

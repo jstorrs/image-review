@@ -189,6 +189,10 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
   - a colour DICOM with float pixel data (`unsupported: float colour pixel
     data`): it has no bit depth to scale by, and values in 0..1 would render
     near black;
+  - a DICOM whose HighBit is not BitsStored - 1 (`unsupported: HighBit 15
+    with BitsStored 12 is not supported`), refused before decoding: its
+    stored bits are not the low ones, so the bits below them, which can
+    hold text, would be neither shown nor noted;
   - an unreadable subdirectory;
   - a rendered image wider or taller than 65500 pixels, libjpeg's limit,
     with an `OSError` from the JPEG writer (with Pillow 12.3,
@@ -327,10 +331,10 @@ input can have several notes, one row each. The file's columns are in
 [`notes.tsv`](../reference/work-directory.md#notestsv); like `skipped.tsv` it
 holds source paths.
 
-Every kind but `alpha` marks content that is not
-rendered into the review image (or, for `overlay-plane` with
-`--draw-overlays`, may not be fully shown) but ships in the file's bytes, so
-nobody reviewed all of it: `export` reports such a file as `NOT_REVIEWED`
+Every kind but `alpha` marks content that is not rendered into the review
+image (or, for `overlay-plane` with `--draw-overlays` and for
+`overlay-unused-bits`, may not be fully shown) but ships in the file's
+bytes, so nobody reviewed all of it: `export` reports such a file as `NOT_REVIEWED`
 and does not allowlist it (`trailing-data` of zero bytes only is the
 exception; see [export](export.md#what-is-allowlisted)). Stripping the
 content changes the file's hash, so to release it, strip it, preprocess the
@@ -352,8 +356,9 @@ stripped file into a new work directory and review it there.
   The note needs only that OverlayData is present, so an overlay that cannot
   be decoded is noted too.
 - **`overlay-unused-bits`**: the bits of each pixel above BitsStored are
-  masked before rendering (signed data is sign-extended from its stored
-  bits), whatever the transfer syntax, so they are not reviewed. A pixel
+  masked out of the image (signed data is sign-extended from its stored
+  bits), whatever the transfer syntax, and shown as a view of their own to
+  its right (see [Rendering pipeline](#rendering-pipeline)). A pixel
   whose bits above BitsStored are all zero, or (signed data) repeat its
   sign, holds nothing there; for the other pixels the detail lists the bit
   positions that differ from the masked value, ascending. A position named by
@@ -362,9 +367,12 @@ stripped file into a new work directory and review it there.
   the note can mean a BitsStored that understates the data, or lossy
   compression overshooting it (e.g. lossy JPEG 2000 coded at a higher
   precision than BitsStored, whose brightest pixels then wrap round to dark
-  when masked): check the image against the note. The bits stay in the
-  pixel data as stored, so they ship in the released bytes (see
-  above; clearing them is stripping).
+  when masked, and the view shows the overshoot): check the image against
+  the note. The view shows that the bits hold something, but it is scaled
+  by their largest value, so different bit patterns can come out at nearly
+  the same gray: `export` still denies the file (see above). The bits stay
+  in the pixel data as stored, so they ship in the released bytes (clearing
+  them is stripping).
 - **`icon-image`**: icons are not rendered, so text burned into them is not
   reviewed (see above). The detail gives the first
   icon's rows, columns and photometric interpretation, with `?` for one that
@@ -456,9 +464,11 @@ or colormap:
    min-to-max span will not overflow, then corrects photometric
    interpretation; otherwise the input is `failed` with the unsupported
    reason above
-2. Compresses intensity outliers (beyond the 1st/99th percentile) into the
-   ends of the range instead of clipping them, so bright burned-in text
-   stays visible. With `--draw-overlays`, DICOM overlay planes (annotations
+2. Windows the intensities: the 1st to 99th percentile of the values inside
+   the outer 0.01% of the min-max range, shrunk by 2%, maps to the full
+   range, and values outside it are clipped (details in the
+   [specification](../reference/specification.md#image-review-preprocess)).
+   With `--draw-overlays`, DICOM overlay planes (annotations
    stored outside the pixel data) are then drawn at maximum brightness (white
    on colour and palette images)
 3. Applies adaptive histogram equalization (CLAHE with 96-pixel tiles)
@@ -478,9 +488,10 @@ the image (one placed outside it is not shown at all) and is drawn at
 maximum brightness, so it can be lost against bright pixels. A DICOM whose
 overlay cannot be decoded is then `failed` as a whole, naming its group; without the flag they are never decoded.
 Overlays stored in the unused bits of the pixel data (bits above
-BitsStored), rather than in overlay planes, are masked for every transfer
-syntax, so they are never drawn, with or without the flag, and are noted as
-`overlay-unused-bits`. Only
+BitsStored), rather than in overlay planes, are masked out of the image for
+every transfer syntax, with or without the flag, are shown as a view of their
+own instead (see below), and are noted as `overlay-unused-bits`; `export`
+still does not allowlist such a file. Only
 single-frame DICOMs (grayscale, colour or palette) are rendered for now.
 
 Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
@@ -499,6 +510,17 @@ as several views side by side in one image (still one item to review):
   anything drawn only in the alpha channel is visible, whatever the colour).
   Check both halves. A grayscale image with alpha stays grayscale. The input
   also gets an [`alpha` note](#input-notes).
+- **DICOMs whose pixel bits above BitsStored hold content** (see
+  [`overlay-unused-bits`](#input-notes)): left is the image with those bits
+  masked, rendered as it would be without them, right is what they held as
+  grayscale, cropped on its own: black where a pixel has nothing above
+  BitsStored, and, where it has, from dark gray (a quarter of white) up to
+  white for the largest value those bits hold in the image (for colour, the
+  largest of a pixel's samples), so even a single set bit stands out. Lossy
+  JPEG 2000 overshooting BitsStored also shows up here, as speckle at the
+  image's brightest pixels. Check both. The view shows that the bits hold
+  something, but different patterns can come out at nearly the same gray,
+  so `export` still denies the file.
 - **MPO JPEGs** (a JPEG whose MPF lists more images: Ultra HDR gain maps,
   camera previews): every image the MPF lists, left to right. Pillow 12
   leaves an Ultra HDR file as a plain JPEG, so preprocess reads it as an

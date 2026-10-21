@@ -57,7 +57,9 @@ stays in the file's bytes, so nobody reviewed all of it:
 - `overlay-plane`, even with `preprocess --draw-overlays`: a drawn plane is
   clipped to the image and drawn at maximum brightness, so part or all of it
   can be outside the image or lost against bright pixels;
-- `overlay-unused-bits` (pixel bits above BitsStored, never drawn);
+- `overlay-unused-bits` (pixel bits above BitsStored): preprocess shows them
+  as a view of their own, but that view is scaled by their largest value, so
+  different bit patterns can come out at nearly the same gray;
 - `icon-image` (a DICOM's embedded icon);
 - `embedded-thumbnail` (an EXIF or TIFF thumbnail);
 - `trailing-data`, unless its detail ends in `; all zero bytes` (zero bytes

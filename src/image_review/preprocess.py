@@ -76,7 +76,8 @@ CLAHE_KERNEL_SIZE = 96  # CLAHE tile size in pixels
 JPEG_QUALITY = 95
 JPEG_SUBSAMPLING = 0  # 4:4:4, so small coloured text keeps its edges
 SIDE_BY_SIDE_GAP = 4  # pixels between views placed side by side in one rendered image
-SIDE_BY_SIDE_FILL = 0.5  # mid-gray, the gap between the colour and alpha views of a transparent image
+SIDE_BY_SIDE_FILL = 0.5  # mid-gray, the gap between an image's views (colour and alpha, or a DICOM's unused bits)
+UNUSED_BITS_FLOOR = 0.25  # the least gray of a pixel whose bits above BitsStored hold content, in their own view
 
 SNIFF_BYTES = 132  # enough for the DICOM preamble and its `DICM` prefix
 _DICOM_MAGIC_OFFSET = 128
@@ -202,9 +203,11 @@ RenderPath = Literal[
 # Peak bytes of memory per pixel for each way an input is rendered, the input's own bytes included. Measured as the
 # peak resident set of `render_and_encode` less the interpreter's after imports, over the pixels, on noisy
 # gradients of 4000 x 4000 to 6800 x 6800 pixels (CPython 3.13, numpy 2.5, Pillow 12.3, pydicom 3.0). The most
-# seen: DICOM gray 73 (up to 16 bits; the colormap's float64 RGBA is most of it), 92 (float64), colour 96 (16 bits
-# with bits above BitsStored set), 120 (32 bits), palette 86; raster gray 40 (8 bits), 42 (16 bits and wider), RGB 29, 16-bit RGB 36, transparent 109 (a 16-bit
-# CMYK TIFF 60), and an MPO 39 per pixel of its canvas. Each is that rounded up by about a tenth.
+# seen: DICOM gray 73 (up to 16 bits; the colormap's float64 RGBA is most of it), 92 (float64), colour 96 (16 bits),
+# 120 (32 bits), palette 86; with content in every pixel's bits above BitsStored, and so their view (CPython 3.14,
+# Pillow 13.0): gray 78, 84 (32 bits), colour 102, 132 (32 bits), palette 91. Raster gray 40 (8 bits), 42 (16 bits and
+# wider), RGB 29, 16-bit RGB 36, transparent 109 (a 16-bit CMYK TIFF 60), and an MPO 39 per pixel of its canvas. Each
+# is the most seen without that view rounded up by about a tenth, which also covers the most seen with it.
 RENDER_BYTES_PER_PIXEL: Mapping[RenderPath, int] = {
     "dicom-gray": 80,
     "dicom-gray-wide": 100,
@@ -497,32 +500,63 @@ def _decode_pixels(dcm: pydicom.FileDataset) -> np.ndarray:
         raise DecodeError(f"cannot decode {syntax.name}: {type(exc).__name__}: {cause}") from exc
 
 
-def _split_unused_bits(raw: np.ndarray, bits_stored: int) -> tuple[np.ndarray, tuple[int, ...]]:
-    """Integer `raw` reduced to its low `bits_stored` bits, and the positions of the bits above them that held content.
+def _split_unused_bits(raw: np.ndarray, bits_stored: int) -> tuple[np.ndarray, np.ndarray | None]:
+    """Integer `raw` reduced to its low `bits_stored` bits, and the content of the bits above them, if any held some.
 
     The low bits are sign-extended when `raw` is signed (PixelRepresentation 1). A sample's bits above `bits_stored`
-    hold content unless they are all zero or (signed) the sign extension, both of which writers use; a sample with
-    content reports every such bit that differs from the masked value. `raw` is returned as is when its dtype has no
-    bits above `bits_stored`.
+    hold content unless they are all zero or (signed) the sign extension, both of which writers use. The content is
+    unsigned, of `raw`'s width, shifted down by `bits_stored`: the bits of each sample with content that differ from
+    the masked value, 0 elsewhere (see `_unused_bit_positions`); None when no sample has any. `raw` is returned as is
+    when its dtype has no bits above `bits_stored`.
     """
     width = raw.dtype.itemsize * 8
     if bits_stored >= width:
-        return raw, ()
+        return raw, None
     shift = raw.dtype.type(width - bits_stored)
     masked = np.right_shift(np.left_shift(raw, shift), shift)  # arithmetic right shift for signed dtypes
     # Only a non-zero high field that is not the sign extension holds content: zero-filled negatives do not
     content = (raw != masked) & (np.right_shift(raw, raw.dtype.type(bits_stored)) != 0)
-    differing = int(np.bitwise_or.reduce(np.bitwise_xor(raw[content], masked[content]).view(f"u{raw.dtype.itemsize}")))
-    return masked, tuple(bit for bit in range(bits_stored, width) if differing >> bit & 1)
+    if not content.any():
+        return masked, None
+    unsigned = np.dtype(f"u{raw.dtype.itemsize}")
+    differing = np.bitwise_xor(raw, masked).view(unsigned)
+    return masked, np.right_shift(np.where(content, differing, 0).astype(unsigned), unsigned.type(bits_stored))
 
 
-def _stored_pixels(dcm: pydicom.FileDataset) -> tuple[np.ndarray, tuple[int, ...]]:
-    """The decoded pixels with bits above BitsStored masked (see `_split_unused_bits`), and the positions of those
-    that held content. Float pixels have no unused bits and are returned as is."""
+def _unused_bit_positions(high: np.ndarray | None, bits_stored: int) -> tuple[int, ...]:
+    """The positions above `bits_stored` set anywhere in `high`, the unused bits' content from `_split_unused_bits`."""
+    if high is None:
+        return ()
+    differing = int(np.bitwise_or.reduce(high, axis=None))
+    return tuple(bits_stored + bit for bit in range(differing.bit_length()) if differing >> bit & 1)
+
+
+def _unused_bits_view(high: np.ndarray) -> np.ndarray:
+    """Float32 [0, 1] grayscale of the unused bits' content `high` (see `_split_unused_bits`), colour samples reduced
+    by their maximum: black where it is 0, and from UNUSED_BITS_FLOOR up to white by its own maximum elsewhere, so a
+    single set bit is clearly visible beside much larger values and the content's shapes are kept."""
+    values = (high.max(axis=2) if high.ndim == 3 else high).astype(np.float32)
+    scaled = UNUSED_BITS_FLOOR + (1 - UNUSED_BITS_FLOOR) * values / values.max()
+    return np.where(values > 0, scaled, 0).astype(np.float32)
+
+
+def _check_high_bit(dcm: pydicom.FileDataset) -> None:
+    """Raise `Unsupported` if HighBit is present and not BitsStored - 1: the stored bits would not be the low ones
+    `_split_unused_bits` keeps, so bits below them (which can hold text) would be neither rendered nor noted."""
+    high_bit, bits_stored = dcm.get("HighBit"), dcm.get("BitsStored")
+    if high_bit is not None and bits_stored is not None and int(high_bit) != int(bits_stored) - 1:
+        raise Unsupported(f"HighBit {int(high_bit)} with BitsStored {int(bits_stored)} is not supported")
+
+
+def _stored_pixels(dcm: pydicom.FileDataset) -> tuple[np.ndarray, np.ndarray | None]:
+    """The decoded pixels with bits above BitsStored masked, and the content of those bits, if any (see
+    `_split_unused_bits`); first `_check_high_bit`, before decoding. Float pixels have no unused bits and are
+    returned as is."""
+    _check_high_bit(dcm)
     raw = _decode_pixels(dcm)
     _require_finite(raw)
     if raw.dtype.kind not in "iu":
-        return raw, ()
+        return raw, None
     return _split_unused_bits(raw, int(dcm.BitsStored))
 
 
@@ -542,12 +576,12 @@ def _palette_entry_bits(dcm: pydicom.FileDataset) -> int:
         return declared
 
 
-def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarray, tuple[int, ...]]:
-    """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels, and the unused
-    bits that held content (see `_stored_pixels`; palette indices are masked before the lookup). RGB is scaled by
+def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarray, np.ndarray | None]:
+    """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels, and the content of
+    their unused bits, if any (see `_stored_pixels`; palette indices are masked before the lookup). RGB is scaled by
     BitsStored and palette entries by the lookup table descriptor's depth, or 8 for 8-bit entries under a 16-bit
     descriptor (see `_palette_entry_bits` and `_to_uint8`)."""
-    pixels, unused_bits = _stored_pixels(dcm)
+    pixels, high = _stored_pixels(dcm)
     if pixels.dtype.kind == "f":  # no depth to scale by: 0..1 floats would render near black
         raise Unsupported("float colour pixel data")
     bits = int(dcm.BitsStored)
@@ -556,7 +590,7 @@ def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarra
         bits = _palette_entry_bits(dcm)  # the entries' depth, not the indices'
     if pixels.ndim != 3 or pixels.shape[2] != 3:
         raise Unsupported(f"pixel array with shape {pixels.shape}")
-    return _to_uint8(pixels, bits), unused_bits
+    return _to_uint8(pixels, bits), high
 
 
 def _overlay_plane_pixels(dcm: pydicom.FileDataset) -> int:
@@ -849,8 +883,10 @@ def preprocess_dicom(
     """Render a single-frame DICOM to (H, W, 3) uint8: grayscale through `colormap`, colour as is.
 
     Overlay planes are drawn at maximum brightness only if `draw_overlays` (an undecodable one then raises);
-    otherwise they are not decoded and the image is the PixelData alone. Bits above BitsStored are masked before rendering; their
-    positions that held content are returned with the image, for `_dicom_notes`.
+    otherwise they are not decoded and the image is the PixelData alone. Bits above BitsStored are masked before
+    rendering; when they held content, it is shown as a view of its own to the right (see `_unused_bits_view`,
+    cropped on its own and placed as `preprocess_raster` places an alpha view), and their positions are returned with
+    the image, for `_dicom_notes`.
     """
     if not _has_pixel_data(dcm):
         sop_class = _sop_class(dcm)
@@ -865,12 +901,11 @@ def preprocess_dicom(
         case "MONOCHROME1" | "MONOCHROME2":
             wide = int(dcm.get("BitsAllocated") or 16) > 16
             _check_dicom_memory(dcm, "dicom-gray-wide" if wide else "dicom-gray", draw_overlays)
-            pixels, unused_bits = _stored_pixels(dcm)
+            pixels, high = _stored_pixels(dcm)
             if pixels.ndim != 2:
                 raise Unsupported(f"pixel array with shape {pixels.shape}")
             overlay = _overlay_mask(dcm, pixels.shape) if draw_overlays else np.zeros(pixels.shape, dtype=bool)
-            gray = _gray_dicom(pixels, photometric, overlay)
-            return apply_colormap(gray, colormap), unused_bits
+            image = apply_colormap(_gray_dicom(pixels, photometric, overlay), colormap)
         case (
             "RGB"
             | "PALETTE COLOR"
@@ -886,12 +921,16 @@ def preprocess_dicom(
             else:
                 path = "dicom-colour-wide" if int(dcm.get("BitsAllocated") or 8) > 16 else "dicom-colour"
             _check_dicom_memory(dcm, path, draw_overlays)
-            rgb, unused_bits = _colour_dicom(dcm, photometric)
+            rgb, high = _colour_dicom(dcm, photometric)
             if draw_overlays:
                 rgb[_overlay_mask(dcm, rgb.shape[:2])] = 255
-            return _crop(rgb), unused_bits
+            image = _crop(rgb)
         case _:
             raise Unsupported(f"photometric interpretation {photometric}")
+    if high is None:
+        return image, ()
+    view = _linear_view(_crop(_unused_bits_view(high)))
+    return _beside([image, view]), _unused_bit_positions(high, int(dcm.BitsStored))
 
 
 def _overlay_note(dcm: pydicom.FileDataset) -> Note | None:
@@ -966,19 +1005,19 @@ def apply_colormap(img: np.ndarray, colormap: str = "inferno") -> np.ndarray:
 
 
 def _side_by_side(views: list[np.ndarray], fill: float) -> np.ndarray:
-    """Place float views left to right, top-aligned, padded and separated by `fill`.
+    """Place views of one dtype (float, or uint8) left to right, top-aligned, padded and separated by `fill`.
 
     If any view is RGB, grayscale views are promoted to RGB.
     """
     if any(v.ndim == 3 for v in views):
         views = [v if v.ndim == 3 else np.stack([v] * 3, axis=2) for v in views]
     height = max(v.shape[0] for v in views)
-    channels = views[0].shape[2:]
+    channels, dtype = views[0].shape[2:], views[0].dtype
     parts = []
     for i, view in enumerate(views):
         if i:
-            parts.append(np.full((height, SIDE_BY_SIDE_GAP, *channels), fill, dtype=np.float32))
-        padded = np.full((height, view.shape[1], *channels), fill, dtype=np.float32)
+            parts.append(np.full((height, SIDE_BY_SIDE_GAP, *channels), fill, dtype=dtype))
+        padded = np.full((height, view.shape[1], *channels), fill, dtype=dtype)
         padded[: view.shape[0]] = view
         parts.append(padded)
     return np.concatenate(parts, axis=1)
@@ -1545,7 +1584,8 @@ def _preprocess_view(img: np.ndarray) -> np.ndarray:
 
 
 def _linear_view(img: np.ndarray) -> np.ndarray:
-    """An alpha view to (H, W, 3) uint8, linearly: transparent black, opaque white, constant alpha its own gray."""
+    """An alpha or unused-bits view to (H, W, 3) uint8, linearly: alpha transparent black, opaque white, constant
+    alpha its own gray."""
     gray = ski.util.img_as_ubyte(img)
     return np.stack([gray] * 3, axis=2)
 
@@ -1554,11 +1594,15 @@ def preprocess_raster(views: Views) -> np.ndarray:
     """Normalize decoded views to one (H, W, 3) uint8 image. The first view is the image, as it would be by itself
     (CLAHE if grayscale, which equalizes by the whole image's range, so another view must not set it); a second is
     alpha, shown linearly (see `_linear_view`). They are placed side by side."""
-    processed = [_preprocess_view(views[0]), *(_linear_view(v) for v in views[1:])]
+    return _beside([_preprocess_view(views[0]), *(_linear_view(v) for v in views[1:])])
+
+
+def _beside(processed: list[np.ndarray]) -> np.ndarray:
+    """(H, W, 3) uint8 views to one image, side by side and separated by SIDE_BY_SIDE_FILL (see `_side_by_side`);
+    one view as is. Placed as uint8, not floats, which would cost 24 bytes a pixel more at the peak."""
     if len(processed) == 1:
         return processed[0]
-    floats = [ski.util.img_as_float32(p) for p in processed]
-    return ski.util.img_as_ubyte(_side_by_side(floats, fill=SIDE_BY_SIDE_FILL))
+    return _side_by_side(processed, fill=round(SIDE_BY_SIDE_FILL * 255))
 
 
 def _has_preamble(head: bytes) -> bool:

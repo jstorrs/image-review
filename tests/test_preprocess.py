@@ -88,7 +88,6 @@ from image_review.preprocess import (
     compress_image,
     decode_raster,
     discover,
-    encode_jpeg,
     render,
     render_and_encode,
     run_preprocess,
@@ -532,7 +531,7 @@ class CollisionTest(unittest.TestCase):
             )
             for e in entries
         }
-        notes = unreviewed_content(load_notes(self.work, required=True), frozenset())
+        notes = unreviewed_content(load_notes(self.work, required=True))
         rows = export_rows(entries, decisions, load_skipped(self.work), notes)
         self.assertEqual(
             [(r.image_id, r.status, r.reason) for r in rows],
@@ -830,6 +829,23 @@ class NotesTest(unittest.TestCase):
             [[(self.src / "tail.jpg").as_posix(), "NOT_REVIEWED", "unreviewed embedded content: trailing-data"]],
         )
 
+    def test_export_denies_unused_bits_though_they_are_shown_as_a_view(self):
+        write_dicom(self.src / "bits.dcm", _with_unused_bit(_text_pixels(), 13), BitsStored=12, HighBit=11)
+        write_dicom(self.src / "plain.dcm", _text_pixels(), BitsStored=12, HighBit=11)
+        self.run_quietly()
+        bits, plain = (self.src / "bits.dcm").as_posix(), (self.src / "plain.dcm").as_posix()
+        self.assertEqual(self.notes(), [[bits, "overlay-unused-bits", "bit 13"]])
+        with LocalStore(self.work) as store:
+            mark(store, [r.key for r in store.manifest()], "CLEAN")
+        report = self.root / "report.tsv"
+        exported = invoke_cli("export", "--work-dir", str(self.work), "--report", str(report))
+        self.assertEqual(exported.exit_code, 0, exported.output)
+        self.assertEqual([line.split("\t")[1] for line in exported.stdout.splitlines()[1:]], [plain])
+        self.assertEqual(
+            [line.split("\t")[:2] + line.split("\t")[5:6] for line in report.read_text().splitlines()[1:]],
+            [[bits, "NOT_REVIEWED", "unreviewed embedded content: overlay-unused-bits"]],
+        )
+
     def test_overlay_plane_is_noted_and_counted(self):
         _dicom_with_overlays(self.src / "a.dcm", 0x6000)
         result = self.run_quietly()
@@ -1033,30 +1049,118 @@ class UnusedBitsTest(unittest.TestCase):
         ds.BitsStored, ds.HighBit = bits_stored, bits_stored - 1
         return ds
 
-    def rendered(self, ds: pydicom.Dataset) -> tuple[bytes, tuple[Note, ...]]:
-        """The JPG and notes `ds` renders to, through its saved bytes."""
+    def rendered(self, ds: pydicom.Dataset) -> tuple[np.ndarray, tuple[Note, ...]]:
+        """The image and notes `ds` renders to, through its saved bytes."""
         buf = io.BytesIO()
         ds.save_as(buf, enforce_file_format=True)
         out = render("dicom", "id", buf.getvalue(), "inferno")
-        return encode_jpeg(out.rgb), out.notes
+        return out.rgb, out.notes
+
+    def assert_masked_beside_unused(self, rgb: np.ndarray, clean: np.ndarray) -> np.ndarray:
+        """Assert `rgb` is `clean` exactly, then the gap, then a view of the unused bits; return that view's gray."""
+        height, width = clean.shape[:2]
+        np.testing.assert_array_equal(rgb[:height, :width], clean)
+        gap = round(preprocess_module.SIDE_BY_SIDE_FILL * 255)
+        np.testing.assert_array_equal(rgb[:, width : width + preprocess_module.SIDE_BY_SIDE_GAP], gap)
+        view = rgb[:, width + preprocess_module.SIDE_BY_SIDE_GAP :]
+        self.assertGreater(view.shape[1], 0)
+        np.testing.assert_array_equal(view, np.stack([view[:, :, 0]] * 3, axis=2))  # grayscale
+        return view[:, :, 0]
 
     def test_native_unused_bits_are_noted_and_not_rendered(self):
         clean, notes = self.rendered(self.dataset(_text_pixels()))
         self.assertEqual(notes, ())
-        jpg, notes = self.rendered(self.dataset(_with_unused_bit(_text_pixels(), 15)))
+        rgb, notes = self.rendered(self.dataset(_with_unused_bit(_text_pixels(), 15)))
         self.assertEqual(notes, (Note("overlay-unused-bits", "bit 15"),))
-        self.assertEqual(jpg, clean)
-        jpg, notes = self.rendered(self.dataset(_with_unused_bit(_with_unused_bit(_text_pixels(), 15), 12)))
+        self.assertEqual(int(self.assert_masked_beside_unused(rgb, clean).max()), 255)
+        rgb, notes = self.rendered(self.dataset(_with_unused_bit(_with_unused_bit(_text_pixels(), 15), 12)))
         self.assertEqual(notes, (Note("overlay-unused-bits", "bits 12, 15"),))
-        self.assertEqual(jpg, clean)
+        self.assert_masked_beside_unused(rgb, clean)
+
+    def test_content_above_bits_stored_is_shown_as_its_own_view(self):
+        rng = np.random.default_rng(5)
+        pixels = rng.integers(0, 256, (100, 100)).astype(np.uint16)  # 8 bits stored in 16
+        text = np.zeros(pixels.shape, dtype=bool)
+        text[40:60, 20:30] = text[40:60, 50:80] = True  # two strokes, apart
+        clean, notes = self.rendered(self.dataset(pixels, bits_stored=8))
+        self.assertEqual(notes, ())
+        marked = pixels.copy()
+        marked[text] |= 0x0F00
+        rgb, notes = self.rendered(self.dataset(marked, bits_stored=8))
+        self.assertEqual(notes, (Note("overlay-unused-bits", "bits 8, 9, 10, 11"),))
+        view = self.assert_masked_beside_unused(rgb, clean)
+        self.assertEqual((int(view.min()), int(view.max())), (0, 255))  # black field, white text
+        # Uncropped, the view is the text itself: white on black
+        _, high = preprocess_module._split_unused_bits(marked, 8)
+        assert high is not None
+        np.testing.assert_array_equal(preprocess_module._unused_bits_view(high), text.astype(np.float32))
+
+    def test_a_single_low_unused_bit_is_visible_beside_a_high_one(self):
+        high = np.zeros((4, 4), dtype=np.uint16)
+        high[0, 0], high[1, 1] = 0x80, 0x01  # bits 15 and 8 above BitsStored 8
+        view = preprocess_module._unused_bits_view(high)
+        self.assertEqual(view.dtype, np.float32)
+        self.assertEqual((float(view[0, 0]), float(view[2, 2])), (1.0, 0.0))
+        self.assertGreaterEqual(float(view[1, 1]), preprocess_module.UNUSED_BITS_FLOOR)
+
+    def test_colour_content_above_bits_stored_is_shown_as_its_own_view(self):
+        rgb = np.random.default_rng(6).integers(0, 4096, (40, 60, 3)).astype(np.uint16)
+        clean, notes = self.rendered(self.dataset(rgb, "RGB"))
+        self.assertEqual(notes, ())
+        marked = rgb.copy()
+        marked[_text_mask(), 1] |= 1 << 14  # green only
+        marked[18:22, 12:48, 2] |= 1 << 12  # and under part of it, blue
+        out, notes = self.rendered(self.dataset(marked, "RGB"))
+        self.assertEqual(notes, (Note("overlay-unused-bits", "bits 12, 14"),))
+        view = self.assert_masked_beside_unused(out, clean)
+        self.assertEqual((int(view.min()), int(view.max())), (0, 255))
+        _, high = preprocess_module._split_unused_bits(marked, 12)
+        assert high is not None
+        np.testing.assert_array_equal(preprocess_module._unused_bits_view(high) > 0, _text_mask())  # max of channels
+
+    def test_without_unused_bit_content_the_image_is_the_masked_view_alone(self):
+        gray = _text_pixels()
+        rgb = np.random.default_rng(8).integers(0, 4096, (40, 60, 3)).astype(np.uint16)
+        overlay = np.zeros(gray.shape, dtype=bool)
+        cases = {
+            "gray": (
+                gray,
+                "MONOCHROME2",
+                preprocess_module.apply_colormap(preprocess_module._gray_dicom(gray, "MONOCHROME2", overlay)),
+            ),
+            "colour": (rgb, "RGB", preprocess_module._crop(preprocess_module._to_uint8(rgb, 12))),
+        }
+        for name, (pixels, photometric, expected) in cases.items():
+            with self.subTest(name):
+                out, notes = self.rendered(self.dataset(pixels, photometric))
+                self.assertEqual(notes, ())
+                np.testing.assert_array_equal(out, expected)
+
+    def test_high_bit_other_than_bits_stored_less_one_is_refused_before_decoding(self):
+        # Data in bits 4-15 (HighBit 15) and text in bits 0-3: masking to the low 12 bits would hide the text
+        pixels = (_text_pixels() << 4) | np.where(_text_mask(), 0x000F, 0).astype(np.uint16)
+        ds = self.dataset(pixels)
+        ds.HighBit = 15
+        buf = io.BytesIO()
+        ds.save_as(buf, enforce_file_format=True)
+        with mock.patch.object(preprocess_module, "_decode_pixels") as decode:
+            row = render_and_encode(Candidate("id", "dicom", buf.getvalue()), "inferno", draw_overlays=False)
+        decode.assert_not_called()
+        self.assertEqual(row, SkippedRow("id", "failed", "unsupported: HighBit 15 with BitsStored 12 is not supported"))
+        for photometric, data in (("RGB", np.zeros((8, 8, 3), dtype=np.uint16)), ("PALETTE COLOR", pixels)):
+            with self.subTest(photometric):
+                ds = self.dataset(data, photometric)
+                ds.HighBit = 15
+                with self.assertRaisesRegex(Unsupported, "HighBit 15 with BitsStored 12"):
+                    preprocess_module.preprocess_dicom(ds)
 
     def test_rle_unused_bit_is_noted_and_not_rendered(self):
         clean, _ = self.rendered(self.dataset(_text_pixels()))
         ds = self.dataset(_with_unused_bit(_text_pixels(), 15))
         ds.compress(RLELossless, encoding_plugin="pydicom")  # from the dataset's bytes: no range check on the values
-        jpg, notes = self.rendered(ds)
+        rgb, notes = self.rendered(ds)
         self.assertEqual(notes, (Note("overlay-unused-bits", "bit 15"),))
-        self.assertEqual(jpg, clean)
+        self.assert_masked_beside_unused(rgb, clean)
 
     def test_jpeg_2000_renders_as_the_masked_native_file(self):
         if not pydicom.pixels.get_encoder(JPEG2000Lossless).is_available:
@@ -1066,9 +1170,9 @@ class UnusedBitsTest(unittest.TestCase):
         ds = self.dataset(_with_unused_bit(_text_pixels(), 15), bits_stored=16)
         ds.compress(JPEG2000Lossless)
         ds.BitsStored, ds.HighBit = 12, 11
-        jpg, notes = self.rendered(ds)
+        rgb, notes = self.rendered(ds)
         self.assertEqual(notes, (Note("overlay-unused-bits", "bit 15"),))
-        self.assertEqual(jpg, clean)
+        self.assert_masked_beside_unused(rgb, clean)
 
     def test_overlay_group_whose_bit_position_holds_content_is_named(self):
         ds = self.dataset(_with_unused_bit(_text_pixels(), 15))
@@ -1084,18 +1188,18 @@ class UnusedBitsTest(unittest.TestCase):
     def test_signed_sign_extension_is_not_content(self):
         pixels = _text_pixels().astype(np.int16) - 2048  # negatives, sign-extended to 16 bits, and a positive bar
         before, _ = self.rendered(self.dataset(pixels, bits_stored=16))
-        jpg, notes = self.rendered(self.dataset(pixels))
+        rgb, notes = self.rendered(self.dataset(pixels))
         self.assertEqual(notes, ())
-        self.assertEqual(jpg, before)
+        np.testing.assert_array_equal(rgb, before)
         zero_filled = (pixels.view(np.uint16) & 0x0FFF).view(np.int16)  # negatives with their unused bits cleared
-        jpg, notes = self.rendered(self.dataset(zero_filled))
+        rgb, notes = self.rendered(self.dataset(zero_filled))
         self.assertEqual(notes, ())
-        self.assertEqual(jpg, before)
+        np.testing.assert_array_equal(rgb, before)
         stray = _with_unused_bit(pixels, 13)  # set under the positive bar: not its sign
         stray[0, 0] &= ~np.int16(1 << 14)  # cleared in a negative value: not its sign either
-        jpg, notes = self.rendered(self.dataset(stray))
+        rgb, notes = self.rendered(self.dataset(stray))
         self.assertEqual(notes, (Note("overlay-unused-bits", "bits 13, 14"),))
-        self.assertEqual(jpg, before)
+        self.assert_masked_beside_unused(rgb, before)
 
     def test_palette_indices_are_masked_before_the_lookup(self):
         def palette(indices: np.ndarray) -> pydicom.Dataset:
@@ -1109,26 +1213,29 @@ class UnusedBitsTest(unittest.TestCase):
         indices = np.random.default_rng(3).integers(0, 200, (40, 60)).astype(np.uint16)
         clean, notes = self.rendered(palette(indices))
         self.assertEqual(notes, ())
-        jpg, notes = self.rendered(palette(_with_unused_bit(indices, 12)))  # unmasked, these indices are off the LUT
+        rgb, notes = self.rendered(palette(_with_unused_bit(indices, 12)))  # unmasked, these indices are off the LUT
         self.assertEqual(notes, (Note("overlay-unused-bits", "bit 12"),))
-        self.assertEqual(jpg, clean)
+        self.assert_masked_beside_unused(rgb, clean)
 
     def test_split_matches_a_reference_mask_for_every_integer_dtype(self):
-        def reference(raw: np.ndarray, bits_stored: int) -> tuple[np.ndarray, tuple[int, ...]]:
+        def reference(raw: np.ndarray, bits_stored: int) -> tuple[np.ndarray, tuple[int, ...], np.ndarray | None]:
             width = raw.dtype.itemsize * 8
             if bits_stored >= width:
-                return raw, ()
+                return raw, (), None
             signed = raw.dtype.kind == "i"
-            masked, differing = [], 0
+            masked, high, differing = [], [], 0
             for value in raw.view(f"u{raw.dtype.itemsize}").ravel().tolist():
                 low = value & ((1 << bits_stored) - 1)
                 negative = signed and low >> (bits_stored - 1) & 1
                 extended = low | ((1 << width) - (1 << bits_stored)) if negative else low  # as unsigned
                 masked.append(extended)
-                if value >> bits_stored not in (0, extended >> bits_stored):
-                    differing |= value ^ extended
-            out = np.array(masked, dtype=f"u{raw.dtype.itemsize}").view(raw.dtype).reshape(raw.shape)
-            return out, tuple(bit for bit in range(bits_stored, width) if differing >> bit & 1)
+                content = value >> bits_stored not in (0, extended >> bits_stored)
+                high.append((value ^ extended) >> bits_stored if content else 0)
+                differing |= value ^ extended if content else 0
+            unsigned = f"u{raw.dtype.itemsize}"
+            out = np.array(masked, dtype=unsigned).view(raw.dtype).reshape(raw.shape)
+            positions = tuple(bit for bit in range(bits_stored, width) if differing >> bit & 1)
+            return out, positions, np.array(high, dtype=unsigned).reshape(raw.shape) if differing else None
 
         rng = np.random.default_rng(11)
         for dtype in (np.uint8, np.uint16, np.uint32, np.int8, np.int16, np.int32):
@@ -1137,14 +1244,21 @@ class UnusedBitsTest(unittest.TestCase):
             for bits_stored in (1, width - 1, width):
                 full = rng.integers(0, 1 << width, (6, 7), dtype=np.uint64).astype(unsigned).view(dtype)
                 low = (full.view(unsigned) & ((1 << bits_stored) - 1)).view(dtype)  # unsigned or zero-filled
-                extended, _ = reference(full, bits_stored)  # sign-extended (signed) or cleared (unsigned)
+                extended, _, _ = reference(full, bits_stored)  # sign-extended (signed) or cleared (unsigned)
                 for name, raw in (("full", full), ("zero-filled", low), ("sign-extended", extended)):
                     with self.subTest(dtype=np.dtype(dtype).name, bits_stored=bits_stored, raw=name):
-                        masked, positions = preprocess_module._split_unused_bits(raw, bits_stored)
-                        expected_masked, expected_positions = reference(raw, bits_stored)
+                        masked, high = preprocess_module._split_unused_bits(raw, bits_stored)
+                        positions = preprocess_module._unused_bit_positions(high, bits_stored)
+                        expected_masked, expected_positions, expected_high = reference(raw, bits_stored)
                         np.testing.assert_array_equal(masked, expected_masked)
                         self.assertEqual(masked.dtype, raw.dtype)
                         self.assertEqual(positions, expected_positions)
+                        if expected_high is None:
+                            self.assertIsNone(high)
+                        else:
+                            assert high is not None
+                            np.testing.assert_array_equal(high, expected_high)
+                            self.assertEqual(high.dtype, expected_high.dtype)
                         if name != "full":
                             self.assertEqual(positions, ())
 
@@ -1153,7 +1267,8 @@ class UnusedBitsTest(unittest.TestCase):
         _, notes = self.rendered(self.dataset(pixels, bits_stored=16))
         self.assertEqual(notes, ())
         masked, _ = self.rendered(self.dataset(pixels))
-        self.assertNotEqual(self.rendered(self.dataset(pixels, bits_stored=16))[0], masked)  # bit 15 is a value bit
+        unmasked, _ = self.rendered(self.dataset(pixels, bits_stored=16))
+        self.assertFalse(np.array_equal(unmasked, masked))  # bit 15 is a value bit
 
 
 class ClassifyTest(unittest.TestCase):

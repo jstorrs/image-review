@@ -32,7 +32,9 @@ NOTE_KINDS: tuple[NoteKind, ...] = get_args(NoteKind)
 ALL_ZERO_SUFFIX = "; all zero bytes"  # ends a `trailing-data` detail whose bytes are all zero: they hold nothing
 # Note kinds for pixel content the review image does not show but the released bytes keep: a file with one is never
 # CLEAN (see unreviewed_content). Every kind is in exactly one of the two sets. `overlay-plane` is here even when
-# `--draw-overlays` drew it: a drawn plane can be clipped to the image or lost against bright pixels.
+# `--draw-overlays` drew it: a drawn plane can be clipped to the image or lost against bright pixels. So is
+# `overlay-unused-bits`, though preprocess shows those bits as a view of their own: the view scales by the largest
+# value, so different bit patterns can come out at nearly the same gray and it cannot vouch that all were seen.
 UNRENDERED_NOTE_KINDS: frozenset[NoteKind] = frozenset(
     {"overlay-plane", "overlay-unused-bits", "icon-image", "embedded-thumbnail", "trailing-data"}
 )
@@ -70,16 +72,12 @@ class _Part:
     reason: str  # the skip reason, or the unreviewed content, for NOT_REVIEWED
 
 
-def unreviewed_content(notes: list[NoteRow], rendered: frozenset[NoteKind]) -> dict[ImageId, str]:
+def unreviewed_content(notes: list[NoteRow]) -> dict[ImageId, str]:
     """Per image_id with notes of content nobody reviewed, `unreviewed embedded content: <kinds>` (in NOTE_KINDS
-    order), in notes order: kinds in UNRENDERED_NOTE_KINDS but not `rendered`, and not a `trailing-data` of zero bytes
-    only. `rendered` is the kinds known to be fully shown in the review image this time: none yet (a drawn overlay
-    plane can be clipped or lost against bright pixels), kept so a preprocess.json flag can later add one."""
+    order), in notes order: kinds in UNRENDERED_NOTE_KINDS, and not a `trailing-data` of zero bytes only."""
     kinds: dict[ImageId, set[NoteKind]] = {}
     for n in notes:
-        if n.kind in UNRENDERED_NOTE_KINDS - rendered and not (
-            n.kind == "trailing-data" and n.detail.endswith(ALL_ZERO_SUFFIX)
-        ):
+        if n.kind in UNRENDERED_NOTE_KINDS and not (n.kind == "trailing-data" and n.detail.endswith(ALL_ZERO_SUFFIX)):
             kinds.setdefault(n.image_id, set()).add(n.kind)
     return {i: f"{UNREVIEWED_CONTENT}: {', '.join(k for k in NOTE_KINDS if k in ks)}" for i, ks in kinds.items()}
 

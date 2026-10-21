@@ -376,7 +376,7 @@ class LocalStore:
         review.tsv ends in a torn line or its last mark was cut short."""
         skipped = load_skipped(self.work_dir, required=self._hashed)
         notes = load_notes(self.work_dir, required=self._hashed)
-        return export_rows(self._entries, self._db.decisions(), skipped, unreviewed_content(notes, frozenset()))
+        return export_rows(self._entries, self._db.decisions(), skipped, unreviewed_content(notes))
 
 
 # The review --filter vocabulary, parsed by the CLI's click.Choice.
