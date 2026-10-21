@@ -118,7 +118,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
   };
   vm.createContext(ctx);
   if (fixedOrder) vm.runInContext("Math.random = () => 0.99;", ctx);
-  vm.runInContext(APP + "\n;globalThis.__state = state;", ctx);
+  vm.runInContext(APP + "\n;globalThis.__state = state;", ctx, { filename: process.argv[2] }); // named, so V8 coverage attributes lines to app.js
 
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
   // Reply headers as the socket server sends them: the content type and the serving instance (page.instance)
@@ -2814,6 +2814,47 @@ tests["grid mode: a resize on the stop sign does not repack; leaving it does, ke
     assert.strictEqual(page.els.grid.hidden, false);
   }
 };
+
+tests["a batch over MAX_GRID_KEYS shows the too-large notice and sends no grid request"] = async () => {
+  const rows = Array.from({ length: 1001 }, (_, i) => ({ key: "k" + i, batch: "b1" }));
+  const all = Object.fromEntries(rows.map((row) => [row.key, "UNREVIEWED"]));
+  const page = makePage({ manifest: rows, statuses: all });
+  await page.boot();
+  await page.enterGrid(all);
+  assert.strictEqual(page.els.message.textContent, "Batch too large for grid mode; use single mode [s]");
+  assert.strictEqual(page.els.message.hidden, false);
+  assert.strictEqual(page.grids.sent.length, 0);
+};
+
+for (const [name, stage] of [["narrow", [100, 300]], ["short", [400, 100]]]) {
+  tests["a " + name + " stage shows the window-too-small notice and sends no grid request"] = async () => {
+    const page = makePage({ manifest, statuses, stage, dpr: 1 });
+    await page.boot();
+    await page.enterGrid();
+    assert.strictEqual(page.els.message.textContent, "Window too small for grid mode");
+    assert.strictEqual(page.els.message.hidden, false);
+    assert.strictEqual(page.grids.sent.length, 0);
+  };
+}
+
+// A grid marked CLEAN, then z with the server answering /undo as given.
+for (const [label, status, body, message] of [
+  ["a 400", 400, { error: "x" }, "invalid reviewer name"],
+  ["a 500", 500, { error: "x" }, "undo failed (HTTP 500)"],
+  ["an empty reply", 200, {}, "Nothing to undo"],
+]) {
+  tests[label + " to /undo says " + message] = async () => {
+    const page = makePage({ manifest, statuses });
+    await showPlan(page);
+    await page.dwell();
+    await page.key("c");
+    await page.respond("/mark", page.json(200, { a: "CLEAN", b: "CLEAN", c: "CLEAN" }));
+    await page.key("z");
+    await page.respond("/undo", page.json(status, body));
+    assert.strictEqual(page.els.status.textContent, message);
+    assert.strictEqual(page.state.busy, false, "the page is free again");
+  };
+}
 
 (async () => {
   const names = Object.keys(tests);

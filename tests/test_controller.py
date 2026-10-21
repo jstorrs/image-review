@@ -1132,6 +1132,46 @@ class TestScaleAndResize(EventLoopTestCase):
         s.handle_events([key(pg.K_c)])
         self.mark.assert_not_called()
 
+    def _suspended_grid(self, **kwargs):
+        s = self.reviewing("grid", status_filter="all", **kwargs)
+        size = pg.display.get_surface().get_size()
+        pg.display.set_mode((size[0], s._viewer.border))
+        s.handle_events([self.resized])
+        s.refresh_if_needed()
+        self.assertTrue(s._grid_suspended)
+        return s
+
+    def test_suspended_grid_handles_only_the_mode_and_fullscreen_keys(self):
+        for k, mod, expected in ((pg.K_m, 0, "auto"), (pg.K_m, pg.KMOD_SHIFT, "never")):
+            with self.subTest(key=k, mod=mod):
+                s = self._suspended_grid()
+                s.rotation = "always"
+                self.assertEqual(s._default_rotation, "auto")
+                s.handle_events([key(k, mod)])
+                self.assertEqual(s.rotation, expected)
+                self.assertEqual(s.mode, "grid")
+                self.assertTrue(s._grid_suspended)
+        with self.subTest(key="s"):
+            s = self._suspended_grid()
+            s.handle_events([key(pg.K_s)])
+            self.assertEqual(s.mode, "single")
+        with self.subTest(key="f"):
+            s = self._suspended_grid()
+            with mock.patch.object(pg.display, "toggle_fullscreen") as toggle:
+                s.handle_events([key(pg.K_f)])
+            toggle.assert_called_once_with()
+        with self.subTest(key="others"):
+            s = self._suspended_grid()
+            status_before = dict(s._statuses)
+            cursor_before, rotation_before = s._cursor, s.rotation
+            with mock.patch.object(pg.display, "toggle_fullscreen") as toggle:
+                s.handle_events([key(pg.K_c), key(pg.K_d), key(pg.K_RIGHT), key(pg.K_LEFT), key(pg.K_z)])
+            toggle.assert_not_called()
+            self.mark.assert_not_called()
+            self.assertEqual(s._statuses, status_before)
+            self.assertEqual((s._cursor, s.rotation, s.mode), (cursor_before, rotation_before, "grid"))
+            self.assertTrue(s._grid_suspended)
+
     def test_grid_startup_defers_packing_until_content_area_returns(self):
         with (
             mock.patch.object(pg.display, "get_desktop_sizes", return_value=[(800, 50)]),
