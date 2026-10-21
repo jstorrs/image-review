@@ -171,9 +171,13 @@ is created by the first verdict.
 | `mode` | `single` or `grid`: the display mode the verdict was given in; `undo` for a row written by `z` |
 | `grid_size` | How many images the one keypress covered (1 in single mode); in an undo row, how many images the undo covered |
 | `tool_version` | The image-review version that wrote the row (`unknown` if not installed) |
+| `source_sha256` | The source file's SHA-256, as `manifest.tsv` recorded it when the verdict was given: which content the verdict is about. Empty when the manifest has no hashes (a 3-column manifest) |
 
-`reviewer`, `mode`, `grid_size` and `tool_version` are empty in rows carried
-over from an older file (see [Upgrading an older file](#upgrading-an-older-file)).
+`reviewer`, `mode`, `grid_size`, `tool_version` and `source_sha256` are empty
+in rows carried over from an older file (see
+[Upgrading an older file](#upgrading-an-older-file)). An upgrade never fills in
+`source_sha256` from the current manifest: the file at that path may have
+changed since the verdict was given.
 
 **Last row wins.** The file is an append-only log: every rating action
 appends a line per image and syncs it to disk, and when an image appears more
@@ -187,22 +191,28 @@ never written.
 `Cannot read work directory: <file>:<line>: <problem>` message as
 `manifest.tsv`, instead of being skipped or rewritten, so a hand edit cannot
 silently lose decisions (a file that is not UTF-8 is named with a byte
-offset instead of a line). The header must be exactly these nine columns (or
-the old first five), and every row has all nine (or five) fields, with:
+offset instead of a line). The header must be exactly these ten columns (or
+an older header: the first nine, or the first five), and every row has as many
+fields as its header, with:
 
 - a non-empty `image_id`;
 - a `status` of `CLEAN` or `DIRTY`, or `UNREVIEWED` with `mode` `undo`;
 - a `pass_number` from 1 to 1000000;
 - a `mode` of `single`, `grid`, `undo` or empty;
-- a `grid_size` that is empty or at least 1.
+- a `grid_size` that is empty or at least 1;
+- a `source_sha256` that is empty or exactly 64 lowercase hex characters.
 
 The other columns are free text and may be empty.
 
 **A line cut short by a crash.** It is safe to kill the process at any time.
 An empty file holds no decisions. A last line cut short by a crash is skipped
 with a warning and dropped on the next rating, unless all of its fields made
-it to disk: then it is kept, and only its last field (`tool_version`, or
-`timestamp` in an old five-column file) may be cut short or empty. A crash
+it to disk. In a current file that means its whole `source_sha256`: a last
+line with no line ending whose hash is empty or incomplete counts as cut
+short, so a verdict never loses its hash to a crash. In an older file (nine or
+five columns, before its upgrade), such a line is kept, and its last field
+(`tool_version` in a nine-column file, `timestamp` in a five-column one) may
+be cut short or empty. A crash
 in the middle of a grid mark can record only some of its images, cut at a line
 ending; the rows that landed are kept and loading logs a warning when the last
 mark has fewer rows than its `grid_size`. `export` refuses only until the next
@@ -226,11 +236,13 @@ until it is marked again.
 ### Upgrading an older file
 
 **Upgrade everyone sharing a work directory together.** A `review.tsv` from
-an older version has only the first five columns. It is upgraded in place the
-first time `review` or `serve` opens it, with the new columns left empty for
-its existing rows. `status` and `export` read it as is, without upgrading it.
+an older version has only the first nine columns (0.3.0 and 0.4.0) or the
+first five (earlier versions). It is upgraded in place the first time `review`
+or `serve` opens it, with the new columns left empty for its existing rows.
+`status` and `export` read it as is, without upgrading it.
 
-- Older image-review versions cannot read the upgraded file.
+- Older image-review versions cannot read the upgraded file: 0.4.0 and earlier
+  refuse a ten-column `review.tsv`.
 - Versions before wire API v5 (before undo) reject a `review.tsv` that holds
   undo rows, so upgrade everyone sharing a work directory before anyone
   presses `z`.

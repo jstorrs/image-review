@@ -3,9 +3,10 @@ import csv
 import io
 import logging
 import os
+import re
 import stat
 import tempfile
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import astuple, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,8 +19,21 @@ from .status import MARK_MODES, TODO_STATUSES, VERDICTS, ImageId, MarkMode, Stat
 
 log = logging.getLogger(__name__)
 
-HEADER = ["image_id", "batch", "status", "pass_number", "timestamp", "reviewer", "mode", "grid_size", "tool_version"]
-LEGACY_HEADER = HEADER[:5]  # before the audit columns; migrate() rewrites such a file with HEADER
+HEADER = [
+    "image_id",
+    "batch",
+    "status",
+    "pass_number",
+    "timestamp",
+    "reviewer",
+    "mode",
+    "grid_size",
+    "tool_version",
+    "source_sha256",
+]
+# Older headers, which migrate() rewrites with HEADER: before the audit columns, and before source_sha256 (0.3.0, 0.4.0)
+LEGACY_HEADERS = (HEADER[:5], HEADER[:9])
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 # A row's mode in review.tsv: a MarkMode, or "undo" for a row written by undo_many (a restore or a tombstone).
 RowMode = MarkMode | Literal["undo"]
@@ -43,18 +57,28 @@ class Decision:
     mode: RowMode | Literal[""]  # "" in rows from before it was recorded
     grid_size: int | None  # how many keys the verdict covered; None in rows from before it was recorded
     tool_version: str  # image-review version that wrote the row; "" in rows from before it was recorded
+    # The manifest's SHA-256 of the source file (64 lowercase hex) when the verdict was recorded; "" in rows from
+    # before it was recorded or when the manifest has no hashes. Derived from PHI content: never leaves the work dir.
+    source_sha256: str
+
+
+def parse_sha256(text: str, name: str) -> str:
+    """A SHA-256 hex digest: exactly 64 lowercase hex characters. ValueError otherwise."""
+    if not _SHA256.fullmatch(text):
+        raise ValueError(f"{name} must be 64 lowercase hex characters")
+    return text
 
 
 def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) -> Decision:
-    """One row of a review.tsv whose header is `header` (HEADER or LEGACY_HEADER); legacy rows get empty audit columns."""
+    """One row of a review.tsv whose header is `header` (HEADER or one of LEGACY_HEADERS); a legacy row gets the
+    columns its header lacks empty."""
     where = f"{path}:{line}"
     if len(fields) != len(header):
         raise ValueError(
             f"{where}: expected {len(header)} tab-separated fields ({', '.join(header)}), got {len(fields)}"
         )
-    image_id, batch, status, pass_text, timestamp, reviewer, mode, size_text, tool_version = fields + [""] * (
-        len(HEADER) - len(header)
-    )
+    padded = fields + [""] * (len(HEADER) - len(header))
+    image_id, batch, status, pass_text, timestamp, reviewer, mode, size_text, tool_version, source_sha256 = padded
     if not image_id:
         raise ValueError(f"{where}: image_id is empty")
     row_status = parse_choice(status, ROW_STATUSES)
@@ -81,6 +105,10 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) 
             raise ValueError(f"{where}: grid_size must be an integer or empty, got {size_text!r}") from None
         if grid_size < 1:
             raise ValueError(f"{where}: grid_size must be at least 1, got {grid_size}")
+    try:
+        source_sha256 = parse_sha256(source_sha256, "source_sha256") if source_sha256 else ""
+    except ValueError as exc:
+        raise ValueError(f"{where}: {exc} or empty") from None
     return Decision(
         image_id=ImageId(image_id),
         batch=batch,
@@ -91,6 +119,7 @@ def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) 
         mode=row_mode,
         grid_size=grid_size,
         tool_version=tool_version,
+        source_sha256=source_sha256,
     )
 
 
@@ -112,11 +141,12 @@ class PendingTruncate:
 
 @dataclass(frozen=True)
 class LegacyLog:
-    """A review.tsv with LEGACY_HEADER, as loaded: every row, and the file (inode, size) they came from."""
+    """A review.tsv with one of LEGACY_HEADERS, as loaded: every row, and the file (inode, size) they came from."""
 
     ino: int
     size: int
     decisions: list[Decision]
+    width: int  # columns in its header
 
 
 def format_tsv(rows: Iterable[Sequence[object]]) -> str:
@@ -146,19 +176,27 @@ def tsv_rows(path: Path, text: str) -> Iterator[tuple[int, list[str]]]:
         raise ValueError(f"{path}:{reader.line_num}: {exc}") from None
 
 
-def parse_log(path: Path, data: bytes) -> tuple[list[Decision], bool]:
-    """Every decision in review.tsv's bytes, in file order, and whether the file has LEGACY_HEADER.
+def parse_log(path: Path, data: bytes) -> tuple[list[Decision], int | None]:
+    """Every decision in review.tsv's bytes, in file order, and the header's width if it is one of LEGACY_HEADERS
+    (None: HEADER).
 
-    An empty file holds none and counts as current.
+    An empty file holds none and counts as current. Under HEADER, a last row with no line ending and an empty
+    source_sha256 is refused like any other bad line: a crash may have cut it at the tab before its hash.
     """
     if not data:
-        return [], False  # created but the first append never landed
+        return [], None  # created but the first append never landed
     rows = tsv_rows(path, decode_utf8(path, data))
     _, header = next(rows, (1, None))
-    if header not in (HEADER, LEGACY_HEADER):
-        raise ValueError(f"{path}:1: header must be {', '.join(HEADER)}")
-    decisions = [parse_decision(path, line, fields, header) for line, fields in rows]
-    return decisions, header == LEGACY_HEADER
+    if header is None or (header != HEADER and header not in LEGACY_HEADERS):
+        raise ValueError(f"{path}:1: header must be {', '.join(HEADER)} (or an older one that migration rewrites)")
+    decisions = []
+    last_line = 1
+    for line, fields in rows:
+        decisions.append(parse_decision(path, line, fields, header))
+        last_line = line
+    if header == HEADER and decisions and not decisions[-1].source_sha256 and not data.endswith((b"\n", b"\r")):
+        raise ValueError(f"{path}:{last_line}: no line ending and an empty source_sha256 (cut short before its hash)")
+    return decisions, None if header == HEADER else len(header)
 
 
 def fold(rows: dict[ImageId, Decision], decisions: Iterable[Decision]) -> None:
@@ -209,8 +247,11 @@ class Change:
 
 
 class ReviewDB:
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, *, sources: Mapping[ImageId, str]):
+        """`sources`: the manifest's source_sha256 per image_id (none for an image_id the manifest has no hash for),
+        recorded with each verdict mark_many writes."""
         self.work_dir = work_dir
+        self._sources = sources
         self.review_path = work_dir / "review.tsv"
         self._rows: dict[ImageId, Decision] = {}  # keyed by image_id; last row wins (see latest(): never a tombstone)
         self._truncate: PendingTruncate | None = None  # a torn tail to drop before the next append
@@ -243,11 +284,13 @@ class ReviewDB:
             log.warning("the last mark in %s is cut short (an interrupted write); its rows are kept", self.review_path)
         self._rows = latest(decisions)
         self._seen = (st.st_ino, len(data))
-        if legacy:
-            self._legacy = LegacyLog(st.st_ino, len(data), decisions)
+        if legacy is not None:
+            self._legacy = LegacyLog(st.st_ino, len(data), decisions, legacy)
 
     def migrate(self) -> None:
         """Rewrite an old-header review.tsv with HEADER, every row kept and the new columns empty; else nothing.
+
+        source_sha256 stays empty even where the manifest has a hash now: the file may have changed since the verdict.
 
         Only for a writer holding the work dir lock. The new file is written and synced beside the old one, then
         renamed over it, so readers see either file whole. A torn tail is dropped (it was never loaded).
@@ -287,7 +330,7 @@ class ReviewDB:
         """
         if self._legacy is not None:
             raise RuntimeError(
-                f"{self.review_path} has the old {len(LEGACY_HEADER)}-column header; migrate() it before appending"
+                f"{self.review_path} has the old {self._legacy.width}-column header; migrate() it before appending"
             )
         rows = format_tsv(map(astuple, decisions))
         file_mode = policy_of_dir(self.work_dir).file_mode
@@ -379,6 +422,7 @@ class ReviewDB:
                         mode=mode,
                         grid_size=len(targets),
                         tool_version=tool_version,
+                        source_sha256=self._sources.get(image_id, ""),
                     ),
                     existing,
                 )
@@ -392,8 +436,8 @@ class ReviewDB:
 
     def undo_many(self, changes: list[Change], *, reviewer: str) -> None:
         """Undo changes (one mark_many's result) in one append: each image's previous decision is written again
-        exactly (batch, status, pass_number; the pass may go down: it is a restore), or a tombstone in the undone
-        row's batch and pass where there was none. Rows get mode "undo", `reviewer` and grid_size = images undone.
+        exactly (batch, status, pass_number, source_sha256; the pass may go down: it is a restore), or a tombstone in
+        the undone row's batch, pass and source_sha256 where there was none. Rows get mode "undo", `reviewer` and grid_size = images undone.
         """
         reviewer = parse_reviewer(reviewer)  # a tab or newline would corrupt the log
         ts = datetime.now(UTC).isoformat()

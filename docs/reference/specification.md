@@ -1168,7 +1168,8 @@ rules users see are in [`manifest.tsv`](work-directory.md#manifesttsv).
 `image_id` (source paths, which may carry patient identifiers) and
 `source_sha256` (derived from PHI content; a digest of a small input can be
 recovered by guessing) are used only inside `LocalStore`/`ReviewDB` and in the
-local `export`. Everything else identifies an image by its
+local `export`; `ReviewDB` also records each verdict's `source_sha256` in
+`review.tsv` (see *`review.tsv`*). Everything else identifies an image by its
 `preprocessed_path`; no hash is ever sent over the wire.
 
 The file is parsed strictly (`store.load_manifest`) when the work directory is
@@ -1253,7 +1254,7 @@ first `fsync`s the work directory, so the new name is durable before any row
 is written; if that fails, the append fails with nothing written and the
 empty file is reused by the retry. Appends never change earlier bytes
 or the inode, with two exceptions: a torn tail (see below) is cut off before
-the next append, and an old five-column file is migrated once (see below),
+the next append, and a file with an older header is migrated once (see below),
 which replaces the file with a new inode. A crash mid-write can therefore record only some rows
 of a multi-image mark. A new or empty file gets the header first and is
 `fchmod`ed (if needed) to the file mode of the work directory's access policy
@@ -1263,7 +1264,14 @@ always used); the reader accepts `\n` too.
 The columns, the last-row-wins rule and the parse rules users see are in
 [`review.tsv`](work-directory.md#reviewtsv). Internally, `mode` holds a
 `status.MarkMode` (`single`, `grid`) or `review_db.RowMode`'s `undo`;
-`tool_version` is `connection.package_version()`, resolved once per process.
+`tool_version` is `connection.package_version()`, resolved once per process;
+in a mark row (`mark_many`), `source_sha256` is the `sources` mapping's entry
+for the row's `image_id` (`""` if it has none; undo rows copy theirs, see
+*Undo rows*), which `LocalStore` builds from its manifest with
+`export.manifest_hashes`, so the server takes it from its own manifest and no
+hash crosses the wire. `Decision.source_sha256` is a plain `str`, `""` or 64
+lowercase hex characters (checked by `review_db.parse_sha256` when parsed), as
+`reviewer`, `mode` and `tool_version` use `""` for "not recorded".
 Files written before the log format (one row per `image_id`) are already
 valid logs. The file is parsed strictly (`review_db.parse_log`; `FLAGGED` is
 never a valid `status`), and a bad file is a `ValueError` naming
@@ -1311,16 +1319,26 @@ inode). The truncate and migration refusals raise `ReviewLogChanged` too. The
 A last line with no line ending that does parse is kept; the next mark first
 writes its missing line ending (`\n` after a bare `\r`, else `\r\n`). Such a
 row's last field may be cut short or empty, since it is not validated:
-`timestamp` in an old five-column file, `tool_version` in a current one. Its
-other fields (`status`, `pass_number` and, in a current file, `reviewer`,
-`mode` and `grid_size`) are complete, since they parsed. A bad line anywhere else, or a bad last line that
-is terminated, is still an error.
+`timestamp` in an old five-column file, `tool_version` in a nine-column one.
+Under the current header the last field is `source_sha256`, which parses only
+empty or whole, and `parse_log` also refuses an unterminated last row whose
+`source_sha256` is empty (a crash may have cut it at the tab before its hash),
+so it takes the torn-tail path above: a row written with a hash never loads
+without one. A terminated row with an empty hash is kept (it was written so).
+The kept row's other fields (`status`, `pass_number` and, in a nine- or
+ten-column file, `reviewer`, `mode` and `grid_size`, plus `tool_version` in a
+ten-column file) are complete, since they parsed or a later field followed
+them. A bad line anywhere else, or a bad last line that is terminated, is
+still an error.
 
-**Migration.** A file with the old five-column header (`image_id`, `batch`,
-`status`, `pass_number`, `timestamp`) still loads, for readers too (`status`,
-read-only stores), and is never rewritten by them. A writable `LocalStore`
+**Migration.** A file with one of `review_db.LEGACY_HEADERS` still loads, for
+readers too (`status`, read-only stores), and is never rewritten by them: the
+five-column header from before the audit columns (`image_id`, `batch`,
+`status`, `pass_number`, `timestamp`), and the nine-column one 0.3.0 and 0.4.0
+write (`HEADER` without `source_sha256`). A writable `LocalStore`
 calls `ReviewDB.migrate()` after taking the work dir lock: it writes every
-loaded row, in order, under the new header with the four new columns empty, to
+loaded row, in order, under `HEADER` with the columns the old header lacks
+empty, to
 a temp file `.review.tsv.*.tmp` in the work directory (`mkstemp`, then
 `fchmod` to the policy's `file_mode`), `fsync`s it, and `os.replace`s it over
 `review.tsv`, then `fsync`s the directory (ignoring only `EINVAL`, `ENOTSUP`/
@@ -1332,18 +1350,22 @@ as it was; a `LocalStore` open then fails and releases the lock (the CLI shows
 header, so later opens leave it alone. A torn tail of the old file is not
 copied (it was never loaded). Migration refuses (`changed since it was loaded`)
 if the file's inode or size changed since the load. `ReviewDB` refuses to
-append to an old-header file that was not migrated, so the file never mixes
-five- and nine-field rows.
+append to an old-header file that was not migrated (`RuntimeError` naming its
+column count), so the file never mixes row widths. A migrated row's
+`source_sha256` is always empty, never filled from the current manifest: the
+source at that path may have been replaced and preprocessed again since the
+verdict, and filling it would vouch for the new content.
 
 **Undo rows.** An undo (`ReviewDB.undo_many`, see *`ReviewStore` Protocol*)
 appends, in one append, one row per `image_id` of the mark it undoes, each with
 `mode` `undo`, a new `timestamp`, the undoing `reviewer`, `grid_size` = the
 number of `image_id`s undone, and the current `tool_version`. Where the image
 had a decision before that mark, the row restores that decision's `batch`,
-`status` and `pass_number` exactly (the pass may be lower than the undone
-row's: a restore is exempt from the never-decreasing pass rule). Where it had
+`status`, `pass_number` and `source_sha256` exactly (the pass may be lower than
+the undone row's: a restore is exempt from the never-decreasing pass rule; the
+hash is the restored verdict's, not the manifest's now). Where it had
 none, the row is a **tombstone**: `status` `UNREVIEWED`, with the undone row's
-`batch` and `pass_number`. Folding the log drops an `image_id` whose last row
+`batch`, `pass_number` and `source_sha256`. Folding the log drops an `image_id` whose last row
 is a tombstone, so it reads as never reviewed (`UNREVIEWED`, and unseen by
 `current_pass`) until it is marked again. image-review versions before undo
 (wire API v5) reject a file holding undo rows as malformed.
@@ -1408,7 +1430,8 @@ image preprocessed more than once); they share a review status.
 
 Loads `manifest.tsv` (written once by `preprocess`, so before locking); a
 writable store then takes the work dir lock (see *Concurrency limits*) and
-loads a `ReviewDB` and calls its `migrate()` (see *`review.tsv`*), releasing the lock if either fails. `close()` releases it. A `read_only` store takes no lock and its
+loads a `ReviewDB(work_dir, sources=export.manifest_hashes(entries))` and
+calls its `migrate()` (see *`review.tsv`*), releasing the lock if either fails. `close()` releases it. A `read_only` store takes no lock and its
 `mark` and `undo` raise `PermissionError` (as they do after `close()`). `image_bytes` reads the file via
 `safe_path` and checks it against its `jpeg_sha256` when the manifest has one
 (see *Integrity check*); `image_bytes_many` loops over it, catching `KeyError`,
@@ -1440,6 +1463,8 @@ see *`image-review export`*.
 | `batch_summary(rows, statuses)` | The same per batch: `dict[str, Counter[Status]]` |
 | `skipped_counts(rows) -> SkippedCounts` | The failed/ignored split of `SkippedRow`s; the one derivation behind `skipped()`, preprocess's summary line and `preprocess.json` counts |
 | `safe_path(work_dir, relative)` | Resolve within `work_dir`; `ValueError` if it escapes |
+| `review_db.parse_sha256(text, name) -> str` | `text` if it is a SHA-256 hex digest (exactly 64 lowercase hex characters), else `ValueError` naming `name`; used by `load_manifest` and `parse_decision`, which add the `file:line` |
+| `export.manifest_hashes(entries) -> dict[ImageId, str]` | The `source_sha256` per `image_id` of the manifest entries that have one; `LocalStore` passes it to `ReviewDB` as `sources`, and `export_rows` uses it |
 | `export.unreviewed_content(notes) -> dict[ImageId, str]` | Per `image_id`, `unreviewed embedded content: <kinds>` for its notes of kinds in `UNRENDERED_NOTE_KINDS` (all-zero `trailing-data` left out); see *Parts and folding* |
 | `export.export_rows(entries, decisions, skipped, unreviewed) -> list[ExportRow]` | The export (see *`image-review export`*) from the manifest entries, the latest decision per `image_id`, the `skipped.tsv` rows and `unreviewed_content`'s mapping: one row per source file, icons (from a work directory made by an older version) folded in; an `X#icon` whose hash differs from `X`'s also gets its own row, and both are at least `NOT_REVIEWED` |
 | `export.split_allowlist(rows) -> tuple[list[AllowedRow], list[ExportRow]]` | (allowed, report) in input order, every row in exactly one: allowed only if `CLEAN`, with a `source_sha256` that no row that is not `CLEAN` shares; a denied `CLEAN` row's `reason` says why |
@@ -1929,9 +1954,12 @@ loaded. The font file is read once and cached.
 
 ## Review Database (`review_db.py`)
 
-### `ReviewDB`
+### `ReviewDB(work_dir, *, sources)`
 
-In-memory dict keyed by `image_id`, backed by `review.tsv` on disk.
+In-memory dict keyed by `image_id`, backed by `review.tsv` on disk. `sources`
+(required, `Mapping[ImageId, str]`) is the manifest's `source_sha256` per
+`image_id`, absent for one the manifest has no hash for; `mark_many` records it
+in each row it writes.
 
 Used only through `LocalStore`, which is the one place that maps keys to
 `image_id`s.
@@ -1950,9 +1978,9 @@ by hand.
 
 | Method | Description |
 |--------|-------------|
-| `mark_many(targets, status, pass_number, *, reviewer, mode) -> list[Change]` | Record one verdict on every `(image_id, batch)` in `targets` (same timestamp; `grid_size` = `len(targets)`; `tool_version` = `package_version()`); returns each row written with the decision it replaced |
+| `mark_many(targets, status, pass_number, *, reviewer, mode) -> list[Change]` | Record one verdict on every `(image_id, batch)` in `targets` (same timestamp; `grid_size` = `len(targets)`; `tool_version` = `package_version()`; `source_sha256` = `sources.get(image_id, "")`); returns each row written with the decision it replaced |
 | `undo_many(changes, *, reviewer)` | Append the undo rows for one `mark_many` result in one append (see *Undo rows*); an `image_id` listed twice (keys sharing it) gets one row |
-| `migrate()` | Rewrite an old five-column file with the current header, once (see *`review.tsv`*); no-op otherwise |
+| `migrate()` | Rewrite a file with one of `LEGACY_HEADERS` (five or nine columns) with `HEADER`, once, the new columns empty (see *`review.tsv`*); no-op otherwise |
 | `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*) |
 | `decisions() -> dict[str, Decision]` | A copy of the latest decision per `image_id` (never a tombstone), for `export`; `ValueError` if `review.tsv` ended in a torn line, or its last mark was cut short, when loaded (not yet cleared by an append) |
 | `current_pass(image_ids) -> int` | Auto-detect pass number |

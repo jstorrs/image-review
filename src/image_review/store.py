@@ -1,6 +1,5 @@
 import hashlib
 import logging
-import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -8,9 +7,9 @@ from pathlib import Path
 from typing import Literal, Protocol, Self, get_args
 
 from .access import MANIFEST_NAME
-from .export import NOTE_KINDS, ExportRow, NoteKind, export_rows, unreviewed_content
+from .export import NOTE_KINDS, ExportRow, NoteKind, export_rows, manifest_hashes, unreviewed_content
 from .lock import LockHolder, acquire_lock, release_lock
-from .review_db import Change, ReviewDB, decode_utf8, tsv_rows
+from .review_db import Change, ReviewDB, decode_utf8, parse_sha256, tsv_rows
 from .status import (
     TODO_STATUSES,
     GridCleanRefused,
@@ -117,14 +116,6 @@ def safe_path(work_dir: Path, relative: str) -> Path:
 
 MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id", "source_sha256", "jpeg_sha256"]
 LEGACY_MANIFEST_HEADER = MANIFEST_HEADER[:3]  # before the hash columns; still loads, with both hashes None
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-
-
-def _parse_sha256(text: str, name: str) -> str:
-    """A SHA-256 hex digest: exactly 64 lowercase hex characters. ValueError otherwise."""
-    if not _SHA256.fullmatch(text):
-        raise ValueError(f"{name} must be 64 lowercase hex characters")
-    return text
 
 
 def load_manifest(work_dir: Path) -> list[ManifestEntry]:
@@ -152,7 +143,7 @@ def load_manifest(work_dir: Path) -> list[ManifestEntry]:
         batch, key, image_id, *hashes = fields
         try:
             source_sha256, jpeg_sha256 = (
-                (_parse_sha256(hashes[0], "source_sha256"), _parse_sha256(hashes[1], "jpeg_sha256"))
+                (parse_sha256(hashes[0], "source_sha256"), parse_sha256(hashes[1], "jpeg_sha256"))
                 if hashes
                 else (None, None)
             )
@@ -284,9 +275,9 @@ class LocalStore:
         self._lock: LockHolder | None = None if read_only else acquire_lock(work_dir)
         self._undo: list[list[Change]] = []  # one entry per mark, latest last
         try:
-            self._db = ReviewDB(work_dir)
+            self._db = ReviewDB(work_dir, sources=manifest_hashes(entries))
             if not read_only:
-                self._db.migrate()  # under the lock: an old-header review.tsv gains the audit columns, once
+                self._db.migrate()  # under the lock: an old-header review.tsv gains the newer columns, once
         except BaseException:
             self.close()
             raise

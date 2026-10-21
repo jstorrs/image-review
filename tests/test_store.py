@@ -399,36 +399,40 @@ class TestStrictLoading(unittest.TestCase):
 
     def test_audit_column_problems_name_file_and_line(self):
         ts = self.GOOD_TS
-        good = f"/src/a.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.2.0"
+        good = f"/src/a.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.2.0\t"
         cases = {
             "old-width row under new header": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}"),
-            "bad mode": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tbogus\t1\t0.2.0"),
+            "bad mode": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tbogus\t1\t0.2.0\t"),
             "FLAGGED status": (
                 self.NEW_HEADER,
                 good,
-                f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tsingle\t1\t0.2.0",
+                f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tsingle\t1\t0.2.0\t",
             ),
             "FLAGGED in an undo row": (
                 self.NEW_HEADER,
                 good,
-                f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tundo\t1\t0.2.0",
+                f"/src/b.dcm\tbatch_001\tFLAGGED\t1\t{ts}\talice\tundo\t1\t0.2.0\t",
             ),
             "UNREVIEWED outside an undo row": (
                 self.NEW_HEADER,
                 good,
-                f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\talice\tsingle\t1\t0.2.0",
+                f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\talice\tsingle\t1\t0.2.0\t",
             ),
             "UNREVIEWED in a migrated row": (
                 self.NEW_HEADER,
                 good,
-                f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\t\t\t\t",
+                f"/src/b.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\t\t\t\t\t",
             ),
             "bad grid_size": (
                 self.NEW_HEADER,
                 good,
-                f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\tfour\t0.2.0",
+                f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\tfour\t0.2.0\t",
             ),
-            "zero grid_size": (self.NEW_HEADER, good, f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\t0\t0.2.0"),
+            "zero grid_size": (
+                self.NEW_HEADER,
+                good,
+                f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tgrid\t0\t0.2.0\t",
+            ),
             "new-width row under old header": (self.REVIEW_HEADER, f"/src/a.dcm\tbatch_001\tCLEAN\t1\t{ts}", good),
         }
         for name, lines in cases.items():
@@ -437,21 +441,50 @@ class TestStrictLoading(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
                     LocalStore(self.work_dir, read_only=True)
 
+    def test_bad_source_hash_names_file_and_line(self):
+        ts = self.GOOD_TS
+        row = f"/src/b.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.5.0\t"
+        good = f"/src/a.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.5.0\t{'a' * 64}"
+        for name, digest in {
+            "short": "a" * 63,
+            "long": "a" * 65,
+            "uppercase": "A" * 64,
+            "non-hex": "g" * 64,
+            "padded": " " + "a" * 63,
+        }.items():
+            with self.subTest(name):
+                self.write_review(self.NEW_HEADER, good, row + digest)
+                with self.assertRaisesRegex(
+                    ValueError, r"review\.tsv:3: source_sha256 must be 64 lowercase hex characters or empty$"
+                ):
+                    LocalStore(self.work_dir, read_only=True)
+
+    def test_empty_or_valid_source_hash_loads(self):
+        ts = self.GOOD_TS
+        self.write_review(
+            self.NEW_HEADER,
+            f"/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.5.0\t{'0123456789abcdef' * 4}",
+            f"/src/patient_jones/b.dcm\tbatch_001\tDIRTY\t1\t{ts}\talice\tsingle\t1\t0.5.0\t",
+        )
+        db = ReviewDB(self.work_dir, sources={})
+        self.assertEqual(db._rows[ImageId("/src/patient_smith/a.dcm")].source_sha256, "0123456789abcdef" * 4)
+        self.assertEqual(db._rows[ImageId("/src/patient_jones/b.dcm")].source_sha256, "")
+
     def test_undo_rows_load_and_tombstone_folds(self):
         ts = self.GOOD_TS
         self.write_review(
             self.NEW_HEADER,
-            f"/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.2.0",
-            f"/src/patient_jones/b.dcm\tbatch_001\tDIRTY\t2\t{ts}\talice\tsingle\t1\t0.2.0",
-            f"/src/patient_jones/b.dcm\tbatch_001\tCLEAN\t3\t{ts}\talice\tsingle\t1\t0.2.0",
-            f"/src/patient_smith/a.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\talice\tundo\t2\t0.2.0",
-            f"/src/patient_jones/b.dcm\tbatch_001\tDIRTY\t2\t{ts}\talice\tundo\t2\t0.2.0",
+            f"/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t1\t{ts}\talice\tsingle\t1\t0.2.0\t",
+            f"/src/patient_jones/b.dcm\tbatch_001\tDIRTY\t2\t{ts}\talice\tsingle\t1\t0.2.0\t",
+            f"/src/patient_jones/b.dcm\tbatch_001\tCLEAN\t3\t{ts}\talice\tsingle\t1\t0.2.0\t",
+            f"/src/patient_smith/a.dcm\tbatch_001\tUNREVIEWED\t1\t{ts}\talice\tundo\t2\t0.2.0\t",
+            f"/src/patient_jones/b.dcm\tbatch_001\tDIRTY\t2\t{ts}\talice\tundo\t2\t0.2.0\t",
         )
         statuses = LocalStore(self.work_dir, read_only=True).statuses(2)
         self.assertEqual((statuses["batch_001/a.jpg"], statuses["batch_001/b.jpg"]), ("UNREVIEWED", "DIRTY"))
 
     def test_migrated_rows_with_empty_audit_columns_load(self):
-        self.write_review(self.NEW_HEADER, f"/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t1\t{self.GOOD_TS}\t\t\t\t")
+        self.write_review(self.NEW_HEADER, f"/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t1\t{self.GOOD_TS}\t\t\t\t\t")
         self.assertEqual(LocalStore(self.work_dir, read_only=True).statuses(1)["batch_001/a.jpg"], "CLEAN")
 
     def test_valid_review_loads(self):
@@ -611,7 +644,9 @@ class TestStrictLoading(unittest.TestCase):
 class TestReviewLog(unittest.TestCase):
     """review.tsv is an append-only log: one header, then one line per decision, last line per image_id wins."""
 
-    HEADER_LINE = b"image_id\tbatch\tstatus\tpass_number\ttimestamp\treviewer\tmode\tgrid_size\ttool_version\r\n"
+    HEADER_LINE = (
+        b"image_id\tbatch\tstatus\tpass_number\ttimestamp\treviewer\tmode\tgrid_size\ttool_version\tsource_sha256\r\n"
+    )
 
     def test_decision_fields_match_header_order(self):
         # _tsv writes dataclasses.astuple(decision) under HEADER, so the two must agree in order
@@ -624,10 +659,10 @@ class TestReviewLog(unittest.TestCase):
 
     def reload(self) -> ReviewDB:
         with self.assertNoLogs("image_review"):
-            return ReviewDB(self.work_dir)
+            return ReviewDB(self.work_dir, sources={})
 
     def test_marks_append_lines_and_reload(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         db.mark_many([("y", "batch_002"), ("z", "batch_002")], "DIRTY", 2, reviewer="tester", mode="single")
         lines = self.path.read_bytes().splitlines(keepends=True)
@@ -636,34 +671,36 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(self.reload()._rows, db._rows)
 
     def test_creating_review_tsv_syncs_the_directory_but_a_later_append_does_not(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         with recorded_dir_fsyncs() as synced:
             db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
             self.assertEqual(len(synced), 1)
             db.mark_many([("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
             self.assertEqual(len(synced), 1)
         with recorded_dir_fsyncs() as synced:  # an existing file, freshly loaded
-            ReviewDB(self.work_dir).mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+            ReviewDB(self.work_dir, sources={}).mark_many(
+                [("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+            )
         self.assertEqual(synced, [])
 
     def test_directory_sync_error_on_creation_writes_nothing_and_a_retry_works(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         with recorded_dir_fsyncs(errno.EINVAL):  # unsupported: tolerated
             db.mark_many([("w", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.path.unlink()
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         with recorded_dir_fsyncs(errno.EIO), self.assertRaises(OSError):
             db.mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         self.assertEqual(self.path.read_bytes(), b"")  # nothing written; memory matches
         self.assertEqual(db._rows, {})
-        self.assertEqual(ReviewDB(self.work_dir)._rows, {})
+        self.assertEqual(ReviewDB(self.work_dir, sources={})._rows, {})
         db.mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")  # retry on the same db
         self.assertEqual(db._rows["x"].status, "DIRTY")
-        self.assertEqual(ReviewDB(self.work_dir)._rows, db._rows)
+        self.assertEqual(ReviewDB(self.work_dir, sources={})._rows, db._rows)
         self.assertEqual(self.path.read_bytes().splitlines()[0] + b"\r\n", self.HEADER_LINE)
 
     def test_same_image_twice_last_wins(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         db.mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         db.mark_many([("x", "batch_001")], "CLEAN", 2, reviewer="tester", mode="single")
         self.assertEqual(len(self.path.read_bytes().splitlines()), 3)
@@ -672,22 +709,28 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(reloaded._rows, db._rows)
 
     def test_mark_is_a_pure_append(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         before = self.path.read_bytes()
         inode = self.path.stat().st_ino
-        ReviewDB(self.work_dir).mark_many([("y", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("y", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single"
+        )
         after = self.path.read_bytes()
         self.assertEqual(self.path.stat().st_ino, inode)
         self.assertTrue(after.startswith(before))
         self.assertGreater(len(after), len(before))
 
     def test_torn_last_line_is_dropped_and_next_mark_starts_clean(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         intact = self.path.read_bytes()
         with open(self.path, "ab") as f:
             f.write(b"y\tbatch_0")  # a crash mid-append
         with self.assertLogs("image_review.review_db", "WARNING") as logs:
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
         self.assertIn("review.tsv:3:", logs.records[0].getMessage())
         self.assertEqual(set(db._rows), {"x"})
@@ -700,12 +743,14 @@ class TestReviewLog(unittest.TestCase):
 
     def test_huge_unterminated_tail_is_a_torn_line(self):
         # a zero-filled extension after a crash: csv refuses a field over 128 KiB, which must not escape as csv.Error
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         intact = self.path.read_bytes()
         with open(self.path, "ab") as f:
             f.write(b"\x00" * 200_000)
         with self.assertLogs("image_review.review_db", "WARNING") as logs:
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
         self.assertIn("field larger than field limit", logs.records[0].getMessage())
         self.assertEqual(set(db._rows), {"x"})
@@ -716,51 +761,79 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(set(self.reload()._rows), {"x", "z"})
 
     def test_oversized_field_on_a_complete_line_is_a_value_error(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         with open(self.path, "ab") as f:
             f.write(b"y" * 200_000 + b"\tbatch_001\r\n")
             f.write(b"z\tbatch_001\r\n")
         with self.assertRaisesRegex(ValueError, r"review\.tsv:3: field larger than field limit"):
-            ReviewDB(self.work_dir)
+            ReviewDB(self.work_dir, sources={})
 
     def test_torn_last_line_that_parses_is_kept(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         with open(self.path, "ab") as f:
-            f.write(
-                b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\tr\tsingle\t1\t0.1"
-            )  # every field written, line ending not
+            f.write(self.TORN_ROW + b"a" * 64)  # every field written, line ending not
         db = self.reload()
         self.assertEqual(set(db._rows), {"x", "y"})
+        self.assertEqual(db._rows[ImageId("y")].source_sha256, "a" * 64)
         db.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
-        self.assertIn(b"\t0.1\r\nz\t", self.path.read_bytes())  # its missing line ending, in the file's style
+        self.assertIn(b"a" * 64 + b"\r\nz\t", self.path.read_bytes())  # its missing line ending, in the file's style
         self.assertEqual(set(self.reload()._rows), {"x", "y", "z"})
 
+    TORN_ROW = b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\tr\tsingle\t1\t0.1\t"  # up to its hash
+
+    def test_torn_last_line_without_its_hash_is_dropped(self):
+        for name, tail in (("cut at the tab before the hash", b""), ("cut inside the hash", b"a" * 30)):
+            with self.subTest(name):
+                self.path.unlink(missing_ok=True)
+                ReviewDB(self.work_dir, sources={}).mark_many(
+                    [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+                )
+                with open(self.path, "ab") as f:
+                    f.write(self.TORN_ROW + tail)  # a row written with a hash, cut short before its end
+                with self.assertLogs("image_review.review_db", "WARNING") as logs:
+                    db = ReviewDB(self.work_dir, sources={})
+                self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
+                self.assertEqual(set(db._rows), {"x"})
+                with self.assertRaisesRegex(ValueError, "unfinished line"):
+                    db.decisions()
+                db.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+                self.assertNotIn(b"\ny\t", self.path.read_bytes())  # dropped by the next append
+                self.assertEqual(set(self.reload().decisions()), {"x", "z"})
+
     def test_torn_between_cr_and_lf_is_kept(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         with open(self.path, "ab") as f:
-            f.write(b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\tr\tsingle\t1\t0.1\r")
+            f.write(b"y\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\tr\tsingle\t1\t0.1\t\r")
         db = self.reload()
         self.assertEqual(set(db._rows), {"x", "y"})
         db.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         data = self.path.read_bytes()
-        self.assertIn(b"\t0.1\r\nz\t", data)
+        self.assertIn(b"\t0.1\t\r\nz\t", data)
         self.assertNotIn(b"\r\r", data)
         self.assertNotIn(b"\n\r\n", data)  # no blank line
         self.assertEqual(data.count(b"\r"), data.count(b"\r\n"))
         self.assertEqual(set(self.reload()._rows), {"x", "y", "z"})
 
     def test_torn_multibyte_character_is_dropped(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         with open(self.path, "ab") as f:
             f.write("é\tb".encode()[:2])
         with self.assertLogs("image_review.review_db", "WARNING") as logs:
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         self.assertIn("ignoring the unfinished last line", logs.records[0].getMessage())
         db.mark_many([("z", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         self.assertEqual(set(self.reload()._rows), {"x", "z"})
 
     def test_failed_append_is_rolled_back(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         real_write = os.write
         calls = []
@@ -779,7 +852,7 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(self.reload()._rows, db._rows)
 
     def test_failed_append_left_on_disk_is_cut_by_the_next(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         real_write = os.write
 
@@ -802,13 +875,13 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(self.reload()._rows, db._rows)
 
     def test_stale_truncate_refuses(self):
-        ReviewDB(self.work_dir).mark_many(
+        ReviewDB(self.work_dir, sources={}).mark_many(
             [("x", "batch_001"), ("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
         )
         with open(self.path, "ab") as f:
             f.write(b"z\tbatch_0")
         with contextlib.redirect_stderr(io.StringIO()):
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         with open(self.path, "ab") as f:
             f.write(b"01\tCLEAN\t1\tt\r\n")  # someone else finished the line since the load
         before = self.path.read_bytes()
@@ -817,10 +890,12 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_append_by_another_writer_since_load_refuses(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
-        db = ReviewDB(self.work_dir)
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
+        db = ReviewDB(self.work_dir, sources={})
         db.mark_many([("y", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")  # its own marks: fine
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="other", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="other", mode="single")
         before = self.path.read_bytes()
         with self.assertRaisesRegex(ReviewLogChanged, "changed since it was loaded; not appending"):
             db.mark_many([("z", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
@@ -828,16 +903,18 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(set(db._rows), {"x", "y"})
 
     def test_file_created_by_another_writer_since_load_refuses(self):
-        db = ReviewDB(self.work_dir)  # no review.tsv yet
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="other", mode="single")
+        db = ReviewDB(self.work_dir, sources={})  # no review.tsv yet
+        ReviewDB(self.work_dir, sources={}).mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="other", mode="single")
         before = self.path.read_bytes()
         with self.assertRaises(ReviewLogChanged):
             db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_file_replaced_since_load_refuses(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
-        db = ReviewDB(self.work_dir)
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
+        db = ReviewDB(self.work_dir, sources={})
         same_size = self.path.read_bytes().replace(b"CLEAN", b"DIRTY")
         replacement = self.work_dir / "replacement.tsv"
         replacement.write_bytes(same_size)  # created while review.tsv still exists: a new inode, the same size
@@ -847,8 +924,10 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), same_size)
 
     def test_concurrent_append_refuses_both_writers_next_mark(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
-        a, b = ReviewDB(self.work_dir), ReviewDB(self.work_dir)
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
+        a, b = ReviewDB(self.work_dir, sources={}), ReviewDB(self.work_dir, sources={})
         real_write = os.write
 
         def a_appends_first(fd, data):  # A appends between B's check and B's write
@@ -867,15 +946,17 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(self.reload()._rows["y"].status, "DIRTY")
 
     def test_file_deleted_since_load_refuses_and_is_not_recreated(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
-        db = ReviewDB(self.work_dir)
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
+        db = ReviewDB(self.work_dir, sources={})
         self.path.unlink()
         with self.assertRaisesRegex(ReviewLogChanged, "changed since it was loaded; not appending"):
             db.mark_many([("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertFalse(self.path.exists())
 
     def test_append_after_failed_rollback_refuses_if_file_grew(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         real_write = os.write
 
@@ -900,7 +981,7 @@ class TestReviewLog(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_undo_after_own_marks_appends(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         changes = db.mark_many([("x", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
         db.undo_many(changes, reviewer="tester")
         db.mark_many([("y", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
@@ -918,13 +999,13 @@ class TestReviewLog(unittest.TestCase):
             with self.subTest(name):
                 self.path.write_bytes(data.encode())
                 with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
-                    ReviewDB(self.work_dir)
+                    ReviewDB(self.work_dir, sources={})
                 self.assertEqual(self.path.read_bytes(), data.encode())
 
     def test_torn_header_is_dropped(self):
         self.path.write_bytes(b"image_id\tba")
         with contextlib.redirect_stderr(io.StringIO()):
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
         self.assertTrue(self.path.read_bytes().startswith(self.HEADER_LINE))
         self.assertEqual(set(self.reload()._rows), {"x"})
@@ -936,18 +1017,22 @@ class TestReviewLog(unittest.TestCase):
         self.assertTrue(self.path.read_bytes().startswith(self.HEADER_LINE))
 
     def test_unparseable_line_before_the_last_still_raises(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         with open(self.path, "ab") as f:
             f.write(b"garbage\r\ny\tbatch_0")
         with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
-            ReviewDB(self.work_dir)
+            ReviewDB(self.work_dir, sources={})
 
     def test_unparseable_terminated_last_line_still_raises(self):
-        ReviewDB(self.work_dir).mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+        ReviewDB(self.work_dir, sources={}).mark_many(
+            [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+        )
         with open(self.path, "ab") as f:
             f.write(b"y\tbatch_0\r\n")
         with self.assertRaisesRegex(ValueError, r"review\.tsv:3: "):
-            ReviewDB(self.work_dir)
+            ReviewDB(self.work_dir, sources={})
 
     def test_file_mode_follows_policy(self):
         for dir_mode, file_mode in [(0o700, 0o600), (0o2770, 0o660)]:
@@ -956,7 +1041,7 @@ class TestReviewLog(unittest.TestCase):
                 os.chmod(self.work_dir, dir_mode)
                 old_umask = os.umask(0o077)  # O_CREAT's mode alone would lose the group bits
                 try:
-                    ReviewDB(self.work_dir).mark_many(
+                    ReviewDB(self.work_dir, sources={}).mark_many(
                         [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
                     )
                 finally:
@@ -980,6 +1065,10 @@ class TestAuditColumns(StoreTestCase):
         version = package_version()
         self.assertEqual(audit, [("alice", "single", "1", version)] + [("Bob Q", "grid", "3", version)] * 3)
 
+    def test_legacy_manifest_records_no_source_hash(self):
+        self.store.mark(["batch_001/a.jpg", "batch_002/c.jpg"], "CLEAN", 1, reviewer="alice", mode="grid")
+        self.assertEqual([r["source_sha256"] for r in review_rows(self.work_dir / "review.tsv")], ["", ""])
+
     def test_each_key_batch_comes_from_the_manifest(self):
         self.store.mark(["batch_001/a.jpg", "batch_002/c.jpg"], "CLEAN", 1, reviewer="alice", mode="grid")
         batches = {r["image_id"]: r["batch"] for r in review_rows(self.work_dir / "review.tsv")}
@@ -989,7 +1078,7 @@ class TestAuditColumns(StoreTestCase):
         reviewer = 'Dr. "Q" O\'Neil'
         self.store.mark(["batch_001/a.jpg"], "CLEAN", 1, reviewer=reviewer, mode="single")
         with contextlib.redirect_stderr(io.StringIO()):
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         self.assertEqual(db._rows["/src/patient_smith/a.dcm"].reviewer, reviewer)
 
     def test_bad_reviewer_is_refused_before_writing(self):
@@ -1010,7 +1099,58 @@ class TestAuditColumns(StoreTestCase):
         self.assertFalse((self.work_dir / "review.tsv").exists())
 
 
+class TestSourceHashColumn(StoreTestCase):
+    """Each verdict row records the manifest's source_sha256 for its image_id, as it was when the verdict was given."""
+
+    def make_work_dir(self) -> None:
+        make_work_dir(self.work_dir, hashed=True)
+
+    @staticmethod
+    def digest(text: str) -> str:
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def test_mark_records_the_manifest_hash(self):
+        self.store.mark(["batch_001/a.jpg"], "DIRTY", 1, reviewer="alice", mode="single")
+        self.store.mark(["batch_001/b.jpg", "batch_002/c.jpg"], "CLEAN", 1, reviewer="alice", mode="grid")
+        rows = review_rows(self.work_dir / "review.tsv")
+        self.assertEqual(
+            [(r["image_id"], r["source_sha256"]) for r in rows],
+            [(image_id, self.digest(image_id)) for image_id in (ROWS[0][2], ROWS[1][2], ROWS[2][2])],
+        )
+        self.store.close()
+        with contextlib.redirect_stderr(io.StringIO()):
+            reloaded = ReviewDB(self.work_dir, sources={})  # read back from disk, not from the manifest
+        self.assertEqual(reloaded._rows[ImageId(ROWS[0][2])].source_sha256, self.digest(ROWS[0][2]))
+
+    def test_undo_restore_carries_the_previous_rows_hash(self):
+        old, new = "1" * 64, "2" * 64
+        x = ImageId("x")
+        ReviewDB(self.work_dir, sources={x: old}).mark_many([(x, "b")], "CLEAN", 1, reviewer="al", mode="single")
+        db = ReviewDB(self.work_dir, sources={x: new})  # the file was replaced and preprocessed again
+        changes = db.mark_many([(x, "b")], "DIRTY", 1, reviewer="al", mode="single")
+        db.undo_many(changes, reviewer="al")
+        rows = review_rows(self.work_dir / "review.tsv")
+        self.assertEqual(
+            [(r["status"], r["mode"], r["source_sha256"]) for r in rows],
+            [("CLEAN", "single", old), ("DIRTY", "single", new), ("CLEAN", "undo", old)],
+        )
+
+    def test_undo_tombstone_carries_the_written_rows_hash(self):
+        written, current = "1" * 64, "2" * 64
+        x = ImageId("x")
+        changes = ReviewDB(self.work_dir, sources={x: written}).mark_many(
+            [(x, "b")], "CLEAN", 1, reviewer="al", mode="single"
+        )
+        ReviewDB(self.work_dir, sources={x: current}).undo_many(changes, reviewer="al")
+        rows = review_rows(self.work_dir / "review.tsv")
+        self.assertEqual(
+            [(r["status"], r["source_sha256"]) for r in rows], [("CLEAN", written), ("UNREVIEWED", written)]
+        )
+
+
 class TestMigration(unittest.TestCase):
+    """The 5-column file from before the audit columns; TestMigrationFromNineColumns reruns these on 0.4.0's."""
+
     OLD_HEADER = "image_id\tbatch\tstatus\tpass_number\ttimestamp"
     OLD_ROWS = (
         "/src/patient_smith/a.dcm\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00",
@@ -1020,14 +1160,15 @@ class TestMigration(unittest.TestCase):
 
     def setUp(self):
         self.work_dir = temp_dir(self)
-        make_work_dir(self.work_dir)
+        make_work_dir(self.work_dir, hashed=True)  # hashes the migrated rows must not be given
         os.chmod(self.work_dir, 0o2770)  # group policy: the migrated file must be 0660, not mkstemp's 0600
         self.path = self.work_dir / "review.tsv"
         self.old = ("\r\n".join([self.OLD_HEADER, *self.OLD_ROWS]) + "\r\n").encode()
         self.path.write_bytes(self.old)
 
     def expected_rows(self) -> list[list[str]]:
-        return [[*line.split("\t"), "", "", "", ""] for line in self.OLD_ROWS]
+        """The old rows, every column the old header lacks empty (source_sha256 too, though the manifest has one)."""
+        return [[*fields, *[""] * (len(HEADER) - len(fields))] for fields in (r.split("\t") for r in self.OLD_ROWS)]
 
     def stored_rows(self) -> tuple[list[str], list[list[str]]]:
         with open(self.path, newline="") as f:
@@ -1059,6 +1200,7 @@ class TestMigration(unittest.TestCase):
         self.assertEqual(
             rows[3][:3] + rows[3][5:8], ["/src/patient_lee/c.dcm", "batch_002", "DIRTY", "alice", "single", "1"]
         )
+        self.assertEqual(rows[3][9], hashlib.sha256(b"/src/patient_lee/c.dcm").hexdigest())  # the fixture's hash
 
     def test_read_only_store_leaves_old_file_alone(self):
         inode = self.path.stat().st_ino
@@ -1078,8 +1220,8 @@ class TestMigration(unittest.TestCase):
         self.assertEqual([r[0] for r in rows[3:]], ["/src/patient_kim/d.dcm"])
 
     def test_unmigrated_db_refuses_to_append(self):
-        db = ReviewDB(self.work_dir)
-        with self.assertRaisesRegex(RuntimeError, "old 5-column header"):
+        db = ReviewDB(self.work_dir, sources={})
+        with self.assertRaisesRegex(RuntimeError, f"old {len(self.OLD_HEADER.split())}-column header"):
             db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="alice", mode="single")
         self.assertEqual(self.path.read_bytes(), self.old)
 
@@ -1106,13 +1248,24 @@ class TestMigration(unittest.TestCase):
                 self.assertFalse((self.work_dir / LOCK_NAME).exists())
 
     def test_file_changed_since_load_is_not_migrated(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         with open(self.path, "ab") as f:
             f.write(self.OLD_ROWS[0].encode() + b"\r\n")
         changed = self.path.read_bytes()
         with self.assertRaisesRegex(ReviewLogChanged, "changed since it was loaded"):
             db.migrate()
         self.assertEqual(self.path.read_bytes(), changed)
+
+
+class TestMigrationFromNineColumns(TestMigration):
+    """The 9-column file 0.3.0 and 0.4.0 write, before source_sha256."""
+
+    OLD_HEADER = "\t".join(HEADER[:9])
+    OLD_ROWS = (
+        "/src/patient_smith/a.dcm\tbatch_001\tDIRTY\t1\t2026-01-01T00:00:00+00:00\talice\tsingle\t1\t0.4.0",
+        "/src/patient_jones/b.dcm\tbatch_001\tCLEAN\t1\t2026-01-01T00:00:01+00:00\t\t\t\t",  # migrated before
+        "/src/patient_smith/a.dcm\tbatch_001\tCLEAN\t2\t2026-01-02T00:00:00+00:00\tbob\tgrid\t1\t0.4.0",
+    )
 
 
 class TestTwoWriters(unittest.TestCase):
@@ -1164,7 +1317,7 @@ class TestCutShortMark(unittest.TestCase):
 
     def write(self, *rows: tuple[str, str, int, str, str, str, int | str]) -> None:
         """Rows are (image_id, status, pass, timestamp, reviewer, mode, grid_size)."""
-        lines = [HEADER] + [[i, "b", st, str(n), ts, rv, md, str(g), "v"] for i, st, n, ts, rv, md, g in rows]
+        lines = [HEADER] + [[i, "b", st, str(n), ts, rv, md, str(g), "v", ""] for i, st, n, ts, rv, md, g in rows]
         self.path.write_bytes("".join("\t".join(line) + "\r\n" for line in lines).encode())
 
     def test_grid_dirty_cut_to_one_row_refuses_export(self):
@@ -1176,7 +1329,7 @@ class TestCutShortMark(unittest.TestCase):
         )
         before = self.path.read_bytes()
         with self.assertLogs("image_review.review_db", "WARNING") as logs:
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         message = logs.records[0].getMessage()
         self.assertIn(str(self.path), message)
         self.assertNotIn("x", message.replace(str(self.path), ""))  # no image_id, no reviewer
@@ -1189,13 +1342,13 @@ class TestCutShortMark(unittest.TestCase):
     def test_next_append_clears_it(self):
         self.write(("x", "CLEAN", 1, "t1", "al", "grid", 2))
         with self.assertLogs("image_review.review_db", "WARNING"):
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         with self.assertRaises(ValueError):
             db.decisions()
         db.mark_many([("y", "b")], "CLEAN", 1, reviewer="al", mode="single")
         self.assertEqual(set(db.decisions()), {"x", "y"})
         with self.assertNoLogs("image_review"):
-            self.assertEqual(set(ReviewDB(self.work_dir).decisions()), {"x", "y"})
+            self.assertEqual(set(ReviewDB(self.work_dir, sources={}).decisions()), {"x", "y"})
 
     def test_complete_marks_never_trip(self):
         cases = {
@@ -1213,21 +1366,34 @@ class TestCutShortMark(unittest.TestCase):
             with self.subTest(name):
                 self.write(*rows)
                 with self.assertNoLogs("image_review"):
-                    db = ReviewDB(self.work_dir)
+                    db = ReviewDB(self.work_dir, sources={})
                 db.decisions()
 
     def test_undo_group_is_complete(self):
-        db = ReviewDB(self.work_dir)
+        db = ReviewDB(self.work_dir, sources={})
         changes = db.mark_many([("x", "b"), ("y", "b"), ("z", "b")], "CLEAN", 1, reviewer="al", mode="grid")
         db.undo_many(changes, reviewer="al")
         with self.assertNoLogs("image_review"):
-            self.assertEqual(ReviewDB(self.work_dir).decisions(), {})
+            self.assertEqual(ReviewDB(self.work_dir, sources={}).decisions(), {})
 
     def test_cut_undo_group_is_caught(self):
         self.write(("x", "CLEAN", 1, "t2", "al", "undo", 3))
         with self.assertLogs("image_review.review_db", "WARNING"):
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         with self.assertRaisesRegex(ValueError, "1 of 3 rows"):
+            db.decisions()
+
+    def test_mark_with_source_hashes_cut_short_is_caught(self):
+        sources = {ImageId(i): c * 64 for i, c in (("x", "1"), ("y", "2"), ("z", "3"))}
+        ReviewDB(self.work_dir, sources=sources).mark_many(
+            [(i, "b") for i in sources], "CLEAN", 1, reviewer="al", mode="grid"
+        )
+        lines = self.path.read_bytes().splitlines(keepends=True)
+        self.assertEqual(lines[0].decode().rstrip("\r\n").split("\t"), HEADER)
+        self.path.write_bytes(b"".join(lines[:-1]))  # the crash kept two of the three rows, cut at a line ending
+        with self.assertLogs("image_review.review_db", "WARNING"):
+            db = ReviewDB(self.work_dir, sources=sources)
+        with self.assertRaisesRegex(ValueError, "2 of 3 rows"):
             db.decisions()
 
     def test_torn_line_and_cut_mark_both_reported(self):
@@ -1235,7 +1401,7 @@ class TestCutShortMark(unittest.TestCase):
         with open(self.path, "ab") as f:
             f.write(b"y\tb\tCLEAN\t1\tt1\tal\tgr")
         with self.assertLogs("image_review.review_db", "WARNING") as logs:
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         self.assertEqual(len(logs.records), 2)
         with self.assertRaises(ValueError) as ctx:
             db.decisions()
@@ -1374,7 +1540,7 @@ class TestUndo(StoreTestCase):
         row = self.last_row()
         self.assertEqual((row["status"], row["pass_number"], row["mode"]), ("CLEAN", "2", "undo"))
         with contextlib.redirect_stderr(io.StringIO()):
-            db = ReviewDB(self.work_dir)
+            db = ReviewDB(self.work_dir, sources={})
         self.assertEqual((db._rows[ROWS[0][2]].status, db._rows[ROWS[0][2]].pass_number), ("CLEAN", 2))
 
     def test_lower_pass_restore_keeps_original_pass(self):

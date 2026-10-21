@@ -29,7 +29,7 @@ from image_review.export import (
 )
 from image_review.lock import boot_id, this_process
 from image_review.remote import RemoteStore
-from image_review.review_db import HEADER, LEGACY_HEADER, Decision
+from image_review.review_db import HEADER, LEGACY_HEADERS, Decision
 from image_review.status import ImageId, Key
 from image_review.store import LocalStore, ManifestEntry, NoteRow, SkippedRow
 from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server, temp_dir
@@ -63,22 +63,22 @@ MANIFEST = [
 MANIFEST_WITH_HASHES = [(b, k, i, sha(i.removesuffix("#icon")), sha(k)) for b, k, i in MANIFEST]
 T = "2026-01-0{}T00:00:0{}+00:00".format
 REVIEW = [
-    ("/src/a.dcm", "b1", "CLEAN", "1", T(1, 1), "alice", "single", "1", "0.1"),
-    ("/src/b.dcm", "b1", "DIRTY", "1", T(1, 2), "alice", "single", "1", "0.1"),
-    ("/src/b.dcm#icon", "b1", "CLEAN", "1", T(1, 2), "alice", "single", "1", "0.1"),
-    ("/src/d.dcm", "b2", "DIRTY", "1", T(1, 3), "bob", "grid", "2", "0.1"),
-    ("/src/e.dcm", "b2", "CLEAN", "1", T(1, 3), "bob", "grid", "2", "0.1"),
-    ("/src/e.dcm", "b2", "UNREVIEWED", "1", T(1, 4), "bob", "undo", "1", "0.1"),  # tombstone
-    ("/src/b.dcm", "b1", "DIRTY", "2", T(2, 5), "carol", "single", "1", "0.1"),
-    ("/src/gone.dcm", "b9", "CLEAN", "1", T(2, 6), "carol", "single", "1", "0.1"),  # not in the manifest
-    ("/src/h.dcm", "b2", "CLEAN", "1", T(2, 7), "dave", "single", "1", "0.1"),
-    ("/src/h.dcm#icon", "b2", "DIRTY", "1", T(2, 7), "dave", "single", "1", "0.1"),
-    ("/src/i.dcm", "b2", "CLEAN", "1", T(2, 8), "dave", "single", "1", "0.1"),
-    ("/src/j.dcm", "b2", "CLEAN", "1", T(2, 8), "dave", "single", "1", "0.1"),
-    ("/src/k.dcm", "b2", "CLEAN", "1", T(2, 9), "dave", "single", "1", "0.1"),
-    ("/src/k.dcm", "b2", "DIRTY", "1", T(3, 1), "erin", "single", "1", "0.1"),
-    ("/src/k.dcm", "b2", "CLEAN", "1", T(3, 2), "frank", "undo", "1", "0.1"),  # undo restores CLEAN
-    ("/src/m.dcm#icon", "b2", "DIRTY", "1", T(3, 3), "erin", "single", "1", "0.1"),
+    ("/src/a.dcm", "b1", "CLEAN", "1", T(1, 1), "alice", "single", "1", "0.1", ""),
+    ("/src/b.dcm", "b1", "DIRTY", "1", T(1, 2), "alice", "single", "1", "0.1", ""),
+    ("/src/b.dcm#icon", "b1", "CLEAN", "1", T(1, 2), "alice", "single", "1", "0.1", ""),
+    ("/src/d.dcm", "b2", "DIRTY", "1", T(1, 3), "bob", "grid", "2", "0.1", ""),
+    ("/src/e.dcm", "b2", "CLEAN", "1", T(1, 3), "bob", "grid", "2", "0.1", ""),
+    ("/src/e.dcm", "b2", "UNREVIEWED", "1", T(1, 4), "bob", "undo", "1", "0.1", ""),  # tombstone
+    ("/src/b.dcm", "b1", "DIRTY", "2", T(2, 5), "carol", "single", "1", "0.1", ""),
+    ("/src/gone.dcm", "b9", "CLEAN", "1", T(2, 6), "carol", "single", "1", "0.1", ""),  # not in the manifest
+    ("/src/h.dcm", "b2", "CLEAN", "1", T(2, 7), "dave", "single", "1", "0.1", ""),
+    ("/src/h.dcm#icon", "b2", "DIRTY", "1", T(2, 7), "dave", "single", "1", "0.1", ""),
+    ("/src/i.dcm", "b2", "CLEAN", "1", T(2, 8), "dave", "single", "1", "0.1", ""),
+    ("/src/j.dcm", "b2", "CLEAN", "1", T(2, 8), "dave", "single", "1", "0.1", ""),
+    ("/src/k.dcm", "b2", "CLEAN", "1", T(2, 9), "dave", "single", "1", "0.1", ""),
+    ("/src/k.dcm", "b2", "DIRTY", "1", T(3, 1), "erin", "single", "1", "0.1", ""),
+    ("/src/k.dcm", "b2", "CLEAN", "1", T(3, 2), "frank", "undo", "1", "0.1", ""),  # undo restores CLEAN
+    ("/src/m.dcm#icon", "b2", "DIRTY", "1", T(3, 3), "erin", "single", "1", "0.1", ""),
 ]
 SKIPPED = (
     "image_id\tkind\treason\n"
@@ -218,16 +218,29 @@ class TestExportRows(ExportTestCase):
         self.assertEqual(lines[0].split("\t")[:3], [ROWS[0][2], "DIRTY", "1"])
 
     def test_legacy_header_review(self):
-        write_tsv(
-            self.work / "review.tsv",
-            LEGACY_HEADER,
-            [("/src/a.dcm", "b1", "DIRTY", "1", "t1"), ("/src/a.dcm", "b1", "CLEAN", "2", "t2")],
-        )
-        before = (self.work / "review.tsv").read_bytes()
-        result = self.export()
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(result.stdout.splitlines()[1], f"{sha('/src/a.dcm')}\t/src/a.dcm\t2\tt2\t")  # no reviewer
-        self.assertEqual((self.work / "review.tsv").read_bytes(), before)  # a reader does not migrate it
+        cases = {
+            "five columns": (
+                LEGACY_HEADERS[0],
+                [("/src/a.dcm", "b1", "DIRTY", "1", "t1"), ("/src/a.dcm", "b1", "CLEAN", "2", "t2")],
+                "",  # no reviewer
+            ),
+            "nine columns": (
+                LEGACY_HEADERS[1],
+                [
+                    ("/src/a.dcm", "b1", "DIRTY", "1", "t1", "al", "single", "1", "0.4.0"),
+                    ("/src/a.dcm", "b1", "CLEAN", "2", "t2", "bo", "single", "1", "0.4.0"),
+                ],
+                "bo",
+            ),
+        }
+        for name, (header, rows, reviewer) in cases.items():
+            with self.subTest(name):
+                write_tsv(self.work / "review.tsv", header, rows)
+                before = (self.work / "review.tsv").read_bytes()
+                result = self.export()
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertEqual(result.stdout.splitlines()[1], f"{sha('/src/a.dcm')}\t/src/a.dcm\t2\tt2\t{reviewer}")
+                self.assertEqual((self.work / "review.tsv").read_bytes(), before)  # a reader does not migrate it
 
     def test_without_skipped_rows_or_review_file(self):
         (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n")
@@ -242,7 +255,7 @@ class TestExportRows(ExportTestCase):
         write_tsv(
             self.work / "review.tsv",
             HEADER,
-            [("/src/scan.dcm#icon", "b1", "CLEAN", "1", "t", "al", "single", "1", "0.1")],
+            [("/src/scan.dcm#icon", "b1", "CLEAN", "1", "t", "al", "single", "1", "0.1", "")],
         )
         (self.work / "skipped.tsv").unlink()  # scan.dcm is in neither file (an ignored one says why instead, below)
         self.assertEqual(self.report_lines(), ["/src/scan.dcm\tNOT_REVIEWED\t\t\t\tmain image missing\t"])
@@ -373,7 +386,7 @@ class TestExportRows(ExportTestCase):
         write_tsv(
             self.work / "review.tsv",
             HEADER,
-            [("/src/a.dcm", "b1", "CLEAN", "1", "t", '"mallory', "single", "1", "0.1")],
+            [("/src/a.dcm", "b1", "CLEAN", "1", "t", '"mallory', "single", "1", "0.1", "")],
         )
         result = self.export()
         self.assertEqual(result.exit_code, 1)
@@ -447,6 +460,7 @@ class TestIconNamedFile(unittest.TestCase):
                 mode="single",
                 grid_size=1,
                 tool_version="0.1",
+                source_sha256="",
             )
             for e in entries
         }
@@ -979,7 +993,7 @@ class TestExportLiveOrTorn(ExportTestCase):
 
     def test_cut_short_mark_is_refused(self):
         with open(self.work / "review.tsv", "ab") as f:
-            f.write(b"/src/c.dcm\tb1\tDIRTY\t2\tt9\tal\tgrid\t3\tv\r\n")
+            f.write(b"/src/c.dcm\tb1\tDIRTY\t2\tt9\tal\tgrid\t3\tv\t\r\n")
         before = (self.work / "review.tsv").read_bytes()
         for args in ((), ("--allow-live",)):
             with self.subTest(args=args):

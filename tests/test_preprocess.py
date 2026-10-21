@@ -630,6 +630,7 @@ class CollisionTest(unittest.TestCase):
                 mode="single",
                 grid_size=1,
                 tool_version="0.1",
+                source_sha256="",
             )
             for e in entries
         }

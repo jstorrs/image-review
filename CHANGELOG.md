@@ -54,6 +54,15 @@
 - A `review.tsv` already holding a `pass_number` above one million is now
   refused when the work directory is opened; edit it by hand to remove or
   correct those rows.
+- **`review.tsv` gains a `source_sha256` column: everyone sharing a work
+  directory must upgrade together.** Each verdict now records the source
+  file's SHA-256 from `manifest.tsv` as it was when the verdict was given
+  (empty when the manifest has no hashes), so a verdict names the content it
+  is about, not only its path. The first `review` or `serve` to open a work
+  directory rewrites its `review.tsv` with the new column; `status` and
+  `export` read the old file as is. Existing rows keep an empty hash: the
+  upgrade never fills it in from the current manifest. 0.4.0 and earlier
+  cannot read the upgraded file.
 - **The click minimum is now 8.3.0.** The previous minimum, 8.2.2, was yanked
   on PyPI, so it could not be installed by default. Only the tests need it
   (see Minimum dependency versions in the install guide).

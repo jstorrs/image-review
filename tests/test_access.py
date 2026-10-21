@@ -207,7 +207,7 @@ class ReviewDbModeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             os.chmod(work, dir_mode)
-            db = ReviewDB(work)
+            db = ReviewDB(work, sources={})
             db.mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
             db.mark_many([("y", "batch_001")], "DIRTY", 1, reviewer="tester", mode="single")
             self.assertEqual(sorted(p.name for p in work.iterdir()), ["review.tsv"])
@@ -224,7 +224,9 @@ class ReviewDbModeTest(unittest.TestCase):
             root = Path(tmp).resolve()
             with contextlib.redirect_stderr(io.StringIO()):
                 run_preprocess([_src(root)], root / "work", access="group")
-            ReviewDB(root / "work").mark_many([("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single")
+            ReviewDB(root / "work", sources={}).mark_many(
+                [("x", "batch_001")], "CLEAN", 1, reviewer="tester", mode="single"
+            )
             self.assertEqual(stat.S_IMODE((root / "work" / "review.tsv").stat().st_mode), 0o660)
 
 

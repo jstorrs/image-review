@@ -152,7 +152,7 @@ def _fold(image_id: ImageId, main: _Part, icon: _Part | None, source_sha256: str
     return ExportRow(image_id, status, d.pass_number, d.timestamp, d.reviewer, "; ".join(notes), source_sha256)
 
 
-def _manifest_hashes(entries: list[ManifestEntry]) -> dict[ImageId, str]:
+def manifest_hashes(entries: list[ManifestEntry]) -> dict[ImageId, str]:
     """The source_sha256 the manifest records per exact image_id (load_manifest allows one); none for a legacy entry."""
     return {e.image_id: e.source_sha256 for e in entries if e.source_sha256 is not None}
 
@@ -219,7 +219,7 @@ def export_rows(
     ignored = _first_reasons(skipped, "ignored")
     parts = _parts(entries, decisions, failed, ignored, unreviewed)
     manifest_ids = {e.image_id for e in entries}
-    hashes = _manifest_hashes(entries)
+    hashes = manifest_hashes(entries)
     ambiguous_icons = _ambiguous_icons(parts, hashes)
     ambiguous = ambiguous_icons | {ImageId(i.removesuffix(ICON_SUFFIX)) for i in ambiguous_icons}
     files = _files(parts, ambiguous_icons)

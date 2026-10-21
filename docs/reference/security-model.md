@@ -283,8 +283,9 @@ world-readable.
   - the batch JPGs, which show whatever text was burned in;
   - `manifest.tsv`, `skipped.tsv`, `notes.tsv` and `preprocess.json`, which
     hold source paths (and `skipped.tsv` reasons, which also contain paths);
-  - `review.tsv`, which holds source paths as `image_id`s plus reviewer names
-    and timestamps;
+  - `review.tsv`, which holds source paths as `image_id`s plus reviewer names,
+    timestamps and each verdict's `source_sha256` (derived from file content,
+    like the manifest's);
   - job output and stderr logs: `preprocess` logs the source paths that
     failed and `review` logs keys it cannot load, and under `sbatch` these land
     in `slurm-*.out` (by default beside where you submitted). Keep job output
@@ -322,9 +323,10 @@ world-readable.
   have no hashes in the manifest and are not checked.)
 - **Audit log.** `review.tsv` is append-only, except that the tool drops a
   last line cut short by an interrupted write, and rewrites an old-format
-  (five-column) file once on upgrade. Each verdict appends a row,
+  (five- or nine-column) file once on upgrade. Each verdict appends a row,
   synced to disk, with `reviewer`, `mode` (`single`, `grid` or `undo`),
-  `grid_size` and `tool_version` beside the status, pass and timestamp. An
+  `grid_size`, `tool_version` and the source file's `source_sha256` from the
+  manifest beside the status, pass and timestamp. An
   undo appends restoring rows rather than deleting any. The log is plain text
   and is not signed: anyone who can write the work directory can edit it.
 - **Export refusals.** `export` refuses while a writer holds the work
