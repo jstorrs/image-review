@@ -1,9 +1,10 @@
 import io
 import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 import pygame as pg
 import pygame.freetype
@@ -48,6 +49,26 @@ def scale_percent(scale: float) -> int:
     return math.floor(scale * 100 + 1e-9)
 
 
+def fit_center_text(
+    text: str, width: int, measure: Callable[[str, int], int], sizes: Sequence[int]
+) -> tuple[str, int] | None:
+    """The text and font size to draw `text` in `width` pixels, or None if nothing fits. `sizes` runs
+    from largest to smallest and `measure(text, size)` is the drawn width: the first size at which
+    the whole text fits wins; otherwise the text is cut to the longest prefix plus "…" that fits at
+    the smallest size; None when empty, when there is no width, or when not even "…" fits."""
+    if not text or width <= 0 or not sizes:
+        return None
+    for size in sizes:
+        if measure(text, size) <= width:
+            return text, size
+    size = sizes[-1]
+    for end in range(len(text) - 1, -1, -1):
+        cut = text[:end].rstrip() + "…"
+        if measure(cut, size) <= width:
+            return cut, size
+    return None
+
+
 @dataclass(frozen=True)
 class Fit:
     """Where and how large an image is drawn: its scaled size, the top-left offset that centres it in
@@ -86,10 +107,13 @@ class ImageViewer:
 
     SCALE_WARNING_COLOR = pg.Color(192, 0, 0)
 
+    BAR_FONT_SIZE = 36
+    CENTER_MIN_FONT_SIZE = 18  # the centre text shrinks no further than this, then is truncated
+
     def __init__(self) -> None:
         sizes = pg.display.get_desktop_sizes()
         self._open_window(max(range(len(sizes)), key=lambda i: sizes[i][0] * sizes[i][1]))
-        self.font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSans.ttf"), 36)
+        self.font = pg.freetype.Font(str(_FONTS_DIR / "DejaVuSans.ttf"), self.BAR_FONT_SIZE)
         self.font.fgcolor = pg.Color(64, 64, 64)
         self.font.strong = True
         self._image: pg.Surface | None = None
@@ -102,6 +126,7 @@ class ImageViewer:
         self._splash_font.fgcolor = pg.Color(200, 200, 200)
         self._joystick_count = 0
         self._todo_only = False
+        self.bar_rects: dict[str, pg.Rect] = {}  # where the last refresh() drew each bar text, by role (for tests)
         self._dirty = True  # a setter changed what refresh() draws; refresh_if_dirty() paints it
 
     def set_image(self, surface: pg.Surface, name: str, status: Status, info: str, source_scale: float = 1.0) -> None:
@@ -194,8 +219,9 @@ class ImageViewer:
         self.screen.fill(BACKGROUND)
         bar_color = self.STATUS_COLORS[self._status]
         pg.draw.rect(self.screen, bar_color, pg.Rect(0, screen_h - self.border, screen_w, self.border))
+        self.bar_rects = {}
         # The word, not only the bar colour, says the status (colour alone fails colour-blind reviewers)
-        self._bar_text(self._status, "left")
+        self._draw("status", self._status, "left")
         status_inset = self.font.get_rect(self._status).width + self.font.get_rect(self._status).height
         left_text = "(h)elp"
         left_text += " | todo-only" if self._todo_only else " | all"
@@ -205,37 +231,67 @@ class ImageViewer:
             left_text += " | gamepad connected"
         else:
             left_text += f" | {self._joystick_count} gamepads"
-        self._bar_text(left_text, "left", inset=status_inset)
+        self._draw("left", left_text, "left", inset=status_inset)
         name_inset = 0
         if self._fitted is not None:
             # Red below 100%: small text may be lost
             scale = self._fitted[1].scale * self._source_scale
             percent = f"{scale_percent(scale)}%"
             color = self.SCALE_WARNING_COLOR if scale < 1.0 else None
-            self._bar_text(percent, "right", color=color)
+            self._draw("scale", percent, "right", color=color)
             name_inset = self.font.get_rect(percent).width + self.font.get_rect(percent).height
-        self._bar_text(self._name, "right", inset=name_inset)
-        self._bar_text(self._info, "center")
+        self._draw("name", self._name, "right", inset=name_inset)
+        # The controller also logs its messages as warnings, so shrinking or truncating one here loses nothing
+        gap = (self.bar_rects["left"].right, self.bar_rects["name"].left)
+        self._draw("center", self._info, "center", span=gap)
         if self._fitted is not None:
             content, fit = self._fitted
             self.screen.blit(content, fit.offset)
         pg.display.flip()
 
+    def _draw(self, role: str, text: str, align: Literal["left", "right", "center"], **kwargs: Any) -> None:
+        """`_bar_text`, remembering the rect it drew under `role` in `bar_rects`."""
+        rect = self._bar_text(text, align, **kwargs)
+        if rect is not None:
+            self.bar_rects[role] = rect
+
     def _bar_text(
-        self, text: str, align: Literal["left", "right", "center"], *, color: pg.Color | None = None, inset: int = 0
-    ) -> None:
-        """Draw `text` in the status bar; `inset` moves aligned text away from its edge (left text right, right text left); `color` None is the font's."""
-        bbox = self.font.get_rect(text)
+        self,
+        text: str,
+        align: Literal["left", "right", "center"],
+        *,
+        color: pg.Color | None = None,
+        inset: int = 0,
+        span: tuple[int, int] | None = None,
+    ) -> pg.Rect | None:
+        """Draw `text` in the status bar and return the rect drawn. `inset` moves aligned text away from its edge
+        (left text right, right text left); `color` None is the font's. Centre text goes in `span`, the x range
+        between the left and right texts, with a margin on each side: it shrinks, then is truncated, to fit, and
+        is not drawn (None) when there is no room."""
+        size = self.BAR_FONT_SIZE
         screen_w, screen_h = self.screen.get_size()
+        margin = self.border // 2
+        if align == "center" and span is not None:
+            sizes = range(self.BAR_FONT_SIZE, self.CENTER_MIN_FONT_SIZE - 1, -1)
+            fitted = fit_center_text(text, span[1] - span[0] - 2 * margin, self._measure, tuple(sizes))
+            if fitted is None:
+                return None
+            text, size = fitted
+        bbox = self.font.get_rect(text, size=size)
         y = int(screen_h - (self.border + bbox.height) / 2)
-        margin = int(bbox.height / 2)
         if align == "left":
-            x = margin + inset
+            x = int(bbox.height / 2) + inset
         elif align == "right":
-            x = screen_w - margin - bbox.width - inset
+            x = screen_w - int(bbox.height / 2) - bbox.width - inset
+        elif span is not None:
+            x = span[0] + (span[1] - span[0] - bbox.width) // 2
         else:
             x = int((screen_w - bbox.width) / 2)
-        self.font.render_to(self.screen, (x, y), text, fgcolor=color)
+        self.font.render_to(self.screen, (x, y), text, fgcolor=color, size=size)
+        return pg.Rect(x, y, bbox.width, bbox.height)
+
+    def _measure(self, text: str, size: int) -> int:
+        return int(self.font.get_rect(text, size=size).width)
 
     HELP_LINES: ClassVar[list[str]] = [
         "Keyboard                 Controller",

@@ -57,6 +57,9 @@
 
 ### Fixes
 
+- The status bar's centre message no longer draws over the status word and the red scale warning on a narrow
+  display. It is centred between the left and right texts, shrunk to as small as 18 px to fit, and cut with "…" if
+  still too wide (the controller also logs it as a warning).
 - A ZIP holding bytes outside its listed entries (two ZIPs joined with `cat`, a self-extracting or damaged archive)
   now fails as a whole: one `failed` row under the ZIP's path (`unsupported: ZIP holds N bytes outside its listed
   entries ...`) and no entry rows. Before, only the entries in its central directory were found, so the others were
