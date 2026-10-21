@@ -61,6 +61,12 @@ class Decision:
     # before it was recorded or when the manifest has no hashes. Derived from PHI content: never leaves the work dir.
     source_sha256: str
 
+    def applies_to(self, source_sha256: str | None) -> bool:
+        """Whether this verdict is on the content whose manifest hash is `source_sha256` (None: the manifest has
+        none). False only if both hashes are known and differ: a row without a hash (recorded before it was, or
+        migrated) is trusted by image_id, and so is any row when the manifest has nothing to compare with."""
+        return not (self.source_sha256 and source_sha256 and self.source_sha256 != source_sha256)
+
 
 def parse_sha256(text: str, name: str) -> str:
     """A SHA-256 hex digest: exactly 64 lowercase hex characters. ValueError otherwise."""
@@ -249,7 +255,8 @@ class Change:
 class ReviewDB:
     def __init__(self, work_dir: Path, *, sources: Mapping[ImageId, str]):
         """`sources`: the manifest's source_sha256 per image_id (none for an image_id the manifest has no hash for),
-        recorded with each verdict mark_many writes."""
+        recorded with each verdict mark_many writes, and what get_status and current_pass judge a row's staleness
+        against (see _current)."""
         self.work_dir = work_dir
         self._sources = sources
         self.review_path = work_dir / "review.tsv"
@@ -408,7 +415,7 @@ class ReviewDB:
         tool_version = package_version()
         changes = []
         for image_id, batch in targets:
-            existing = self._rows.get(image_id)
+            existing = self._rows.get(image_id)  # the raw row, even one for other content: undo restores it exactly
             recorded_pass = max(existing.pass_number, pass_number) if existing else pass_number  # never decreases
             changes.append(
                 Change(
@@ -460,7 +467,8 @@ class ReviewDB:
         fold(self._rows, decisions)
 
     def decisions(self) -> dict[ImageId, Decision]:
-        """The latest decision per image_id (a copy; never a tombstone).
+        """The latest decision per image_id (a copy; never a tombstone), as recorded: one for other content too (see
+        Decision.applies_to), which get_status counts as none.
 
         ValueError if review.tsv ended in an unfinished line when loaded (the next append drops it), or its last mark
         has fewer rows than its grid_size (the next append keeps them): the last verdict may be missing or
@@ -485,8 +493,14 @@ class ReviewDB:
             raise ValueError("; ".join(problems))
         return dict(self._rows)
 
-    def get_status(self, image_id: ImageId, current_pass: int) -> Status:
+    def _current(self, image_id: ImageId) -> Decision | None:
+        """The image's latest decision, or None if it has none or that verdict was recorded for other content (its
+        source_sha256 differs from the manifest's now: the file changed since), which counts as no verdict."""
         row = self._rows.get(image_id)
+        return row if row is not None and row.applies_to(self._sources.get(image_id)) else None
+
+    def get_status(self, image_id: ImageId, current_pass: int) -> Status:
+        row = self._current(image_id)
         if not row:
             return "UNREVIEWED"
         if row.pass_number >= current_pass or row.status == "CLEAN":
@@ -496,13 +510,14 @@ class ReviewDB:
     def current_pass(self, image_ids: Iterable[ImageId]) -> int:
         """Auto-detect the current pass number.
 
-        If any manifest image has no row in _rows, we're on pass 1.
+        If any manifest image has no current decision (none, or only one recorded for other content), we're on pass 1.
         Otherwise, next pass = max pass_number + 1, at most MAX_PASS.
         """
         ids = set(image_ids)
-        if any(image_id not in self._rows for image_id in ids):
+        rows = [row for i in ids if (row := self._current(i)) is not None]
+        if len(rows) < len(ids):
             return 1
-        max_pass = max((self._rows[i].pass_number for i in ids), default=0)
+        max_pass = max((row.pass_number for row in rows), default=0)
         # Stay on max_pass if it still has unfinished work
         if any(self.get_status(i, max_pass) in TODO_STATUSES for i in ids):
             return max_pass

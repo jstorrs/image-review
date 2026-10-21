@@ -956,14 +956,18 @@ icon without its main, or a failed `X`), the one for `X#icon`; else
 empty (an `X` listed without a hash never borrows its icon's).
 
 **Parts and folding.** Every distinct `image_id` of the manifest, and of the
-`failed` rows of `skipped.tsv`, is a part:
+`failed` rows of `skipped.tsv`, is a part. Its decision is its latest one
+unless that is stale: `Decision.applies_to(hash)` is false (the decision's
+`source_sha256` is not empty and differs from the manifest's for that part,
+from `manifest_hashes`), in which case the part has no decision. An `X#icon`
+part is judged against its own manifest hash. Then:
 
 - It is `NOT_REVIEWED` if `skipped.tsv` has any `failed` row for it, even if
   the manifest lists it too. Repeated rows count once, with the first reason.
   A manifest `image_id` with an `ignored` row (and no `failed` one) is
   likewise `NOT_REVIEWED`, with the first `ignored` reason: the two files
   disagree, so nobody can vouch for it.
-- Otherwise it is `DIRTY` if its latest decision is.
+- Otherwise it is `DIRTY` if its decision is.
 - Otherwise it is `NOT_REVIEWED` if `notes.tsv` lists unreviewed content for
   it, with the reason `unreviewed embedded content: <kinds>`, whether its
   decision is CLEAN or it has none. `export.unreviewed_content(notes)`
@@ -988,8 +992,15 @@ empty (an `X` listed without a hash never borrows its icon's).
   file named `X#icon` gets notes of its own, and when it is folded into
   `X`'s row (equal hashes) its `NOT_REVIEWED` part makes that row
   `NOT_REVIEWED` with `icon: unreviewed embedded content: <kinds>`.
-- Otherwise its status is its latest decision's (CLEAN; a tombstone leaves
-  none), or `UNREVIEWED` without one.
+- Otherwise its status is its decision's (CLEAN; a tombstone leaves none),
+  or `UNREVIEWED` without one, with the reason `export.STALE_VERDICT`
+  (`verdict recorded for different content (the file changed since it was
+  reviewed)`) when it had only a stale one. A stale DIRTY is no decision too,
+  so the `notes.tsv` rule above sees none, and a stale verdict is never
+  allowlisted.
+
+`_fold` puts a main part's non-empty reason first in the row's `reason`; an
+`UNREVIEWED` icon part with a reason adds `icon UNREVIEWED: <reason>`.
 
 Status is not pass-aware: a DIRTY from an earlier pass that is FLAGGED in the
 current one is `DIRTY` (it still contains PHI as far as anyone has said).
@@ -1272,6 +1283,10 @@ for the row's `image_id` (`""` if it has none; undo rows copy theirs, see
 hash crosses the wire. `Decision.source_sha256` is a plain `str`, `""` or 64
 lowercase hex characters (checked by `review_db.parse_sha256` when parsed), as
 `reviewer`, `mode` and `tool_version` use `""` for "not recorded".
+`Decision.applies_to(source_sha256: str | None) -> bool` is false only when
+both its own hash and the given one (the manifest's now; `None` when it has
+none) are non-empty and differ: a stale row (see *Pass Logic* and *Parts and
+folding*).
 Files written before the log format (one row per `image_id`) are already
 valid logs. The file is parsed strictly (`review_db.parse_log`; `FLAGGED` is
 never a valid `status`), and a bad file is a `ValueError` naming
@@ -1981,16 +1996,27 @@ by hand.
 | `mark_many(targets, status, pass_number, *, reviewer, mode) -> list[Change]` | Record one verdict on every `(image_id, batch)` in `targets` (same timestamp; `grid_size` = `len(targets)`; `tool_version` = `package_version()`; `source_sha256` = `sources.get(image_id, "")`); returns each row written with the decision it replaced |
 | `undo_many(changes, *, reviewer)` | Append the undo rows for one `mark_many` result in one append (see *Undo rows*); an `image_id` listed twice (keys sharing it) gets one row |
 | `migrate()` | Rewrite a file with one of `LEGACY_HEADERS` (five or nine columns) with `HEADER`, once, the new columns empty (see *`review.tsv`*); no-op otherwise |
-| `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*) |
-| `decisions() -> dict[str, Decision]` | A copy of the latest decision per `image_id` (never a tombstone), for `export`; `ValueError` if `review.tsv` ended in a torn line, or its last mark was cut short, when loaded (not yet cleared by an append) |
+| `get_status(image_id, current_pass) -> Status` | Pass-aware status (see *Pass Logic*); a stale latest row reads `UNREVIEWED` |
+| `decisions() -> dict[str, Decision]` | A copy of the latest decision per `image_id` (never a tombstone), stale or not (export judges staleness itself, to explain it), for `export`; `ValueError` if `review.tsv` ended in a torn line, or its last mark was cut short, when loaded (not yet cleared by an append) |
 | `current_pass(image_ids) -> int` | Auto-detect pass number |
 
 ### Pass Logic
 
-`get_status(image_id, pass)` maps the image's last row to a `Status` as the
-table in [Passes](../commands/review.md#passes) gives: no row is UNREVIEWED; a
-row with `pass_number >= pass`, or a CLEAN one, keeps its verdict; an
-earlier-pass DIRTY is FLAGGED.
+**Stale rows.** A latest row is stale when `Decision.applies_to(sources.get(image_id))`
+is false: its `source_sha256` is not empty, the manifest has a hash for the
+`image_id`, and they differ (a verdict on content the file no longer has).
+`get_status` and `current_pass` read through `_current(image_id)`, which gives
+`None` for no row or a stale one, so a stale row counts as no row. A row with an
+empty hash (recorded before the column, or migrated), and any row when
+`sources` has no entry for its `image_id` (a 3-column manifest), is trusted by
+`image_id`. `mark_many` and `undo_many` use the raw latest row: the recorded
+pass is `max(raw pass_number, requested pass)`, and an undo restores the stale
+row exactly, so the image reads `UNREVIEWED` again.
+
+`get_status(image_id, pass)` maps the image's current row to a `Status` as the
+table in [Passes](../commands/review.md#passes) gives: no row (or a stale one)
+is UNREVIEWED; a row with `pass_number >= pass`, or a CLEAN one, keeps its
+verdict; an earlier-pass DIRTY is FLAGGED.
 
 `mark_many` stores `max(existing pass_number, requested pass)` for each image,
 so an image's recorded pass never decreases (its verdict and timestamp still
@@ -1998,7 +2024,8 @@ update). In a view at a lower pass a later-pass DIRTY image therefore reads
 DIRTY, not FLAGGED, and is not grid-eligible. `ReviewStore.mark` returns
 statuses as seen at the requested pass.
 
-`current_pass(image_ids)` returns 1 if any of `image_ids` has no row.
+`current_pass(image_ids)` returns 1 if any of `image_ids` has no row, or only a
+stale one.
 Otherwise it returns `max(pass_number)` if any image's status at that pass is
 in `TODO_STATUSES` (UNREVIEWED or FLAGGED), or `max(pass_number) + 1` if the
 pass is fully complete, never more than `connection.MAX_PASS` (1000000).

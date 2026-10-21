@@ -20,6 +20,7 @@ from image_review.export import (
     AMBIGUOUS_ICON,
     NOTE_KINDS,
     SHOWN_NOTE_KINDS,
+    STALE_VERDICT,
     UNRENDERED_NOTE_KINDS,
     ExportRow,
     export_rows,
@@ -562,6 +563,14 @@ class TestIconNamedFile(unittest.TestCase):
             [("a.dcm", "NOT_REVIEWED", "bad", sha("1"))],
         )
 
+    def test_an_empty_main_reason_adds_no_empty_note(self):
+        entries = [self.entry("a.dcm", sha("1")), self.entry("a.dcm#icon", sha("1"))]
+        decisions = self.clean(entries)
+        icon = ImageId("a.dcm#icon")
+        decisions[icon] = dataclasses.replace(decisions[icon], status="DIRTY")
+        rows = export_rows(entries, decisions, [SkippedRow(ImageId("a.dcm"), "failed", "")], {})
+        self.assertEqual([(r.image_id, r.status, r.reason) for r in rows], [("a.dcm", "DIRTY", "icon DIRTY")])
+
     def test_a_chain_of_icon_names_gives_each_hash_a_not_reviewed_row(self):
         entries = [self.entry("x", sha("1")), self.entry("x#icon", sha("2")), self.entry("x#icon#icon", sha("3"))]
         rows = export_rows(entries, self.clean(entries), [], {})
@@ -662,6 +671,99 @@ class TestUnreviewedContent(unittest.TestCase):
             [("a.png", "NOT_REVIEWED", "icon: unreviewed embedded content: trailing-data")],
         )
         self.assertEqual(split_allowlist(rows)[0], [])
+
+
+class TestStaleVerdict(unittest.TestCase):
+    """A decision whose source_sha256 differs from the manifest's for that part is a verdict on other content."""
+
+    entry = staticmethod(TestIconNamedFile.entry)
+
+    @staticmethod
+    def decided(entries: list[ManifestEntry], status: str, recorded: str) -> dict[ImageId, Decision]:
+        """A `status` decision on every entry, recorded with source_sha256 `recorded`."""
+        return {
+            i: dataclasses.replace(d, status=status, source_sha256=recorded)
+            for i, d in TestIconNamedFile.clean(entries).items()
+        }
+
+    def summary(self, rows: list[ExportRow]) -> list[tuple[str, str, int | None, str]]:
+        return [(r.image_id, r.status, r.pass_number, r.reason) for r in rows]
+
+    def test_a_stale_verdict_is_unreviewed_and_never_allowlisted(self):
+        for status in ("CLEAN", "DIRTY"):
+            with self.subTest(status=status):
+                entries = [self.entry("a.dcm", sha("new"))]
+                rows = export_rows(entries, self.decided(entries, status, sha("old")), [], {})
+                self.assertEqual(self.summary(rows), [("a.dcm", "UNREVIEWED", None, STALE_VERDICT)])
+                allowed, _ = split_allowlist(rows)
+                self.assertEqual(allowed, [])
+
+    def test_a_verdict_on_this_content_or_without_a_hash_stands(self):
+        for recorded in (sha("1"), ""):  # "": recorded before the hash was, or migrated: trusted by image_id
+            with self.subTest(recorded=recorded):
+                entries = [self.entry("a.dcm", sha("1"))]
+                rows = export_rows(entries, self.decided(entries, "CLEAN", recorded), [], {})
+                self.assertEqual(self.summary(rows), [("a.dcm", "CLEAN", 1, "")])
+                allowed, _ = split_allowlist(rows)
+                self.assertEqual([r.image_id for r in allowed], ["a.dcm"])
+
+    def test_a_legacy_manifest_has_nothing_to_compare(self):
+        entries = [self.entry("a.dcm", None)]
+        rows = export_rows(entries, self.decided(entries, "DIRTY", sha("old")), [], {})
+        self.assertEqual(self.summary(rows), [("a.dcm", "DIRTY", 1, "")])
+
+    def test_skipped_rows_and_unreviewed_content_take_precedence(self):
+        entries = [self.entry(i, sha("new")) for i in ("failed", "noted")]
+        why = "unreviewed embedded content: icon-image"
+        skipped = [SkippedRow(ImageId("failed"), "failed", "bad")]
+        # a stale DIRTY is no decision, so the unreviewed content decides, as for an image never reviewed
+        rows = export_rows(entries, self.decided(entries, "DIRTY", sha("old")), skipped, {ImageId("noted"): why})
+        self.assertEqual(
+            self.summary(rows), [("failed", "NOT_REVIEWED", None, "bad"), ("noted", "NOT_REVIEWED", None, why)]
+        )
+
+    def test_a_stale_icon_makes_its_file_unreviewed(self):
+        entries = [self.entry("a.dcm", sha("1")), self.entry("a.dcm#icon", sha("1"))]
+        decisions = self.decided(entries, "CLEAN", sha("1"))
+        icon = ImageId("a.dcm#icon")
+        decisions[icon] = dataclasses.replace(decisions[icon], source_sha256=sha("old"))
+        rows = export_rows(entries, decisions, [], {})
+        self.assertEqual(self.summary(rows), [("a.dcm", "UNREVIEWED", 1, f"icon UNREVIEWED: {STALE_VERDICT}")])
+        allowed, _ = split_allowlist(rows)
+        self.assertEqual(allowed, [])
+
+
+class TestExportStaleVerdict(unittest.TestCase):
+    """End to end: a verdict given, then the file's hash in the manifest changes (replaced and preprocessed again)."""
+
+    def setUp(self):
+        self.work = temp_dir(self)
+        make_work_dir(self.work, hashed=True)
+        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n")
+        (self.work / "notes.tsv").write_text(NOTES_HEADER_LINE)
+
+    def test_changed_file_is_unreviewed_and_not_allowlisted(self):
+        with LocalStore(self.work) as store:
+            mark(store, KEYS, "CLEAN")
+        changed = ROWS[0][2]
+        with open(self.work / "manifest.tsv", newline="") as f:
+            header, *rows = csv.reader(f, delimiter="\t")
+        write_tsv(
+            self.work / "manifest.tsv",
+            header,
+            [(*r[:3], sha("replaced") if r[2] == changed else r[3], r[4]) for r in rows],
+        )
+        out = self.work.parent / f"{self.work.name}-report.tsv"
+        self.addCleanup(out.unlink, missing_ok=True)
+        result = invoke("export", "--work-dir", str(self.work), "--report", str(out))
+        self.assertEqual(result.exit_code, 0, result.output)
+        allowlisted = [line.split("\t")[1] for line in result.stdout.splitlines()[1:]]
+        self.assertEqual(allowlisted, [r[2] for r in ROWS[1:]])
+        report = [line.split("\t") for line in out.read_text().splitlines()[1:]]
+        self.assertEqual(report, [[changed, "UNREVIEWED", "", "", "", STALE_VERDICT, sha("replaced")]])
+        status = invoke("status", "--work-dir", str(self.work)).stdout
+        self.assertIn("UNREVIEWED:      1", status)
+        self.assertIn("Current pass: 1", status)
 
 
 class TestExportNotes(ExportTestCase):

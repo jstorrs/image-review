@@ -171,13 +171,26 @@ is created by the first verdict.
 | `mode` | `single` or `grid`: the display mode the verdict was given in; `undo` for a row written by `z` |
 | `grid_size` | How many images the one keypress covered (1 in single mode); in an undo row, how many images the undo covered |
 | `tool_version` | The image-review version that wrote the row (`unknown` if not installed) |
-| `source_sha256` | The source file's SHA-256, as `manifest.tsv` recorded it when the verdict was given: which content the verdict is about. Empty when the manifest has no hashes (a 3-column manifest) |
+| `source_sha256` | The source file's SHA-256, as `manifest.tsv` recorded it when the verdict was given: which content the verdict is about. Empty when the manifest had no hashes (a 3-column manifest). A verdict whose hash differs from the one `manifest.tsv` records now counts as no verdict (see **Verdicts on changed content** below) |
 
 `reviewer`, `mode`, `grid_size`, `tool_version` and `source_sha256` are empty
 in rows carried over from an older file (see
 [Upgrading an older file](#upgrading-an-older-file)). An upgrade never fills in
 `source_sha256` from the current manifest: the file at that path may have
 changed since the verdict was given.
+
+**Verdicts on changed content.** A row whose `source_sha256` is not empty and
+differs from the one `manifest.tsv` records now for its `image_id` is a
+verdict on other content: the file at that path was replaced and preprocessed
+again, or `review.tsv` was copied into a work directory rebuilt from different
+files. Such a row counts as no verdict: the image is UNREVIEWED in `review`,
+`serve` and `status` (and keeps the pass at 1 until it is marked again), and
+`export` reports it `UNREVIEWED` with the reason `verdict recorded for
+different content (the file changed since it was reviewed)`. The row stays in
+the file, and an undo can restore it. A row with an empty `source_sha256`
+(from before this column, or carried over by an upgrade) cannot be checked and
+is trusted by `image_id` alone, as is any row when the manifest has no hashes:
+those verdicts are not protected against a replaced file.
 
 **Last row wins.** The file is an append-only log: every rating action
 appends a line per image and syncs it to disk, and when an image appears more
@@ -228,10 +241,13 @@ cut short; see [Refusals](../commands/export.md#refusals-and-output-files).
 An undo (`z`) appends one row for each image of the mark it undoes, with
 `mode` `undo`, the time of the undo and the undoing reviewer. Where the image
 had a verdict before that mark, the row restores that verdict's `batch`,
-`status` and `pass_number` exactly, so the pass can go down. Where it had
-none, the row is a **tombstone**: `status` `UNREVIEWED`, keeping the undone
-row's `batch` and `pass_number`, which makes the image read as never reviewed
-until it is marked again.
+`status`, `pass_number` and `source_sha256` exactly, so the pass can go down.
+That includes a verdict given on other content (see **Verdicts on changed
+content** above): undoing a mark over it restores that row, not a tombstone,
+so the image reads UNREVIEWED again. Where it had none, the row is a
+**tombstone**: `status` `UNREVIEWED`, keeping the undone row's `batch`,
+`pass_number` and `source_sha256`, which makes the image read as never
+reviewed until it is marked again.
 
 ### Upgrading an older file
 

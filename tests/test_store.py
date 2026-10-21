@@ -25,7 +25,7 @@ from image_review.controller import ReviewSession
 from image_review.export import split_allowlist
 from image_review.lock import LOCK_NAME
 from image_review.review_db import HEADER, Decision, ReviewDB, ReviewLogChanged
-from image_review.status import GridCleanRefused, ImageId
+from image_review.status import TODO_STATUSES, GridCleanRefused, ImageId
 from image_review.store import (
     LocalStore,
     ManifestEntry,
@@ -1146,6 +1146,85 @@ class TestSourceHashColumn(StoreTestCase):
         self.assertEqual(
             [(r["status"], r["source_sha256"]) for r in rows], [("CLEAN", written), ("UNREVIEWED", written)]
         )
+
+
+class TestStaleVerdicts(unittest.TestCase):
+    """A row whose source_sha256 differs from the manifest's for its image_id is a verdict on other content: it reads
+    as none. A row without a hash, or any row when the manifest has none to compare, is trusted by image_id."""
+
+    OLD, NEW = "1" * 64, "2" * 64
+    X, Y = ImageId("x"), ImageId("y")
+
+    def setUp(self):
+        self.work_dir = temp_dir(self)
+
+    def record(self, sources: dict[ImageId, str], image_id: ImageId, status, pass_number: int = 1) -> None:
+        ReviewDB(self.work_dir, sources=sources).mark_many(
+            [(image_id, "b")], status, pass_number, reviewer="al", mode="single"
+        )
+
+    def test_stale_verdict_is_unreviewed(self):
+        for status in ("CLEAN", "DIRTY"):
+            with self.subTest(status=status):
+                (self.work_dir / "review.tsv").unlink(missing_ok=True)
+                self.record({self.X: self.OLD}, self.X, status)
+                db = ReviewDB(self.work_dir, sources={self.X: self.NEW})  # the file was replaced since
+                self.assertEqual([db.get_status(self.X, p) for p in (1, 2)], ["UNREVIEWED", "UNREVIEWED"])
+                self.assertEqual(db.decisions()[self.X].status, status)  # the raw row, for export to explain
+
+    def test_stale_only_image_is_on_pass_one(self):
+        self.record({self.X: self.OLD}, self.X, "CLEAN", 3)
+        self.record({self.Y: self.NEW}, self.Y, "CLEAN", 3)
+        both = [self.X, self.Y]
+        self.assertEqual(ReviewDB(self.work_dir, sources={self.X: self.OLD, self.Y: self.NEW}).current_pass(both), 4)
+        db = ReviewDB(self.work_dir, sources={self.X: self.NEW, self.Y: self.NEW})
+        self.assertEqual(db.current_pass(both), 1)  # x has no verdict on its content: not at max_pass
+        self.assertIn(db.get_status(self.X, 3), TODO_STATUSES)
+
+    def test_hashless_row_is_trusted_by_a_hashed_manifest(self):
+        self.record({}, self.X, "CLEAN")  # recorded before the hash was, or migrated
+        db = ReviewDB(self.work_dir, sources={self.X: self.NEW})
+        self.assertEqual((db.get_status(self.X, 1), db.current_pass([self.X])), ("CLEAN", 2))
+
+    def test_hashed_row_is_trusted_by_a_legacy_manifest(self):
+        self.record({self.X: self.OLD}, self.X, "DIRTY")
+        db = ReviewDB(self.work_dir, sources={})  # nothing to compare with
+        self.assertEqual((db.get_status(self.X, 1), db.current_pass([self.X])), ("DIRTY", 2))
+        self.assertEqual(db.get_status(self.X, 2), "FLAGGED")
+
+    def test_marking_a_stale_image_keeps_its_pass_and_undo_restores_the_raw_row(self):
+        self.record({self.X: self.OLD}, self.X, "DIRTY", 3)
+        db = ReviewDB(self.work_dir, sources={self.X: self.NEW})
+        changes = db.mark_many([(self.X, "b")], "CLEAN", 1, reviewer="al", mode="single")
+        self.assertEqual(changes[0].written.pass_number, 3)  # never decreases, even over a stale row
+        self.assertEqual(db.get_status(self.X, 1), "CLEAN")
+        db.undo_many(changes, reviewer="al")
+        self.assertEqual(db.get_status(self.X, 1), "UNREVIEWED")
+        rows = review_rows(self.work_dir / "review.tsv")
+        verdict = ("batch", "status", "pass_number", "source_sha256")
+        self.assertEqual(
+            [tuple(r[c] for c in verdict) for r in rows],
+            [("b", "DIRTY", "3", self.OLD), ("b", "CLEAN", "3", self.NEW), ("b", "DIRTY", "3", self.OLD)],
+        )
+        reloaded = ReviewDB(self.work_dir, sources={self.X: self.NEW})
+        self.assertEqual(reloaded.get_status(self.X, 1), "UNREVIEWED")
+        self.assertEqual(reloaded.decisions()[self.X].source_sha256, self.OLD)
+
+    def test_grid_clean_over_a_stale_dirty_is_accepted(self):
+        make_work_dir(self.work_dir, hashed=True)
+        keys = [key for _, key, _ in ROWS[:2]]
+        with LocalStore(self.work_dir) as store:
+            store.mark(keys[:1], "DIRTY", 1, reviewer="al", mode="single")
+        manifest = self.work_dir / "manifest.tsv"
+        with open(manifest, newline="") as f:
+            header, *rows = csv.reader(f, delimiter="\t")
+        with open(manifest, "w", newline="") as f:  # the first file was replaced and preprocessed again
+            csv.writer(f, delimiter="\t").writerows([header, [*rows[0][:3], self.NEW, rows[0][4]], *rows[1:]])
+        with LocalStore(self.work_dir) as store:
+            self.assertEqual(store.statuses(1)[keys[0]], "UNREVIEWED")  # its DIRTY was on other content
+            self.assertEqual(
+                store.mark(keys, "CLEAN", 1, reviewer="al", mode="grid"), dict.fromkeys(keys, "CLEAN")
+            )  # not GridCleanRefused
 
 
 class TestMigration(unittest.TestCase):

@@ -63,6 +63,15 @@
   `export` read the old file as is. Existing rows keep an empty hash: the
   upgrade never fills it in from the current manifest. 0.4.0 and earlier
   cannot read the upgraded file.
+- **A verdict on content the file no longer has no longer counts.** When a
+  verdict's recorded `source_sha256` differs from the one `manifest.tsv`
+  records now (the file was replaced and preprocessed again, or `review.tsv`
+  was copied into a work directory rebuilt from other files), the image reads
+  UNREVIEWED in `review`, `serve` and `status` and is offered for review again
+  (keeping the pass at 1 until it is), and `export` reports it `UNREVIEWED`
+  with the reason `verdict recorded for different content (the file changed
+  since it was reviewed)` instead of allowlisting it. Verdicts recorded before
+  this version have no hash and are trusted by path as before.
 - **The click minimum is now 8.3.0.** The previous minimum, 8.2.2, was yanked
   on PyPI, so it could not be installed by default. Only the tests need it
   (see Minimum dependency versions in the install guide).

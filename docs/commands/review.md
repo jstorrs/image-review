@@ -133,7 +133,9 @@ remembered across restarts.
 
 In grid mode every filter, `all` included, leaves out DIRTY and FLAGGED
 images, so a batch whose only todo images are FLAGGED is not picked for grid
-mode. If that leaves nothing to show, it says how many images need
+mode. An image whose DIRTY verdict was given on content its file no longer
+has (replaced and preprocessed again) is UNREVIEWED, not DIRTY, so it can be
+shown, and cleared, in a grid. If that leaves nothing to show, it says how many images need
 single-mode review instead of implying the review is done. In the terminal,
 at the start:
 
@@ -214,9 +216,16 @@ An image's status in a pass comes from its latest verdict:
 | Latest verdict | Status in this pass |
 |----------------|---------------------|
 | none | UNREVIEWED |
+| given on other content (the file changed since) | UNREVIEWED |
 | from this pass or a later one | that verdict, CLEAN or DIRTY |
 | CLEAN, from an earlier pass | CLEAN |
 | DIRTY, from an earlier pass | FLAGGED |
+
+A verdict counts only for the content it was given on: if an image's file was
+replaced and preprocessed again since its verdict, the image is offered for
+review again, and until then it counts as never reviewed (so the pass is 1).
+Verdicts recorded before `review.tsv` held a hash are taken as given (see
+[`review.tsv`](../reference/work-directory.md#reviewtsv)).
 
 So under the default `--filter unreviewed` each pass shows:
 

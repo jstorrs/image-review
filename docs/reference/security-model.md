@@ -329,6 +329,18 @@ world-readable.
   manifest beside the status, pass and timestamp. An
   undo appends restoring rows rather than deleting any. The log is plain text
   and is not signed: anyone who can write the work directory can edit it.
+- **Verdicts are tied to content.** A verdict counts only while its
+  `source_sha256` matches the manifest's for that `image_id`. If the file at a
+  path is replaced and preprocessed again, or `review.tsv` is copied into a
+  work directory rebuilt from other files, the old verdict counts as none: the
+  image comes back for review, and `export` reports it `UNREVIEWED` and never
+  allowlists it on that verdict
+  ([`review.tsv`](work-directory.md#reviewtsv)). This is a current limit:
+  rows with an empty `source_sha256` (recorded before the column existed, or
+  carried over by an upgrade) and any rows read against a manifest without
+  hashes cannot be checked and are still trusted by path alone. The hash is
+  as good as the manifest: anyone who can write the work directory can edit
+  both files.
 - **Export refusals.** `export` refuses while a writer holds the work
   directory (unless `--allow-live`, which exports anyway with a warning),
   refuses a `review.tsv` whose last line, or last grid mark, was cut short,
@@ -387,9 +399,12 @@ world-readable.
   refuses it too: `/mark` checks the store's current statuses under its lock
   and answers 409, recording nothing, so a client bug, or statuses gone stale
   because another client marked an image DIRTY meanwhile, cannot clear such
-  an image through a grid. This does not lift the limit above: a `single`
-  mark, from any client holding the token, can still mark any known image
-  CLEAN.
+  an image through a grid. An image whose only DIRTY verdict was given on
+  content its file no longer has (replaced and preprocessed again) is
+  UNREVIEWED, not DIRTY, so a grid can clear it: that verdict was never about
+  the content now shown (see *Verdicts are tied to content* above). This does
+  not lift the limit above: a `single` mark, from any client holding the
+  token, can still mark any known image CLEAN.
 
 ## Reporting a vulnerability
 

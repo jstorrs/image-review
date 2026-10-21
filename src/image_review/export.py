@@ -40,6 +40,9 @@ UNRENDERED_NOTE_KINDS: frozenset[NoteKind] = frozenset(
 )
 SHOWN_NOTE_KINDS: frozenset[NoteKind] = frozenset({"alpha"})  # shown as a view of its own
 UNREVIEWED_CONTENT = "unreviewed embedded content"
+# The reason on an UNREVIEWED part whose latest verdict was recorded with a different source_sha256 than the
+# manifest's now: the file changed since it was reviewed, so that verdict counts as none (Decision.applies_to).
+STALE_VERDICT = "verdict recorded for different content (the file changed since it was reviewed)"
 # A part's status: never IGNORED, since an ignored input that is not a part gets a row of its own, never folded.
 _PartStatus = Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED"]
 # The worst part decides a file's status: CLEAN only if every part is CLEAN.
@@ -69,7 +72,7 @@ class _Part:
 
     status: _PartStatus
     decision: Decision | None  # None for UNREVIEWED and NOT_REVIEWED
-    reason: str  # the skip reason, or the unreviewed content, for NOT_REVIEWED
+    reason: str  # the skip reason, or the unreviewed content, for NOT_REVIEWED; STALE_VERDICT, or "", for UNREVIEWED
 
 
 def unreviewed_content(notes: list[NoteRow]) -> dict[ImageId, str]:
@@ -97,14 +100,19 @@ def _parts(
     failed: dict[ImageId, str],
     ignored: dict[ImageId, str],
     unreviewed: dict[ImageId, str],
+    hashes: dict[ImageId, str],
 ) -> dict[ImageId, _Part]:
     """Each manifest or failed image_id once, manifest order then failed order. A `failed` row makes it NOT_REVIEWED
     (with its reason), even if the manifest has it too; so does an `ignored` row for a manifest image_id (the two
     disagree, so nobody can vouch for it); then a DIRTY decision makes it DIRTY; then `unreviewed` content makes it
-    NOT_REVIEWED (with that reason), whatever else its decision."""
+    NOT_REVIEWED (with that reason), whatever else its decision. A decision recorded for other content (its
+    source_sha256 differs from the manifest's for that image_id) counts as none: without `unreviewed` content the part
+    is UNREVIEWED with STALE_VERDICT. `hashes` is manifest_hashes(entries)."""
     parts: dict[ImageId, _Part] = {}
     for image_id in dict.fromkeys([*(e.image_id for e in entries), *failed]):
-        decision = decisions.get(image_id)
+        raw = decisions.get(image_id)
+        stale = raw is not None and not raw.applies_to(hashes.get(image_id))
+        decision = None if stale else raw
         if image_id in failed:
             parts[image_id] = _Part("NOT_REVIEWED", None, failed[image_id])
         elif image_id in ignored:
@@ -112,7 +120,7 @@ def _parts(
         elif image_id in unreviewed and (decision is None or decision.status != "DIRTY"):
             parts[image_id] = _Part("NOT_REVIEWED", None, unreviewed[image_id])
         elif decision is None:
-            parts[image_id] = _Part("UNREVIEWED", None, "")
+            parts[image_id] = _Part("UNREVIEWED", None, STALE_VERDICT if stale else "")
         else:
             parts[image_id] = _Part(decision.status, decision, "")  # CLEAN or DIRTY: latest() drops tombstones
     return parts
@@ -132,18 +140,19 @@ def _main(f: ImageId, parts: dict[ImageId, _Part], ignored: dict[ImageId, str]) 
 
 def _fold(image_id: ImageId, main: _Part, icon: _Part | None, source_sha256: str, *, ambiguous: bool) -> ExportRow:
     """One file's row: the worst status of its main image and its icon, and at least NOT_REVIEWED (with the
-    `AMBIGUOUS_ICON` note last) if `ambiguous`; pass, timestamp and reviewer from the main image's decision."""
+    `AMBIGUOUS_ICON` note last) if `ambiguous`; pass, timestamp and reviewer from the main image's decision. Notes:
+    the main part's reason, then the icon's state, then `AMBIGUOUS_ICON`."""
     statuses: list[_PartStatus] = [p.status for p in (main, icon) if p is not None]
     if ambiguous:
         statuses.append("NOT_REVIEWED")
     status = max(statuses, key=_SEVERITY.__getitem__)
     notes = []
-    if main.status == "NOT_REVIEWED":
+    if main.reason:
         notes.append(main.reason)
     if icon is not None and icon.status == "NOT_REVIEWED":
         notes.append(f"icon: {icon.reason}")
     elif icon is not None and icon.status != "CLEAN":
-        notes.append(f"icon {icon.status}")
+        notes.append(f"icon {icon.status}" + (f": {icon.reason}" if icon.reason else ""))
     if ambiguous:
         notes.append(AMBIGUOUS_ICON)
     d = main.decision
@@ -193,7 +202,9 @@ def export_rows(
     A part (manifest or failed image_id) is NOT_REVIEWED if skipped.tsv has a `failed` row for it, or an `ignored`
     one (the first `failed` reason wins, else the first `ignored` one); else DIRTY if its latest decision is; else
     NOT_REVIEWED if `unreviewed` (see unreviewed_content) has it, with that reason, since nobody saw that content;
-    else its latest decision's status (CLEAN), else UNREVIEWED. A DIRTY from an earlier pass not yet re-reviewed
+    else its latest decision's status (CLEAN), else UNREVIEWED. A decision whose source_sha256 differs from the
+    manifest's for that part (the file changed since its verdict) counts as no decision: the part is UNREVIEWED with
+    STALE_VERDICT, never CLEAN or DIRTY on the strength of it. A DIRTY from an earlier pass not yet re-reviewed
     (FLAGGED in `status`) is DIRTY: it still contains PHI. A DICOM's icon (`X#icon`: preprocess no longer renders
     icons, so only a work directory made by an older version, or a file merely so named, has one) is folded into
     `X`'s row, whose status is the worse of the two (DIRTY, then NOT_REVIEWED, then UNREVIEWED, then CLEAN); an icon
@@ -217,9 +228,9 @@ def export_rows(
     """
     failed = _first_reasons(skipped, "failed")
     ignored = _first_reasons(skipped, "ignored")
-    parts = _parts(entries, decisions, failed, ignored, unreviewed)
-    manifest_ids = {e.image_id for e in entries}
     hashes = manifest_hashes(entries)
+    parts = _parts(entries, decisions, failed, ignored, unreviewed, hashes)
+    manifest_ids = {e.image_id for e in entries}
     ambiguous_icons = _ambiguous_icons(parts, hashes)
     ambiguous = ambiguous_icons | {ImageId(i.removesuffix(ICON_SUFFIX)) for i in ambiguous_icons}
     files = _files(parts, ambiguous_icons)

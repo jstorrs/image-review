@@ -35,7 +35,7 @@ export runs where the work directory is (e.g. on the cluster). It refuses
 A file is allowlisted only if:
 
 - it was reviewed CLEAN (and, in a work directory made by an older version,
-  its `#icon` row too);
+  its `#icon` row too), on the content the manifest hashes now;
 - `notes.tsv` lists no content of it that its review image does not show
   (see below);
 - the manifest has its SHA-256; and
@@ -74,6 +74,16 @@ stays DIRTY; without a verdict, or with a CLEAN one, the file is
 stripped file matches no row: to release it, preprocess the stripped file
 into a new work directory and review it there. Notes for an `image_id` the
 manifest does not list are ignored.
+
+A verdict given on other content counts as none: if `review.tsv` recorded a
+`source_sha256` with the verdict and the manifest now records a different
+one (the file was replaced and preprocessed again, or `review.tsv` was copied
+into a work directory rebuilt from other files), the file is `UNREVIEWED`
+with the reason `verdict recorded for different content (the file changed
+since it was reviewed)`, whether the verdict was CLEAN or DIRTY; review it
+again. A verdict recorded without a hash (before `review.tsv` had the column)
+is taken as given. See
+[`review.tsv`](../reference/work-directory.md#reviewtsv).
 
 A file whose name ends in `#icon` cannot be told apart from a DICOM's icon
 in a work directory made by an older version (preprocess no longer renders
@@ -118,9 +128,9 @@ for reading.)
 |--------|-------------|
 | `image_id` | The source file's path, as in `manifest.tsv` / `skipped.tsv`; a file inside a ZIP is `<zip>::<entry>`, one row per entry |
 | `source_sha256` | SHA-256 of the source file (or ZIP entry), from the manifest (in a work directory made by an older version, a DICOM and its icon share it); compare it with the file's own before releasing it. In the report, empty for a file that never rendered (so always for `IGNORED`) or a work directory from an older version. It is derived from the file's content, so treat it like the `image_id` |
-| `status` | (report) `DIRTY`, `UNREVIEWED` (no verdict yet), `NOT_REVIEWED` (preprocess could not render it, or `notes.tsv` lists content its review image does not show, or an older version could not render its icon, or it is a file and a file named like its icon whose hashes differ), `IGNORED` (preprocess did not take it for an image, so nobody looked at it), or `CLEAN` for a CLEAN file that was not allowlisted |
-| `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. Also empty when the main image is `NOT_REVIEWED` (preprocess failed on it or ignored it, or it holds unreviewed embedded content), even if `review.tsv` has a verdict for it, and when there is no main image. After an [undo](../reference/work-directory.md#undo-rows) they are the undo's time and reviewer, with the pass it restored. `reviewer` is the reviewer's unverified claim, and may be empty in rows from an older version |
-| `reason` | (report) Why the row is not simply the main image's verdict, as `; `-separated notes in this order: preprocess's error or ignored reason, or `unreviewed embedded content: <kinds>`, for a `NOT_REVIEWED` main image; `main image missing` for an icon whose file is neither in the manifest nor a failed input (the row is then at best `NOT_REVIEWED`), or that file's reason if preprocess ignored it; `icon: <error>` for an icon an older version could not render, else `icon DIRTY` / `icon UNREVIEWED`; `ambiguous #icon: the files with and without #icon in their name differ; rename the one ending in #icon` for a file and a file named like its icon whose hashes differ (see below); preprocess's reason for an `IGNORED` file; and last, `not allowlisted: ...` for a CLEAN file that was not allowlisted. Otherwise empty |
+| `status` | (report) `DIRTY`, `UNREVIEWED` (no verdict yet, or its latest verdict was given on content the file no longer has), `NOT_REVIEWED` (preprocess could not render it, or `notes.tsv` lists content its review image does not show, or an older version could not render its icon, or it is a file and a file named like its icon whose hashes differ), `IGNORED` (preprocess did not take it for an image, so nobody looked at it), or `CLEAN` for a CLEAN file that was not allowlisted |
+| `pass_number`, `timestamp`, `reviewer` | From the latest verdict on the file's main image; empty without one. Also empty when the main image is `NOT_REVIEWED` (preprocess failed on it or ignored it, or it holds unreviewed embedded content), even if `review.tsv` has a verdict for it; when the main image's latest verdict was given on other content; and when there is no main image. After an [undo](../reference/work-directory.md#undo-rows) they are the undo's time and reviewer, with the pass it restored. `reviewer` is the reviewer's unverified claim, and may be empty in rows from an older version |
+| `reason` | (report) Why the row is not simply the main image's verdict, as `; `-separated notes in this order: preprocess's error or ignored reason, or `unreviewed embedded content: <kinds>`, for a `NOT_REVIEWED` main image; `verdict recorded for different content (the file changed since it was reviewed)` for a main image whose latest verdict was given on other content; `main image missing` for an icon whose file is neither in the manifest nor a failed input (the row is then at best `NOT_REVIEWED`), or that file's reason if preprocess ignored it; `icon: <error>` for an icon an older version could not render, else `icon DIRTY` / `icon UNREVIEWED` (followed by `: ` and that reason when the icon's verdict was given on other content); `ambiguous #icon: the files with and without #icon in their name differ; rename the one ending in #icon` for a file and a file named like its icon whose hashes differ (see below); preprocess's reason for an `IGNORED` file; and last, `not allowlisted: ...` for a CLEAN file that was not allowlisted. Otherwise empty |
 
 - A DICOM's embedded icon is not rendered (see
   [preprocess](preprocess.md#rendering-pipeline)), so nobody reviews it: a
