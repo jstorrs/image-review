@@ -127,5 +127,5 @@ source = ["image_review"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 94
+fail_under = 96
 show_missing = true
