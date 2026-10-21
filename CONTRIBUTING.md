@@ -60,6 +60,11 @@ A push to a branch without a pull request does not run CI; open a pull request,
 or start the workflow from the Actions tab (`workflow_dispatch`).
 
 The `web` job runs those browser-page tests on node 24 alone, with no Python.
+It first type-checks the page: `web/helpers.js` and `web/app.js` are checked
+with `tsc` (TypeScript is pinned exactly in `package.json`; `tsconfig.json`
+holds the options). Run the same check locally with `npm ci && npm run
+typecheck`. Python-only contributors need no npm for `python -m unittest
+discover`.
 
 The `minimums` job runs the tests on Python 3.12 against the lowest versions that
 `pyproject.toml` allows for the direct dependencies, installed with
@@ -83,7 +88,9 @@ Dependabot (`.github/dependabot.yml`) opens a weekly pull request for newer
 action releases; check the release notes and keep the comment in step with the
 SHA. It watches `github-actions` only. Do not enable the `pip` ecosystem: the
 dependency floors in `pyproject.toml` are verified minimums, and version-update
-pull requests would raise them.
+pull requests would raise them. It does not watch npm either: a TypeScript
+bump can add new type errors, so bump the pin in `package.json` by hand,
+refresh `package-lock.json` and fix what it reports in the same change.
 
 ## Documentation
 

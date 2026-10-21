@@ -21,3 +21,4 @@ __pycache__/
 .*_cache/
 .coverage
 .venv/
+node_modules/

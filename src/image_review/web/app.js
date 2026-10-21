@@ -116,36 +116,42 @@ const state = {
   flashing: false, // a marked item is up in its new status before the move on: busy, and q waits too
 };
 
-const $ = (id) => document.getElementById(id);
+function $(id) {
+  const element = document.getElementById(id);
+  if (element === null) {
+    throw new Error("missing #" + id);
+  }
+  return element;
+}
 const ui = {
   bar: $("bar"),
-  reviewer: $("reviewer"),
+  reviewer: /** @type {HTMLInputElement} */ ($("reviewer")),
   nameBox: $("name-box"),
-  nameOk: $("name-ok"),
-  chip: $("reviewer-chip"),
+  nameOk: /** @type {HTMLButtonElement} */ ($("name-ok")),
+  chip: /** @type {HTMLButtonElement} */ ($("reviewer-chip")),
   reviewerName: $("reviewer-name"), // the chip's name, before its fixed "✎": cut short first when the bar is narrow
   help: $("help"),
-  helpButton: $("help-button"),
+  helpButton: /** @type {HTMLButtonElement} */ ($("help-button")),
   progress: $("progress"),
   itemStatus: $("item-status"),
   scale: $("scale"),
   where: $("where"),
   mode: $("mode"),
   stage: $("stage"),
-  image: $("image"),
-  grid: $("grid"),
+  image: /** @type {HTMLImageElement} */ ($("image")),
+  grid: /** @type {HTMLCanvasElement} */ ($("grid")),
   placeholder: $("placeholder"),
   message: $("message"),
   listEnd: $("list-end"), // the stop sign past either end of the list
   listEndDetail: $("list-end-detail"),
   status: $("status"),
-  clean: $("clean"),
-  dirty: $("dirty"),
-  prev: $("prev"),
-  next: $("next"),
-  undo: $("undo"),
-  reconnect: $("reconnect"),
-  done: $("done"),
+  clean: /** @type {HTMLButtonElement} */ ($("clean")),
+  dirty: /** @type {HTMLButtonElement} */ ($("dirty")),
+  prev: /** @type {HTMLButtonElement} */ ($("prev")),
+  next: /** @type {HTMLButtonElement} */ ($("next")),
+  undo: /** @type {HTMLButtonElement} */ ($("undo")),
+  reconnect: /** @type {HTMLButtonElement} */ ($("reconnect")),
+  done: /** @type {HTMLButtonElement} */ ($("done")),
 };
 
 // ---- Requests ----
@@ -1442,6 +1448,7 @@ function wire() {
   ui.reviewer.addEventListener("keydown", onReviewerKey);
   ui.nameOk.addEventListener("mousedown", (event) => event.preventDefault()); // focus stays in the name
   ui.nameOk.addEventListener("click", acceptName);
+  /** @type {[HTMLButtonElement, () => void][]} */
   const buttons = [
     [ui.clean, () => doMark("CLEAN")],
     [ui.dirty, () => doMark("DIRTY")],
