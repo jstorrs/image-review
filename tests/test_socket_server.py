@@ -847,25 +847,26 @@ class TestWebFiles(unittest.TestCase):
         """)
 
     @requires_node
-    def test_grid_mode_in_a_stub_page(self):
-        # Both scripts, as the page loads them, against a stub DOM: see tests/web_harness.js for the checks
+    def test_browser_page_suite(self):
+        # Both scripts, as the page loads them, against a stub DOM: the checks are in tests/web/*.test.js
         node = shutil.which("node")
         assert node is not None
-        harness = Path(__file__).with_name("web_harness.js")
+        root = Path(__file__).parent.parent
         result = subprocess.run(
-            [node, str(harness), *(str(WEB_DIR / name) for name in SCRIPT_NAMES)],
+            [node, "--test", "--test-reporter=tap", "tests/web/*.test.js"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=120,
             check=False,
+            cwd=root,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        # Every test ran to the end (one stuck on an unsettled promise would end node early)
-        count = len(re.findall(r"^\s*tests\[", harness.read_text(), re.MULTILINE))
-        ran = re.fullmatch(r"(\d+)/(\d+) passed", result.stdout.strip())
-        assert ran is not None, result.stdout
-        self.assertEqual(ran[1], ran[2])
-        self.assertGreaterEqual(int(ran[2]), count)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Nothing was cancelled, skipped or left todo, and every test passed
+        summary = {k: int(v) for k, v in re.findall(r"^# (\w+) (\d+)$", result.stdout, re.MULTILINE)}
+        self.assertGreater(summary["tests"], 0, result.stdout)
+        self.assertEqual(summary["pass"], summary["tests"], result.stdout)
+        for key in ("fail", "cancelled", "skipped", "todo"):
+            self.assertEqual(summary[key], 0, result.stdout)
 
     @requires_node
     def test_grid_status_parity(self):

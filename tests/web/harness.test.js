@@ -1,9 +1,13 @@
 "use strict";
-// Runs helpers.js then app.js (paths in argv[2], argv[3], as the page loads them) against a minimal stub DOM and checks grid mode's
-// display and verdict rules end to end. Run by tests/test_socket_server.py; exits non-zero on failure.
+// Runs helpers.js then app.js (as the page loads them) against a minimal stub DOM and checks grid mode's
+// display and verdict rules end to end. Run with `node --test tests/web/*.test.js`; tests/test_socket_server.py runs it too.
 const assert = require("assert");
 const fs = require("fs");
+const path = require("path");
+const test = require("node:test");
 const vm = require("vm");
+
+const SCRIPTS = ["helpers.js", "app.js"].map((name) => path.join(__dirname, "..", "..", "src", "image_review", "web", name));
 
 const JPEG = [0xff, 0xd8, 1, 2, 0xff, 0xd9];
 const MARK_FLASH_MS = 200; // app.js's: a marked item stays up this long before the next
@@ -119,7 +123,7 @@ function makePage({ manifest, statuses, stage = [400, 300], dpr = 2, fixedOrder 
   if (fixedOrder) vm.runInContext("Math.random = () => 0.99;", ctx);
   // Both scripts in one context, as the page runs them: app.js sees helpers.js's top-level names.
   // Named, so V8 coverage attributes lines to the files.
-  for (const path of process.argv.slice(2)) vm.runInContext(fs.readFileSync(path, "utf8"), ctx, { filename: path });
+  for (const script of SCRIPTS) vm.runInContext(fs.readFileSync(script, "utf8"), ctx, { filename: script });
   vm.runInContext("globalThis.__state = state;", ctx);
 
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
@@ -324,9 +328,6 @@ tests["leaving grid mode frees the canvas"] = async () => {
   assert.strictEqual(page.els.grid.hidden, true);
 };
 
-// A test stuck on a promise that never settles ends node early: exit code 1 and
-// no "N/N passed" line, which the Python test looks for.
-process.exitCode = 1;
 for (const dwell of ["running", "over"]) {
   tests["contextlost with the dwell " + dwell + " takes the grid off screen"] = async () => {
     const page = makePage({ manifest, statuses });
@@ -2858,17 +2859,5 @@ for (const [label, status, body, message] of [
   };
 }
 
-(async () => {
-  const names = Object.keys(tests);
-  let passed = 0;
-  for (const name of names) {
-    try {
-      await tests[name]();
-      passed++;
-    } catch (error) {
-      console.error("FAIL: " + name + "\n" + (error.stack || error));
-    }
-  }
-  console.log(passed + "/" + names.length + " passed");
-  process.exitCode = passed === names.length ? 0 : 1;
-})();
+// node:test runs these one after another and fails one whose promise is still pending when the event loop empties.
+for (const [name, fn] of Object.entries(tests)) test(name, fn);

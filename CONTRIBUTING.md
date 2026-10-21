@@ -30,7 +30,13 @@ machine.
 The browser-page tests run `web/helpers.js` and `web/app.js` under `node` and skip when it is not on
 `PATH`. Set `IMAGE_REVIEW_REQUIRE_NODE=1` to make them fail instead; CI sets it
 and installs node 24, so a missing node cannot pass silently. It is test-only
-and the application never reads it.
+and the application never reads it. `python -m unittest discover` runs them
+through `tests/test_socket_server.py`; to run them alone, with one line per
+test:
+
+```
+node --test --test-reporter=spec tests/web/*.test.js
+```
 
 ## Coverage
 
@@ -53,6 +59,8 @@ manual dispatch: lint, format check, type check and tests on Linux
 A push to a branch without a pull request does not run CI; open a pull request,
 or start the workflow from the Actions tab (`workflow_dispatch`).
 
+The `web` job runs those browser-page tests on node 24 alone, with no Python.
+
 The `minimums` job runs the tests on Python 3.12 against the lowest versions that
 `pyproject.toml` allows for the direct dependencies, installed with
 `uv pip install --resolution lowest-direct` and wheels only (rectpack has only
@@ -67,7 +75,7 @@ the site builds.
 
 Both workflows cancel an in-progress run for the same ref when a newer one
 starts (never on `main`), cache pip downloads keyed on `pyproject.toml`, and
-set a job timeout: 30 minutes for tests (both test jobs), 15 for the docs build,
+set a job timeout: 30 minutes for tests (both test jobs), 15 for the web job and the docs build,
 10 for deploy.
 
 Every `uses:` is pinned to a full commit SHA with a `# vX.Y.Z` comment.
