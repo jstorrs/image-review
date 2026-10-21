@@ -44,6 +44,9 @@
 
 ### Fixes
 
+- DICOM palette images whose 8-bit lookup table entries sit under a 16-bit descriptor no longer render near
+  black (text at 255 on 0 became 0 and 1 and looked clean). When every red, green and blue entry is at most 255,
+  they are scaled as 8-bit; tables with larger entries, and 8-bit descriptors, are unchanged. Preprocess again.
 - A new `review.tsv`, `review.lock` or `export --output` file is now made durable with an `fsync` of its directory.
   For the lock and export files this is best effort (a failure is logged as a warning); creating `review.tsv` fails
   before writing any row if it cannot be synced.

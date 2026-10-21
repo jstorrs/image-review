@@ -471,7 +471,10 @@ decodes to at most a few bytes per sample.
    are scaled to uint8 by their nominal depth alone, never by the data:
    `bits` is BitsStored (for `PALETTE COLOR`, the entry depth declared by the
    third value of the Red Palette Color Lookup Table Descriptor, not how the
-   table is stored) and each sample becomes `round(sample * 255 / (2**bits
+   table is stored; but when that is 16 and every red, green and blue entry
+   of the lookup tables themselves, never the image pixels, is at most 255,
+   the entries are 8-bit values under a 16-bit descriptor and `bits` is 8,
+   and if the tables cannot be read the declared depth stands) and each sample becomes `round(sample * 255 / (2**bits
    - 1))`, clipped to 0-255 (negative samples become 0, larger ones 255,
    nothing wraps). Float colour pixel data raises
    `unsupported: float colour pixel data`, since it has no bit depth to

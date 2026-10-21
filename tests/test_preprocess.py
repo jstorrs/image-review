@@ -4033,9 +4033,25 @@ class RenderTest(unittest.TestCase):
         return ds
 
     def test_palette_entries_are_scaled_by_the_descriptors_depth(self):
+        wide = np.arange(256)[::-1] * 257  # genuinely 16-bit entries: some above 255
+        rgb, _ = preprocess_module._colour_dicom(self._palette_dataset(16, wide), "PALETTE COLOR")
+        np.testing.assert_array_equal(rgb[..., 0].ravel(), preprocess_module._to_uint8(wide, 16))
+        self.assertEqual(rgb.max(), 255)
+        mixed = np.zeros(256, dtype=int)
+        mixed[0], mixed[255] = 256, 255  # a single entry above 255 keeps 16-bit scaling
+        rgb, _ = preprocess_module._colour_dicom(self._palette_dataset(16, mixed), "PALETTE COLOR")
+        np.testing.assert_array_equal(rgb[..., 0].ravel(), preprocess_module._to_uint8(mixed, 16))
+
+    def test_palette_with_8_bit_entries_under_a_16_bit_descriptor_renders_them_at_full_brightness(self):
         entries = np.arange(256)[::-1]
-        rgb, _ = preprocess_module._colour_dicom(self._palette_dataset(16, entries), "PALETTE COLOR")
-        np.testing.assert_array_equal(rgb[..., 0].ravel(), preprocess_module._to_uint8(entries, 16))  # dark, as stored
+        ds = self._palette_dataset(16, entries)
+        rgb, _ = preprocess_module._colour_dicom(ds, "PALETTE COLOR")
+        np.testing.assert_array_equal(rgb[..., 0].ravel(), entries)
+        self.assertEqual(rgb.max(), 255)
+        green = self._palette_dataset(16, entries)  # one table with a 16-bit entry is enough to scale by 16 bits
+        green.GreenPaletteColorLookupTableData = (entries * 0 + 1000).astype("<u2").tobytes()
+        rgb, _ = preprocess_module._colour_dicom(green, "PALETTE COLOR")
+        np.testing.assert_array_equal(rgb[..., 0].ravel(), preprocess_module._to_uint8(entries, 16))
 
     def test_palette_with_8_bit_entries_padded_into_16_bit_words_renders_the_entries(self):
         entries = np.arange(256)[::-1]  # descriptor depth 8: the 16-bit words only pad the entries

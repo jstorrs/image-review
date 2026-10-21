@@ -526,17 +526,34 @@ def _stored_pixels(dcm: pydicom.FileDataset) -> tuple[np.ndarray, tuple[int, ...
     return _split_unused_bits(raw, int(dcm.BitsStored))
 
 
+def _palette_entry_bits(dcm: pydicom.FileDataset) -> int:
+    """The depth to scale PALETTE COLOR entries by: the lookup table descriptor's declared depth, except that a
+    16-bit descriptor over tables whose every red, green and blue entry is at most 255 means 8-bit entries (a common
+    writer quirk) and gives 8. Only the tables decide this, never the image pixels. The tables are expanded by
+    `apply_color_lut` over their own index range (segmented tables too, at most 65536 entries); if that fails the
+    declared depth stands."""
+    count, first, declared = (int(v) for v in dcm.RedPaletteColorLookupTableDescriptor)
+    if declared != 16:
+        return declared
+    try:
+        tables = pydicom.pixels.apply_color_lut(np.arange(first, first + (count or 2**16)), dcm)
+        return 8 if int(tables[..., :3].max()) <= 255 else declared
+    except Exception:  # noqa: BLE001 - unreadable tables: keep the declared depth, do not fail the input
+        return declared
+
+
 def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarray, tuple[int, ...]]:
     """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels, and the unused
     bits that held content (see `_stored_pixels`; palette indices are masked before the lookup). RGB is scaled by
-    BitsStored and palette entries by the lookup table descriptor's depth (see `_to_uint8`)."""
+    BitsStored and palette entries by the lookup table descriptor's depth, or 8 for 8-bit entries under a 16-bit
+    descriptor (see `_palette_entry_bits` and `_to_uint8`)."""
     pixels, unused_bits = _stored_pixels(dcm)
     if pixels.dtype.kind == "f":  # no depth to scale by: 0..1 floats would render near black
         raise Unsupported("float colour pixel data")
     bits = int(dcm.BitsStored)
     if photometric == "PALETTE COLOR":
         pixels = pydicom.pixels.apply_color_lut(pixels, dcm)
-        bits = int(dcm.RedPaletteColorLookupTableDescriptor[2])  # the entries' declared depth, not the indices'
+        bits = _palette_entry_bits(dcm)  # the entries' depth, not the indices'
     if pixels.ndim != 3 or pixels.shape[2] != 3:
         raise Unsupported(f"pixel array with shape {pixels.shape}")
     return _to_uint8(pixels, bits), unused_bits

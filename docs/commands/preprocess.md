@@ -447,8 +447,10 @@ stripped file into a new work directory and review it there.
 
 The DICOM preprocessing pipeline for grayscale (MONOCHROME1/2) images;
 single-frame colour (RGB, YBR) and palette DICOMs are only converted to 8-bit
-RGB (scaled by the stored depth, BitsStored, without adjustment) and cropped,
-with no windowing or colormap:
+RGB (scaled by the stored depth, BitsStored, without adjustment; palette entries
+by the depth the lookup table descriptor declares, except that 8-bit entries
+under a 16-bit descriptor are scaled as 8-bit) and cropped, with no windowing
+or colormap:
 
 1. Converts to float32 only when each value is represented exactly and the
    min-to-max span will not overflow, then corrects photometric
