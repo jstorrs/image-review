@@ -71,7 +71,7 @@ log = logging.getLogger(__name__)
 EROSION_KERNEL_SIZE = 5
 OUTLIER_PERCENTILE = 0.01
 INTENSITY_MARGIN = 0.02
-TAIL_FRACTION = 0.10  # output range given to each outlier tail (below bot, above top)
+RANGE_TRIM = 0.0001  # fraction of the min-max range trimmed at each end before the percentiles: only the extremes
 CLAHE_KERNEL_SIZE = 96  # CLAHE tile size in pixels
 JPEG_QUALITY = 95
 JPEG_SUBSAMPLING = 0  # 4:4:4, so small coloured text keeps its edges
@@ -203,7 +203,7 @@ RenderPath = Literal[
 # peak resident set of `render_and_encode` less the interpreter's after imports, over the pixels, on noisy
 # gradients of 4000 x 4000 to 6800 x 6800 pixels (CPython 3.13, numpy 2.5, Pillow 12.3, pydicom 3.0). The most
 # seen: DICOM gray 73 (up to 16 bits; the colormap's float64 RGBA is most of it), 92 (float64), colour 96 (16 bits
-# with bits above BitsStored set), 120 (32 bits), palette 86; raster gray 40 (8 bits), 43 (16 bits and wider), RGB 29, 16-bit RGB 36, transparent 109 (a 16-bit
+# with bits above BitsStored set), 120 (32 bits), palette 86; raster gray 40 (8 bits), 42 (16 bits and wider), RGB 29, 16-bit RGB 36, transparent 109 (a 16-bit
 # CMYK TIFF 60), and an MPO 39 per pixel of its canvas. Each is that rounded up by about a tenth.
 RENDER_BYTES_PER_PIXEL: Mapping[RenderPath, int] = {
     "dicom-gray": 80,
@@ -385,26 +385,30 @@ def _gray_float32(arr: np.ndarray) -> np.ndarray:
     return converted
 
 
-def _compress_tails(img: np.ndarray) -> np.ndarray:
-    """Map float `img` to [0, 1], squeezing the outlier tails instead of clipping them.
+def _window(img: np.ndarray) -> np.ndarray:
+    """Map float `img`, not constant, to [0, 1] by its robust window, clipping what lies outside it.
 
-    The robust core range [bot, top] fills [TAIL_FRACTION, 1 - TAIL_FRACTION]; values
-    below bot and above top are interpolated into the remaining tails, so extreme
-    values (e.g. burned-in text at the maximum) stay distinct from the core.
-    Falls back to a plain min-max rescale when no robust core can be found.
+    The window runs from the OUTLIER_PERCENTILE to the 1 - OUTLIER_PERCENTILE quantile of the values strictly inside
+    the outer RANGE_TRIM of the min-max range (which leaves out only pixels at or very near the extremes, such as a
+    hot pixel), shrunk by INTENSITY_MARGIN. When there are no such values or they give no window (e.g. a two-valued
+    image), the quantiles of all the values are tried. Failing that, a plain min-max rescale.
     """
     lo, hi = float(img.min()), float(img.max())
-    minmax = (img - lo) / (hi - lo)
-    margin_initial = OUTLIER_PERCENTILE * (hi - lo)
+    margin_initial = RANGE_TRIM * (hi - lo)
     inner = img[(img > lo + margin_initial) & (img < hi - margin_initial)]
-    if inner.size == 0:
-        return minmax
-    bot, top = np.quantile(inner, [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
-    margin_final = INTENSITY_MARGIN * (top - bot)
-    bot, top = bot + margin_final, top - margin_final
-    if not lo < bot < top < hi:
-        return minmax
-    return np.interp(img, [lo, bot, top, hi], [0, TAIL_FRACTION, 1 - TAIL_FRACTION, 1]).astype(np.float32)
+    for values in (inner, img):
+        if values.size:
+            bot, top = _core_range(values)
+            if bot < top:
+                return np.clip((img - bot) / (top - bot), 0, 1)
+    return (img - lo) / (hi - lo)
+
+
+def _core_range(values: np.ndarray) -> tuple[float, float]:
+    """The OUTLIER_PERCENTILE and 1 - OUTLIER_PERCENTILE quantiles of `values`, shrunk by INTENSITY_MARGIN."""
+    bot, top = np.quantile(values, [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
+    margin = INTENSITY_MARGIN * (top - bot)
+    return float(bot + margin), float(top - margin)
 
 
 def _to_uint8(pixels: np.ndarray, bits: int) -> np.ndarray:
@@ -449,7 +453,7 @@ def _overlay_mask(dcm: pydicom.FileDataset, shape: tuple[int, int]) -> np.ndarra
 
 
 def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray) -> np.ndarray:
-    """Float [0, 1] image from MONOCHROME1/2 pixels: tail compression, overlay, crop, CLAHE, crop.
+    """Float [0, 1] image from MONOCHROME1/2 pixels: windowing, overlay, crop, CLAHE, crop.
 
     Overlay pixels are set to 1.0 after intensity mapping, so they come out at the top of the range.
     """
@@ -457,7 +461,7 @@ def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray) -> np
     if photometric == "MONOCHROME1":
         img = -img
     constant = img.min() >= img.max()
-    img = np.zeros_like(img) if constant else _compress_tails(img)
+    img = np.zeros_like(img) if constant else _window(img)
     img[overlay] = 1.0
     img = _crop(img)
     return img if constant else _crop(ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE))
@@ -984,14 +988,16 @@ def _alpha_notes(counts: AlphaCounts) -> tuple[Note, ...]:
     return (Note("alpha", f"{not_opaque} of {total} pixels not opaque"),) if not_opaque else ()
 
 
+def _windowed_gray(arr: np.ndarray) -> np.ndarray:
+    """Float32 [0, 1] from grayscale samples as a DICOM's are (see `_gray_dicom`): `_window`, so one extreme
+    pixel cannot push the content into a single bin of CLAHE's 256; zeros when constant."""
+    img = _gray_float32(arr)
+    return np.zeros_like(img) if img.min() >= img.max() else _window(img)
+
+
 def _high_bit_gray(im: Image.Image) -> np.ndarray:
-    """Scale an I/F/I;16 image to float32 [0, 1], keeping its full range."""
-    arr = np.asarray(im)
-    if im.mode.startswith("I;16"):
-        return ski.util.img_as_float32(arr.astype(np.uint16))
-    arr = _gray_float32(arr)
-    lo, hi = arr.min(), arr.max()
-    return (arr - lo) / (hi - lo) if hi > lo else np.zeros_like(arr)
+    """An I/F/I;16 image as float32 [0, 1], windowed (see `_windowed_gray`)."""
+    return _windowed_gray(np.asarray(im))
 
 
 def _decode_frame(im: Image.Image) -> tuple[Views, AlphaCounts]:
@@ -1087,8 +1093,9 @@ def _decode_tiff(data: bytes) -> tuple[Views, AlphaCounts]:
 
 def _full_depth(colour: np.ndarray, alpha: np.ndarray | None) -> tuple[Views, AlphaCounts]:
     """16-bit samples to float32 [0, 1] by their depth alone, colour and alpha alike (see `_with_alpha`); the data is
-    never consulted, so no pixel affects how another is scaled."""
-    scaled = colour.astype(np.float32) / 65535
+    never consulted, so no pixel affects how another is scaled. The exception is a gray colour (2-D), which is
+    windowed as any high-bit grayscale is (see `_windowed_gray`); its alpha is still scaled by depth."""
+    scaled = _windowed_gray(colour) if colour.ndim == 2 else colour.astype(np.float32) / 65535
     if alpha is None:
         return (scaled,), (0, 0)
     return _with_alpha(scaled, alpha.astype(np.float32) / 65535)
@@ -2111,7 +2118,7 @@ def provenance(
             "clahe_kernel_size": CLAHE_KERNEL_SIZE,
             "outlier_percentile": OUTLIER_PERCENTILE,
             "intensity_margin": INTENSITY_MARGIN,
-            "tail_fraction": TAIL_FRACTION,
+            "range_trim": RANGE_TRIM,
             "jpeg_quality": JPEG_QUALITY,
             "jpeg_subsampling": JPEG_SUBSAMPLING,
             "draw_overlays": draw_overlays,

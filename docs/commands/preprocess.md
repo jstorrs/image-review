@@ -482,10 +482,10 @@ syntax, so they are never drawn, with or without the flag, and are noted as
 single-frame DICOMs (grayscale, colour or palette) are rendered for now.
 
 Non-DICOM images (JPG/PNG) are decoded by mode (CMYK and palette images are
-converted to RGB; 16-bit grayscale keeps its full range), get adaptive
+converted to RGB; 16-bit and 32-bit grayscale are windowed as a DICOM's is), get adaptive
 histogram equalization if grayscale, and are saved as RGB JPGs. 16-bit colour
 and alpha PNGs (RGB, RGBA, gray+alpha) and 16-bit RGB and CMYK TIFFs are
-decoded at full depth, and gray+alpha stays grayscale. Colour is shown at its
+decoded at full depth, and gray+alpha stays grayscale (windowed like other grayscale). Colour is shown at its
 stored depth without adjustment (16-bit samples divided by 65535, a colour
 DICOM's by 2^BitsStored - 1), whatever the image holds, so a colour image
 that uses only part of its range looks dark, as in any viewer. Some inputs are shown

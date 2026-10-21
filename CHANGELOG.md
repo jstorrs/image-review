@@ -4,6 +4,14 @@
 
 ### Upgrading: breaking and behaviour changes
 
+- **Grayscale rendering changed.** DICOM grayscale windowing is restored to the original method, replacing 0.4.0's
+  tail compression (and the 1% range trim that preceded it): the values outside the outer 0.01% of the min-max range
+  are set aside, the 1st and 99th percentiles of the rest, shrunk by 2%, are the window, and values outside it are
+  clipped. Bright text on a bright border, both above the window, merges again. 16-bit and 32-bit grayscale image
+  files (modes `I;16`, `I` and `F`, and the gray of a 16-bit gray+alpha PNG) are windowed the same way; before, they
+  were divided by 65535 or min-max scaled, so one bright pixel could hide all the text. `parameters.tail_fraction`
+  is no longer written to `preprocess.json`, and `parameters.range_trim` is new. Preprocess again to get the new
+  rendering.
 - **`export` no longer allowlists a file holding content its review image
   does not show.** A file with an `overlay-plane`, `overlay-unused-bits`,
   `icon-image`, `embedded-thumbnail` or `trailing-data` note in `notes.tsv`

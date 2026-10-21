@@ -513,15 +513,17 @@ decodes to at most a few bytes per sample.
    bits: with 8 bits allocated and fewer stored (non-conformant; e.g. 7
    stored) RGB values of 128 and up wrap and give a spurious note
 3. Correct photometric interpretation (invert MONOCHROME1 by negation)
-4. Compress the intensity tails: the robust core range (1st-99th percentile
-   of the values strictly inside the outer 1% of the min-max range, then
-   shrunk by a 2% margin) maps to [`TAIL_FRACTION`, 1 - `TAIL_FRACTION`]
-   (0.10-0.90), and the values below/above it are interpolated linearly into
-   the remaining tails [0, 0.10] and [0.90, 1] rather than clipped, so
-   extremes such as burned-in text at the maximum stay distinguishable from
-   a bright core. An image with a single value maps to all zeros; when no
-   robust core exists (no inner values, or the core is empty or touches
-   the min or max) a plain min-max rescale is used. Then, only with
+4. Window the intensities: the robust window runs from the 1st to the 99th
+   percentile of the values strictly inside the outer 0.01% of the min-max
+   range (`RANGE_TRIM`, which leaves out only pixels at or very near the
+   extremes, such as a hot pixel), shrunk by a 2% margin on each side. It
+   maps to [0, 1] and values outside it are clipped, so text brighter (or
+   darker) than the window merges with whatever else lies beyond it, such as
+   a bright border. An image with a single value maps to all zeros. When no
+   window comes of those values (there are none, or the percentiles meet, as
+   in a two-valued image), the same percentiles and margin are taken over all
+   the values instead; only when that finds none either is a plain min-max
+   rescale used. Then, only with
    `draw_overlays`, overlay planes (see below) are drawn at 1.0
 5. Apply CLAHE (adaptive histogram equalization, 96-pixel tiles)
    (drawn overlay pixels stay at or near the top of the range)
@@ -707,8 +709,11 @@ at a set bit.
   whether the input renders. The counted bytes are never quoted, so the
   detail is safe in a TSV. A tables-only `SOI ... EOI` prefix before the
   image makes the image itself count, which errs on the safe side
-- High-bit-depth grayscale (`I;16*` scaled by 65535, `I`/`F` min-max scaled)
-  keeps its full range. `I`/`F` samples must round-trip exactly through
+- High-bit-depth grayscale (`I;16*`, `I` and `F`, and the gray of a 16-bit
+  gray+alpha PNG) is windowed exactly as DICOM grayscale is (step 4 above,
+  all zeros when constant), so one extreme pixel cannot push the content
+  into a single bin of CLAHE; only its alpha is divided by 65535.
+  `I`/`F` samples must round-trip exactly through
   float32 and their min-to-max span must not overflow float32; otherwise the
   same unsupported reason as DICOM grayscale is raised. A mode `F` image holding
   NaN or infinity raises
@@ -734,7 +739,9 @@ at a set bit.
   divided by 65535, their nominal depth: nothing is computed from the data,
   so no pixel (hidden content under transparent pixels, a stray bright
   pixel) changes how another is scaled, and a colour image that uses only
-  part of its range looks dark. Then the alpha rule above applies. CMYK
+  part of its range looks dark. The gray of a gray+alpha PNG is not colour
+  in this sense: it is windowed (see above), so hidden gray under
+  transparent pixels can move its window. Then the alpha rule above applies. CMYK
   inks are converted with Pillow's formula `RGB = (1 - [C, M, Y]) * (1 - K)`.
   Gray+alpha stays grayscale. The multi-frame check runs first
 - Grayscale modes (`1`, `L`, `I;16*`, `I`, `F`) stay grayscale; every other

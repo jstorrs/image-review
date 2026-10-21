@@ -82,6 +82,7 @@ from image_review.preprocess import (
     _uncovered,
     _unrendered_detail,
     _WalkBudget,
+    _window,
     classify,
     colliding_ids,
     compress_image,
@@ -642,7 +643,7 @@ class ProvenanceTest(unittest.TestCase):
                 "clahe_kernel_size": preprocess_module.CLAHE_KERNEL_SIZE,
                 "outlier_percentile": preprocess_module.OUTLIER_PERCENTILE,
                 "intensity_margin": preprocess_module.INTENSITY_MARGIN,
-                "tail_fraction": preprocess_module.TAIL_FRACTION,
+                "range_trim": preprocess_module.RANGE_TRIM,
                 "jpeg_quality": preprocess_module.JPEG_QUALITY,
                 "jpeg_subsampling": preprocess_module.JPEG_SUBSAMPLING,
                 "draw_overlays": False,
@@ -2990,6 +2991,59 @@ class TrailingDataTest(unittest.TestCase):
         np.testing.assert_array_equal(views[0], decode_raster(_gradient_jpeg())[0][0])
 
 
+class WindowTest(unittest.TestCase):
+    def test_extreme_pixel_leaves_the_content_a_real_range(self):
+        img = np.random.default_rng(0).integers(0, 4096, (400, 400)).astype(np.float32)
+        img[0, 0] = 2**24
+        out = _window(img)
+        self.assertEqual(out[0, 0], 1)
+        content = out.ravel()[1:]
+        self.assertGreater(content.max() - content.min(), 0.99)  # not squeezed against 0 as min-max would
+        self.assertGreater(len(np.unique(content)), 1000)
+
+    def test_two_valued_sparse_image_stays_min_max(self):
+        img = np.zeros((100, 100), dtype=np.float32)
+        img[:2, :2] = 4000
+        img[5, 5:8] = 2000
+        np.testing.assert_array_equal(_window(img), img / 4000)
+
+    def test_window_values_by_hand(self):
+        img = np.arange(1, 201, dtype=np.float32)  # 1..200, one of each
+        # The trim of 0.01% of 199 leaves 2..199; their 1% and 99% quantiles are 3.97 and 197.03, shrunk by 2% of
+        # 193.06 (3.8612) to 7.8312 and 193.1688
+        out = _window(img)
+        expected = [0, (8 - 7.8312) / 185.3376, (101 - 7.8312) / 185.3376, 1]
+        np.testing.assert_allclose(out[[0, 7, 100, 199]], expected, atol=1e-5)
+
+    def test_window_clips_at_the_robust_range(self):
+        img = (np.arange(10000).reshape(100, 100) % 1000).astype(np.float32)
+        img[0, 0], img[0, 1] = 0, 1000
+        img[1, :3] = [-3000, 3000, 2500]
+        lo, hi = float(img.min()), float(img.max())
+        margin = 0.0001 * (hi - lo)
+        inner = img[(img > lo + margin) & (img < hi - margin)]
+        bot, top = np.quantile(inner, [0.01, 0.99])
+        shrink = 0.02 * (top - bot)
+        bot, top = bot + shrink, top - shrink
+        expected = np.clip((img - bot) / (top - bot), 0, 1).astype(np.float32)
+        np.testing.assert_allclose(_window(img), expected, atol=1e-6)
+        np.testing.assert_array_equal(_window(img)[1, :3], [0, 1, 1])  # the outliers clip
+
+    def test_text_in_the_clipped_tail_is_not_separated(self):
+        # Known limit of clipping: bright text on a bright border above the window both come out 1
+        rng = np.random.default_rng(1)
+        img = rng.integers(0, 1001, (200, 200)).astype(np.float32)
+        band = np.zeros((200, 200), dtype=bool)
+        band[:, :12] = band[:, -12:] = True
+        img[band] = 3900
+        text = np.zeros_like(band)
+        text[20:24, 2:10] = True
+        img[text] = 4095
+        out = _window(img)
+        self.assertTrue((out[text] == 1).all())
+        self.assertTrue((out[band] == 1).all())
+
+
 class DecodeRasterTest(unittest.TestCase):
     def test_cmyk_jpeg_keeps_black_text(self):
         cmyk = np.zeros((40, 60, 4), dtype=np.uint8)
@@ -3062,11 +3116,12 @@ class DecodeRasterTest(unittest.TestCase):
         gray = (np.arange(40 * 60).reshape(40, 60) * 20).astype(np.uint16)
         img = _decoded(_png_bytes(gray))
         self.assertEqual(img.ndim, 2)
-        np.testing.assert_allclose(img, gray / 65535, atol=1e-6)
+        # Windowed like a DICOM's grayscale, not scaled by 65535
+        np.testing.assert_array_equal(img, _window(gray.astype(np.float32)))
         out = render("raster", "id", _png_bytes(gray), "inferno")
         self.assertEqual(out.rgb.shape, (40, 60, 3))
 
-    def test_16_bit_grayscale_with_trns_keeps_full_range(self):
+    def test_16_bit_grayscale_with_trns_is_windowed(self):
         gray = np.full((40, 60), 30000, dtype=np.uint16)
         gray[_text_mask()] = 50000
         gray[:5, :5] = 0  # the transparent key
@@ -3075,11 +3130,76 @@ class DecodeRasterTest(unittest.TestCase):
         img, notes = _decode_joined(buf.getvalue())
         self.assertEqual(img.ndim, 2)
         left, right = _halves(img, 60)
-        self.assertAlmostEqual(float(left[20, 20]), 50000 / 65535, places=5)
-        self.assertAlmostEqual(float(left[10, 5]), 30000 / 65535, places=5)
+        np.testing.assert_array_equal(left, _window(gray.astype(np.float32)))  # not scaled by 65535
         self.assertEqual(left[0, 0], 0)  # the key's own value, in the colour view
         np.testing.assert_array_equal(right, (gray != 0).astype(np.float32))  # binary alpha
         self.assertEqual(notes, (Note("alpha", "25 of 2400 pixels not opaque"),))
+
+    def test_high_bit_grayscale_with_an_extreme_pixel_shows_the_text(self):
+        rng = np.random.default_rng(7)
+        field = rng.integers(0, 1001, (400, 400))
+        field[150:250, 100:300] = 4000  # text, within 0..4095
+        cases = {
+            "mode I TIFF": (lambda a: Image.fromarray(a.astype(np.int32), "I"), "TIFF", 2**24),
+            "I;16 PNG": (lambda a: Image.fromarray(a.astype(np.uint16)), "PNG", 65535),
+        }
+        for name, (make, fmt, extreme) in cases.items():
+            with self.subTest(name):
+                means = []
+                for outlier in (False, True):
+                    pixels = field.copy()
+                    if outlier:
+                        pixels[0, 0] = extreme
+                    buf = io.BytesIO()
+                    make(pixels).save(buf, fmt)
+                    out = render("raster", "id", buf.getvalue(), "x").rgb
+                    means.append((out[150:250, 100:300].mean(), out[300:, :].mean(), (out[300:] == 0).mean()))
+                (text, _, black), (text_out, background_out, black_out) = means
+                self.assertGreaterEqual(text_out - background_out, 40)
+                # The outlier is clipped; the window moves a little with it, but the text stays near white
+                self.assertAlmostEqual(text_out, text, delta=20)
+                self.assertLess(black_out, black + 0.1)  # the field keeps its range: it is not clipped to black
+
+    def test_hot_pixel_over_a_bright_structure_shows_the_text(self):
+        for share in (0.2, 0.6):
+            with self.subTest(structure=share):
+                rng = np.random.default_rng(5)
+                gray = rng.integers(190, 211, (400, 400)).astype(np.uint16)
+                gray[150:250, 100:300] = 600  # text
+                start = round(400 * (1 - share))
+                gray[:, start:] = rng.integers(900, 1001, (400, 400 - start))  # a structure over most of a side
+                gray[0, 0] = 65535
+                out = render("raster", "id", _png_bytes(gray), "x").rgb
+                background = out[300:, : start - 1]
+                self.assertGreaterEqual(out[150:250, 100:300].mean() - background.mean(), 40)
+
+    def test_caption_on_black_with_an_extreme_pixel_shows_the_text(self):
+        pixels = np.zeros((400, 400), dtype=np.int32)
+        caption = np.zeros((400, 400), dtype=bool)
+        caption[100:110, 100:300] = True  # 1.25% of the pixels: more than the window's 1%
+        pixels[caption] = 4000
+        pixels[0, 0] = 2**24
+        buf = io.BytesIO()
+        Image.fromarray(pixels, "I").save(buf, "TIFF")
+        out = render("raster", "id", buf.getvalue(), "x").rgb
+        self.assertGreaterEqual(out[caption].mean() - out[~caption].mean(), 200)
+
+    def test_label_box_over_noise_leaves_the_glyphs_visible(self):
+        rng = np.random.default_rng(7)
+        gray = rng.integers(0, 10001, (400, 400)).astype(np.uint16)
+        gray[:80, :75] = 60000  # a label box of 3.75% of the pixels
+        glyphs = np.zeros((400, 400), dtype=bool)
+        glyphs[10:70:6, 5:70] = True
+        gray[glyphs] = 50000
+        out = render("raster", "id", _png_bytes(gray), "x").rgb
+        self.assertGreaterEqual(out[glyphs].mean() - out[300:, :].mean(), 40)
+
+    def test_16_bit_gray_alpha_png_with_an_extreme_pixel_shows_the_text(self):
+        gray = np.random.default_rng(7).integers(0, 1001, (400, 400)).astype(np.uint16)
+        gray[150:250, 100:300] = 4000
+        gray[0, 0] = 65535
+        out = render("raster", "id", imagecodecs.png_encode(np.dstack([gray, np.full_like(gray, 65535)])), "x").rgb
+        self.assertGreaterEqual(out[150:250, 100:300].mean() - out[300:, :].mean(), 40)
 
     def test_mpo_frames_render_side_by_side(self):
         buf = io.BytesIO()
@@ -3288,7 +3408,8 @@ class DecodeRasterTest(unittest.TestCase):
                 img, notes = _decode_joined(imagecodecs.png_encode(np.dstack([gray, np.full_like(gray, alpha)])))
                 raw = img if alpha else _halves(img, 60)[0]
                 self.assertEqual(raw.shape, (40, 60))  # still grayscale
-                np.testing.assert_array_equal(raw, (gray / 65535).astype(np.float32))
+                np.testing.assert_array_equal(raw, _window(gray.astype(np.float32)))  # two values: min-max
+                np.testing.assert_array_equal(raw, (gray / 4000).astype(np.float32))
                 if alpha:
                     self.assertEqual(notes, ())
                 else:
@@ -3531,6 +3652,16 @@ class RenderTest(unittest.TestCase):
         ds.save_as(buf, enforce_file_format=True)
         return buf.getvalue()
 
+    def test_dicom_with_an_extreme_pixel_shows_the_text(self):
+        rng = np.random.default_rng(3)
+        pixels = rng.integers(0, 101, (400, 400)).astype(np.uint16)
+        pixels[150:250, 100:300] = 400  # below 1% of the range once one pixel is at 65535 (655)
+        plain = render("dicom", "id", self.dicom_bytes(pixels), "gray").rgb
+        pixels[0, 0] = 65535
+        out = render("dicom", "id", self.dicom_bytes(pixels), "gray").rgb
+        self.assertGreaterEqual(out[150:250, 100:300].mean() - out[300:, :].mean(), 40)
+        self.assertAlmostEqual(out[150:250, 100:300].mean(), plain[150:250, 100:300].mean(), delta=20)
+
     def test_gray_float32_accepts_exact_integer_values(self):
         for pixels in (
             np.array([[-32768, 32767]], dtype=np.int16),
@@ -3659,6 +3790,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(main.image_id, "/x/a.dcm")
         self.assertFalse(np.array_equal(main.rgb, plain.rgb))
         mask = pydicom.dcmread(path).overlay_array(0x6000).astype(bool)
+        self.assertEqual(main.rgb.shape[:2], mask.shape)  # nothing cropped, so the mask lines up
         self.assertGreaterEqual(np.percentile(main.rgb[..., 0][mask], 5), 250)
 
     def with_elements_from(self, data: bytes, edit) -> bytes:
@@ -3726,25 +3858,6 @@ class RenderTest(unittest.TestCase):
 
     def luminance(self, rgb: np.ndarray) -> np.ndarray:
         return rgb @ np.array([0.299, 0.587, 0.114])
-
-    def test_bright_text_on_bright_border_stays_visible(self):
-        rng = np.random.default_rng(1)
-        pixels = rng.integers(0, 1001, (200, 200)).astype(np.uint16)
-        band = np.zeros((200, 200), dtype=bool)
-        band[:, :12] = True
-        band[:, -12:] = True
-        pixels[band] = rng.integers(3800, 3951, int(band.sum()))
-        text = np.zeros_like(band)
-        text[20:24, 2:10] = True
-        text[60:64, 2:10] = True
-        text[100:104, -10:-2] = True
-        pixels[text] = 4095
-        for colormap in ("inferno", "gray"):
-            with self.subTest(colormap=colormap):
-                out = render("dicom", "id", self.dicom_bytes(pixels), colormap)
-                self.assertEqual(out.rgb.shape[:2], pixels.shape)
-                lum = self.luminance(out.rgb.astype(float))
-                self.assertGreaterEqual(lum[text].mean() - lum[band & ~text].mean(), 20)
 
     def test_two_level_text_image_renders_text_bright(self):
         for dtype, low, high in ((np.uint16, 0, 4095), (np.int16, -1000, 3000)):
