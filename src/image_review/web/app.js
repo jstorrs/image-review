@@ -78,6 +78,46 @@ function takeToken() {
 
 // ---- State ----
 
+/**
+ * @typedef {Object} State
+ * @property {string | null} token
+ * @property {string | null} instance
+ * @property {number | null} pass
+ * @property {ManifestRow[]} manifest
+ * @property {string[]} batches
+ * @property {Map<string, string>} batchOf
+ * @property {Map<string, string>} statuses
+ * @property {Item[]} items
+ * @property {number} index
+ * @property {string | null} reviewer
+ * @property {boolean} busy
+ * @property {boolean} dead
+ * @property {boolean} lost
+ * @property {boolean} waiting
+ * @property {boolean} atEnd
+ * @property {number} epoch
+ * @property {"single" | "grid"} mode
+ * @property {"auto" | "never"} rotation
+ * @property {string | null} batch
+ * @property {{width: number, height: number} | null} gridSize
+ * @property {{key: string, plan: GridPlan} | null} gridCache
+ * @property {Promise<unknown> | null} gridsRequest
+ * @property {number} buildSeq
+ * @property {ReturnType<typeof setTimeout> | null} repackTimer
+ * @property {string | null} landKey
+ * @property {number} sourceScale
+ * @property {string[][]} marked
+ * @property {boolean} loaded
+ * @property {number | null} scale
+ * @property {"none" | "running" | "over"} dwell
+ * @property {number} dwellSeq
+ * @property {number} showSeq
+ * @property {string | null} objectUrl
+ * @property {null | "help" | "name"} overlay
+ * @property {boolean} flashing
+ */
+
+/** @type {State} */
 const state = {
   token: takeToken(),
   instance: null, // the serve run the review was loaded from (its /current_pass reply's INSTANCE_HEADER)
@@ -506,7 +546,7 @@ function refreshScale() {
 }
 
 function itemVisible() {
-  return !ui.placeholder.hidden || (state.loaded && state.scale > 0);
+  return !ui.placeholder.hidden || (state.loaded && state.scale !== null && state.scale > 0);
 }
 
 function clearDwell() {
@@ -715,12 +755,15 @@ function onContextRestored() {
 // Draw grid item `index` on the canvas, then show it. An image that fails to load
 // or decode, or whose decoded size is not its `source`, leaves its rect black and
 // becomes a single item.
-async function showGrid(index, seq) {
-  const item = state.items[index];
+async function showGrid(index, item, seq) {
+  // Grid items exist only after buildGrids has measured gridSize (leaveGrid clears it
+  // only once abandonItems has dropped them).
+  const size = /** @type {{width: number, height: number}} */ (state.gridSize);
   const canvas = ui.grid;
-  canvas.width = state.gridSize.width; // resizing clears the canvas
-  canvas.height = state.gridSize.height;
-  const context = canvas.getContext("2d");
+  canvas.width = size.width; // resizing clears the canvas
+  canvas.height = size.height;
+  // The canvas only ever gets a 2d context, so getContext("2d") never returns null.
+  const context = /** @type {CanvasRenderingContext2D} */ (canvas.getContext("2d"));
   context.fillStyle = "#000";
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.imageSmoothingEnabled = true;
@@ -785,9 +828,10 @@ async function showItem(index, end = showEnd) {
     end();
     return;
   }
-  if (state.items[index].kind === "grid") {
+  const item = state.items[index];
+  if (item.kind === "grid") {
     setObjectUrl(null);
-    await showGrid(index, seq);
+    await showGrid(index, item, seq);
     return;
   }
   const key = itemKeys(state.items[index])[0];
@@ -866,10 +910,10 @@ function describeKeys(keys) {
 // One verdict on the current item: every key it covers (a grid's drawn keys),
 // sent with the display mode, so a left-out single in grid mode is sent as "grid".
 async function mark(verdict) {
-  if (!canJudge()) {
+  const item = currentItem();
+  if (item === null || !canJudge()) {
     return; // too soon after the item appeared, or busy: ignored, as in the pygame client
   }
-  const item = currentItem();
   if (verdict === "CLEAN" && item.kind === "grid" && gridCleanRefused(item.keys, state.statuses)) {
     say(GRID_HAS_DIRTY);
     return;
@@ -1021,8 +1065,10 @@ function showOrRepack(index) {
 // Drop the grid build (and any pending repack) and the item shown: a stale build,
 // load or dwell then does nothing.
 function abandonItems() {
-  clearTimeout(state.repackTimer);
-  state.repackTimer = null;
+  if (state.repackTimer !== null) {
+    clearTimeout(state.repackTimer);
+    state.repackTimer = null;
+  }
   state.buildSeq++;
   state.showSeq++;
   clearDwell();

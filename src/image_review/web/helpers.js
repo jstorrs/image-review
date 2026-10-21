@@ -10,6 +10,15 @@ const MAX_REVIEWER_LENGTH = 64;
 const GRID_ELIGIBLE = new Set(["UNREVIEWED", "CLEAN"]);
 const MAX_PASS = 1000000; // connection.MAX_PASS
 
+// ---- Shapes ----
+
+/** @typedef {{key: string, batch: string}} ManifestRow */
+/** @typedef {{key: string, x: number, y: number, w: number, h: number, rotated: boolean, source: [number, number]}} Placement */
+/** @typedef {{kind: "single", key: string}} SingleItem */
+/** @typedef {{kind: "grid", placements: Placement[], keys: string[]}} GridItem */
+/** @typedef {SingleItem | GridItem} Item */
+/** @typedef {{grids: Placement[][], leftOut: string[], width: number, height: number}} GridPlan */
+
 // ---- Pure helpers ----
 
 function isTodo(status) {
@@ -68,6 +77,7 @@ function gridCleanRefused(keys, statuses) {
 }
 
 // The todo singles of a pass, shuffled: single mode's list.
+/** @returns {Item[]} */
 function singleItems(manifest, statuses, random = Math.random) {
   return shuffle(
     manifest.filter((row) => isTodo(statuses.get(row.key))).map((row) => ({ kind: "single", key: row.key })),
@@ -209,12 +219,14 @@ function parseGridPlan(reply, sentKeys, width, height) {
   return { grids, leftOut, width, height };
 }
 
+/** @returns {GridItem} */
 function gridItem(placements) {
   return { kind: "grid", placements, keys: placements.map((p) => p.key) };
 }
 
 // As controller._grid_items: the grids shuffled, then (stably) the fullest first,
 // then each left-out key as a single item.
+/** @returns {Item[]} */
 function orderGridItems(plan, random = Math.random) {
   const grids = shuffle(plan.grids.map(gridItem), random);
   grids.sort((a, b) => b.keys.length - a.keys.length);
@@ -224,6 +236,7 @@ function orderGridItems(plan, random = Math.random) {
 // `items` with `failed` keys taken out of grid item `index` (dropped if it is left
 // empty) and appended as single items, unless already listed as one: an image
 // that cannot be drawn is never covered by a grid verdict.
+/** @returns {Item[]} */
 function demoteKeys(items, index, failed) {
   const gone = new Set(failed);
   const kept = items[index].placements.filter((p) => !gone.has(p.key));
