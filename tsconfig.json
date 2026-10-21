@@ -2,8 +2,7 @@
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
-    "strict": false,
-    "strictNullChecks": true,
+    "strict": true,
     "noEmit": true,
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],

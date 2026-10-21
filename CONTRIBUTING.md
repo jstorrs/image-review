@@ -61,7 +61,7 @@ or start the workflow from the Actions tab (`workflow_dispatch`).
 
 The `web` job runs those browser-page tests on node 24 alone, with no Python.
 It first type-checks the page: `web/helpers.js` and `web/app.js` are checked
-with `tsc` (TypeScript is pinned exactly in `package.json`; `tsconfig.json`
+with `tsc` in strict mode (TypeScript is pinned exactly in `package.json`; `tsconfig.json`
 holds the options). Run the same check locally with `npm ci && npm run
 typecheck`. Python-only contributors need no npm for `python -m unittest
 discover`.

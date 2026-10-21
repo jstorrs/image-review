@@ -39,6 +39,7 @@ const WINDOW_TOO_SMALL = "Window too small for grid mode";
 
 // ---- Token and reviewer name (sessionStorage, guarded: storage may be blocked) ----
 
+/** @param {string} name @returns {string | null} */
 function readStored(name) {
   try {
     return sessionStorage.getItem(name);
@@ -47,6 +48,7 @@ function readStored(name) {
   }
 }
 
+/** @param {string} name @param {string | null} value */
 function writeStored(name, value) {
   try {
     if (value === null) {
@@ -86,7 +88,7 @@ function takeToken() {
  * @property {ManifestRow[]} manifest
  * @property {string[]} batches
  * @property {Map<string, string>} batchOf
- * @property {Map<string, string>} statuses
+ * @property {StatusMap} statuses
  * @property {Item[]} items
  * @property {number} index
  * @property {string | null} reviewer
@@ -156,6 +158,7 @@ const state = {
   flashing: false, // a marked item is up in its new status before the move on: busy, and q waits too
 };
 
+/** @param {string} id @returns {HTMLElement} */
 function $(id) {
   const element = document.getElementById(id);
   if (element === null) {
@@ -200,12 +203,14 @@ const ui = {
 class Stopped extends Error {}
 
 class HttpError extends Error {
+  /** @param {number} status */
   constructor(status) {
     super("HTTP " + status);
     this.status = status;
   }
 }
 
+/** @param {string} text @returns {Stopped} */
 function stop(text) {
   state.epoch++;
   state.showSeq++; // pending image reads, decodes and grid draws no longer apply
@@ -247,11 +252,13 @@ function stale() {
 // network failure stops the page, as does a 412 (another serve now answers, see
 // SERVER_CHANGED); once stopped, nothing is sent until a Reconnect, and a request
 // sent before then changes nothing.
+/** @param {string} path @param {Omit<RequestInit, "headers"> & {headers?: Record<string, string>}} [options] (callers pass plain-object headers) @returns {Promise<Response>} */
 async function call(path, options = {}) {
   if (state.dead) {
     throw new Stopped("stopped");
   }
   const epoch = state.epoch;
+  /** @type {Record<string, string>} */
   const headers = { ...options.headers, Authorization: "Bearer " + state.token };
   if (state.instance !== null) {
     headers[INSTANCE_HEADER] = state.instance; // /current_pass needs none: a Reconnect starts there
@@ -279,6 +286,8 @@ async function call(path, options = {}) {
 }
 
 // Read a body; a failure mid-body is a lost connection.
+// any: a parsed JSON reply goes straight to the helpers.js parsers (which take any); "blob" gives a Blob.
+/** @param {Response} response @param {"json" | "blob"} how @returns {Promise<any>} */
 async function readBody(response, how) {
   const epoch = epochOf.get(response);
   let body;
@@ -299,6 +308,7 @@ async function readBody(response, how) {
   return body;
 }
 
+/** @param {string} path @returns {Promise<any>} a reply body for the helpers.js parsers */
 async function getJson(path) {
   const response = await call(path);
   if (!response.ok) {
@@ -307,6 +317,7 @@ async function getJson(path) {
   return readBody(response, "json");
 }
 
+/** @param {string} path @param {unknown} body @returns {Promise<Response>} */
 function postJson(path, body) {
   return call(path, {
     method: "POST",
@@ -316,6 +327,7 @@ function postJson(path, body) {
 }
 
 // The image as a complete JPEG blob, or null if it cannot be shown.
+/** @param {string} key @returns {Promise<Blob | null>} */
 async function loadJpeg(key) {
   const response = await call("/image?key=" + encodeURIComponent(key));
   if (!response.ok) {
@@ -344,12 +356,14 @@ async function loadJpeg(key) {
 }
 
 // The image as a blob URL, or null if it cannot be shown (a placeholder then).
+/** @param {string} key @returns {Promise<string | null>} */
 async function loadImage(key) {
   const blob = await loadJpeg(key);
   return blob === null ? null : URL.createObjectURL(blob);
 }
 
 // The image decoded for a grid, or null if it cannot be drawn.
+/** @param {string} key @returns {Promise<ImageBitmap | null>} */
 async function loadBitmap(key) {
   const blob = await loadJpeg(key);
   if (blob === null) {
@@ -363,6 +377,7 @@ async function loadBitmap(key) {
 }
 
 // One /grids request: the reply body, or null when the server is busy (503).
+/** @param {{keys: string[], width: number, height: number, [field: string]: unknown}} body @returns {Promise<any>} a reply body for parseGridPlan, or null */
 async function fetchGrids(body) {
   const response = await postJson("/grids", body);
   if (response.status === 503) {
@@ -376,6 +391,7 @@ async function fetchGrids(body) {
 
 // The layout for `body`, retrying while the server is busy; null once build `seq`
 // is stale. A request still in flight is waited out first.
+/** @param {{keys: string[], width: number, height: number, [field: string]: unknown}} body @param {number} seq @returns {Promise<GridPlan | null>} */
 async function requestGrids(body, seq) {
   for (;;) {
     while (state.gridsRequest !== null) {
@@ -408,6 +424,7 @@ async function requestGrids(body, seq) {
 // The message takes the centre of the bar in place of the mode, progress and place.
 // The reviewer's own moves (arrows, a mark moving on, a mode switch) clear it first;
 // a show the reviewer did not start (a repack, a redraw) leaves it.
+/** @param {string} text */
 function say(text) {
   ui.status.textContent = text;
   ui.status.title = text; // the bar is one line and cuts it short, so the stage keeps its height
@@ -424,6 +441,7 @@ function canAct() {
 
 // The request(s) begun in epoch `epoch` are over: clear busy, unless the page
 // stopped meanwhile (busy is then a Reconnect's, or already clear).
+/** @param {number} epoch */
 function endBusy(epoch) {
   if (epoch === state.epoch) {
     state.busy = false;
@@ -556,6 +574,7 @@ function clearDwell() {
 
 // Start the current item's dwell once it has been painted. The timer ends it:
 // c/d count only after MIN_DWELL_MS with the item on screen.
+/** @param {number} seq */
 async function startDwell(seq) {
   await nextPaint();
   if (seq !== state.showSeq || state.dead || state.dwell !== "none" || state.overlay !== null) {
@@ -601,6 +620,7 @@ function onResize() {
   render();
 }
 
+/** @param {string | null} url */
 function setObjectUrl(url) {
   if (url === null) {
     ui.image.removeAttribute("src");
@@ -611,6 +631,7 @@ function setObjectUrl(url) {
   state.objectUrl = url;
 }
 
+/** @param {string | null} text null clears the text (a notice with nothing to say) */
 function showNotice(text) {
   ui.message.textContent = text;
   ui.message.hidden = false;
@@ -624,6 +645,7 @@ function passDone() {
 // is one batch, so there, as the controller, b moves on while a batch has grid items and
 // s reviews what grids leave out; single mode's list is the whole pass, unless others
 // marked meanwhile.
+/** @returns {string | null} */
 function elsewhereHint() {
   if (!gridMode()) {
     return RELOAD_SINGLE;
@@ -698,6 +720,7 @@ function sizeCanvas() {
 }
 
 // Run `work` on each of `values`, at most `limit` at a time.
+/** @template T @param {T[]} values @param {number} limit @param {(value: T) => Promise<void>} work */
 async function eachLimited(values, limit, work) {
   let next = 0;
   const worker = async () => {
@@ -710,6 +733,7 @@ async function eachLimited(values, limit, work) {
 
 // Draw `bitmap` (null: it could not be loaded) into placement p and close it;
 // false if it was not drawn, wrong-sized or failing.
+/** @param {CanvasRenderingContext2D} context @param {Placement} p @param {ImageBitmap | null} bitmap @returns {boolean} */
 function drawPlacement(context, p, bitmap) {
   if (bitmap === null) {
     return false;
@@ -755,6 +779,7 @@ function onContextRestored() {
 // Draw grid item `index` on the canvas, then show it. An image that fails to load
 // or decode, or whose decoded size is not its `source`, leaves its rect black and
 // becomes a single item.
+/** @param {number} index @param {GridItem} item @param {number} seq */
 async function showGrid(index, item, seq) {
   // Grid items exist only after buildGrids has measured gridSize (leaveGrid clears it
   // only once abandonItems has dropped them).
@@ -768,6 +793,7 @@ async function showGrid(index, item, seq) {
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
+  /** @type {string[]} */
   const failed = [];
   let done = 0;
   showNotice("Loading grid 0/" + item.placements.length);
@@ -800,11 +826,13 @@ async function showGrid(index, item, seq) {
       return;
     }
   }
-  showGridDrawn(state.items[index]); // less any failed keys, whose rects stay black
+  // demoteKeys leaves a grid item at `index` when only some keys failed (all failed returned above)
+  showGridDrawn(/** @type {GridItem} */ (state.items[index])); // less any failed keys, whose rects stay black
   render();
   await startDwell(seq);
 }
 
+/** @param {GridItem} item */
 function showGridDrawn(item) {
   state.sourceScale = minScale(item.placements);
   sizeCanvas();
@@ -815,6 +843,7 @@ function showGridDrawn(item) {
 
 // Show item `index` (or for -1 no item: the end screen, or what `end` shows). The
 // dwell starts once the image (or placeholder) has been decoded and painted.
+/** @param {number} index @param {() => void} [end] */
 async function showItem(index, end = showEnd) {
   const seq = ++state.showSeq;
   state.index = index;
@@ -875,6 +904,7 @@ async function showItem(index, end = showEnd) {
 
 // ---- Actions ----
 
+/** @param {StatusMap} changed */
 function applyStatuses(changed) {
   for (const [key, status] of changed) {
     state.statuses.set(key, status);
@@ -884,6 +914,7 @@ function applyStatuses(changed) {
 // The statuses in a 200 reply to /mark or /undo. The server has acted either
 // way, so a body that cannot be used is replaced by rereading every status
 // (resynced); if that fails too the page stops.
+/** @param {Response} response @returns {Promise<{changed: StatusMap, resynced: boolean}>} */
 async function replyStatuses(response) {
   try {
     return { changed: parseStatusMap(await readBody(response, "json")), resynced: false };
@@ -903,12 +934,14 @@ async function replyStatuses(response) {
 }
 
 // "k1" for a single item, "grid of N images" for a grid.
+/** @param {string[]} keys @returns {string} */
 function describeKeys(keys) {
   return keys.length === 1 ? keys[0] : "grid of " + keys.length + " images";
 }
 
 // One verdict on the current item: every key it covers (a grid's drawn keys),
 // sent with the display mode, so a left-out single in grid mode is sent as "grid".
+/** @param {"CLEAN" | "DIRTY"} verdict */
 async function mark(verdict) {
   const item = currentItem();
   if (item === null || !canJudge()) {
@@ -1034,6 +1067,7 @@ async function undo() {
   }
 }
 
+/** @param {number} step */
 function navigate(step) {
   if (!canAct() || state.items.length === 0) {
     return;
@@ -1053,6 +1087,7 @@ function navigate(step) {
 
 // Show item `index`; in grid mode after a resize on the end screen, repack first
 // and land on its grid (the repack also empties the stack of marked keys).
+/** @param {number} index */
 function showOrRepack(index) {
   if (gridMode() && gridSizeChanged()) {
     state.landKey = itemKeys(state.items[index])[0];
@@ -1089,6 +1124,7 @@ function leaveGrid() {
 // Build grid mode's items for state.batch and show the one holding `landKey`
 // (else the first). Messages instead when there is nothing to pack, the batch is
 // over MAX_GRID_KEYS (split, it would pack unlike pygame) or the window is too small.
+/** @param {string | null} landKey */
 async function buildGrids(landKey) {
   abandonItems();
   const seq = state.buildSeq;
@@ -1133,7 +1169,7 @@ async function buildGrids(landKey) {
     state.gridCache = { key: cacheKey, plan };
   }
   state.items = orderGridItems(plan); // reshuffled on every build
-  const index = state.items.findIndex((item) => itemKeys(item).includes(landKey));
+  const index = state.items.findIndex((item) => landKey !== null && itemKeys(item).includes(landKey));
   await showItem(Math.max(index, 0));
 }
 
@@ -1171,6 +1207,7 @@ function canSwitch() {
 // and rebuild the items for `mode`. Grid mode stays on its batch while it has grid
 // items (else takes the first that has); with `nextBatchToo` it moves to the next
 // one with any, wrapping, and drops the cached layout.
+/** @param {"single" | "grid"} mode @param {"auto" | "never"} rotation @param {boolean} [nextBatchToo] */
 async function restart(mode, rotation, nextBatchToo = false) {
   if (!canSwitch()) {
     return;
@@ -1192,6 +1229,7 @@ async function restart(mode, rotation, nextBatchToo = false) {
 
 // Rebuild the items for `mode` from state.statuses (see restart); a grid build
 // lands on the grid holding `landKey`, else the first.
+/** @param {"single" | "grid"} mode @param {"auto" | "never"} rotation @param {boolean} nextBatchToo @param {string | null} landKey */
 async function rebuild(mode, rotation, nextBatchToo, landKey) {
   if (mode === "single") {
     abandonItems();
@@ -1202,7 +1240,8 @@ async function rebuild(mode, rotation, nextBatchToo, landKey) {
     return;
   }
   const withGrids = gridBatches(state.manifest, state.statuses);
-  const accepts = (batch) => withGrids.has(batch);
+  /** @param {string | null} batch */
+  const accepts = (batch) => batch !== null && withGrids.has(batch);
   if (nextBatchToo) {
     state.gridCache = null;
     state.batch = nextBatch(state.batches, state.batch, accepts);
@@ -1232,6 +1271,7 @@ async function loadReview() {
   return { pass, manifest, statuses };
 }
 
+/** @param {{pass: number, manifest: ManifestRow[], statuses: StatusMap}} review */
 function takeReview({ pass, manifest, statuses }) {
   state.pass = pass;
   state.statuses = statuses;
@@ -1317,6 +1357,7 @@ function waitForNextServer() {
   showNotice(WAITING_DETAIL);
 }
 
+/** @param {unknown} error */
 function reportError(error) {
   if (error instanceof Stopped) {
     return; // the page already says why
@@ -1331,6 +1372,7 @@ function reportError(error) {
   render();
 }
 
+/** @template {unknown[]} A @param {(...args: A) => Promise<void>} action @returns {(...args: A) => void} */
 function run(action) {
   return (...args) => {
     action(...args).catch(reportError);
@@ -1346,6 +1388,7 @@ const doReconnect = run(reconnect);
 
 // Open overlay `which` ("help" or "name"): the dwell is cleared, so nothing is
 // judged on an item it covered, and every action waits for it to close.
+/** @param {"help" | "name"} which */
 function openOverlay(which) {
   state.overlay = which;
   ui.help.hidden = which !== "help";
@@ -1412,6 +1455,7 @@ function cancelName() {
 
 // ---- Event wiring ----
 
+/** @param {KeyboardEvent} event */
 function onReviewerKey(event) {
   if (event.isComposing) {
     return; // an input method's Enter or Escape
@@ -1423,6 +1467,7 @@ function onReviewerKey(event) {
   }
 }
 
+/** @param {KeyboardEvent} event */
 function onKey(event) {
   if (event.target === ui.reviewer || event.altKey || event.ctrlKey || event.metaKey) {
     return; // typing a name, or a browser shortcut

@@ -2381,7 +2381,7 @@ following the pygame client (see *Single Mode*, *Grid Mode*, *Unloadable
 Images*, *Undo*). Its keys, screens and messages as the reviewer sees them
 are on [The browser page](../commands/browser.md). It obeys the CSP above:
 no inline script or style, no `innerHTML`, no external URLs; all text goes
-in with `textContent`. Both scripts are type-checked with `tsc` (`npm run
+in with `textContent`. Both scripts are type-checked strictly with `tsc` (`npm run
 typecheck`; see CONTRIBUTING).
 
 `m` (rotation `auto`) and `M` (`never`) switch to grid mode and `s` back to

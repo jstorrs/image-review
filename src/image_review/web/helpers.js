@@ -15,7 +15,7 @@ const MAX_PASS = 1000000; // connection.MAX_PASS
 // ---- Shapes ----
 
 /** @typedef {"CLEAN" | "DIRTY" | "UNREVIEWED" | "FLAGGED"} Status */
-/** @typedef {Map<string, string>} StatusMap */ // values are Status once the server reply is trusted; app.js still holds them as strings
+/** @typedef {Map<string, Status>} StatusMap */
 /** @typedef {{key: string, batch: string}} ManifestRow */
 /** @typedef {{key: string, x: number, y: number, w: number, h: number, rotated: boolean, source: [number, number]}} Placement */
 /** @typedef {{kind: "single", key: string}} SingleItem */
@@ -282,7 +282,7 @@ function demoteKeys(items, index, failed) {
 // The canvas matrix [a, b, c, d, e, f] that draws a source image (at its natural
 // size, from 0,0) into placement p. A rotated image turns clockwise, as pygame's
 // rotate(-90) in grid_packer: its top edge lands on the rect's right edge.
-/** @param {Placement} p @returns {number[]} */
+/** @param {Placement} p @returns {[number, number, number, number, number, number]} */
 function placementTransform(p) {
   const [sw, sh] = p.source;
   if (p.rotated) {
