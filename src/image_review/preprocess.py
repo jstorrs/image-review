@@ -383,6 +383,12 @@ def _gray_float32(arr: np.ndarray) -> np.ndarray:
     if not np.isfinite(converted).all():
         raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
     if not np.can_cast(arr.dtype, np.float32, casting="safe"):
+        if arr.dtype.kind in "iu":
+            # A value rounded past the integer range (int64's max becomes 2**63) has no defined cast back: x86
+            # wraps it, ARM saturates it to the original value. Compare as Python ints, which are exact.
+            info = np.iinfo(arr.dtype)
+            if int(converted.max()) > info.max or int(converted.min()) < info.min:
+                raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
         with np.errstate(over="ignore", invalid="ignore"):
             restored = converted.astype(arr.dtype)
         if not np.array_equal(arr, restored):
