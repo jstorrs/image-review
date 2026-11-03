@@ -25,7 +25,7 @@ from functools import partial
 from itertools import groupby, pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, assert_never, cast
-from zipfile import ZIP_BZIP2, ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, ZipFile, ZipInfo
+from zipfile import ZIP_BZIP2, ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, BadZipFile, ZipFile, ZipInfo
 
 import imagecodecs
 import matplotlib
@@ -1791,13 +1791,28 @@ def _check_input_size(size: int) -> None:
 def _check_zip_entry(info: ZipInfo) -> None:
     """Raise `Unsupported` for an entry that is not to be opened: over `MAX_INPUT_BYTES` when inflated, even to
     sniff it, encrypted (said so, as the method check would otherwise name AES's method 99), or compressed by a method for which `zipfile` does not bound the memory it uses (bzip2 and LZMA
-    decompress whole, then cut to the declared size). STORED and DEFLATED are bounded, and a header that
-    understates the size cannot make `zipfile` return more, only fail its CRC."""
+    decompress whole, then cut to the declared size). STORED and DEFLATED are bounded only when read
+    with a size, which `_read_zip_entry` does."""
     _check_input_size(info.file_size)
     if info.flag_bits & 0x1:  # ZipCrypto, or AES (method 99): zipfile would ask for a password, not decrypt
         raise Unsupported("encrypted ZIP entry (decrypt the archive first)")
     if info.compress_type not in (ZIP_STORED, ZIP_DEFLATED):
         raise Unsupported(f"ZIP compression method {_ZIP_METHODS.get(info.compress_type, info.compress_type)}")
+
+
+def _read_zip_entry(zf: ZipFile, info: ZipInfo) -> bytes:
+    """The bytes of the entry, read no further than its declared size (plus the up to 4 KiB zlib may decode past it):
+    `ZipFile.read` would let one call inflate up to `MAX_N` (1 GiB, 2 GiB on Python 3.14) of a deflated entry whose
+    directory understates its size. Such an entry fails its CRC check unless the CRC was written for the stated
+    prefix; then only that prefix is read. An entry holding fewer bytes than declared raises `BadZipFile`, as
+    `zipfile` would not."""
+    with zf.open(info) as f:
+        data = f.read(info.file_size)
+    if len(data) != info.file_size:
+        raise BadZipFile(
+            f"File {info.filename!r} is {len(data)} bytes, not the {info.file_size} the ZIP directory states"
+        )
+    return data
 
 
 def _read_input(path: Path, size: int) -> bytes:
@@ -1891,7 +1906,7 @@ def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
                 case Rejected(kind, reason):
                     yield SkippedRow(image_id, kind, reason)
                 case "dicom" | "raster" as kind:
-                    yield _candidate(image_id, kind, partial(zf.read, info))
+                    yield _candidate(image_id, kind, partial(_read_zip_entry, zf, info))
                 case _ as unreachable:
                     assert_never(unreachable)
 

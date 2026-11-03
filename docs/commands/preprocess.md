@@ -261,8 +261,11 @@ and records it as `failed`:
 
 - A file or ZIP entry over 1 GiB is not read, and a ZIP entry that large is
   refused even if it is not an image. The size is the one the file system or
-  the ZIP directory states; `zipfile` never returns more bytes than a ZIP
-  header declares, and fails the entry's CRC check if it understates them.
+  the ZIP directory states; an entry is decoded no more than about 4 KiB
+  past that size. One that understates it fails its CRC check unless the CRC
+  was written for the stated prefix, in which case only the stated bytes are
+  read and the rest is ignored; one holding fewer bytes than it states
+  fails.
   A ZIP entry compressed by a method other than stored or deflate (bzip2,
   LZMA) is refused, since `zipfile` decompresses those whole before cutting
   them to the declared size.

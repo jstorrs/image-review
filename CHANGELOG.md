@@ -78,6 +78,11 @@
 
 ### Fixes
 
+- A deflated ZIP entry could make preprocess inflate up to 1 GiB (2 GiB on Python 3.14) from an archive of about
+  1 MB, whatever size its directory stated: an entry stating 2 KB could decode up to that cap in one call.
+  preprocess now decodes an entry no further than about its stated size (already checked against the 1 GiB
+  limit). An entry holding fewer bytes than it states now fails (`BadZipFile: File 'x' is N bytes, not the M the
+  ZIP directory states`).
 - preprocess now syncs the work directory's files and directories before reporting success, so a power loss right
   after a run no longer leaves a missing work directory, missing batch entries, or truncated or empty TSVs. The JPGs'
   contents are not synced: a lost one fails its hash check.

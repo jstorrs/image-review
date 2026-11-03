@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import tracemalloc
 import unittest
 import warnings
 import zipfile
@@ -2092,7 +2093,7 @@ class SizeLimitTest(unittest.TestCase):
         with (
             mock.patch.object(preprocess_module, "MAX_INPUT_BYTES", len(self.png) - 1),
             mock.patch.object(zipfile.ZipFile, "open", side_effect=AssertionError("opened")) as opened,
-            mock.patch.object(zipfile.ZipFile, "read", side_effect=AssertionError("read")) as read,
+            mock.patch.object(preprocess_module, "_read_zip_entry", side_effect=AssertionError("read")) as read,
         ):
             rows = self.run_failed(archive)
         opened.assert_not_called()
@@ -2133,12 +2134,65 @@ class SizeLimitTest(unittest.TestCase):
         struct.pack_into("<I", data, directory + 24, declared)  # the declared uncompressed size
         archive = self.root / "lie.zip"
         archive.write_bytes(data)
-        real = zipfile.ZipFile.read
+        real = preprocess_module._read_zip_entry
         reads = []
-        with mock.patch.object(zipfile.ZipFile, "read", lambda *a: reads.append(a) or real(*a)):
+        with mock.patch.object(preprocess_module, "_read_zip_entry", lambda *a: reads.append(a) or real(*a)):
             reasons = [reason for _, _, reason in self.run_failed(archive)]
         self.assertEqual(len(reads), 1)
         self.assertEqual(reasons, ["BadZipFile: Bad CRC-32 for file 'lie.png'"])
+
+    def test_deflated_zip_bomb_is_not_inflated_past_the_declared_size(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf, zf.open("bomb.png", "w") as f:
+            f.write(self.png)
+            for _ in range(32):
+                f.write(bytes(1 << 20))
+        directory = buf.getvalue().rindex(b"PK\x01\x02")
+        real = preprocess_module._read_zip_entry
+        for name, forged in (("crc as written", False), ("crc forged", True)):
+            with self.subTest(name):
+                data = bytearray(buf.getvalue())
+                declared = len(self.png) if forged else 5000  # 5000: past the sniff, so that the read is reached
+                struct.pack_into("<I", data, directory + 24, declared)  # the declared uncompressed size
+                if forged:
+                    struct.pack_into("<I", data, directory + 16, zlib.crc32(self.png))
+                archive = self.root / f"bomb-{forged}.zip"
+                archive.write_bytes(data)
+                tracemalloc.start()
+                try:
+                    with mock.patch.object(preprocess_module, "_read_zip_entry", wraps=real) as read:
+                        items = list(discover([archive]))
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertEqual(read.call_count, 1)
+                self.assertLess(peak, 16 << 20)
+                [item] = items
+                if forged:
+                    self.assertIsInstance(item, Candidate)
+                    self.assertEqual(item.data, self.png)
+                else:
+                    self.assertEqual(
+                        item,
+                        SkippedRow(
+                            ImageId(f"{archive.as_posix()}::bomb.png"),
+                            "failed",
+                            "BadZipFile: Bad CRC-32 for file 'bomb.png'",
+                        ),
+                    )
+
+    def test_zip_entry_shorter_than_its_declared_size_fails(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("x.png", self.png)
+        data = bytearray(buf.getvalue())
+        struct.pack_into("<I", data, data.rindex(b"PK\x01\x02") + 24, len(self.png) + 10)
+        archive = self.root / "short.zip"
+        archive.write_bytes(data)
+        reason = (
+            f"BadZipFile: File 'x.png' is {len(self.png)} bytes, not the {len(self.png) + 10} the ZIP directory states"
+        )
+        self.assertEqual(self.run_failed(archive), [(f"{archive.as_posix()}::x.png", "failed", reason)])
 
     # ---- DICOM
 
