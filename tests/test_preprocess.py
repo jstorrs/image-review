@@ -6,7 +6,9 @@ import errno
 import faulthandler
 import hashlib
 import io
+import itertools
 import json
+import lzma
 import multiprocessing
 import os
 import shutil
@@ -127,6 +129,23 @@ def quiet():
     with warnings.catch_warnings(), contextlib.redirect_stderr(io.StringIO()):
         warnings.simplefilter("ignore")
         yield
+
+
+class Unseekable(io.RawIOBase):
+    """A file at `path` that cannot seek: zipfile writes to it with a data descriptor (flag bit 3)."""
+
+    def __init__(self, path: Path) -> None:
+        self._f = open(path, "wb")  # noqa: SIM115 - closed in close()
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b) -> int:
+        return self._f.write(b)
+
+    def close(self) -> None:
+        self._f.close()
+        super().close()
 
 
 def _png_bytes(arr: np.ndarray, mode: str | None = None) -> bytes:
@@ -1669,43 +1688,39 @@ class ContentDiscoveryTest(unittest.TestCase):
     def test_ordinary_zips_have_no_outside_bytes(self):
         png = _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8))
 
-        class Unseekable(io.RawIOBase):  # zipfile then writes a data descriptor (flag bit 3)
-            def __init__(self, path: Path) -> None:
-                self._f = open(path, "wb")  # noqa: SIM115 - closed in close()
-
-            def writable(self) -> bool:
-                return True
-
-            def write(self, b) -> int:
-                return self._f.write(b)
-
-            def close(self) -> None:
-                self._f.close()
-                super().close()
-
         def stored(zf):
             zf.writestr("a.png", png)
 
         def deflated(zf):
             zf.writestr("a.png", png, compress_type=zipfile.ZIP_DEFLATED)
 
+        def bzip2(zf):
+            zf.writestr("a.png", png, compress_type=zipfile.ZIP_BZIP2)
+
+        def lzma(zf):
+            zf.writestr("a.png", png, compress_type=zipfile.ZIP_LZMA)
+
         def with_directory(zf):
             zf.mkdir("d")
             zf.writestr("d/a.png", png)
 
-        for name, fill in (("stored", stored), ("deflated", deflated), ("directory", with_directory)):
+        fills = (("stored", stored), ("deflated", deflated), ("bzip2", bzip2), ("lzma", lzma))
+        for name, fill in (*fills, ("directory", with_directory)):
             with self.subTest(name):
                 archive = self.root / f"{name}.zip"
                 with zipfile.ZipFile(archive, "w") as zf:
                     fill(zf)
                 self.assertEqual([r.kind for r in self._found(archive)], ["raster"])
-        with self.subTest("data descriptor"):
-            archive = self.root / "descriptor.zip"
-            with zipfile.ZipFile(Unseekable(archive), "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("a.png", png)
-            with zipfile.ZipFile(archive) as zf:
-                self.assertTrue(zf.infolist()[0].flag_bits & 0x8)
-            self.assertEqual([r.kind for r in self._found(archive)], ["raster"])
+        for name, fill in fills[1:]:
+            with self.subTest(f"data descriptor, {name}"):
+                archive = self.root / f"descriptor-{name}.zip"
+                with zipfile.ZipFile(Unseekable(archive), "w") as zf:
+                    fill(zf)
+                with zipfile.ZipFile(archive) as zf:
+                    self.assertTrue(zf.infolist()[0].flag_bits & 0x8)
+                [item] = self._found(archive)
+                self.assertIsInstance(item, Candidate)
+                self.assertEqual(item.data, png)
         with self.subTest("empty"):
             archive = self.root / "none.zip"
             with zipfile.ZipFile(archive, "w"):
@@ -2107,22 +2122,6 @@ class SizeLimitTest(unittest.TestCase):
             ],
         )
 
-    def test_zip_entries_compressed_by_unbounded_methods_fail(self):
-        archive = self.root / "methods.zip"
-        with zipfile.ZipFile(archive, "w") as zf:
-            zf.writestr("stored.png", self.png, zipfile.ZIP_STORED)
-            zf.writestr("deflated.png", self.png, zipfile.ZIP_DEFLATED)
-            zf.writestr("bzip2.png", self.png, zipfile.ZIP_BZIP2)
-            zf.writestr("lzma.png", self.png, zipfile.ZIP_LZMA)
-        rows = self.run_failed(archive)
-        self.assertEqual(
-            rows,
-            [
-                (f"{archive.as_posix()}::bzip2.png", "failed", "unsupported: ZIP compression method bzip2"),
-                (f"{archive.as_posix()}::lzma.png", "failed", "unsupported: ZIP compression method lzma"),
-            ],
-        )
-
     def test_zip_entry_whose_header_understates_its_size_cannot_be_read_past_it(self):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -2368,6 +2367,306 @@ class SizeLimitTest(unittest.TestCase):
             Unsupported, r"^unsupported: image too large \(over \d+ pixels, Pillow's decompression bomb limit\)$"
         ):
             decode_raster(png)
+
+
+def _patch_zip_directory(data: bytes, name: str, *, size=None, crc=None, method=None, flags_clear=0) -> bytearray:
+    """`data`, a ZIP, with the central directory entry of `name` stating another uncompressed size, CRC-32 or method,
+    or with general-purpose flags cleared."""
+    patched = bytearray(data)
+    entry = patched.index(b"PK\x01\x02")
+    while patched[entry + 46 : entry + 46 + len(name)] != name.encode():
+        entry = patched.index(b"PK\x01\x02", entry + 1)
+    (flags,) = struct.unpack_from("<H", patched, entry + 8)
+    struct.pack_into("<H", patched, entry + 8, flags & ~flags_clear)
+    for value, offset, fmt in ((method, 10, "<H"), (crc, 16, "<I"), (size, 24, "<I")):
+        if value is not None:
+            struct.pack_into(fmt, patched, entry + offset, value)
+    return patched
+
+
+def _zip_data_start(data: bytes, name: str) -> int:
+    """Where the compressed data of entry `name` of `data`, a ZIP, starts: after its local header."""
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        offset = zf.getinfo(name).header_offset
+    name_len, extra_len = struct.unpack_from("<HH", data, offset + 26)
+    return offset + 30 + name_len + extra_len
+
+
+class ZipMethodTest(unittest.TestCase):
+    """bzip2 and LZMA ZIP entries are read, decoded no further than their declared size and checked like the others;
+    other methods fail."""
+
+    METHODS = (("bzip2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.png = _png_bytes(np.random.default_rng(1).integers(0, 255, (20, 30, 3), dtype=np.uint8))
+        cls.zips = {name: cls.zip_of(method, cls.png) for name, method in cls.METHODS}
+        cls.bombs = {}
+        for name, method in cls.METHODS:  # the PNG, then 32 MiB of zeros, in a few KiB (seconds to write)
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", method) as zf, zf.open("bomb.png", "w") as f:
+                f.write(cls.png)
+                for _ in range(32):
+                    f.write(bytes(1 << 20))
+            cls.bombs[name] = buf.getvalue()
+        cls.zeros = {}
+        for name, method in (("deflated", zipfile.ZIP_DEFLATED), *cls.METHODS):  # 32 MiB of zeros, stated honestly
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", method) as zf, zf.open("zeros.bin", "w") as f:
+                for _ in range(32):
+                    f.write(bytes(1 << 20))
+            cls.zeros[name] = buf.getvalue()
+
+    @staticmethod
+    def zip_of(method: int, payload: bytes) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", method) as zf:
+            zf.writestr("a.png", payload)
+        return buf.getvalue()
+
+    def setUp(self):
+        self.root = temp_dir(self).resolve()
+
+    def found(self, data: bytes) -> Candidate | SkippedRow:
+        """The one item `discover` finds in `data`, a ZIP of one entry."""
+        archive = self.root / f"{len(list(self.root.iterdir()))}.zip"
+        archive.write_bytes(data)
+        with quiet():
+            [item] = discover([archive])
+        return item
+
+    def assert_fails(self, data: bytes, reason: str):
+        item = self.found(data)
+        self.assertIsInstance(item, SkippedRow)
+        assert isinstance(item, SkippedRow)
+        self.assertEqual((item.kind, item.reason), ("failed", reason))
+
+    def assert_reads(self, data: bytes, expected: bytes):
+        item = self.found(data)
+        self.assertIsInstance(item, Candidate)
+        assert isinstance(item, Candidate)
+        self.assertEqual(item.data, expected)
+
+    def test_zip_entries_by_each_supported_method_render_and_others_fail(self):
+        archive = self.root / "methods.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            for name, method in (*self.METHODS, ("stored", zipfile.ZIP_STORED), ("deflated", zipfile.ZIP_DEFLATED)):
+                zf.writestr(f"{name}.png", self.png, method)
+            zf.writestr("zstd.png", self.png, zipfile.ZIP_STORED)
+        archive.write_bytes(_patch_zip_directory(archive.read_bytes(), "zstd.png", method=93))
+        with quiet():
+            items = list(discover([archive]))
+        self.assertEqual(
+            [(type(i).__name__, i.data if isinstance(i, Candidate) else i.reason) for i in items],
+            [("Candidate", self.png)] * 4 + [("SkippedRow", "unsupported: ZIP compression method 93")],
+        )
+        work = self.root / "work"
+        with quiet():
+            run_preprocess([archive], work)
+        self.assertEqual(
+            [(r["image_id"], r["kind"], r["reason"]) for r in _read_tsv(work / "skipped.tsv")],
+            [(f"{archive.as_posix()}::zstd.png", "failed", "unsupported: ZIP compression method 93")],
+        )
+
+    def test_zip_bombs_are_not_decoded_past_the_declared_size(self):
+        real = preprocess_module._read_zip_entry
+        declared = 5000  # past the 4096 bytes a sniff checks, so that the read is reached, once
+        prefix = (self.png + bytes(declared))[:declared]
+        for (name, _), forged in itertools.product(self.METHODS, (False, True)):
+            with self.subTest(name, crc="forged" if forged else "as written"):
+                crc = zlib.crc32(prefix) if forged else None
+                data = _patch_zip_directory(self.bombs[name], "bomb.png", size=declared, crc=crc)
+                tracemalloc.start()
+                try:
+                    with mock.patch.object(preprocess_module, "_read_zip_entry", wraps=real) as read:
+                        item = self.found(data)
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(peak, 16 << 20)
+                self.assertEqual(read.call_count, 1)
+                if forged:
+                    self.assertIsInstance(item, Candidate)
+                    assert isinstance(item, Candidate)
+                    self.assertEqual(item.data, prefix)
+                else:
+                    self.assertIsInstance(item, SkippedRow)
+                    assert isinstance(item, SkippedRow)
+                    self.assertEqual(item.reason, "BadZipFile: Bad CRC-32 for file 'bomb.png'")
+
+    def test_crc_mismatch_fails(self):
+        crc = zlib.crc32(self.png) ^ 1
+        for name, _ in self.METHODS:
+            with self.subTest(name):
+                data = _patch_zip_directory(self.zips[name], "a.png", crc=crc)
+                self.assert_fails(data, "BadZipFile: Bad CRC-32 for file 'a.png'")
+
+    def test_understated_size_fails_its_crc_and_overstated_size_fails(self):
+        size = len(self.png)
+        over = f"BadZipFile: File 'a.png' is {size} bytes, not the {size + 10} the ZIP directory states"
+        for name, _ in self.METHODS:
+            with self.subTest(name, size="understated"):
+                data = _patch_zip_directory(self.zips[name], "a.png", size=size - 1)
+                self.assert_fails(data, "BadZipFile: Bad CRC-32 for file 'a.png'")
+            with self.subTest(name, size="overstated"):
+                self.assert_fails(_patch_zip_directory(self.zips[name], "a.png", size=size + 10), over)
+
+    def test_zip64_entry_reads(self):
+        for name, method in self.METHODS:
+            with self.subTest(name):
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", method) as zf, zf.open("a.png", "w", force_zip64=True) as f:
+                    f.write(self.png)
+                self.assert_reads(buf.getvalue(), self.png)
+
+    def test_lzma_entry_without_its_eos_flag_reads(self):
+        data = self.zips["lzma"]
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            self.assertTrue(zf.getinfo("a.png").flag_bits & 0x2)
+        self.assert_reads(_patch_zip_directory(data, "a.png", flags_clear=0x2), self.png)
+
+    def test_malformed_lzma_header_fails(self):
+        with self.subTest("properties size"):
+            data = bytearray(self.zips["lzma"])
+            start = _zip_data_start(data, "a.png")
+            self.assertEqual(struct.unpack_from("<H", data, start + 2), (5,))
+            struct.pack_into("<H", data, start + 2, 4)
+            self.assert_fails(data, "BadZipFile: Bad LZMA properties for file 'a.png'")
+        with self.subTest("shorter than its header"):
+            data = self.zip_of(zipfile.ZIP_STORED, b"\x09\x04\x05\x00\x5d")  # 5 of the 9 bytes
+            data = _patch_zip_directory(data, "a.png", method=zipfile.ZIP_LZMA)
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                struct.pack_into("<H", data, zf.getinfo("a.png").header_offset + 8, zipfile.ZIP_LZMA)  # local header
+            self.assert_fails(data, "BadZipFile: Truncated data for file 'a.png'")
+
+    def test_corrupt_stream_fails(self):
+        for name, reason in (("bzip2", "OSError: Invalid data stream"), ("lzma", "LZMAError: Corrupt input data")):
+            with self.subTest(name):
+                data = bytearray(self.zips[name])
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    middle = _zip_data_start(data, "a.png") + zf.getinfo("a.png").compress_size // 2
+                before = data[middle : middle + 8]
+                data[middle : middle + 8] = bytes(b ^ 0xFF for b in before)
+                self.assertNotEqual(data[middle : middle + 8], before)
+                self.assert_fails(data, reason)
+
+    def test_lzma1_filter(self):
+        header = b"\x09\x04\x05\x00" + bytes.fromhex("5d00008000")
+        self.assertEqual(
+            preprocess_module._lzma1_filter(header, "a.png", 64 << 20),
+            {"id": lzma.FILTER_LZMA1, "lc": 3, "lp": 0, "pb": 2, "dict_size": 8 << 20},
+        )
+        with self.subTest("dictionary cut to the size decoded, at least 4 KiB"):
+            for size, dict_size in ((5000, 5000), (100, 4096)):
+                self.assertEqual(preprocess_module._lzma1_filter(header, "a.png", size)["dict_size"], dict_size)
+        for byte in (225, 8):  # pb 5; lc 8 (lc + lp over 4, which liblzma refuses as an internal error)
+            with (
+                self.subTest(byte=byte),
+                self.assertRaisesRegex(zipfile.BadZipFile, r"^Bad LZMA properties for file 'a.png'$"),
+            ):
+                preprocess_module._lzma1_filter(b"\x09\x04\x05\x00" + bytes([byte]) + bytes(4), "a.png", 5000)
+
+    def test_read_holds_about_one_copy_of_the_entry(self):
+        size = 24 << 20
+        archive = self.root / "big.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("a.bin", bytes(size))
+        with zipfile.ZipFile(archive) as zf:
+            [info] = zf.infolist()
+            tracemalloc.start()
+            try:
+                data = preprocess_module._read_zip_entry(zf, archive, info)
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertEqual(len(data), size)
+        self.assertLess(peak, size * 3 // 2)
+
+    def test_lzma_dictionary_is_cut_to_the_size_decoded(self):
+        data = _patch_zip_directory(self.bombs["lzma"], "bomb.png", size=len(self.png), crc=zlib.crc32(self.png))
+        start = _zip_data_start(data, "bomb.png")
+        self.assertEqual(struct.unpack_from("<H", data, start + 2), (5,))
+        struct.pack_into("<I", data, start + 5, 1 << 30)  # the dictionary size: 1 GiB
+        tracemalloc.start()
+        try:
+            item = self.found(data)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 16 << 20)
+        self.assertIsInstance(item, Candidate)
+        assert isinstance(item, Candidate)
+        self.assertEqual(item.data, self.png)
+
+    def test_sniff_decodes_only_its_bytes(self):
+        for name, data in self.zeros.items():
+            with self.subTest(name):
+                tracemalloc.start()
+                try:
+                    item = self.found(data)
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(peak, 16 << 20)
+                self.assertNotIsInstance(item, Candidate)
+
+    def test_short_entry_with_a_bad_crc_fails_whatever_its_method(self):
+        """zipfile's sniff decodes `MIN_READ_SIZE` (4096) bytes, so checks the CRC of a STORED or DEFLATED entry up to
+        that size; bzip2 and LZMA entries are checked up to the same size. Past it, STORED, bzip2 and LZMA are not;
+        DEFLATED may be, as zipfile flushes a stream whose compressed bytes all came in that first read."""
+        methods = (("stored", zipfile.ZIP_STORED), ("deflated", zipfile.ZIP_DEFLATED), *self.METHODS)
+        for (name, method), size in itertools.product(methods, (12, 1000, 4096, 4097)):
+            with self.subTest(name, size=size):
+                text = b"hello, world"[:size] + b"x" * (size - 12)
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", method) as zf:
+                    zf.writestr("notes.txt", text)
+                data = _patch_zip_directory(buf.getvalue(), "notes.txt", crc=zlib.crc32(text) ^ 1)
+                item = self.found(data)
+                self.assertIsInstance(item, SkippedRow)
+                assert isinstance(item, SkippedRow)
+                if size <= 4096:
+                    self.assertEqual(
+                        (item.kind, item.reason), ("failed", "BadZipFile: Bad CRC-32 for file 'notes.txt'")
+                    )
+                elif method != zipfile.ZIP_DEFLATED:
+                    self.assertNotEqual(item.kind, "failed")
+
+    # 7z a -tzip -mm=LZMA -meos=off -mtc=off noeos.zip g.png (7-Zip 26.00), where g.png is a 24 x 24 gradient,
+    # `(np.add.outer(np.arange(24), np.arange(24)) * 5).astype(np.uint8)`, saved by Pillow with compress_level=0.
+    SEVEN_ZIP_LZMA_WITHOUT_END_MARKER = bytes.fromhex(
+        "504b03043f0000000e006781635d52f9ee6d590000009c02000005000000672e706e671a0005005d0010000000449405"
+        "c47a27f6f7ee898e509088b3aad5502644a5dbed8767c5f250b8db9d8618608e46b27826372ff7b63bfaa17160a49b92"
+        "5c0bd8c81831c28ae0b8627f16e8c84195e2b5a4e560cbf7263c7c00504b01023f033f0000000e006781635d52f9ee6d"
+        "590000009c020000050024000000000000002080b48100000000672e706e670a002000000000000100180056c5dddad7"
+        "6bdd0100000000000000000000000000000000504b05060000000001000100570000007c0000000000"
+    )
+
+    def test_lzma_stream_without_an_end_marker_reads(self):
+        data = self.SEVEN_ZIP_LZMA_WITHOUT_END_MARKER
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            info = zf.getinfo("g.png")
+        self.assertEqual((info.compress_type, info.flag_bits & 0x2), (zipfile.ZIP_LZMA, 0))
+        start = _zip_data_start(data, "g.png")
+        raw = data[start : start + info.compress_size]
+        decoder = lzma.LZMADecompressor(
+            lzma.FORMAT_RAW, filters=[preprocess_module._lzma1_filter(raw[:9], "g.png", info.file_size)]
+        )
+        self.assertEqual(len(decoder.decompress(raw[9:])), info.file_size)
+        self.assertFalse(decoder.eof)  # no end marker: the stream ends with its input
+        item = self.found(data)
+        self.assertIsInstance(item, Candidate)
+        assert isinstance(item, Candidate)
+        self.assertEqual(zlib.crc32(item.data), info.CRC)
+        gradient = (np.add.outer(np.arange(24), np.arange(24)) * 5).astype(np.uint8)
+        np.testing.assert_array_equal(np.asarray(Image.open(io.BytesIO(item.data))), gradient)
+        with self.subTest("stating more than the stream holds"):  # the input ends before the stated size
+            size = info.file_size
+            self.assert_fails(
+                _patch_zip_directory(data, "g.png", size=size + 10),
+                f"BadZipFile: File 'g.png' is {size} bytes, not the {size + 10} the ZIP directory states",
+            )
 
 
 HTJ2K_ENCODE = getattr(imagecodecs, "htj2k_encode", None)  # not in the oldest supported imagecodecs

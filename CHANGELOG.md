@@ -75,6 +75,11 @@
 - **The click minimum is now 8.3.0.** The previous minimum, 8.2.2, was yanked
   on PyPI, so it could not be installed by default. Only the tests need it
   (see Minimum dependency versions in the install guide).
+- **ZIP entries compressed with bzip2 or LZMA are read again.** 0.4.0 refused them (`unsupported: ZIP compression
+  method bzip2`), since `zipfile` decompresses each of their reads with no limit before Python 3.12.15, 3.13.16 and
+  3.14.8 (gh-156002). preprocess now decodes them itself, stopping exactly at the size the ZIP directory states, and
+  checks their CRC-32 and size as for deflated entries, on every Python patch level. An entry compressed by any other
+  method still fails, as before (`unsupported: ZIP compression method 93` for Zstandard).
 
 ### Fixes
 

@@ -180,8 +180,8 @@ Every input ends up in exactly one of `manifest.tsv` (rendered) or
     limits](#size-limits)): `unsupported: input too large (N bytes; limit
     1073741824)` for a file or ZIP entry over 1 GiB, `unsupported: image too
     large (7000 x 6000, about 3.2 GiB to render; limit 3.0 GiB)` for an
-    image, and `unsupported: ZIP compression method bzip2` for a ZIP entry
-    that is neither stored nor deflated;
+    image, and `unsupported: ZIP compression method 93` for a ZIP entry
+    compressed by a method other than stored, deflate, bzip2 and LZMA;
   - an input whose float pixel data holds NaN or infinity (a float DICOM or a
     mode `F` TIFF), with `unsupported: non-finite pixel values (1 NaN, 0
     infinite)`: scaling by the minimum and maximum would wipe out the
@@ -261,14 +261,12 @@ and records it as `failed`:
 
 - A file or ZIP entry over 1 GiB is not read, and a ZIP entry that large is
   refused even if it is not an image. The size is the one the file system or
-  the ZIP directory states; an entry is decoded no more than about 4 KiB
-  past that size. One that understates it fails its CRC check unless the CRC
-  was written for the stated prefix, in which case only the stated bytes are
-  read and the rest is ignored; one holding fewer bytes than it states
-  fails.
-  A ZIP entry compressed by a method other than stored or deflate (bzip2,
-  LZMA) is refused, since `zipfile` decompresses those whole before cutting
-  them to the declared size.
+  the ZIP directory states. preprocess decodes a bzip2 or LZMA entry itself
+  and stops exactly at that size; a deflated entry is decoded no more than
+  about 4 KiB past it. An entry, whatever its method, that understates its
+  size fails its CRC check unless the CRC was written for the stated
+  prefix, in which case only the stated bytes are read and the rest is
+  ignored; one holding fewer bytes than it states fails.
 - An image whose estimated memory to render is over 3 GiB. The estimate is
   its pixels, from the header, times a number of bytes per pixel measured for
   the way that kind of image is rendered: for a DICOM Rows x Columns (plus

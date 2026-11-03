@@ -14,17 +14,18 @@ import stat
 import struct
 import unicodedata
 import warnings
+import zlib
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from itertools import groupby, pairwise
+from itertools import chain, groupby, pairwise
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, assert_never, cast
+from typing import TYPE_CHECKING, Any, Literal, assert_never, cast
 from zipfile import ZIP_BZIP2, ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, BadZipFile, ZipFile, ZipInfo
 
 import imagecodecs
@@ -67,6 +68,10 @@ from .store import (
     skipped_counts,
 )
 
+if TYPE_CHECKING:
+    import bz2
+    import lzma
+
 log = logging.getLogger(__name__)
 
 EROSION_KERNEL_SIZE = 5
@@ -84,7 +89,6 @@ SNIFF_BYTES = 132  # enough for the DICOM preamble and its `DICM` prefix
 _DICOM_MAGIC_OFFSET = 128
 _DICOM_MAGIC = b"DICM"
 _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")  # an archive, or an empty one
-_ZIP_METHODS = {ZIP_BZIP2: "bzip2", ZIP_LZMA: "lzma"}  # compression methods named in a failure; others by number
 _APPLEDOUBLE_MAGIC = b"\x00\x05\x16\x07"  # macOS `._name` metadata files
 _RASTER_MAGIC = (
     b"\x89PNG\r\n\x1a\n",
@@ -1790,28 +1794,33 @@ def _check_input_size(size: int) -> None:
 
 def _check_zip_entry(info: ZipInfo) -> None:
     """Raise `Unsupported` for an entry that is not to be opened: over `MAX_INPUT_BYTES` when inflated, even to
-    sniff it, encrypted (said so, as the method check would otherwise name AES's method 99), or compressed by a method for which `zipfile` does not bound the memory it uses (bzip2 and LZMA
-    decompress whole, then cut to the declared size). STORED and DEFLATED are bounded only when read
-    with a size, which `_read_zip_entry` does."""
+    sniff it, encrypted (said so, as the method check would otherwise name AES's method 99), or compressed by a
+    method other than STORED, DEFLATED, BZIP2 and LZMA (named by its number). `_zip_entry_pieces` decodes each of
+    the four no further than the declared size (deflate: up to about 4 KiB past it)."""
     _check_input_size(info.file_size)
     if info.flag_bits & 0x1:  # ZipCrypto, or AES (method 99): zipfile would ask for a password, not decrypt
         raise Unsupported("encrypted ZIP entry (decrypt the archive first)")
-    if info.compress_type not in (ZIP_STORED, ZIP_DEFLATED):
-        raise Unsupported(f"ZIP compression method {_ZIP_METHODS.get(info.compress_type, info.compress_type)}")
+    if info.compress_type not in (ZIP_STORED, ZIP_DEFLATED, ZIP_BZIP2, ZIP_LZMA):
+        raise Unsupported(f"ZIP compression method {info.compress_type}")
 
 
-def _read_zip_entry(zf: ZipFile, info: ZipInfo) -> bytes:
-    """The bytes of the entry, read no further than its declared size (plus the up to 4 KiB zlib may decode past it):
-    `ZipFile.read` would let one call inflate up to `MAX_N` (1 GiB, 2 GiB on Python 3.14) of a deflated entry whose
-    directory understates its size. Such an entry fails its CRC check unless the CRC was written for the stated
-    prefix; then only that prefix is read. An entry holding fewer bytes than declared raises `BadZipFile`, as
-    `zipfile` would not."""
-    with zf.open(info) as f:
-        data = f.read(info.file_size)
+def _read_zip_entry(zf: ZipFile, path: Path, info: ZipInfo) -> bytes:
+    """The bytes of the entry in the archive at `path`, decoded no further than its declared size (deflate: plus the
+    up to 4 KiB zlib may decode past it): `ZipFile.read` would let one call inflate up to `MAX_N` (1 GiB, 2 GiB on
+    Python 3.14) of a deflated entry whose directory understates its size, and decompress a bzip2 or LZMA one whole.
+    Such an entry fails its CRC check unless the CRC was written for the stated prefix; then only that prefix is
+    read. An entry holding fewer bytes than declared raises `BadZipFile`, as `zipfile` would not; so does one whose
+    CRC-32 does not match, in `zipfile`'s words, for every method."""
+    buf = io.BytesIO()  # not `b"".join`, which holds the pieces and the whole at once: twice the entry
+    for piece in _zip_entry_pieces(zf, path, info, info.file_size):
+        buf.write(piece)
+    data = buf.getvalue()
     if len(data) != info.file_size:
         raise BadZipFile(
             f"File {info.filename!r} is {len(data)} bytes, not the {info.file_size} the ZIP directory states"
         )
+    if zlib.crc32(data) != info.CRC:
+        raise BadZipFile(f"Bad CRC-32 for file {info.filename!r}")
     return data
 
 
@@ -1832,13 +1841,135 @@ _ZIP_LOCAL_HEADER = struct.Struct(
     "<4s2B4HL2L2H"
 )  # the 30-byte local file header; the last two are name and extra lengths
 _ZIP_DATA_DESCRIPTOR_MAX = 24  # 12 or 16 bytes (signature optional), 20 or 24 for ZIP64
+_ZIP_PIECE = 1 << 16  # the most compressed bytes read, and decoded bytes produced, at a time
+_ZIP_SNIFF_CHECKED = 4096  # `ZipExtFile.MIN_READ_SIZE`: a sniff decodes that much, so reaches the CRC check below it
+_ZIP_LZMA_HEADER = struct.Struct("<BBHBI")  # ZIP's LZMA header: version, properties size, lc/lp/pb byte, dict size
+
+
+def _zip_local_header(f: io.BufferedReader, info: ZipInfo) -> tuple[int, int]:
+    """The (name, extra) lengths in the local header of `info`, read from `f`, the archive opened; `Unsupported`
+    if there is no readable header there."""
+    f.seek(info.header_offset)
+    header = f.read(_ZIP_LOCAL_HEADER.size)
+    if len(header) < _ZIP_LOCAL_HEADER.size or not header.startswith(b"PK\x03\x04"):
+        raise Unsupported(
+            f"ZIP entry has no readable local header at byte {info.header_offset} (concatenated, "
+            "self-extracting or damaged archive)"
+        )
+    *_, name_len, extra_len = _ZIP_LOCAL_HEADER.unpack(header)
+    return name_len, extra_len
+
+
+def _zip_data_start(info: ZipInfo, name_len: int, extra_len: int) -> int:
+    """Where the compressed data of `info` starts, after a local header with these name and extra lengths."""
+    return info.header_offset + _ZIP_LOCAL_HEADER.size + name_len + extra_len
 
 
 def _zip_entry_span(info: ZipInfo, name_len: int, extra_len: int) -> tuple[int, int]:
     """The (start, end) bytes an entry takes in its archive: local header (with the lengths read from it, which may
     differ from the central directory's), data, and, if general-purpose flag bit 3 is set, up to a data descriptor."""
-    end = info.header_offset + _ZIP_LOCAL_HEADER.size + name_len + extra_len + info.compress_size
+    end = _zip_data_start(info, name_len, extra_len) + info.compress_size
     return info.header_offset, end + (_ZIP_DATA_DESCRIPTOR_MAX if info.flag_bits & 0x8 else 0)
+
+
+def _zip_compressed(path: Path, info: ZipInfo) -> Generator[bytes, None, None]:
+    """The `compress_size` compressed bytes of `info` in the archive at `path`, in pieces of at most `_ZIP_PIECE`.
+    The sizes are the central directory's (ZIP64 already resolved by `zipfile`), so a data descriptor is not read."""
+    with open(path, "rb") as f:
+        f.seek(_zip_data_start(info, *_zip_local_header(f, info)))
+        left = info.compress_size
+        while left > 0:
+            data = f.read(min(_ZIP_PIECE, left))
+            if not data:
+                raise BadZipFile(f"Truncated data for file {info.filename!r}")
+            left -= len(data)
+            yield data
+
+
+def _lzma1_filter(header: bytes, name: str, size: int) -> dict[str, int]:
+    """The raw LZMA1 filter that ZIP's 9-byte LZMA `header` (of entry `name`) describes, to decode `size` bytes: two
+    version bytes, a properties size that must be 5, then the properties, a lc/lp/pb byte (`(pb * 5 + lp) * 9 + lc`,
+    below 225, with lc + lp at most 4) and the dictionary size. liblzma allocates the whole dictionary up front, so
+    it is cut to `size` (at least liblzma's 4 KiB minimum): no match can reach further back than what is decoded."""
+    import lzma
+
+    _major, _minor, props_size, lclppb, dict_size = _ZIP_LZMA_HEADER.unpack(header)
+    pb, rest = divmod(lclppb, 9 * 5)
+    lp, lc = divmod(rest, 9)
+    if props_size != 5 or pb > 4 or lc + lp > 4:
+        raise BadZipFile(f"Bad LZMA properties for file {name!r}")
+    return {"id": lzma.FILTER_LZMA1, "lc": lc, "lp": lp, "pb": pb, "dict_size": min(dict_size, max(size, 4096))}
+
+
+def _zip_decoder(
+    info: ZipInfo, compressed: Iterator[bytes], size: int
+) -> "tuple[bz2.BZ2Decompressor | lzma.LZMADecompressor, Iterator[bytes]]":
+    """A decoder for the first `size` bytes of the bzip2 or LZMA entry `info`, and the `compressed` pieces left for it
+    to decode: for LZMA, those after the 9-byte header that sets up its filter. `bz2` and `lzma` are imported here,
+    as `zipfile` does, so that a Python built without them fails only on such an entry."""
+    if info.compress_type == ZIP_BZIP2:
+        import bz2
+
+        return bz2.BZ2Decompressor(), compressed
+    import lzma
+
+    need, header = _ZIP_LZMA_HEADER.size, b""
+    while len(header) < need and (piece := next(compressed, b"")):
+        header += piece
+    if len(header) < need:
+        raise BadZipFile(f"Truncated data for file {info.filename!r}")
+    decoder = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[_lzma1_filter(header[:need], info.filename, size)])
+    return decoder, chain([header[need:]], compressed)
+
+
+def _decoded(
+    decoder: "bz2.BZ2Decompressor | lzma.LZMADecompressor", compressed: Iterator[bytes], size: int
+) -> Iterator[bytes]:
+    """What `decoder` makes of the `compressed` pieces, at most `size` bytes in all and `_ZIP_PIECE` at a time. It
+    ends at the end of the stream (bytes after it are ignored, as `zipfile` does), or when the input does: an LZMA
+    stream need not carry an end marker, so its EOS flag (bit 1) is not relied on."""
+    left = size
+    while left > 0 and not decoder.eof:
+        data = next(compressed, None) if decoder.needs_input else b""
+        if data is None:
+            return
+        out = decoder.decompress(data, min(_ZIP_PIECE, left))
+        left -= len(out)
+        if out:
+            yield out
+
+
+def _zip_entry_pieces(zf: ZipFile, path: Path, info: ZipInfo, size: int) -> Generator[bytes, None, None]:
+    """The first `size` (at most) decoded bytes of `info` in `zf`, the archive at `path`, in pieces. STORED and
+    DEFLATED are read through `zipfile`, each read asking for no more than is left; zipfile checks their CRC when the
+    declared size is reached. BZIP2 and LZMA are decoded here from the raw bytes: `ZipExtFile` decompresses each read
+    of theirs with no `max_length` before Python 3.12.15, 3.13.16 and 3.14.8 (gh-156002), so one 4 KiB read could
+    make 1 GiB. Opening the entry first keeps zipfile's checks of its local header and its errors for a missing
+    module, without reading any data."""
+    # Once the Python floor guarantees the gh-156002 fix, the bzip2 decoder can be replaced by zipfile's
+    # `read(file_size)`, as for STORED and DEFLATED. LZMA must keep its own decoder (or zipfile gain an equivalent
+    # bound): zipfile builds its filter from the header's dict_size, so it would lose the cut in `_lzma1_filter`.
+    if info.compress_type in (ZIP_BZIP2, ZIP_LZMA):
+        with zf.open(info):
+            pass
+        with closing(_zip_compressed(path, info)) as compressed:
+            yield from _decoded(*_zip_decoder(info, compressed, size), size)
+        return
+    left = size
+    with zf.open(info) as f:
+        while left > 0 and (data := f.read(min(_ZIP_PIECE, left))):
+            left -= len(data)
+            yield data
+
+
+def _zip_entry_head(zf: ZipFile, path: Path, info: ZipInfo) -> bytes:
+    """The first `SNIFF_BYTES` decoded bytes of `info`, to classify it, decoding no more. A bzip2 or LZMA entry of at
+    most `_ZIP_SNIFF_CHECKED` bytes is read whole, its size and CRC checked, as zipfile checks the CRC of a STORED or
+    DEFLATED one that short when sniffing it: a damaged short entry then fails whatever its method."""
+    if info.compress_type in (ZIP_BZIP2, ZIP_LZMA) and info.file_size <= _ZIP_SNIFF_CHECKED:
+        return _read_zip_entry(zf, path, info)
+    with closing(_zip_entry_pieces(zf, path, info, SNIFF_BYTES)) as pieces:
+        return b"".join(pieces)
 
 
 def _check_zip_covered(path: Path, zf: ZipFile) -> None:
@@ -1850,18 +1981,8 @@ def _check_zip_covered(path: Path, zf: ZipFile) -> None:
     start_dir = getattr(zf, "start_dir", None)
     if not isinstance(start_dir, int):
         raise Unsupported("ZIP directory offset unavailable, so its entries cannot be checked for hidden bytes")
-    spans: list[tuple[int, int]] = []
     with open(path, "rb") as f:
-        for info in zf.infolist():
-            f.seek(info.header_offset)
-            header = f.read(_ZIP_LOCAL_HEADER.size)
-            if len(header) < _ZIP_LOCAL_HEADER.size or not header.startswith(b"PK\x03\x04"):
-                raise Unsupported(
-                    f"ZIP entry has no readable local header at byte {info.header_offset} (concatenated, "
-                    "self-extracting or damaged archive)"
-                )
-            *_, name_len, extra_len = _ZIP_LOCAL_HEADER.unpack(header)
-            spans.append(_zip_entry_span(info, name_len, extra_len))
+        spans = [_zip_entry_span(info, *_zip_local_header(f, info)) for info in zf.infolist()]
     outside = sum(end - start for start, end in _uncovered(start_dir, spans))
     if outside:
         raise Unsupported(
@@ -1895,8 +2016,7 @@ def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
             image_id = ImageId(f"{zip_id}::{info.filename}" + (f"#{nth}" if nth > 1 else ""))
             try:
                 _check_zip_entry(info)
-                with zf.open(info) as f:
-                    head = f.read(SNIFF_BYTES)
+                head = _zip_entry_head(zf, path, info)
             except Exception as exc:  # noqa: BLE001 - an unreadable entry (encrypted, bad compression) is recorded as failed
                 yield _failed(image_id, exc)
                 continue
@@ -1906,7 +2026,7 @@ def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
                 case Rejected(kind, reason):
                     yield SkippedRow(image_id, kind, reason)
                 case "dicom" | "raster" as kind:
-                    yield _candidate(image_id, kind, partial(_read_zip_entry, zf, info))
+                    yield _candidate(image_id, kind, partial(_read_zip_entry, zf, path, info))
                 case _ as unreachable:
                     assert_never(unreachable)
 
