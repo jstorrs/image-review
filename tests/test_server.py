@@ -22,9 +22,20 @@ from unittest import mock
 from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
 from image_review.connection import API_VERSION, MAX_PASS, RemoteTarget
 from image_review.review_db import ReviewLogChanged
-from image_review.server import HANDSHAKE_TIMEOUT_SECONDS, ReviewHandler, ReviewServer, make_server
+from image_review.server import INSTANCE_HEADER, ReviewHandler, ReviewServer, make_server
 from image_review.store import LocalStore, load_manifest
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, start_server, temp_dir, wait_for_file
+from tests.fixtures import (
+    HAS_AF_UNIX,
+    ROWS,
+    UnixHTTPConnection,
+    invoke_cli,
+    make_work_dir,
+    socket_dir,
+    start_server,
+    start_unix_server,
+    temp_dir,
+    wait_for_file,
+)
 
 FP = "a" * 64
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
@@ -68,45 +79,83 @@ class MakeServerChecksTest(unittest.TestCase):
         server_bind.assert_not_called()
 
 
+@unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
 class ServerTestCase(unittest.TestCase):
+    """The handler tests, over the Unix socket server that serve uses.
+
+    Raw requests send Host: localhost, as the socket handler answers any other Host with 400.
+    """
+
     HASHED = False  # manifest.tsv with the hash columns
 
     def setUp(self):
         self.work_dir = temp_dir(self)
         make_work_dir(self.work_dir, hashed=self.HASHED)
-        self.server, self.target, stop = start_server(self.work_dir)
+        self.path = socket_dir(self) / "ir.sock"
+        self.server, self.token, stop = start_unix_server(self.work_dir, self.path)
         self.addCleanup(stop)
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        self.ctx = ctx
 
     def request(self, method, path, body=None, token="default", headers=None):
-        token = self.target.token if token == "default" else token
-        hdrs = dict(headers or {})
+        """One request with Host localhost:8080 and this server's instance, which the socket handler requires.
+
+        Headers and body go in one write (http.client makes two): a server that replies early and closes, as on a
+        401, would otherwise fail the body's write with EPIPE. The connection serves further conn.request calls.
+        """
+        token = self.token if token == "default" else token
+        hdrs = {"Host": "localhost:8080", INSTANCE_HEADER: self.server.instance, **(headers or {})}
         if token is not None:
             hdrs["Authorization"] = f"Bearer {token}"
-        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
+        if not any(k.lower() == "content-length" for k in hdrs):
+            if body is not None:
+                hdrs["Content-Length"] = str(len(body))
+            elif method in ("POST", "PUT"):
+                hdrs["Content-Length"] = "0"  # as http.client sends for a bodyless POST or PUT
+        conn = UnixHTTPConnection(self.path)
         self.addCleanup(conn.close)
-        conn.request(method, path, body=body, headers=hdrs)
-        resp = conn.getresponse()
+        conn.sock = self.connect()
+        head = f"{method} {path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in hdrs.items()) + "\r\n"
+        conn.sock.sendall(head.encode() + (body or b""))
+        resp = conn.response_class(conn.sock, method=method)
+        resp.begin()
+        if resp.will_close:
+            conn.close()  # as getresponse does, so the next conn.request reconnects
         data = resp.read()
         return resp, data, conn
 
+    def connect(self) -> socket.socket:
+        """A connected socket. While the listen backlog is full AF_UNIX refuses at once, with EAGAIN on Linux and
+        ECONNREFUSED on macOS; like TCP, wait."""
+        deadline = time.monotonic() + 10
+        while True:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(sock.close)
+            sock.settimeout(10)
+            try:
+                sock.connect(str(self.path))
+            except (BlockingIOError, ConnectionRefusedError):
+                sock.close()
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.01)
+                continue
+            return sock
+
     def raw(self, data: bytes) -> bytes:
-        """Send raw bytes over TLS and read until the server closes."""
-        with (
-            socket.create_connection(("127.0.0.1", self.target.port), timeout=10) as sock,
-            self.ctx.wrap_socket(sock) as tls,
-        ):
-            tls.sendall(data)
-            chunks = []
-            while chunk := tls.recv(65536):
-                chunks.append(chunk)
+        """Send raw bytes over the socket and read until the server closes."""
+        sock = self.connect()
+        sock.sendall(data)
+        chunks = []
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
         return b"".join(chunks)
 
+    def auth_headers(self) -> dict[str, str]:
+        """The token and instance, for a further request on a connection from request()."""
+        return {"Authorization": f"Bearer {self.token}", INSTANCE_HEADER: self.server.instance}
+
     def auth_header(self) -> str:
-        return f"Authorization: Bearer {self.target.token}\r\n"
+        """The token and instance lines of a raw request; it also needs Host: localhost."""
+        return f"Authorization: Bearer {self.token}\r\n{INSTANCE_HEADER}: {self.server.instance}\r\n"
 
     def get_json(self, path):
         resp, data, _ = self.request("GET", path)
@@ -129,7 +178,33 @@ class ServerTestCase(unittest.TestCase):
         return self.request("POST", "/undo", body=body)[:2]
 
 
-class TestTransport(ServerTestCase):
+class TlsServerTestCase(unittest.TestCase):
+    """The few tests that only make sense over the TLS server (serve --https)."""
+
+    def setUp(self):
+        self.work_dir = temp_dir(self)
+        make_work_dir(self.work_dir)
+        self.server, self.target, stop = start_server(self.work_dir)
+        self.addCleanup(stop)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        self.ctx = ctx
+
+    def request(self, method, path, body=None, token="default", headers=None):
+        token = self.target.token if token == "default" else token
+        hdrs = dict(headers or {})
+        if token is not None:
+            hdrs["Authorization"] = f"Bearer {token}"
+        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
+        self.addCleanup(conn.close)
+        conn.request(method, path, body=body, headers=hdrs)
+        resp = conn.getresponse()
+        data = resp.read()
+        return resp, data, conn
+
+
+class TestTlsTransport(TlsServerTestCase):
     def test_peer_cert_matches_fingerprint(self):
         from image_review.connection import cert_fingerprint
 
@@ -137,16 +212,6 @@ class TestTransport(ServerTestCase):
         der = conn.sock.getpeercert(binary_form=True)
         self.assertEqual(cert_fingerprint(der), self.target.fingerprint)
 
-    def test_security_headers_and_persistent_connection(self):
-        resp, _, conn = self.request("GET", "/current_pass")
-        self.assertEqual(resp.getheader("Cache-Control"), "no-store")
-        self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
-        self.assertEqual(resp.getheader("Content-Type"), "application/json")
-        conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {self.target.token}"})
-        self.assertEqual(conn.getresponse().status, 200)
-
-
-class TestConnectionHandling(ServerTestCase):
     def test_keep_alive_not_delayed_by_nagle(self):
         conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
         self.addCleanup(conn.close)
@@ -164,6 +229,28 @@ class TestConnectionHandling(ServerTestCase):
                 return
         self.fail(f"30 keep-alive requests took {elapsed} s in 3 attempts; want one under 0.9 s")
 
+    def test_no_public_routes_or_csp_over_tls(self):
+        resp, data, _ = self.request("GET", "/")
+        self.assertEqual((resp.status, data), (404, b""))
+        self.assertIsNone(resp.getheader("Content-Security-Policy"))
+        self.assertIsNone(resp.getheader("Referrer-Policy"))
+        resp, data, _ = self.request("GET", "/", token=None)
+        self.assertEqual((resp.status, data), (401, b""))
+        self.assertIsNone(resp.getheader("Content-Security-Policy"))
+        self.assertIsNone(resp.getheader("Referrer-Policy"))
+
+
+class TestTransport(ServerTestCase):
+    def test_security_headers_and_persistent_connection(self):
+        resp, _, conn = self.request("GET", "/current_pass")
+        self.assertEqual(resp.getheader("Cache-Control"), "no-store")
+        self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(resp.getheader("Content-Type"), "application/json")
+        conn.request("GET", "/current_pass", headers=self.auth_headers())
+        self.assertEqual(conn.getresponse().status, 200)
+
+
+class TestConnectionHandling(ServerTestCase):
     def test_connection_close_header_and_reconnect(self):
         cases = {
             401: ("GET", "/manifest", None),
@@ -175,7 +262,7 @@ class TestConnectionHandling(ServerTestCase):
                 resp, _, conn = self.request(method, path, token=token)
                 self.assertEqual(resp.status, status)
                 self.assertEqual(resp.getheader("Connection"), "close")
-                conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {self.target.token}"})
+                conn.request("GET", "/current_pass", headers=self.auth_headers())
                 again = conn.getresponse()
                 self.assertEqual(again.status, 200)
                 again.read()
@@ -194,10 +281,15 @@ class TestConnectionHandling(ServerTestCase):
     def test_transfer_encoding_rejected(self):
         data = self.raw(
             (
-                f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+                f"POST /mark HTTP/1.1\r\nHost: localhost\r\n{self.auth_header()}Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
             ).encode()
         )
         self.assertTrue(data.startswith(b"HTTP/1.1 400"))
+        self.assertIn(b"Connection: close", data)
+
+    def test_post_without_content_length_rejected(self):
+        data = self.raw(f"POST /mark HTTP/1.1\r\nHost: localhost\r\n{self.auth_header()}\r\n".encode())
+        self.assertTrue(data.startswith(b"HTTP/1.1 400"), data[:60])
         self.assertIn(b"Connection: close", data)
 
     def test_body_on_bodyless_route_rejected(self):
@@ -208,7 +300,7 @@ class TestConnectionHandling(ServerTestCase):
     def test_duplicate_content_length_on_get_rejected(self):
         data = self.raw(
             (
-                f"GET /manifest HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Content-Length: 0\r\nContent-Length: 5\r\n\r\n"
+                f"GET /manifest HTTP/1.1\r\nHost: localhost\r\n{self.auth_header()}Content-Length: 0\r\nContent-Length: 5\r\n\r\n"
             ).encode()
         )
         self.assertTrue(data.startswith(b"HTTP/1.1 400"))
@@ -216,7 +308,7 @@ class TestConnectionHandling(ServerTestCase):
     def test_duplicate_content_length_on_mark_rejected(self):
         data = self.raw(
             (
-                f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Content-Length: 2\r\nContent-Length: 2\r\n\r\n{{}}"
+                f"POST /mark HTTP/1.1\r\nHost: localhost\r\n{self.auth_header()}Content-Length: 2\r\nContent-Length: 2\r\n\r\n{{}}"
             ).encode()
         )
         self.assertTrue(data.startswith(b"HTTP/1.1 400"))
@@ -235,7 +327,7 @@ class TestConnectionHandling(ServerTestCase):
         errors = [r for r in logs.records if r.levelno == logging.ERROR]
         self.assertEqual([r.getMessage() for r in errors], ["internal error: OSError"])
         self.assertNotIn("secret-detail", "\n".join(logs.output))
-        conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {self.target.token}"})
+        conn.request("GET", "/current_pass", headers=self.auth_headers())
         self.assertEqual(conn.getresponse().status, 200)
 
     def test_store_timeout_is_500_not_a_silent_close(self):
@@ -275,9 +367,9 @@ class TestLogging(ServerTestCase):
 
     def test_logs_escape_control_chars_and_drop_query(self):
         with self.assertLogs(SERVER_LOGGER, "INFO") as logs:
-            self.raw(b"GET /a\x1b[31mb?key=SECRETKEY HTTP/1.1\r\nHost: x\r\n\r\n")
+            self.raw(b"GET /a\x1b[31mb?key=SECRETKEY HTTP/1.1\r\nHost: localhost\r\n\r\n")
         messages, formatted = self.logged(logs)
-        self.assertEqual(messages, ["127.0.0.1 GET /a\\x1b[31mb 401"])
+        self.assertEqual(messages, ["unix GET /a\\x1b[31mb 401"])  # AF_UNIX has no peer address
         for text in (*messages, formatted):
             self.assertNotIn("\x1b", text)
             self.assertNotIn("SECRETKEY", text)
@@ -288,11 +380,11 @@ class TestLogging(ServerTestCase):
             self.request("GET", "/current_pass")
         (record,) = logs.records
         self.assertEqual(record.levelno, logging.INFO)
-        self.assertEqual(record.getMessage(), "127.0.0.1 GET /current_pass 200")
+        self.assertEqual(record.getMessage(), "unix GET /current_pass 200")  # AF_UNIX has no peer address
         _, formatted = self.logged(logs)
         self.assertRegex(
             formatted,
-            r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d INFO image_review.server: 127.0.0.1 GET /current_pass 200$",
+            r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d INFO image_review.server: unix GET /current_pass 200$",
         )
 
     def test_logs_never_contain_token_or_key(self):
@@ -305,16 +397,16 @@ class TestLogging(ServerTestCase):
         messages, formatted = self.logged(logs)
         self.assertEqual(
             messages,
-            [
-                "127.0.0.1 GET /image 200",
-                "127.0.0.1 GET /image 401",
-                "127.0.0.1 GET /image 404",
-                "127.0.0.1 GET /statuses 400",
-                "127.0.0.1 POST /mark 400",
+            [  # AF_UNIX has no peer address
+                "unix GET /image 200",
+                "unix GET /image 401",
+                "unix GET /image 404",
+                "unix GET /statuses 400",
+                "unix POST /mark 400",
             ],
         )
         for text in (*messages, formatted):
-            self.assertNotIn(self.target.token, text)
+            self.assertNotIn(self.token, text)
             self.assertNotIn("wrong", text)
             self.assertNotIn("batch_001", text)
             self.assertNotIn("key=", text)
@@ -336,14 +428,14 @@ class TestLogging(ServerTestCase):
 
 class TestPreAuthIdleSockets(ServerTestCase):
     def test_idle_raw_sockets_do_not_block_real_client(self):
-        idle = [socket.create_connection(("127.0.0.1", self.target.port), timeout=10) for _ in range(40)]
-        for sock in idle:
-            self.addCleanup(sock.close)
+        for _ in range(40):
+            self.connect()
         start = time.perf_counter()
         resp, data, _ = self.request("GET", "/current_pass")
         self.assertEqual((resp.status, data), (200, b'{"pass": 1}'))
-        # Blocked behind the idle sockets, the request would wait out the handshake timeout.
-        self.assertLess(time.perf_counter() - start, HANDSHAKE_TIMEOUT_SECONDS / 2)
+        # Blocked behind the idle sockets, the request would wait until they time out: 60 s, the shorter of the
+        # request deadline and the per-receive timeout (no handshake here).
+        self.assertLess(time.perf_counter() - start, 5)
 
 
 def read_until_closed(sock: socket.socket, limit: float) -> bytes:
@@ -398,19 +490,17 @@ class TestConnectionLimit(ServerTestCase):
         self.addCleanup(patcher.stop)
         super().setUp()
 
-    def hold(self) -> ssl.SSLSocket:
-        """A connection past its handshake, waiting idle for its request line: it holds a slot."""
-        sock = socket.create_connection(("127.0.0.1", self.target.port), timeout=10)
-        tls = self.ctx.wrap_socket(sock)
-        self.addCleanup(tls.close)
-        return tls
+    def hold(self) -> socket.socket:
+        """A connection waiting idle for its request line: it holds a slot."""
+        return self.connect()
 
     def assert_refused(self):
         start = time.monotonic()
-        with socket.create_connection(("127.0.0.1", self.target.port), timeout=10) as sock:
-            # Given a thread it would sit in the handshake for HANDSHAKE_TIMEOUT_SECONDS; refused, it closes at once
-            self.assertEqual(read_until_closed(sock, HANDSHAKE_TIMEOUT_SECONDS / 2), b"")
-        self.assertLess(time.monotonic() - start, HANDSHAKE_TIMEOUT_SECONDS / 2)
+        with self.connect() as sock:
+            # Given a thread it would wait 60 s for its request line (the shorter of the request deadline and the
+            # per-receive timeout); refused, it closes at once
+            self.assertEqual(read_until_closed(sock, 5), b"")
+        self.assertLess(time.monotonic() - start, 5)
 
     def get_when_free(self) -> None:
         """GET /current_pass, retried while the server is still full; the connection then holds a slot."""
@@ -455,32 +545,26 @@ class TestRequestDeadline(ServerTestCase):
         self.addCleanup(patcher.stop)
         super().setUp()
 
-    def connect(self) -> ssl.SSLSocket:
-        sock = socket.create_connection(("127.0.0.1", self.target.port), timeout=10)
-        tls = self.ctx.wrap_socket(sock)
-        self.addCleanup(tls.close)
-        return tls
-
     def test_trickled_headers_cut_off_at_the_deadline(self):
-        tls = self.connect()
-        tls.sendall(b"GET /current_pass HTTP/1.1\r\nHost: x\r\n")
-        elapsed, sent = trickle_until_closed(tls, b"X-Pad: " + b"a" * 1000, limit=10 * self.DEADLINE)
+        sock = self.connect()
+        sock.sendall(b"GET /current_pass HTTP/1.1\r\nHost: localhost\r\n")
+        elapsed, sent = trickle_until_closed(sock, b"X-Pad: " + b"a" * 1000, limit=10 * self.DEADLINE)
         self.assertGreater(elapsed, self.DEADLINE / 2)
         self.assertGreater(sent, 3)  # trickled for a while, not closed as idle
 
     def test_slow_body_closed_without_reply_or_error_log(self):
-        tls = self.connect()
-        head = f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}Content-Length: 100\r\n\r\n"
+        sock = self.connect()
+        head = f"POST /mark HTTP/1.1\r\nHost: localhost\r\n{self.auth_header()}Content-Length: 100\r\n\r\n"
         with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
-            tls.sendall(head.encode() + b'{"keys": ')  # the rest of the body never comes
-            self.assertEqual(read_until_closed(tls, 10 * self.DEADLINE), b"")
+            sock.sendall(head.encode() + b'{"keys": ')  # the rest of the body never comes
+            self.assertEqual(read_until_closed(sock, 10 * self.DEADLINE), b"")
         self.get_json("/current_pass")  # the server carries on
 
     def test_keep_alive_requests_each_get_the_deadline(self):
         deadline = 2.0  # longer than the class's, for headroom on slow runners
-        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
+        conn = UnixHTTPConnection(self.path)
         self.addCleanup(conn.close)
-        headers = {"Authorization": f"Bearer {self.target.token}"}
+        headers = self.auth_headers()
         with mock.patch.object(ReviewHandler, "request_deadline", deadline):
             for _ in range(4):  # together longer than one deadline; each request alone well within it
                 conn.request("GET", "/current_pass", headers=headers)
@@ -501,24 +585,22 @@ class TestRequestBudget(ServerTestCase):
 
     def send(self, head: str, body: bytes = b"") -> bytes:
         """Send one request (with `Connection: close`) and read until the server closes."""
-        sock = socket.create_connection(("127.0.0.1", self.target.port), timeout=10)
-        tls = self.ctx.wrap_socket(sock)
-        self.addCleanup(tls.close)
-        with contextlib.suppress(BrokenPipeError, ConnectionResetError, ssl.SSLError):  # it may close mid-send
-            tls.sendall(f"{head}Connection: close\r\n\r\n".encode() + body)
-        return read_until_closed(tls, 10)
+        sock = self.connect()
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):  # it may close mid-send
+            sock.sendall(f"{head}Connection: close\r\n\r\n".encode() + body)
+        return read_until_closed(sock, 10)
 
     def test_headers_over_the_budget_closed_without_reply(self):
         pad = "".join(f"X-Pad-{i}: {'a' * 30000}\r\n" for i in range(3))  # each line and the count within stdlib limits
         with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
-            self.assertEqual(self.send(f"GET /current_pass HTTP/1.1\r\nHost: x\r\n{pad}"), b"")
+            self.assertEqual(self.send(f"GET /current_pass HTTP/1.1\r\nHost: localhost\r\n{pad}"), b"")
         self.get_json("/current_pass")  # the server carries on
 
     def test_body_beyond_the_head_budget_is_read_after_the_token(self):
         # Headers near the budget, then a body (padded JSON) larger than it: the Content-Length raises the budget
         body = self.MARK + b" " * 100_000
         head = (
-            f"POST /mark HTTP/1.1\r\nHost: x\r\n{self.auth_header()}X-Pad: {'a' * 60000}\r\n"
+            f"POST /mark HTTP/1.1\r\nHost: localhost\r\n{self.auth_header()}X-Pad: {'a' * 60000}\r\n"
             f"Content-Length: {len(body)}\r\n"
         )
         reply = self.send(head, body)
@@ -758,16 +840,6 @@ class TestAuth(ServerTestCase):
                     self.assertEqual(resp.status, 401)
                     self.assertEqual(data, b"")
                     self.assertEqual(resp.getheader("Cache-Control"), "no-store")
-
-    def test_no_public_routes_or_csp_over_tls(self):
-        resp, data, _ = self.request("GET", "/")
-        self.assertEqual((resp.status, data), (404, b""))
-        self.assertIsNone(resp.getheader("Content-Security-Policy"))
-        self.assertIsNone(resp.getheader("Referrer-Policy"))
-        resp, data, _ = self.request("GET", "/", token=None)
-        self.assertEqual((resp.status, data), (401, b""))
-        self.assertIsNone(resp.getheader("Content-Security-Policy"))
-        self.assertIsNone(resp.getheader("Referrer-Policy"))
 
     def test_unknown_path_with_token_is_404(self):
         resp, data, _ = self.request("GET", "/nope")
@@ -1027,7 +1099,7 @@ class TestGridCleanRefusal(ServerTestCase):
         resp, _, conn = self.request("POST", "/mark", body=json.dumps({**body, "mode": "grid"}).encode())
         self.assertEqual(resp.status, 409)
         self.assertIsNone(resp.getheader("Connection"))
-        conn.request("GET", "/current_pass", headers={"Authorization": f"Bearer {self.target.token}"})
+        conn.request("GET", "/current_pass", headers=self.auth_headers())
         again = conn.getresponse()
         self.assertEqual((again.status, json.loads(again.read())), (200, {"pass": 1}))
 
