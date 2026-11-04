@@ -34,6 +34,7 @@ from image_review.server import (
     clear_stale_socket,
     default_socket_path,
     is_local_host,
+    is_same_origin,
     load_assets,
     make_unix_server,
     parse_socket_path,
@@ -126,27 +127,104 @@ class IsLocalHostTest(unittest.TestCase):
         self.assertFalse(is_local_host([]))
         self.assertFalse(is_local_host(["localhost", "localhost"]))
 
+    def test_with_a_port_only_127_0_0_1_and_that_port(self):
+        for value in ["127.0.0.1:8123", " 127.0.0.1:8123\t"]:
+            with self.subTest(value=value):
+                self.assertTrue(is_local_host([value], 8123))
+        for value in [
+            "localhost:8123",  # browsers try ::1 first for localhost, where another user could listen
+            "LOCALHOST:8123",
+            "[::1]:8123",
+            "[::1]",
+            "127.0.0.1",
+            "localhost",
+            "127.0.0.1:8124",
+            "127.0.0.1:80",
+            "evil.example:8123",
+            "localhost.evil.example:8123",
+            "127.0.0.2:8123",
+            "127.0.0.1:08123",
+            "127.0.0.1:8123x",
+            "",
+        ]:
+            with self.subTest(value=value):
+                self.assertFalse(is_local_host([value], 8123))
+        self.assertFalse(is_local_host([], 8123))
+        self.assertFalse(is_local_host(["127.0.0.1:8123", "127.0.0.1:8123"], 8123))
+
+
+class IsSameOriginTest(unittest.TestCase):
+    def test_no_origin_is_allowed(self):
+        self.assertTrue(is_same_origin([], "localhost:8080"))
+
+    def test_the_request_host_is_allowed(self):
+        for host, origin in [
+            ("localhost:8080", "http://localhost:8080"),
+            ("localhost:8080", "http://LOCALHOST:8080"),
+            ("LOCALHOST:8080", "http://localhost:8080"),
+            ("localhost", "http://localhost"),
+            ("[::1]:9000", "http://[::1]:9000"),
+            ("127.0.0.1:8123", "http://127.0.0.1:8123"),
+            (" 127.0.0.1:8123", "http://127.0.0.1:8123\t"),
+        ]:
+            with self.subTest(host=host, origin=origin):
+                self.assertTrue(is_same_origin([origin], host))
+
+    def test_anything_else_is_refused(self):
+        host = "localhost:8080"
+        for origin in [
+            "http://localhost:8888",  # another local web app
+            "http://localhost",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "null",
+            "",
+            "http://evil.example",
+            "https://localhost:8080",
+            "HTTP://localhost:8080",
+            "http://localhost:8080/",
+            "http://user@localhost:8080",
+            "localhost:8080",
+            "http://locaﬀhost:8080",
+            "http://localhost:8080\u212a",  # Kelvin sign: lower() is "k"
+            "file://",
+            "chrome-extension://abc",
+        ]:
+            with self.subTest(origin=origin):
+                self.assertFalse(is_same_origin([origin], host))
+        self.assertFalse(is_same_origin(["http://localhost:8080"] * 2, host))
+
 
 @unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
 class SocketServerTestCase(unittest.TestCase):
+    PEER = "unix"  # the peer log lines name
+
     def setUp(self):
         self.work_dir = temp_dir(self)
         make_work_dir(self.work_dir)
+        self.start_server()
+
+    def start_server(self) -> None:
+        """Start the server under test; subclasses' setUp patches apply, as they run first."""
         self.path = socket_dir(self) / "ir.sock"
         self.server, self.token, stop = start_unix_server(self.work_dir, self.path)
         self.addCleanup(stop)
+        self.host = "localhost"  # the Host the direct-socket requests send
 
-    def request(self, method, path, body=None, token="default", host="localhost:8080", instance="default"):
+    def request(self, method, path, body=None, token="default", host="localhost:8080", instance="default", origin=None):
         """One request through http.client, with `host` sent exactly as given (http.client would rewrite "::1").
 
-        `instance` is the X-Review-Instance sent: this server's by default, None for none.
+        `instance` is the X-Review-Instance sent: this server's by default, None for none. `origin`, if given, is
+        sent as the Origin header.
         """
         token = self.token if token == "default" else token
         instance = self.server.instance if instance == "default" else instance
-        conn = UnixHTTPConnection(self.path)
+        conn = self.connection()
         self.addCleanup(conn.close)
         conn.putrequest(method, path, skip_host=True)
         conn.putheader("Host", host)
+        if origin is not None:
+            conn.putheader("Origin", origin)
         if token is not None:
             conn.putheader("Authorization", f"Bearer {token}")
         if instance is not None:
@@ -156,6 +234,9 @@ class SocketServerTestCase(unittest.TestCase):
         conn.endheaders(body)
         resp = conn.getresponse()
         return resp, resp.read()
+
+    def connection(self) -> http.client.HTTPConnection:
+        return UnixHTTPConnection(self.path)
 
     def raw_request(
         self,
@@ -280,10 +361,49 @@ class TestSocketRequests(SocketServerTestCase):
             self.request("GET", "/current_pass")
             self.request("GET", "/current_pass", host="evil.example")
         messages = [r.getMessage() for r in logs.records]
-        self.assertEqual(messages, ["unix GET /current_pass 200", "unix GET /current_pass 400"])
+        self.assertEqual(messages, [f"{self.PEER} GET /current_pass 200", f"{self.PEER} GET /current_pass 400"])
         for text in [*messages, *logs.output]:
             self.assertNotIn(self.token, text)
             self.assertNotIn("Error", text)
+
+
+FOREIGN_ORIGINS = [
+    "http://evil.example",
+    "null",
+    "https://localhost:8080",
+    "http://localhost.evil.example",
+    "http://localhost:8888",  # another local web app, against Host localhost:8080
+    "http://127.0.0.1:8080",
+]
+
+
+class TestSocketOrigin(SocketServerTestCase):
+    def test_foreign_origin_is_400_before_the_token(self):
+        for (method, path), origin, token in itertools.product(
+            [("GET", "/current_pass"), ("GET", "/"), ("GET", "/app.js")], FOREIGN_ORIGINS, (None, "default")
+        ):
+            with self.subTest(method=method, path=path, origin=origin, token=token):
+                resp, data = self.request(method, path, token=token, origin=origin)
+                self.assertEqual((resp.status, data), (400, b""))
+                self.assertEqual(resp.getheader("Connection"), "close")
+
+    def test_foreign_origin_on_a_post_records_nothing(self):
+        resp, _ = self.request("POST", "/mark", body=json.dumps(MARK_A).encode(), origin="http://evil.example")
+        self.assertEqual(resp.status, 400)
+        resp, data = self.request("GET", "/statuses?pass=1")
+        self.assertEqual(json.loads(data)["batch_001/a.jpg"], "UNREVIEWED")
+
+    def test_the_pages_own_origin_is_allowed(self):
+        # The page is reached through a forward on whatever local port the reviewer picked: its Host
+        for host in ["localhost:8080", "localhost:1234", "127.0.0.1:9", "[::1]:8080", "localhost"]:
+            with self.subTest(host=host):
+                origin = f"http://{host}"
+                resp, data = self.request("GET", "/current_pass", host=host, origin=origin)
+                self.assertEqual((resp.status, json.loads(data)), (200, {"pass": 1}))
+                resp, _ = self.request("GET", "/app.js", token=None, host=host, origin=origin)
+                self.assertEqual(resp.status, 200)
+        resp, _ = self.request("POST", "/mark", body=json.dumps(MARK_A).encode(), origin="http://localhost:8080")
+        self.assertEqual(resp.status, 200)
 
 
 # The API routes a page loaded from another serve is refused on (ROUTES less /current_pass)
@@ -404,7 +524,7 @@ class TestServerInstance(SocketServerTestCase):
             self.request("GET", "/current_pass")
             self.request("GET", "/manifest", instance="stale")
         messages = [r.getMessage() for r in logs.records]
-        self.assertEqual(messages, ["unix GET /current_pass 200", "unix GET /manifest 412"])
+        self.assertEqual(messages, [f"{self.PEER} GET /current_pass 200", f"{self.PEER} GET /manifest 412"])
         for text in logs.output:
             self.assertNotIn(self.server.instance, text)
 
@@ -567,7 +687,7 @@ class TestSocketRequestDeadline(SocketServerTestCase):
     def test_slow_grids_body_closed_without_reply_or_error_log(self):
         sock = self.connect()
         head = (
-            f"POST /grids HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {self.token}\r\n"
+            f"POST /grids HTTP/1.1\r\nHost: {self.host}\r\nAuthorization: Bearer {self.token}\r\n"
             f"{INSTANCE_HEADER}: {self.server.instance}\r\nContent-Length: 100\r\n\r\n"
         )
         with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
@@ -578,7 +698,7 @@ class TestSocketRequestDeadline(SocketServerTestCase):
 
     def test_keep_alive_requests_each_get_the_deadline(self):
         deadline = 2.0  # longer than the class's, for headroom on slow runners
-        conn = UnixHTTPConnection(self.path)
+        conn = self.connection()
         self.addCleanup(conn.close)
         headers = {"Authorization": f"Bearer {self.token}", INSTANCE_HEADER: self.server.instance}
         with mock.patch.object(ReviewHandler, "request_deadline", deadline):
@@ -592,11 +712,20 @@ class TestSocketRequestDeadline(SocketServerTestCase):
         pad = "".join(f"X-Pad-{i}: {'a' * 30000}\r\n" for i in range(3))
         with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):  # it may close mid-send
-                sock.sendall(f"GET / HTTP/1.1\r\nHost: localhost\r\n{pad}\r\n".encode())
+                sock.sendall(f"GET / HTTP/1.1\r\nHost: {self.host}\r\n{pad}\r\n".encode())
             self.assertEqual(read_until_closed(sock, 10), b"")
 
 
 class TestWebFiles(unittest.TestCase):
+    def test_fetch_keeps_its_default_mode(self):
+        # The server's Origin check relies on fetch's default "cors" mode: in "same-origin" or "no-cors" mode a POST
+        # under the page's Referrer-Policy: no-referrer sends Origin: null, which the server refuses with 400
+        scripts = web_scripts()
+        calls = re.findall(r"\bfetch\(([^;]*)\);", scripts)
+        self.assertEqual(calls, ['path, { ...options, headers, cache: "no-store" }'])
+        self.assertNotIn("referrerPolicy", scripts)
+        self.assertNotRegex(scripts, r"""\bmode:\s*["'](cors|no-cors|same-origin|navigate)["']""")
+
     def test_load_assets(self):
         assets = load_assets()
         self.assertEqual(sorted(assets), ["/", "/app.css", "/app.js", "/helpers.js"])

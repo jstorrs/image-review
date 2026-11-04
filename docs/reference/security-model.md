@@ -109,6 +109,17 @@ The points below are its limits.
   grids; it reads the image list and statuses, asks for grid layouts,
   fetches each image and records verdicts and undos through the same API,
   with the token.
+- **Requests that name another origin are refused.** A request carrying an
+  `Origin` header passes only if it has exactly one, and it is `http://`
+  followed by the request's own `Host` value (the host part ignoring case), after that
+  `Host` has passed its check: the page's own origin. Anything else, `null`,
+  `https://`, another site or another local port (another web app on this
+  machine) included, gets 400 before the token is checked, the page files
+  included. The page itself always passes. Requests with no `Origin` header
+  are not covered: another site's `<script>`, `<img>` and navigations send
+  none, so they can still fetch the four public files, and get 401 on the
+  API. The token is what protects the API, as a browser never attaches it
+  on its own.
 - **Grid layouts cost the server work.** `POST /grids` lets a token holder make the server read image files (to learn each
   image's size from its header) and run the bin packer. It is bounded to at
   most 1000 known keys per request, grid sides of 256-16384 pixels, and one

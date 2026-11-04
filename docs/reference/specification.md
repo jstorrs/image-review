@@ -2009,19 +2009,39 @@ The threat model these sections implement is summarized in [the security model](
 
 `make_unix_server(store, path, token=None) -> (UnixReviewServer, token)`
 creates the listening server (see *Unix-socket server*); it leaves no socket
-file behind when it raises.
+file behind when it raises. `make_loopback_server(store, port=0, token=None)
+-> (LoopbackReviewServer, token)` creates the same server on loopback TCP (see
+*Loopback server*).
 `ReviewServer` is a `ThreadingHTTPServer` (daemon threads) holding the store,
 the token, a store lock, and the sets of known keys and batches taken from the
 manifest at start. It runs at most 64 connections at once, each with a 60 s
 deadline per request ([Headers and connection
-handling](#headers-and-connection-handling)); `UnixReviewServer` inherits both.
+handling](#headers-and-connection-handling)). It, with its handler
+`ReviewHandler`, also carries everything the browser page needs: the public
+page files, the `Host` and `Origin` checks, the security headers, the
+instance id and `POST /grids` (all described under *Unix-socket server*, and
+the same on both servers). Two subclasses bind it: `LoopbackReviewServer`
+binds `127.0.0.1:port` over TCP, and `UnixReviewServer` (with
+`UnixReviewHandler`, which names the peer `unix` and leaves `TCP_NODELAY`
+unset) adds the Unix socket
+file: its bind, mode and removal. `ReviewServer` sets `SO_REUSEADDR`
+(`allow_reuse_address`) everywhere but Windows, so a restart on the same port
+need not wait out `TIME_WAIT`; a port another socket is listening on is
+still refused. On Windows the option would let another process bind a port
+already in use, so it stays off there. `SO_REUSEPORT` is never set
+(`allow_reuse_port = False`). `UnixReviewServer` keeps `allow_reuse_address
+= False`, which means nothing for a socket file.
+`ReviewServer.host_port` is the bound TCP port (the real one when 0 was
+asked for), or None on a Unix socket; the `Host` check uses it.
 
 ### Authentication
 
 Every request must carry `Authorization: Bearer <token>`, checked with
 `hmac.compare_digest` before any routing; otherwise 401 and the connection is
 closed (any request body is left unread). The one exception is the four
-static files of the page, served without it (see Unix-socket server).
+static files of the page, served without it (see Unix-socket server). The
+`Host` and `Origin` checks come first: a request failing either is 400
+whether or not it carries the token.
 
 ### Endpoints
 
@@ -2050,7 +2070,7 @@ restart) is refused with 412 by the `X-Review-Instance` check (see
 
 | Status | Cause |
 |--------|-------|
-| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark`, `POST /undo` and `POST /grids`; a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` (not an integer from 1 to `MAX_PASS`, 1000000) on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid, repeated keys, a `single` mark without exactly one key; `/grids` as described under *Unix-socket server* |
+| 400 | Bad request: a `Host` or `Origin` header the server does not accept (before the token check; see *Unix-socket server* and *Loopback server*); `Transfer-Encoding` present; a body on anything but `POST /mark`, `POST /undo` and `POST /grids`; a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` (not an integer from 1 to `MAX_PASS`, 1000000) on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid, repeated keys, a `single` mark without exactly one key; `/grids` as described under *Unix-socket server* |
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 409 | `POST /mark`: CLEAN with `mode: "grid"` on keys holding a DIRTY or FLAGGED status in that pass, unless every key is DIRTY (`status.grid_clean_refused`); body `{"error": "grid holds a DIRTY or FLAGGED image"}` (no keys); nothing is recorded |
@@ -2190,7 +2210,8 @@ suppressed. What is never logged is listed in the
 Two other records exist: WARNING `connection error: <ExceptionClass>` for
 connection-level failures, and ERROR `internal error:
 <ExceptionClass>` for 500s. On the Unix-socket server the peer is the
-literal `unix` (`accept` gives no peer address there).
+literal `unix` (`accept` gives no peer address there); on the loopback server
+it is `127.0.0.1`.
 
 ### Unix-socket server
 
@@ -2205,9 +2226,25 @@ non-socket is refused with `ValueError` (`clear_stale_socket`). The socket is
 chmodded 0600 before `listen()` (until then every connect is refused), and
 `server_close` unlinks it only if it is still the same file. Before the token
 check, the single `Host` header must be `localhost`, `127.0.0.1` or `[::1]`
-with an optional port of 1-5 digits in 1-65535; anything else (including a
-missing or repeated header) is 400 and the connection closed, a defence
-against DNS rebinding.
+with an optional port of 1-5 digits in 1-65535 (`is_local_host(values)`; any
+port, since the forward's local port is the reviewer's choice); anything else
+(including a missing or repeated header) is 400 and the connection closed, a
+defence against DNS rebinding. Then the `Origin` header (`is_same_origin`,
+on both servers): a request with none passes. Otherwise there must be exactly
+one, and it must be the literal `http://` followed by the request's `Host`
+value (which has just passed the `Host` check), the host part compared ignoring
+ASCII case:
+the page's own origin. Anything else (`null`, `https://`, another host,
+another local port such as `http://localhost:8888` against `Host:
+localhost:8080`, a path, a repeated header) is 400 and the connection closed,
+the public files included. The page never fails this: browsers send no
+`Origin` on its navigations, `<script>` and stylesheet loads and same-origin
+GET fetches, and its own origin on its `fetch` POSTs (fetch's default mode
+`cors`, so `Referrer-Policy: no-referrer` does not turn it into `null`;
+`TestWebFiles` checks that the page sets no `mode` or `referrerPolicy`).
+Requests without an `Origin` header are not covered by this check: another
+site's `<script>`, `<img>` and navigations send none, so they can still fetch
+the four public files, and get 401 on the API.
 
 Four static files are served without the token: `GET /` (`index.html`),
 `/helpers.js`, `/app.js` and `/app.css`, from `web/` in the package, read once by
@@ -2225,7 +2262,7 @@ img-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 and `Referrer-Policy: no-referrer`, besides `Cache-Control: no-store` and
 `X-Content-Type-Options: nosniff`.
 
-Each `UnixReviewServer` start draws an instance id, `token_urlsafe(16)`. It
+Each `ReviewServer` start (of either kind) draws an instance id, `token_urlsafe(16)`. It
 names the server run and is not an access secret, but it is never logged.
 Every response, stdlib error pages and the public files included, carries it
 as `X-Review-Instance`. Every API request except `GET /current_pass` (where
@@ -2241,7 +2278,7 @@ restarted serve, with keys that repeat across work directories) is in the
 [security model](security-model.md#browser-review-over-a-unix-socket),
 under "A page belongs to one serve".
 
-`POST /grids` (`UnixReviewHandler._grids`) lays out images into grids for
+`POST /grids` (`ReviewHandler._grids`) lays out images into grids for
 the browser client. The body, parsed by `parse_grids` into a `GridsRequest`, is `{"keys": [str, ...],
 "width": W, "height": H, "rotation": "auto"|"always"|"never"}`: `keys` a
 non-empty list of 1 to `MAX_GRID_KEYS` (1000) distinct manifest keys; `W` and
@@ -2306,6 +2343,37 @@ When that path would be `SUN_PATH_SIZE` bytes or more, the host part is replaced
 by the first 8 hex characters of the SHA-256 of the short host name (not a
 truncation, since node names often differ only at the end). If even that does
 not fit, it is returned anyway and `parse_socket_path` raises its usual error.
+
+### Loopback server
+
+`make_loopback_server(store, port=0, token=None) -> (LoopbackReviewServer,
+token)` (the token as for `make_unix_server`) serves the same page, handler
+and API as plain HTTP on TCP, bound to `LOOPBACK_HOST` (`127.0.0.1`) only:
+never `::1` or a wildcard address, so nothing listens on another interface.
+`port` must be 0 (a free port; `server.host_port` gives the bound one) or
+1024-65535, else `ValueError`: no privileged port, and never 80, where
+browsers leave the port out of `Host` and `Origin`. A bind failure (the port
+in use, say) raises `OSError`. `LoopbackReviewServer.server_bind` skips
+`HTTPServer.server_bind`, whose `socket.getfqdn` is a reverse DNS lookup that
+can stall startup on an offline machine; `server_name` is `127.0.0.1`. The
+handler turns on `TCP_NODELAY`
+(`disable_nagle_algorithm`): otherwise Nagle and delayed ACK hold each reply's
+body about 40 ms behind its headers on a keep-alive connection
+(`UnixReviewHandler` turns it off, as `AF_UNIX` refuses the option).
+
+The only URL is `http://127.0.0.1:PORT/`. The `Host` rule is port-aware
+here (`is_local_host(values, port)`): exactly one `Host` header,
+`127.0.0.1:PORT`, with `PORT` exactly the bound port written as the decimal
+number. `localhost` is refused: browsers try `::1` first for it, and this
+server does not bind `[::1]:PORT`, so another local user could, and a
+`http://localhost:PORT/#token` URL would hand them the token; refusing it
+makes such a URL fail at once with 400 rather than work until someone takes
+the port. `[::1]` is refused for the same reason, as are a missing port,
+another port and any other host: 400 and the connection closed. With this
+`Host` rule the `Origin` rule allows none or exactly
+`http://127.0.0.1:PORT`. Everything else about requests (token, public
+files, headers, instance id, limits, logging apart from the peer) is as on
+the Unix-socket server.
 
 ### Browser client
 

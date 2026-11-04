@@ -108,6 +108,9 @@
 
 ### Fixes
 
+- `serve` now refuses with 400, before the token check, a request whose `Origin` header is not the page's own
+  (another site, another local port, `null` or `https://`). The page itself always passes; requests with no `Origin`
+  are not covered.
 - A deflated ZIP entry could make preprocess inflate up to 1 GiB (2 GiB on Python 3.14) from an archive of about
   1 MB, whatever size its directory stated: an entry stating 2 KB could decode up to that cap in one call.
   preprocess now decodes an entry no further than about its stated size (already checked against the 1 GiB

@@ -183,6 +183,17 @@ def start_unix_server(work_dir: Path, path: Path):
     return server, token, _serve_in_thread(server, store)
 
 
+def start_loopback_server(work_dir: Path, port: int = 0):
+    """Serve work_dir on 127.0.0.1:`port` (0 picks a free one; see server.host_port) in a thread; returns
+    (server, token, stop), as start_unix_server."""
+    from image_review.server import make_loopback_server
+    from image_review.store import LocalStore
+
+    store = LocalStore(work_dir)
+    server, token = make_loopback_server(store, port)
+    return server, token, _serve_in_thread(server, store)
+
+
 class UnixHTTPConnection(http.client.HTTPConnection):
     """HTTP over the Unix socket `path`; `host` only sets the Host header."""
 

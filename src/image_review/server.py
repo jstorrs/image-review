@@ -1,4 +1,5 @@
-"""Bearer-token server exposing a ReviewStore over plain HTTP on a Unix socket, for browser review over SSH.
+"""Bearer-token server exposing a ReviewStore and the browser page over plain HTTP: on a Unix socket, for browser
+review over SSH, or on 127.0.0.1, for review on this machine.
 
 Must stay importable without pygame/numpy/skimage. Original image_ids never
 leave the store; clients only ever see keys (preprocessed paths).
@@ -195,8 +196,9 @@ def grids_payload(
 ) -> dict:
     """The /grids response for `plan`, packed from `sizes` (by index into `keys`) into width x height grids.
 
-    As grid_packer.pack_into_grids: grids in bin order, placements in rectpack's order, and left out (in input
-    order) every key with no size (unreadable bytes or header) or that the packer did not place.
+    Grids come in the plan's bin order and placements in rectpack's order. Each placement gives the key, its box
+    in the grid, whether it is drawn rotated, and its source (width, height). `left_out` lists, in input order,
+    every key with no size (unreadable bytes or header) or that the packer did not place.
     """
     grids = [
         [
@@ -276,9 +278,85 @@ class DeadlineReader(io.RawIOBase):
         return received
 
 
+LOOPBACK_HOST = "127.0.0.1"  # IPv4 loopback only: no ::1, never a wildcard
+LOOPBACK_PORTS = range(1024, 65536)  # or 0, any free one: never a privileged port, nor 80 (browsers drop it)
+
+_LOCAL_HOST = re.compile(r"(localhost|127\.0\.0\.1|\[::1\])(?::([0-9]{1,5}))?", re.IGNORECASE | re.ASCII)
+
+
+def is_local_host(values: list[str], port: int | None = None) -> bool:
+    """True for exactly one Host header naming this server.
+
+    With `port` None (the Unix socket, reached through a forward on any local port): the loopback (localhost,
+    127.0.0.1, [::1]), optionally with a port. With a `port` (the loopback TCP server): 127.0.0.1 with exactly
+    that port. Not localhost: browsers try ::1 first for it, and the server does not bind [::1]:port, so another
+    local user could, and receive the token in the URL. Not [::1] either, for the same reason.
+    """
+    if len(values) != 1:
+        return False
+    match = _LOCAL_HOST.fullmatch(values[0].strip(" \t"))  # optional whitespace is not part of the value
+    if match is None:
+        return False
+    host, given = match.groups()
+    if port is None:
+        return given is None or 1 <= int(given) <= 65535
+    return host == LOOPBACK_HOST and given == str(port)
+
+
+def is_same_origin(values: list[str], host: str) -> bool:
+    """True for no Origin header, or exactly one that is `http://` followed by `host`, the host part ignoring ASCII
+    case.
+
+    `host` is the request's Host value, already accepted by `is_local_host`, so this is the page's own origin:
+    same-origin requests always pass. `null`, https, another host and another local port are refused.
+    """
+    if not values:
+        return True
+    if len(values) != 1:
+        return False
+    origin = values[0].strip(" \t")
+    prefix = "http://"
+    return origin.isascii() and origin.startswith(prefix) and origin[len(prefix) :].lower() == host.strip(" \t").lower()
+
+
+WEB_ASSETS = {
+    "/": ("index.html", "text/html"),
+    "/helpers.js": ("helpers.js", "text/javascript"),
+    "/app.js": ("app.js", "text/javascript"),
+    "/app.css": ("app.css", "text/css"),
+}
+
+# The browser page may only load its own scripts and styles, talk to this origin, and show blob: images
+CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src blob:; "
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
+
+# The server run a request was meant for (ReviewServer.instance), sent on every reply and
+# required on every API request but this one: the page's first load and its Reconnect start there.
+INSTANCE_HEADER = "X-Review-Instance"
+INSTANCE_FREE_ROUTES = frozenset({("GET", "/current_pass")})
+# A page loaded from an earlier serve (keys collide across work dirs): nothing is read, recorded or packed
+STALE_PAGE = Reply(412, json.dumps({"error": "the page was loaded from another serve; reconnect"}).encode(), close=True)
+
+
+def load_assets() -> dict[str, Reply]:
+    """The packaged browser page, read once; request paths never reach the filesystem."""
+    web = importlib.resources.files("image_review") / "web"
+    return {
+        path: Reply(200, (web / name).read_bytes(), f"{content_type}; charset=utf-8")
+        for path, (name, content_type) in WEB_ASSETS.items()
+    }
+
+
 class ReviewHandler(BaseHTTPRequestHandler):
+    """The browser page and its API, over plain HTTP on loopback TCP; UnixReviewHandler serves it on a Unix socket."""
+
     protocol_version = "HTTP/1.1"
     timeout = HANDLER_TIMEOUT_SECONDS
+    # Else Nagle holds each reply's body until the client ACKs its headers: about 40 ms per keep-alive request
+    disable_nagle_algorithm = True
     request_deadline: float = REQUEST_DEADLINE_SECONDS  # read per request, so tests can patch it
     server: "ReviewServer"
 
@@ -302,6 +380,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
 
     def end_headers(self) -> None:
         # Here rather than in _send so stdlib send_error responses carry them too
+        self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(INSTANCE_HEADER, self.server.instance)
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
@@ -330,6 +411,29 @@ class ReviewHandler(BaseHTTPRequestHandler):
         return hmac.compare_digest(given, expected)
 
     def _handle(self, method: str) -> None:
+        # Before the token check: a browser tricked by DNS rebinding sends the attacker's host name, and a page from
+        # another origin sends its own Origin
+        hosts = self.headers.get_all("Host", [])
+        if not is_local_host(hosts, self.server.host_port) or not is_same_origin(
+            self.headers.get_all("Origin", []), hosts[0]
+        ):
+            self._send(Reply(400, close=True))
+            return
+        # The four static files are served without the token: they hold no PHI and no secret, and the page
+        # cannot present the token before it has loaded. Exact GET paths only. CSRF does
+        # not apply: browsers never attach an Authorization header on their own.
+        path = self.path.partition("?")[0]  # not urlsplit: it raises ValueError on targets like "http://["
+        if method == "GET" and path in self.server.assets:
+            try:
+                self._check_framing(method, path)
+            except BadRequest:
+                self._send(Reply(400, close=True))
+                return
+            asset = self.server.assets[path]
+            # Without the token, one request per connection, as a 401 is: a client re-fetching a file within each
+            # request deadline could otherwise hold its connection slot for good
+            self._send(asset if self._authorized() else replace(asset, close=True))
+            return
         if not self._authorized():
             self._send(Reply(401, close=True))  # any request body is left unread
             return
@@ -359,7 +463,14 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self._check_body(method, path)
 
     def _route(self, method: str) -> Reply:
+        # After the Host and token checks (in _handle), so a 412 tells nothing to a client without the token.
+        # Any request body is left unread: STALE_PAGE closes the connection.
+        path = self.path.partition("?")[0]
+        if (method, path) not in INSTANCE_FREE_ROUTES and not self._same_instance():
+            return STALE_PAGE
         self._check_chunked()
+        if method == "POST" and path == "/grids":  # the query is ignored, as on /mark
+            return self._grids()  # the body is read here, so no _check_body
         url = urlsplit(self.path)
         self._check_body(method, url.path)
         query = parse_qs(url.query)
@@ -397,6 +508,22 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 return json_reply(changed)  # keys only, like /mark
             case _:
                 return Reply(404, close=True)
+
+    def _same_instance(self) -> bool:
+        values = self.headers.get_all(INSTANCE_HEADER, [])
+        return len(values) == 1 and values[0] == self.server.instance
+
+    def _grids(self) -> Reply:
+        req = parse_grids(self._read_body(), self.server.known_keys)
+        # One packing at a time; the body is read, so a busy reply can keep the connection
+        if not self.server.grid_slot.acquire(blocking=False):
+            return Reply(503)
+        try:  # no store_lock: image reads are read-only and packing is pure
+            sizes = {idx: size for idx, key in enumerate(req.keys) if (size := self.server.image_size(key))}
+            plan = plan_grids(sizes, req.width, req.height, req.rotation)
+            return json_reply(grids_payload(req.keys, sizes, plan, req.width, req.height))
+        finally:
+            self.server.grid_slot.release()
 
     def _image(self, query: dict[str, list[str]]) -> Reply:
         key = _one(query, "key")
@@ -446,7 +573,13 @@ class ReviewHandler(BaseHTTPRequestHandler):
 
 
 class ReviewServer(ThreadingHTTPServer):
+    """The browser page and its API on `address`; LoopbackReviewServer and UnixReviewServer bind it."""
+
     daemon_threads = True
+    # A restart on the same port must not wait out TIME_WAIT. Not on Windows: there SO_REUSEADDR lets another
+    # process bind a port already in use.
+    allow_reuse_address = sys.platform != "win32"
+    allow_reuse_port = False  # SO_REUSEPORT would let another process listen on the same port
     max_connections = MAX_CONNECTIONS  # read in __init__, so tests can patch it
 
     def __init__(
@@ -454,6 +587,7 @@ class ReviewServer(ThreadingHTTPServer):
         address: str | tuple[str, int],
         store: ReviewStore,
         token: str,
+        assets: dict[str, Reply],
         *,
         handler: type[ReviewHandler] = ReviewHandler,
     ):
@@ -462,10 +596,31 @@ class ReviewServer(ThreadingHTTPServer):
         self.known_keys: frozenset[Key] = frozenset(r.key for r in rows)
         self.store = store
         self.token = token
+        self.assets = assets
+        # Names this server run, so a page loaded from an earlier one on the same address and token is refused
+        # (ReviewHandler._route). Not a secret, but never logged.
+        self.instance = secrets.token_urlsafe(16)
+        self.grid_slot = threading.Lock()  # held while a /grids request reads sizes and packs
+        self.image_sizes: dict[Key, tuple[int, int]] = {}  # header sizes read so far; failures are not kept
         self.store_lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(self.max_connections)  # one per open connection
         self._full = False  # the limit warning was logged and no connection has been accepted since
         super().__init__(address, handler)  # type: ignore[arg-type]  # typeshed omits AF_UNIX path addresses
+        # The port a Host (and Origin) header must name: the bound one, so port 0 gives the real port. None on a
+        # Unix socket, reached through a forward on any local port.
+        self.host_port: int | None = self.server_address[1] if isinstance(self.server_address, tuple) else None
+
+    def image_size(self, key: Key) -> tuple[int, int] | None:
+        """The image's (width, height) from its JPEG header, or None if its bytes or header cannot be read.
+
+        Only under grid_slot. Nothing is logged: the failure would name the key or path.
+        """
+        if key not in self.image_sizes:
+            try:
+                self.image_sizes[key] = jpeg_size(self.store.image_bytes(key))  # one image's bytes at a time
+            except (KeyError, ValueError, OSError):
+                return None
+        return self.image_sizes[key]
 
     def process_request(self, request, client_address) -> None:
         # On the serve_forever thread only, so _full needs no lock
@@ -495,140 +650,38 @@ class ReviewServer(ThreadingHTTPServer):
         log.warning("connection error: %s", exc_type.__name__ if exc_type else "unknown")
 
 
-_LOCAL_HOST = re.compile(r"(localhost|127\.0\.0\.1|\[::1\])(?::([0-9]{1,5}))?", re.IGNORECASE | re.ASCII)
-
-
-def is_local_host(values: list[str]) -> bool:
-    """True for exactly one Host header naming the loopback (localhost, 127.0.0.1, [::1]), optionally with a port."""
-    if len(values) != 1:
-        return False
-    match = _LOCAL_HOST.fullmatch(values[0].strip(" \t"))  # optional whitespace is not part of the value
-    if match is None:
-        return False
-    port = match.group(2)
-    return port is None or 1 <= int(port) <= 65535
-
-
-WEB_ASSETS = {
-    "/": ("index.html", "text/html"),
-    "/helpers.js": ("helpers.js", "text/javascript"),
-    "/app.js": ("app.js", "text/javascript"),
-    "/app.css": ("app.css", "text/css"),
-}
-
-# The browser page may only load its own scripts and styles, talk to this origin, and show blob: images
-CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src blob:; "
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-)
-
-
-# The server run a socket-mode request was meant for (UnixReviewServer.instance), sent on every reply and
-# required on every API request but this one: the page's first load and its Reconnect start there.
-INSTANCE_HEADER = "X-Review-Instance"
-INSTANCE_FREE_ROUTES = frozenset({("GET", "/current_pass")})
-# A page loaded from an earlier serve (keys collide across work dirs): nothing is read, recorded or packed
-STALE_PAGE = Reply(412, json.dumps({"error": "the page was loaded from another serve; reconnect"}).encode(), close=True)
-
-
-def load_assets() -> dict[str, Reply]:
-    """The packaged browser page, read once; request paths never reach the filesystem."""
-    web = importlib.resources.files("image_review") / "web"
-    return {
-        path: Reply(200, (web / name).read_bytes(), f"{content_type}; charset=utf-8")
-        for path, (name, content_type) in WEB_ASSETS.items()
-    }
-
-
 class UnixReviewHandler(ReviewHandler):
     """Plain HTTP over a Unix socket, reached through `ssh -L`."""
 
     server: "UnixReviewServer"
+    disable_nagle_algorithm = False  # TCP_NODELAY fails (EOPNOTSUPP) on AF_UNIX
 
     def _peer(self) -> str:
         return "unix"  # accept() gives no peer address on AF_UNIX
 
-    def _handle(self, method: str) -> None:
-        # Before the token check: a browser tricked by DNS rebinding sends the attacker's host name
-        if not is_local_host(self.headers.get_all("Host", [])):
-            self._send(Reply(400, close=True))
-            return
-        # The four static files are served without the token: they hold no PHI and no secret, and the page
-        # cannot present the token before it has loaded. Exact GET paths only. CSRF does
-        # not apply: browsers never attach an Authorization header on their own.
-        path = self.path.partition("?")[0]  # not urlsplit: it raises ValueError on targets like "http://["
-        if method == "GET" and path in self.server.assets:
-            try:
-                self._check_framing(method, path)
-            except BadRequest:
-                self._send(Reply(400, close=True))
-                return
-            asset = self.server.assets[path]
-            # Without the token, one request per connection, as a 401 is: a client re-fetching a file within each
-            # request deadline could otherwise hold its connection slot for good
-            self._send(asset if self._authorized() else replace(asset, close=True))
-            return
-        super()._handle(method)
 
-    def _route(self, method: str) -> Reply:
-        # After the Host and token checks (in _handle), so a 412 tells nothing to a client without the token.
-        # Any request body is left unread: STALE_PAGE closes the connection.
-        path = self.path.partition("?")[0]
-        if (method, path) not in INSTANCE_FREE_ROUTES and not self._same_instance():
-            return STALE_PAGE
-        if method == "POST" and path == "/grids":  # the query is ignored, as on /mark
-            self._check_chunked()  # as ReviewHandler._route; the body is read here, so no _check_body
-            return self._grids()
-        return super()._route(method)
+class LoopbackReviewServer(ReviewServer):
+    """ReviewServer on 127.0.0.1:`port` over TCP."""
 
-    def _same_instance(self) -> bool:
-        values = self.headers.get_all(INSTANCE_HEADER, [])
-        return len(values) == 1 and values[0] == self.server.instance
+    def __init__(self, port: int, store: ReviewStore, token: str, assets: dict[str, Reply]):
+        super().__init__((LOOPBACK_HOST, port), store, token, assets)
 
-    def _grids(self) -> Reply:
-        req = parse_grids(self._read_body(), self.server.known_keys)
-        # One packing at a time; the body is read, so a busy reply can keep the connection
-        if not self.server.grid_slot.acquire(blocking=False):
-            return Reply(503)
-        try:  # no store_lock: image reads are read-only and packing is pure
-            sizes = {idx: size for idx, key in enumerate(req.keys) if (size := self.server.image_size(key))}
-            plan = plan_grids(sizes, req.width, req.height, req.rotation)
-            return json_reply(grids_payload(req.keys, sizes, plan, req.width, req.height))
-        finally:
-            self.server.grid_slot.release()
-
-    def end_headers(self) -> None:
-        self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header(INSTANCE_HEADER, self.server.instance)
-        super().end_headers()
+    def server_bind(self) -> None:
+        # Not HTTPServer.server_bind: its socket.getfqdn is a reverse DNS lookup, which can stall an offline machine
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = LOOPBACK_HOST
+        self.server_port = self.server_address[1]
 
 
 class UnixReviewServer(ReviewServer):
-    allow_reuse_address = False
+    """ReviewServer on a Unix socket file, mode 0600, removed on close."""
+
+    allow_reuse_address = False  # no meaning for a socket file; kept off, as before
 
     def __init__(self, path: Path, store: ReviewStore, token: str, assets: dict[str, Reply]):
-        self.assets = assets
-        # Names this server run, so a page loaded from an earlier one on the same path and token is refused
-        # (UnixReviewHandler._route). Not a secret, but never logged.
-        self.instance = secrets.token_urlsafe(16)
-        self.grid_slot = threading.Lock()  # held while a /grids request reads sizes and packs
-        self.image_sizes: dict[Key, tuple[int, int]] = {}  # header sizes read so far; failures are not kept
         self.address_family = socket.AF_UNIX  # here, not on the class: Windows has no AF_UNIX and must still import
         self._bound: tuple[int, int] | None = None  # (st_dev, st_ino) of our socket file; a failed bind closes
-        super().__init__(str(path), store, token, handler=UnixReviewHandler)
-
-    def image_size(self, key: Key) -> tuple[int, int] | None:
-        """The image's (width, height) from its JPEG header, or None if its bytes or header cannot be read.
-
-        Only under grid_slot. Nothing is logged: the failure would name the key or path.
-        """
-        if key not in self.image_sizes:
-            try:
-                self.image_sizes[key] = jpeg_size(self.store.image_bytes(key))  # one image's bytes at a time
-            except (KeyError, ValueError, OSError):
-                return None
-        return self.image_sizes[key]
+        super().__init__(str(path), store, token, assets, handler=UnixReviewHandler)
 
     def server_bind(self) -> None:
         # Not HTTPServer.server_bind: it treats the address as (host, port)
@@ -773,4 +826,19 @@ def make_unix_server(store: ReviewStore, path: Path, token: Token | None = None)
     clear_stale_socket(path)
     token = Token(secrets.token_urlsafe(16)) if token is None else token
     server = UnixReviewServer(path, store, token, load_assets())
+    return server, token
+
+
+def make_loopback_server(
+    store: ReviewStore, port: int = 0, token: Token | None = None
+) -> tuple[LoopbackReviewServer, str]:
+    """Create the loopback TCP server on 127.0.0.1:`port`; returns (server, token). Raises ValueError for a port
+    other than 0 (any free one; see `host_port`) or 1024-65535, OSError if binding fails.
+
+    `token` is a parsed one (`connection.parse_token`) to reuse; None generates a fresh one.
+    """
+    if port != 0 and port not in LOOPBACK_PORTS:
+        raise ValueError(f"Port {port} must be 0 (any free port) or 1024-65535.")
+    token = Token(secrets.token_urlsafe(16)) if token is None else token
+    server = LoopbackReviewServer(port, store, token, load_assets())
     return server, token
