@@ -18,8 +18,8 @@ first**: it lists the differences from the HTTPS mode (a URL that
 holds the token) and the questions to ask your HPC administrator if
 forwarding does not work.
 
-Install `[preprocess,codecs]` where you preprocess and core alone where you
-only `serve`; see [Installation](../install.md) and
+Install image-review on the cluster; a plain install has every command but
+`review`. See [Installation](../install.md) and
 [Cluster install without root](../install.md#cluster-install-without-root).
 
 ## 1. Preprocess on the cluster

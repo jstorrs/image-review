@@ -15,9 +15,10 @@ The documentation is at <https://jstorrs.github.io/image-review/>.
 
 ## Installation
 
-Requires Python >= 3.12. Install everything with `pip install '.[all]'` from a
-clone, or `pip install 'image-review[all]'` from a wheel or a package index.
-See [Installation](docs/install.md) for the extras, cluster installs without
+Requires Python >= 3.12. `pip install .` from a clone, or `pip install
+image-review` from a wheel or a package index, installs every command but
+`review`; add the viewer with `'.[viewer]'` / `'image-review[viewer]'`. See
+[Installation](docs/install.md) for the extras, cluster installs without
 root, compressed DICOMs and minimum dependency versions.
 
 ## Quick start

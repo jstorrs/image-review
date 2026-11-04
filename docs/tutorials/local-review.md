@@ -4,8 +4,8 @@ A walk-through of a whole review on one machine: **preprocess**, **review**,
 **status** and **export**. Each command's options, keys and file formats are
 on its own page; this tutorial links to them.
 
-On one machine you need the `preprocess`, `codecs` and `viewer` extras:
-`pip install 'image-review[all]'` (see [Installation](../install.md)).
+On one machine you also need the `viewer` extra, for `review`:
+`pip install 'image-review[viewer]'` (see [Installation](../install.md)).
 
 ## Step 1: Preprocess
 

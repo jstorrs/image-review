@@ -1,7 +1,6 @@
 """A command whose optional extra is missing names the install command; other import failures are not masked."""
 
 import builtins
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,7 +55,8 @@ class RequiresExtraTest(unittest.TestCase):
 
     def test_other_import_failures_are_not_masked(self):
         for exc in (
-            missing("numpy"),  # not part of the viewer extra
+            missing("numpy"),  # a core dependency
+            missing("PIL"),  # a core dependency: no longer part of the viewer extra
             missing("kiwisolver"),  # a missing transitive dependency is a broken install, not a missing extra
             missing("rectpack"),  # a core dependency: missing means a broken install, not a missing extra
             missing(""),
@@ -78,31 +78,14 @@ class CommandHintTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Error: this command needs the viewer extra: pip install 'image-review[viewer]'", result.stderr)
 
-    def test_preprocess_without_matplotlib(self):
+    def test_preprocess_without_a_core_dependency_is_not_masked(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.invoke(
                 "matplotlib", missing("matplotlib"), "preprocess", tmp, "--work-dir", str(Path(tmp) / "w")
             )
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn(
-            "Error: this command needs the preprocess extra: pip install 'image-review[preprocess]'", result.stderr
-        )
-
-    def test_preprocess_without_tqdm(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            result = self.invoke("tqdm", missing("tqdm"), "preprocess", tmp, "--work-dir", str(Path(tmp) / "w"))
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("pip install 'image-review[preprocess]'", result.stderr)
-
-    def test_preprocess_without_imagecodecs(self):
-        # imagecodecs is imported only by image_review.preprocess: drop a cached copy so the import runs again
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules):
-            sys.modules.pop("image_review.preprocess", None)
-            result = self.invoke(
-                "imagecodecs", missing("imagecodecs"), "preprocess", tmp, "--work-dir", str(Path(tmp) / "w")
-            )
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("pip install 'image-review[preprocess]'", result.stderr)
+        self.assertIsInstance(result.exception, ModuleNotFoundError)
+        self.assertEqual(result.exception.name, "matplotlib")
+        self.assertNotIn("extra", result.output)
 
     def test_an_import_error_inside_the_package_is_not_masked(self):
         exc = ImportError("cannot import name 'ReviewSession'", name="image_review.controller")

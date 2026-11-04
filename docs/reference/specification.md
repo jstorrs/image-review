@@ -11,24 +11,27 @@ and **export** the allowlist of files that may be released.
 ## Requirements
 
 - Python >= 3.12
-- Dependencies are grouped into extras (core, `preprocess`, `codecs`,
-  `viewer`, `all`). The extras, what each command needs and every minimum
-  version are in [Installation](../install.md#choosing-extras) and
+- Every command but `review` needs only the core dependencies; `review` needs
+  the `viewer` extra. `preprocess` and `codecs` are empty extras kept for
+  existing install commands, and `all` equals `viewer`. The extras, what each
+  command needs and every minimum version are in [Installation](../install.md#choosing-extras) and
   [Minimum dependency versions](../install.md#minimum-dependency-versions);
   `pyproject.toml` declares them. The `dev` and `docs` extras are described in
   [CONTRIBUTING.md](https://github.com/jstorrs/image-review/blob/main/CONTRIBUTING.md).
-  The reasons for the minimums are on the installation page. `codecs`
-  is separate from `preprocess`: without it, any compressed DICOM pydicom
+  The reasons for the minimums are on the installation page. The
+  pixel-data codecs are core dependencies; if they are missing, any compressed DICOM pydicom
   cannot decode by itself or through Pillow is `failed` with `cannot decode
   <transfer syntax name>: ...` (see the DICOM preprocessing pipeline, step
   0). `pylibjpeg-libjpeg` is deliberately not used (GPL-3).
 
-- The CLI imports an extra's modules only in the command that needs them
-  (`cli.requires_extra`). A command whose extra is missing exits 1 with
-  `this command needs the <extra> extra: pip install 'image-review[<extra>]'`;
-  only a `ModuleNotFoundError` naming one of that extra's own top-level
-  modules is translated, so any other import failure (one of image-review's
-  modules, a broken install) surfaces unchanged
+- The CLI imports heavy modules only in the command that needs them, so
+  `--help`, `serve`, `status` and `export` start without them. `review`
+  without the viewer extra exits 1 with
+  `this command needs the viewer extra: pip install 'image-review[viewer]'`
+  (`cli.requires_extra`). Only a `ModuleNotFoundError` naming one of that
+  extra's own top-level modules is translated; any other import failure
+  surfaces unchanged (one of image-review's modules, a missing core
+  dependency, a broken install)
 - `review --via` / `status --via` additionally need an OpenSSH client (`ssh`)
   on the client machine
 

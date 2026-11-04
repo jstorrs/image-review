@@ -60,14 +60,9 @@ STATUS_REMOTE_DEPRECATED = (
     "directory instead, e.g. over ssh."
 )
 
-# The top-level modules each optional extra (pyproject.toml) provides and the commands import; the core
-# dependencies (click, cryptography, rectpack) are always there. The codecs extra is loaded by pydicom only when needed.
-EXTRA_MODULES: dict[str, frozenset[str]] = {
-    "preprocess": frozenset(
-        {"imagecodecs", "matplotlib", "numpy", "pydicom", "PIL", "skimage", "scipy", "tifffile", "tqdm"}
-    ),
-    "viewer": frozenset({"pygame", "PIL"}),
-}
+# The top-level modules of the optional extra that a command imports; every other dependency in pyproject.toml is
+# always installed, so a missing one is a broken install and is not translated.
+EXTRA_MODULES: dict[str, frozenset[str]] = {"viewer": frozenset({"pygame"})}
 
 
 @contextlib.contextmanager
@@ -346,8 +341,7 @@ def _shared_with(work_dir: Path) -> str:
 
 
 def _known_colormap(ctx: click.Context, param: click.Parameter, value: str) -> str:
-    with requires_extra("preprocess"):  # the first preprocess import: callbacks run before the command
-        import matplotlib
+    import matplotlib
 
     if value not in matplotlib.colormaps:
         raise click.BadParameter(f"unknown colormap {value!r}; see matplotlib.colormaps for valid names")
@@ -455,10 +449,9 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, j
     either manifest.tsv or skipped.tsv (as failed, or ignored when it is not an
     image). Exits 1 if any input failed, unless --allow-skipped is given.
     """
-    with requires_extra("preprocess"):
-        from tqdm.contrib.logging import logging_redirect_tqdm
+    from tqdm.contrib.logging import logging_redirect_tqdm
 
-        from .preprocess import WorkDirExists, WorkerCrashed, run_preprocess
+    from .preprocess import WorkDirExists, WorkerCrashed, run_preprocess
 
     source_paths = [Path(s).resolve() for s in sources]
 

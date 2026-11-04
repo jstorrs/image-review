@@ -3,29 +3,35 @@
 Requires Python >= 3.12.
 
 ```bash
-pip install '.[all]'          # everything: preprocess, codecs and the viewer
+pip install .                 # every command but review
+pip install '.[viewer]'       # also the pygame viewer, for review
 ```
 
-That installs from a source checkout. From a wheel or a package index the same
-extras apply, e.g. `pip install 'image-review[all]'`.
+That installs from a source checkout. From a wheel or package index, use
+`pip install image-review` or `pip install 'image-review[viewer]'`; from a
+clone, `uv sync` installs the same as `pip install .`.
 
 ## Choosing extras
 
-The dependencies are split into extras, so each machine installs only what its
-commands need:
+Only the viewer is optional, since it is the only dependency that needs a
+display:
 
-| Install | Commands | Adds |
+| Install | Commands | Dependencies |
 |---|---|---|
-| `pip install .` (core) | `serve`, `status`, `export`, `--help` | click, cryptography, rectpack |
-| `pip install '.[viewer]'` | `review` (local, or the deprecated `--remote`) | pygame-ce, Pillow |
-| `pip install '.[preprocess,codecs]'` | `preprocess` | pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
-| `pip install '.[all]'` | every command | `preprocess` + `codecs` + `viewer` |
+| `pip install .` | `preprocess`, `serve`, `status`, `export`, `--help` | click, cryptography, rectpack; pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
+| `pip install '.[viewer]'` | also `review` (local, or the deprecated `--remote`) | pygame-ce |
 
-For [browser review](tutorials/browser-review.md) on a cluster, install
-`[preprocess,codecs]` where you preprocess and core alone where you only
-`serve`; the laptop needs only ssh and a browser. A command whose extra is
-missing exits 1 with
-`this command needs the <extra> extra: pip install 'image-review[<extra>]'`.
+`[all]` is the same as `[viewer]`, and `[preprocess]` and `[codecs]` are still
+accepted but add nothing, since their dependencies are installed by default.
+
+For [browser review](tutorials/browser-review.md) on a cluster, use a plain
+install where you preprocess and serve; the laptop needs only ssh and a
+browser. Running `review` without the viewer extra exits 1 with
+`this command needs the viewer extra: pip install 'image-review[viewer]'`.
+
+Every install brings several hundred MB of native wheels. On Linux the
+imagecodecs wheels need glibc 2.28 or later (manylinux_2_28), and python-gdcm
+2.27 or later; on an older Linux, such as CentOS/RHEL 7, installation may fail.
 
 The deprecated [Python client](tutorials/remote-review.md) also needs:
 
@@ -46,9 +52,9 @@ module names vary by site) or from your own interpreter or `uv`, then:
 module load python/3.12                  # or skip if python3.12 is already on PATH
 python3.12 -m venv ~/venvs/image-review  # or: uv venv --seed --python 3.12 ~/venvs/image-review
 source ~/venvs/image-review/bin/activate
-pip install 'image-review[preprocess,codecs] @ git+https://github.com/jstorrs/image-review@<branch-or-tag>'
+pip install 'image-review @ git+https://github.com/jstorrs/image-review@<branch-or-tag>'
 # or, from a clone of the repository:
-pip install -e '.[preprocess,codecs]'
+pip install -e .
 ```
 
 If the repository is private, the https URL needs credentials (or use an
@@ -61,12 +67,13 @@ cluster.
 
 JPEG, JPEG Lossless, JPEG-LS, JPEG 2000, HTJ2K and RLE
 DICOMs are decoded with `python-gdcm`, `pylibjpeg` and `pylibjpeg-openjpeg`
-(the `codecs` extra). Install the codecs wherever you preprocess DICOMs.
+(they come with every install).
 
-- Wheels exist for CPython 3.12 and 3.13 on Linux (x86_64 and aarch64), macOS
+- Wheels exist for CPython 3.12 to 3.14 (python-gdcm 3.2.6 and
+  pylibjpeg-openjpeg 2.6.0 have cp314 wheels) on Linux (x86_64 and aarch64), macOS
   (Intel and Apple silicon) and Windows (x86_64). On other platforms
-  `python-gdcm` has no wheel and installation may fail.
-- Without the codecs, `preprocess` still runs, but only what pydicom decodes
+  `python-gdcm` has no wheel and installing image-review may fail.
+- If they are missing, `preprocess` still runs, but only what pydicom decodes
   by itself or through Pillow (e.g. RLE, JPEG 2000) renders. Other compressed
   DICOMs (e.g. JPEG Lossless, JPEG-LS) are listed in `skipped.tsv` as failed,
   `cannot decode <transfer syntax>: ...`.
@@ -99,8 +106,8 @@ packing depends on its exact behavior).
 
 imagecodecs decodes 16-bit colour PNGs and tifffile 16-bit RGB and CMYK
 TIFFs (with imagecodecs for LZW, deflate and other compressions), which
-Pillow truncates to their high byte. imagecodecs has wheels for CPython 3.12 and later on
-Linux x86_64 and macOS arm64.
+Pillow truncates to their high byte. imagecodecs 2026.10.10 has abi3 wheels for Linux
+(x86_64 and aarch64, manylinux_2_28), macOS (arm64 and x86_64) and Windows.
 
 rectpack is published only as a source distribution: a default `pip install`
 builds it, but an offline or `--only-binary :all:` install needs its sdist or

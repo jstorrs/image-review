@@ -14,8 +14,7 @@ server runs on a compute node and the viewer on your laptop:
 `image-review serve --https` serves the preprocessed work directory over
 HTTPS, and `image-review review --remote` is the viewer.
 
-Install `[preprocess,codecs]` on the cluster (core alone is enough for a node
-that only runs `serve`, `status` and `export`) and `[viewer]` on the laptop;
+Install image-review on the cluster and `image-review[viewer]` on the laptop;
 see [Installation](../install.md) and
 [Cluster install without root](../install.md#cluster-install-without-root).
 Use the same image-review version on both.

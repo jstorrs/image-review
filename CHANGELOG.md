@@ -80,6 +80,14 @@
   3.14.8 (gh-156002). preprocess now decodes them itself, stopping exactly at the size the ZIP directory states, and
   checks their CRC-32 and size as for deflated entries, on every Python patch level. An entry compressed by any other
   method still fails, as before (`unsupported: ZIP compression method 93` for Zstandard).
+- **A plain `pip install image-review` installs the `preprocess` and `codecs` dependencies again,** as before 0.3.0.
+  pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm, python-gdcm, pylibjpeg and
+  pylibjpeg-openjpeg are core dependencies, since the machine that serves a work directory is usually the one that
+  preprocessed it; a node that only runs `serve`, `status` or `export` now installs them too (several hundred MB of
+  wheels; on Linux, imagecodecs needs glibc 2.28 or later). Only the viewer is still an extra: `pip install 'image-review[viewer]'` for `review`. `[preprocess]` and
+  `[codecs]` are still accepted but add nothing, and `[all]` now means `[viewer]`. `preprocess` no longer answers a
+  missing dependency with `this command needs the preprocess extra`: that is a broken install, and fails with
+  Python's own ModuleNotFoundError.
 
 ### Fixes
 
