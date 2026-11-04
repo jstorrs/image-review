@@ -101,63 +101,37 @@ being computed is dropped, including `q`/Escape and the arrows.
 
 ## Undo
 
-`z` undoes your most recent mark, a single image or a whole grid, and returns
-to that item so you can mark it again (after the same 200 ms). Pressing it
-again undoes the mark before that, and so on. Keys do not repeat, so holding
-`z` down undoes one mark.
-
-- Only marks you made in this session since the last mode switch (`s`, `m`,
-  `M`) can be undone; beyond them `z` says "Nothing to undo".
-- In grid mode, resizing the window, or confirming a different display with
-  `w`, clears the history too: the grids are rebuilt, and a grid marked DIRTY
-  is no longer among them.
-- The history lives in memory only and is gone when you quit. It does not
-  carry over to a new batch opened with `b`.
-- An undo appends rows to `review.tsv` that restore each image's previous
-  verdict and pass, or mark it UNREVIEWED again; see
-  [Undo rows](../reference/work-directory.md#undo-rows).
+`z` follows the browser page's rules; see [Undo](browser.md#undo). In
+`review`, the marks it can undo are those made since the last mode switch
+(`s`, `m`, `M`). In grid mode, confirming a different display with `w`
+clears them too, as resizing the window does, and they do not carry over to
+a new batch opened with `b`.
 
 ## Todo images
 
-With the default `--filter unreviewed`, "todo" means UNREVIEWED or FLAGGED.
-With `--filter clean` or `--filter all`, every listed image is a re-check, so
-an image is todo until you have marked it in this session (whatever the
-verdict, re-confirming included), and again if it becomes UNREVIEWED or
-FLAGGED (e.g. DIRTY images come back FLAGGED in the next pass); undoing a mark
-makes it todo again. The count starts from the full list and is not
-remembered across restarts.
+Under the default `--filter unreviewed`, todo images and the "No grid items
+for pass N" message are as on the browser page; see
+[Todo images](browser.md#todo-images). In `review`:
 
-In grid mode every filter, `all` included, leaves out DIRTY and FLAGGED
-images, so a batch whose only todo images are FLAGGED is not picked for grid
-mode. An image whose DIRTY verdict was given on content its file no longer
-has (replaced and preprocessed again) is UNREVIEWED, not DIRTY, so it can be
-shown, and cleared, in a grid. If that leaves nothing to show, it says how many images need
-single-mode review instead of implying the review is done. In the terminal,
-at the start:
-
-```
-No grid items for pass N; K FLAGGED/DIRTY image(s) need(s) single-mode review (--mode single)
-```
-
-It says "images need", or "image needs" when K is 1. On screen the message
-ends " - press [s]" instead of " (--mode single)", and `s` switches to single
-mode to review them. When there is simply nothing to review, the terminal
-says "No images to review for pass N." instead, with " (filter: F)" before
-the full stop under `--filter clean` or `all`.
-
-The `n` key jumps to the next todo item and `u` toggles todo-only navigation
-in all filter modes.
+- With `--filter clean` or `--filter all`, every listed image is a re-check,
+  so an image is todo until you have marked it in this session (whatever the
+  verdict, re-confirming included), and again if it becomes UNREVIEWED or
+  FLAGGED (e.g. DIRTY images come back FLAGGED in the next pass); undoing a
+  mark makes it todo again. The count starts from the full list and is not
+  remembered across restarts. Grid mode leaves out DIRTY and FLAGGED images
+  under every filter, `all` included.
+- With `--batch`, K counts that batch only.
+- At the start the message is printed in the terminal, ending
+  " (--mode single)" instead of " - press [s]". When there is simply nothing
+  to review, the terminal says "No images to review for pass N." instead,
+  with " (filter: F)" before the full stop under `--filter clean` or `all`.
+- The `n` key jumps to the next todo item and `u` toggles todo-only
+  navigation in all filter modes.
 
 ### Refused CLEAN on a grid
 
-A grid can still come to hold a DIRTY or FLAGGED image mid-session, for
-example when one of its images shares a source file with an image marked
-DIRTY elsewhere. CLEAN on such a grid is refused, unless every image in it is
-DIRTY (that reverses the grid's own verdict), and the status bar says "grid contains an
-image already marked DIRTY - review it in single mode"; DIRTY is still
-accepted. An image that grid mode left out of the grids then says "image
-already marked DIRTY in another pass - review it in single mode". A refused
-CLEAN records nothing, does not advance and leaves nothing to undo.
+The rule and its messages are in
+[Refused CLEAN on a grid](browser.md#refused-clean-on-a-grid).
 
 ## End of a batch
 
@@ -198,50 +172,16 @@ left to show, only `q`/Escape, `s`, `m`, `M`, `z` and `b` act, and `z` says
 
 ## Passes
 
-Without `--pass`, the pass is detected from `review.tsv`:
-
-- pass 1 while any image has never been reviewed;
-- otherwise the highest recorded pass while it still has todo images
-  (UNREVIEWED or FLAGGED);
-- otherwise the next pass, but never above 1000000.
-
-An image's status in a pass comes from its latest verdict:
-
-| Latest verdict | Status in this pass |
-|----------------|---------------------|
-| none | UNREVIEWED |
-| given on other content (the file changed since) | UNREVIEWED |
-| from this pass or a later one | that verdict, CLEAN or DIRTY |
-| CLEAN, from an earlier pass | CLEAN |
-| DIRTY, from an earlier pass | FLAGGED |
-
-A verdict counts only for the content it was given on: if an image's file was
-replaced and preprocessed again since its verdict, the image is offered for
-review again, and until then it counts as never reviewed (so the pass is 1).
-Verdicts recorded before `review.tsv` held a hash are taken as given (see
-[`review.tsv`](../reference/work-directory.md#reviewtsv)).
-
-So under the default `--filter unreviewed` each pass shows:
-
-| Pass | Shows |
-|------|-------|
-| 1 | All UNREVIEWED images |
-| N > 1 | FLAGGED images (marked DIRTY in an earlier pass) in single mode, plus any still-UNREVIEWED images |
-
-An image's recorded pass never goes down: a verdict given with a lower
-`--pass` updates the verdict but keeps the higher pass. So a lower `--pass`,
-or a manifest that gains an image (for example by a hand edit, which sends
-the detected pass back to 1), cannot hide or overwrite later-pass verdicts.
-In such a view an image marked DIRTY in a later pass reads DIRTY, not
-FLAGGED.
-
-The workflow built on passes is in
-[Multi-pass workflow](../tutorials/local-review.md#multi-pass-workflow).
+How the pass is detected, and what each pass shows, is in
+[Passes](browser.md#passes). `--pass N` reviews pass N instead of the
+detected one; a verdict given with a lower `--pass` keeps the image's higher
+recorded pass.
 
 ## Images that cannot be loaded
 
-An image whose JPEG is missing, does not match its recorded hash, or cannot
-be read or decoded is shown as a dark placeholder instead:
+The rules are in
+[Images that cannot be loaded](browser.md#images-that-cannot-be-loaded). In
+`review` the placeholder is a dark screen reading:
 
 ```
 Cannot load image: KEY
@@ -249,17 +189,8 @@ image could not be read or decoded
 It can only be marked DIRTY
 ```
 
-The error itself is only logged, as a warning naming the
-image.
-
-The placeholder takes part in navigation, `n`, todo-only and autoplay like
-any other item. It can be marked DIRTY but never CLEAN: CLEAN is refused and
-the status bar says "cannot mark CLEAN: image could not be loaded". DIRTY is
-recorded normally, so the image stops being todo and the pass can finish. In
-later passes it comes back FLAGGED and, if it still cannot be loaded, again as
-a placeholder that only takes DIRTY. The image is tried again each time it is
-shown, so one that loads again is shown normally.
-
+The error itself is only logged, as a warning naming the image. The
+placeholder takes part in `n`, todo-only and autoplay like any other item.
 Grid mode packs only images it can load; one it cannot is shown on its own,
 after the grids.
 
@@ -285,16 +216,8 @@ verdicts.
 
 ## Recorded verdicts
 
-Every verdict is saved to `review.tsv` in the work directory, with who gave
-it and how: the reviewer, the display mode, how many images the one keypress
-covered and the image-review version. The columns are described in
-[`review.tsv`](../reference/work-directory.md#reviewtsv).
-
-`--reviewer NAME` (or `$IMAGE_REVIEW_REVIEWER`) sets the reviewer name, by
-default your login name. It must be 1-64 printable characters, not all
-spaces (no tabs or newlines), else the command exits 2; so does a missing
-login name with no `--reviewer`. The name is an
-unauthenticated claim, recorded as given; nothing verifies it.
-
-**Upgrade everyone sharing a work directory together.** See
-[Upgrading an older file](../reference/work-directory.md#upgrading-an-older-file).
+What is recorded with each verdict is in
+[Recorded verdicts](browser.md#recorded-verdicts). In `review` the reviewer
+name comes from `--reviewer NAME` (or `$IMAGE_REVIEW_REVIEWER`), by default
+your login name. An invalid name exits 2; so does a missing login name with
+no `--reviewer`.

@@ -1559,7 +1559,7 @@ DIRTY or FLAGGED key is refused (`status.grid_clean_refused`; the session
 makes no store call; the status bar shows `controller.GRID_HAS_DIRTY`, also
 logged), unless every key in the grid is DIRTY, which reverses that grid's own
 verdict. The messages are in
-[Refused CLEAN on a grid](../commands/review.md#refused-clean-on-a-grid).
+[Refused CLEAN on a grid](../commands/browser.md#refused-clean-on-a-grid).
 
 The store applies the same rule to every grid mark, so the server's
 `POST /mark` answers 409 (see *Error semantics*) and a snapshot gone stale
@@ -1578,7 +1578,8 @@ itself, against the keys' current statuses for the pass, and raises
 If grid mode has no items but the status filter selected rows it left out, the
 session says so instead of implying the review is done: `run()` prints, and a
 mode restart shows, `_held_back_message` (text in
-[Todo images](../commands/review.md#todo-images)). Its K counts the left-out
+[Todo images](../commands/browser.md#todo-images); the terminal form is in
+[`image-review review`](../commands/review.md#todo-images)). Its K counts the left-out
 rows that are todo as in *Todo*, over the selected batch, or all batches when
 none is selected.
 
@@ -1967,7 +1968,7 @@ pass is `max(raw pass_number, requested pass)`, and an undo restores the stale
 row exactly, so the image reads `UNREVIEWED` again.
 
 `get_status(image_id, pass)` maps the image's current row to a `Status` as the
-table in [Passes](../commands/review.md#passes) gives: no row (or a stale one)
+table in [Passes](../commands/browser.md#passes) gives: no row (or a stale one)
 is UNREVIEWED; a row with `pass_number >= pass`, or a CLEAN one, keeps its
 verdict; an earlier-pass DIRTY is FLAGGED.
 
@@ -2240,10 +2241,8 @@ restarted serve, with keys that repeat across work directories) is in the
 [security model](security-model.md#browser-review-over-a-unix-socket),
 under "A page belongs to one serve".
 
-`POST /grids` lays out images into
-grids for the browser client with the code the pygame client uses
-(`layout.plan_grids`), so a grid verdict covers the same images in both. The
-body, parsed by `parse_grids` into a `GridsRequest`, is `{"keys": [str, ...],
+`POST /grids` (`UnixReviewHandler._grids`) lays out images into grids for
+the browser client. The body, parsed by `parse_grids` into a `GridsRequest`, is `{"keys": [str, ...],
 "width": W, "height": H, "rotation": "auto"|"always"|"never"}`: `keys` a
 non-empty list of 1 to `MAX_GRID_KEYS` (1000) distinct manifest keys; `W` and
 `H` JSON integers (not booleans) from `MIN_GRID_SIDE` (256) to `MAX_GRID_SIDE`
@@ -2260,17 +2259,33 @@ in request order, keys whose bytes cannot be read (missing file, `jpeg_sha256`
 mismatch), whose header `layout.jpeg_size` refuses, or that the packer left
 unplaced. Identical requests give identical responses.
 
-Parity with the pygame client holds under two preconditions. First, key order
-matters: rects go to rectpack in request order and its area sort is stable,
-so images of equal area can swap places or grids when the order changes. The
-page must send a batch's grid-eligible keys in manifest order, as the pygame
-controller does (`_grid_items`), to get the same grids. Second, a batch with
-more grid-eligible keys than `MAX_GRID_KEYS` cannot use `/grids` (preprocess
-`--batch-size` is unbounded): the page must refuse grid mode for that batch
-rather than split it, since chunks would pack differently. Given both, the
-layout matches `grid_packer.pack_into_grids` exactly for images that decode;
-the pygame client also leaves out images that fail to decode, which the
-server does not try.
+The packing rule: `_grids` reads each key's size from its JPEG header
+(`image_size`, which uses `layout.jpeg_size`; no pixels are decoded) and
+passes the sizes, keyed by their index in the request, to `layout.plan_grids`.
+That sizes each image with `layout.fit_size`: with rotation allowed it tries
+the grid both ways, `(W, H)` and `(H, W)`, and keeps the image at its size if
+it fits either (a 1000x300 image in a 400x1200 grid stays 1000x300);
+otherwise it shrinks the image, keeping its aspect ratio, by the larger of the
+two orientations' scales, each side floored as `max(1, min(bound,
+int(side * scale)))`. Without rotation only `(W, H)` is tried. An image is
+never enlarged. `plan_grids` then adds the rects
+to rectpack in request order, into as many `W` x `H` bins as it needs.
+`never` packs without rotation and `always` with it; `auto` packs both ways
+and keeps the rotated packing only if it needs strictly fewer bins.
+`grids_payload` then builds the reply from the `GridPlan`: placements as
+rectpack placed them, `rotated` from `layout.is_rotated`, and `left_out`
+from the keys with no size plus `GridPlan.unpacked`.
+
+So a batch always gets the same grids, given two preconditions on the page.
+First, key order matters: rectpack's area sort is stable, so images of
+equal area can swap places or grids when the order changes. The page must
+send a batch's grid-eligible keys in manifest order to get the same grids
+every time. Second, a batch with more grid-eligible keys than
+`MAX_GRID_KEYS` cannot use `/grids` (preprocess `--batch-size` is
+unbounded): the page must refuse grid mode for that batch rather than split
+it, since chunks would pack differently. The server never decodes the
+images, so one whose header reads but whose pixels do not decode is still
+placed; the page catches it when it draws the grid (below).
 
 The server reads each image's bytes one at a time, never holding the store
 lock, and keeps each successfully read header size in memory for the life of
@@ -2279,8 +2294,7 @@ the server (failures are retried on the next request). `source` and
 server run: a file replaced or deleted later keeps its old size and place.
 The client contract covers this: the page must check that each decoded
 image's natural size equals its `source`, and treat a mismatch or any
-`/image` failure as left out, never covered by a grid verdict (as
-`grid_packer._composite_bin` checks the decoded size).
+`/image` failure as left out, never covered by a grid verdict.
 
 One `/grids` request is computed at a time; another arriving meanwhile gets
 503 with the connection kept open, meaning retry later. Packing is not
@@ -2296,10 +2310,11 @@ not fit, it is returned anyway and `parse_socket_path` raises its usual error.
 ### Browser client
 
 `web/app.js` (plain ES2020, no build step) reviews single images and grids,
-with the page's pure helpers (no DOM) in `web/helpers.js`, loaded before it,
-following the pygame client (see *Single Mode*, *Grid Mode*, *Unloadable
-Images*, *Undo*). Its keys, screens and messages as the reviewer sees them
-are on [The browser page](../commands/browser.md). It obeys the CSP above:
+with the page's pure helpers (no DOM) in `web/helpers.js`, loaded before it.
+Its keys, screens and messages as the reviewer sees them, and the review
+rules they follow (passes, todo images, refused CLEAN on a grid, unloadable
+images, undo, recorded verdicts), are on
+[The browser page](../commands/browser.md). It obeys the CSP above:
 no inline script or style, no `innerHTML`, no external URLs; all text goes
 in with `textContent`. Both scripts are type-checked strictly with `tsc` (`npm run
 typecheck`; see CONTRIBUTING).
@@ -2308,17 +2323,28 @@ typecheck`; see CONTRIBUTING).
 single mode; each switch rereads `/statuses`, empties the stack of marked keys
 and rebuilds the list. It reviews one batch: `m`/`M` stay on the current batch
 while it has UNREVIEWED keys, else take the first in sorted order (by code
-point, as Python sorts) that has; `b` moves to the next that has, wrapping.
-The batch's UNREVIEWED keys go to `POST /grids` in manifest order at the
-stage's size in device pixels, as the *Unix-socket server* contract requires;
-a batch over `MAX_GRID_KEYS`, a stage under 256 device pixels or a batch with
-none (the controller's held-back message) shows a message instead. One
+point, as Python sorts) that has; `b` moves to the next that has, wrapping
+(`nextBatch`, which goes round once back to the current batch itself). A key
+is packed when `isGridTodo` accepts its status: todo and in `GRID_ELIGIBLE`
+(UNREVIEWED or CLEAN), i.e. UNREVIEWED, since a grid verdict covers every
+image in it and one keypress must never clear an image already judged DIRTY
+(this pass) or FLAGGED (DIRTY in an earlier one). The batch's UNREVIEWED keys
+go to `POST /grids` in manifest order at the stage's size in device pixels,
+as the *Unix-socket server* contract requires; a batch over `MAX_GRID_KEYS`,
+a stage under 256 device pixels or a batch with none shows a message instead
+(for none, `showEnd`: the end-of-pass screen, or `elsewhereHint`, which is
+the held-back message `heldBackMessage` when no batch has grid items, its K
+being `heldBackCount` over every batch: the pass's FLAGGED keys). One
 `/grids` request is in flight at a time (a newer build waits for it, and a
 stale reply is dropped); a 503 shows "Server busy computing grids; retrying"
-and is retried every 2 s while the layout is still wanted. The last layout is
-cached, keyed as `controller.GridCacheKey` plus the batch, and kept across
-`s`/`m`/`M`; `b` drops it. Items follow `controller._grid_items`, reshuffled
-on every build. Each grid is drawn on a `<canvas>` at one canvas pixel per
+and is retried every 2 s while the layout is still wanted. The last layout
+alone is cached (`gridCache`), keyed by the batch, the keys sent in order,
+the grid size and the rotation, so a rebuild with nothing changed (e.g. `s`
+then `m` with nothing marked) reuses it, and a mark that changes which keys
+are packed misses it; a failed `/grids` leaves no cached layout. It is kept
+across `s`/`m`/`M`; `b` and Reconnect drop it. Items come from
+`orderGridItems`: the grids shuffled, then (stably) the fullest first, then
+each `left_out` key as a single item; reshuffled on every build. Each grid is drawn on a `<canvas>` at one canvas pixel per
 device pixel from `ImageBitmap`s (four `/image` requests at a time, no blob
 URLs); an image that fails to load, or whose decoded size is not its `source`,
 leaves its rectangle black and becomes a single item after the grids. The
@@ -2338,26 +2364,30 @@ the help or the name box never changes the stage size and so never repacks.
 A grid verdict covers exactly the grid's drawn keys (any demoted to single
 items are not in it) in one `POST /mark` with `mode: "grid"`; every item
 shown in grid mode, including a left-out or demoted single, is marked with
-`mode: "grid"`, as `controller._mark` sends its mode. `c`/`d` on a grid count
+`mode: "grid"`: the display mode, not the item's kind. `c`/`d` on a grid count
 only while its canvas is shown with every key drawn and its dwell is over:
 never while it is being drawn or redrawn, hidden by a resize repack, or
-after `contextlost`. CLEAN on a grid holding a DIRTY or FLAGGED image (as
-`status.grid_clean_refused`: unless every image is DIRTY) is refused
+after `contextlost`. CLEAN on a grid holding a DIRTY or FLAGGED image
+(`gridCleanRefused`, as the server's `status.grid_clean_refused`: unless
+every image is DIRTY, which reverses the grid's own verdict) is refused
 with "grid contains an image already marked DIRTY - review it in single
 mode" and no request; DIRTY is always allowed. If the page's statuses were
 stale and the server refuses the CLEAN instead (409), the page shows the same
 message (for a left-out single that became FLAGGED, which the server refuses
 as a grid mark: "image already marked DIRTY in another pass - review it in
 single mode"), rereads `/statuses` into its status map, pushes nothing on the
-stack of marked keys and stays on the item. A grid holding such an image
-is not todo (its status is DIRTY, as `status.grid_status`), so the
-move after a mark skips it. A resize repack empties the stack of marked keys
-at once, as `controller._rebuild_grids_for_resize` resets its undo count
-(the old items are gone, so `z` then says "Nothing to undo"); a repack due
+stack of marked keys and stays on the item. A grid's status (`gridStatus`)
+is DIRTY when any key is DIRTY or FLAGGED, else UNREVIEWED while any key is
+UNREVIEWED, else CLEAN; an item is todo when its status is UNREVIEWED or
+FLAGGED (`isTodo`), so a grid holding such an image is not todo and the move
+after a mark skips it, while a partly undone grid is todo again. A resize
+repack empties the stack of marked keys at once (the old items are gone, and
+a grid marked DIRTY is not among the new ones, so `z` then says "Nothing to
+undo"); a repack due
 while a `/mark` or `/undo` is in flight waits for its reply, and a mark
 whose reply arrives after a resize hid the grids is not pushed on the stack
-and moves nowhere. On the end (or stop) screen a resize does not repack (the
-controller repacks only while reviewing), so `z` still undoes there; leaving
+and moves nowhere. On the end (or stop) screen a resize does not repack
+(`onResize` skips it there), so `z` still undoes there; leaving
 that screen by `z` or Left/Right at a new size repacks first, landing on
 the grid holding the item that would have been shown, and that repack
 empties the rest of the stack.
@@ -2448,17 +2478,20 @@ empties the rest of the stack.
   awaited with `decode()`, and the previous blob URL is revoked. Any failure
   but a 401 or a network error shows the placeholder "Cannot load image:
   KEY", which can be marked DIRTY but never CLEAN ("cannot mark CLEAN: image
-  could not be loaded", no request).
+  could not be loaded", no request; a grid counts only once every key is
+  drawn, so this applies to single items). A single item is fetched each
+  time it is shown, so a key that loads again is shown normally.
 - **Scale**: after each paint, on every window resize (which includes a
   browser zoom) and whenever a `ResizeObserver` sees the stage (which the
   `<img>` fills) change, the page computes the display scale, `min(width /
   naturalWidth, height / naturalHeight) * devicePixelRatio` with the box from
   `getBoundingClientRect()` (screen pixels per image pixel under
   `object-fit: contain`), and shows it in the bar as an integer percent,
-  `floor(scale * 100 + 1e-9)` as in the viewer. Below 100% it reads "⚠ 46%"
-  in a badge with the bar's colours inverted (class `low`), so it stands out
-  on every tint, as the viewer's scale indicator warns: small burned-in text
-  can be lost when an image is scaled down. A scale that leaves less than
+  `floor(scale * 100 + 1e-9)` (truncated, so a scale just under 1 never reads
+  100%; the epsilon keeps float error from dropping a point). Below 100% it
+  reads "⚠ 46%" in a badge with the bar's colours inverted (class `low`), so
+  it stands out on every tint: small burned-in text can be lost when an image
+  is scaled down. A scale that leaves less than
   one pixel counts as 0.
 - **Dwell**: `c`/`d` and their buttons act only once the image or
   placeholder has been decoded, painted (two animation frames) and on screen
@@ -2472,8 +2505,8 @@ empties the rest of the stack.
 - **Marking**: one `POST /mark` with the item's keys and `mode` the display
   mode (`single`, or `grid` for every item in grid mode), controls disabled
   while it is in flight, never retried. On a 200 the keys are pushed on the
-  page's stack of marked keys and the reply updates the status map. As in the
-  viewer, the marked item then stays up for `MARK_FLASH_MS` (200 ms) with the
+  page's stack of marked keys and the reply updates the status map. The
+  marked item then stays up for `MARK_FLASH_MS` (200 ms) with the
   bar in its new status (colour and word; a grid's from `gridStatus`), and the
   page is busy meanwhile: no verdict, move, undo, mode switch, `q` or `r`
   acts. Then it empties the status message (so a run of `c` and `d` keeps the
@@ -2487,8 +2520,8 @@ empties the rest of the stack.
   FLAGGED) is it the end of the pass: "Pass N: nothing left to review. Stop
   serve (Ctrl-C), start the next one, then press Reconnect (r)." with the
   Reconnect button, offered while no request is in flight and the page has not
-  stopped (a stop takes the hint off the stage; see *Errors*). Otherwise, as
-  the controller: in grid mode (whose list is one batch) "No todo images
+  stopped (a stop takes the hint off the stage; see *Errors*). Otherwise
+  (`elsewhereHint`): in grid mode (whose list is one batch) "No todo images
   remaining - [b] next batch" while any batch has grid items, else the
   pass-wide "No grid items for pass N; K FLAGGED/DIRTY images need single-mode
   review - press [s]"; in single mode (whose list is the whole pass, so only
@@ -2499,8 +2532,8 @@ empties the rest of the stack.
   `/statuses` instead, and stops with "unexpected reply from the server;
   reload the page" if that fails too.
 - **Navigation**: Left/Right (and buttons) step through the list without
-  marking. As the viewer's "End of list" message, a step past either end
-  shows the stop screen on the stage: a red octagonal stop sign (inline SVG,
+  marking. A step past either end shows the stop screen (`showListEnd`) on
+  the stage: a red octagonal stop sign (inline SVG,
   coloured by the CSS) over "End of the list", "→ first item · ← last item"
   and the list's todo count, "K todo left in this list" (grid mode: "K todo
   left in this batch - [b] next batch"), or, with none left in the list, the
@@ -2632,5 +2665,5 @@ are rejected.
 
 The workflow (grid triage in pass 1, single-image review of FLAGGED images in
 later passes, resuming, then `export`) is in
-[Multi-pass workflow](../tutorials/local-review.md#multi-pass-workflow); what
-each pass shows is in [Passes](../commands/review.md#passes).
+[Multi-pass workflow](../tutorials/browser-review.md#multi-pass-workflow); what
+each pass shows is in [Passes](../commands/browser.md#passes).

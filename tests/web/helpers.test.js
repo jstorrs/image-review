@@ -115,7 +115,7 @@ test("placement transform and min scale", () => {
   // Upright: source corners to the rect's, in order
   const upright = { key: "a", x: 10, y: 20, w: 50, h: 25, rotated: false, source: [200, 100] };
   assert.deepStrictEqual(plain(corners(upright)), [[10, 20], [60, 20], [60, 45], [10, 45]]);
-  // Rotated clockwise (pygame rotate(-90)): top-left to top-right, top-right to bottom-right, ...
+  // Rotated 90 degrees clockwise: top-left to top-right, top-right to bottom-right, ...
   const turned = { key: "b", x: 10, y: 20, w: 25, h: 50, rotated: true, source: [200, 100] };
   assert.deepStrictEqual(plain(corners(turned)), [[35, 20], [35, 70], [10, 70], [10, 20]]);
   assert.strictEqual(m.minScale([]), 1);

@@ -97,8 +97,7 @@ function singleItems(manifest, statuses, random = Math.random) {
   );
 }
 
-// Whether grid mode packs a key: as controller._review_rows with the todo filter,
-// todo and grid-eligible, i.e. UNREVIEWED.
+// Whether grid mode packs a key: todo and grid-eligible, i.e. UNREVIEWED.
 /** @param {string | undefined} status @returns {boolean} */
 function isGridTodo(status) {
   return isTodo(status) && GRID_ELIGIBLE.has(status);
@@ -116,8 +115,7 @@ function gridBatches(manifest, statuses) {
   return new Set(manifest.filter((row) => isGridTodo(statuses.get(row.key))).map((row) => row.batch));
 }
 
-// Todo rows of `batch` (null: every batch) that grid mode leaves out, as
-// controller._held_back_count with the todo filter: the FLAGGED ones.
+// Todo rows of `batch` (null: every batch) that grid mode leaves out: the FLAGGED ones.
 /** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {string | null} batch @returns {number} */
 function heldBackCount(manifest, statuses, batch) {
   return manifest.filter((row) => {
@@ -126,7 +124,7 @@ function heldBackCount(manifest, statuses, batch) {
   }).length;
 }
 
-// As controller._held_back_message (in session), or null.
+// The held-back message (see "Todo images" in docs/commands/browser.md), or null.
 /** @param {number | null} pass @param {number} held @returns {string | null} */
 function heldBackMessage(pass, held) {
   if (held === 0) {
@@ -156,7 +154,7 @@ function sortedBatches(manifest) {
   return [...new Set(manifest.map((row) => row.batch))].sort(compareCodePoints);
 }
 
-// As controller.next_batch with wrap: the first batch after `current` (null: from
+// The first batch after `current` (null: from
 // the first) that `accepts`, going round once back to `current` itself; null if none.
 /** @param {string[]} batches @param {string | null} current @param {(batch: string) => boolean} accepts @returns {string | null} */
 function nextBatch(batches, current, accepts) {
@@ -251,7 +249,7 @@ function gridItem(placements) {
   return { kind: "grid", placements, keys: placements.map((p) => p.key) };
 }
 
-// As controller._grid_items: the grids shuffled, then (stably) the fullest first,
+// The grids shuffled, then (stably) the fullest first,
 // then each left-out key as a single item.
 /** @param {GridPlan} plan @param {() => number} [random] @returns {Item[]} */
 function orderGridItems(plan, random = Math.random) {
@@ -280,8 +278,8 @@ function demoteKeys(items, index, failed) {
 }
 
 // The canvas matrix [a, b, c, d, e, f] that draws a source image (at its natural
-// size, from 0,0) into placement p. A rotated image turns clockwise, as pygame's
-// rotate(-90) in grid_packer: its top edge lands on the rect's right edge.
+// size, from 0,0) into placement p. A rotated image turns 90 degrees clockwise:
+// its top edge lands on the rect's right edge.
 /** @param {Placement} p @returns {[number, number, number, number, number, number]} */
 function placementTransform(p) {
   const [sw, sh] = p.source;

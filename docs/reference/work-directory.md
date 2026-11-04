@@ -167,7 +167,7 @@ is created by the first verdict.
 | `status` | `CLEAN` or `DIRTY`; `UNREVIEWED` only in an undo row (see [Undo rows](#undo-rows)) |
 | `pass_number` | Pass (an integer from 1 to 1000000) in which the verdict was given; in an undo row, the restored verdict's pass, or for a tombstone the undone mark's pass |
 | `timestamp` | ISO 8601 UTC time |
-| `reviewer` | Who gave the verdict: `review --reviewer`, by default the login name. An unverified claim made by the client, recorded as given |
+| `reviewer` | Who gave the verdict: the name from the browser page's name box, or `review --reviewer`. The rules are in [Recorded verdicts](../commands/browser.md#recorded-verdicts) and, for `review`, [Recorded verdicts](../commands/review.md#recorded-verdicts) |
 | `mode` | `single` or `grid`: the display mode the verdict was given in; `undo` for a row written by `z` |
 | `grid_size` | How many images the one keypress covered (1 in single mode); in an undo row, how many images the undo covered |
 | `tool_version` | The image-review version that wrote the row (`unknown` if not installed) |
@@ -197,7 +197,7 @@ appends a line per image and syncs it to disk, and when an image appears more
 than once its last line wins. Only images that have been marked appear; an
 image with no row, or whose last row is an undo's `UNREVIEWED`, is
 UNREVIEWED. FLAGGED (marked DIRTY in an earlier pass; see
-[review](../commands/review.md)) is worked out when the file is read and is
+[Passes](../commands/browser.md#passes)) is worked out when the file is read and is
 never written.
 
 **Strict parsing.** A malformed file stops the tool with the same

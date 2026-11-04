@@ -74,39 +74,12 @@ end-of-batch screen are described in
 
 ### Multi-pass workflow
 
-The intended workflow uses repeated passes to build confidence:
+The intended workflow, grid triage in pass 1 and then single-image review of
+the images marked DIRTY, pass after pass, is in
+[Multi-pass workflow](browser-review.md#multi-pass-workflow). With `review`,
+run pass 1 with `--mode grid` and the later passes with `--mode single`.
 
-1. **Pass 1** (grid triage): mark grids CLEAN or DIRTY. Err toward DIRTY.
-
-   ```bash
-   image-review review --mode grid
-   ```
-
-   Mark grids as CLEAN if every image in the grid looks clean. Mark DIRTY if
-   any image is suspicious. When you mark a grid, all constituent images get
-   that status. This is the fast pass.
-
-2. **Pass 2** (single review): only images marked DIRTY in pass 1 are shown,
-   as FLAGGED (orange status bar). Inspect them individually.
-
-   ```bash
-   image-review review --mode single --pass 2
-   ```
-
-   Mark obviously clean ones as CLEAN, mark the rest DIRTY again. Grid mode
-   skips FLAGGED and DIRTY images, so a grid keypress cannot clear them.
-   Review flagged images in single mode.
-
-3. **Pass 3+**: repeat on the shrinking DIRTY pool until confident.
-
-   ```bash
-   image-review review --mode single
-   ```
-
-   Each subsequent pass shows only the images still DIRTY from the previous
-   pass (FLAGGED in the new pass).
-
-The batch and the [pass number](../commands/review.md#passes) are
+The batch and the [pass number](../commands/browser.md#passes) are
 auto-detected when not specified. Press `b` at
 the end of a batch to move on to the next one, and into the next pass once
 this one is done (not with `--batch`, which keeps you in that batch); see

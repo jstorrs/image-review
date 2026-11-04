@@ -173,6 +173,39 @@ itself. Under `sbatch` the node name is only known when the job runs, so set
 it there if the default does not work from your laptop, e.g. `--ssh-host
 "$(hostname -f)"` or a site-specific name.
 
+## Multi-pass workflow
+
+The intended workflow uses repeated passes to build confidence. The page
+always reviews the current pass (see
+[Passes](../commands/browser.md#passes)); each pass needs one or more
+`serve` runs.
+
+1. **Pass 1** (grid triage): press `m` for grid mode and mark grids CLEAN
+   (`c`) or DIRTY (`d`). Err toward DIRTY.
+
+   Mark a grid CLEAN if every image in it looks clean, DIRTY if any image is
+   suspicious: every image in the grid gets that verdict. Press `b` for the
+   next batch with images to review. This is the fast pass.
+
+2. **Pass 2** (single review): once pass 1 is done, the page says so; start
+   the next `serve` and press Reconnect (`r`), as in
+   **Moving on to the next batch or pass** above. Only images marked DIRTY
+   in pass 1 are left, as FLAGGED (amber bar). Reconnect keeps the mode you
+   were in, so grid mode now says they need single-mode review: press `s`
+   and inspect them one at a time.
+
+   Mark obviously clean ones CLEAN and the rest DIRTY again. Grid mode
+   leaves out FLAGGED and DIRTY images, so a grid verdict cannot clear them.
+
+3. **Pass 3+**: repeat on the shrinking DIRTY pool until confident. Each
+   pass shows only the images still DIRTY from the previous pass (FLAGGED in
+   the new pass).
+
+Your marks are saved as you make them, so you can stop at any point: the
+next page load, or Reconnect, lists only what is still to review. When the
+last pass has nothing left, write the allowlist with
+[`image-review export`](../commands/export.md).
+
 ## Troubleshooting
 
 - `channel N: open failed: connect failed` from ssh: the node's sshd would

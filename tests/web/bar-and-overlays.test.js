@@ -378,7 +378,7 @@ tests["a stop's message persists until Reconnect; Reconnect's survives its own s
   assert.strictEqual(page.els["list-end"].hidden, false);
 };
 
-// As the pygame client: a mark that went through keeps the item up, the bar in its new
+// A mark that went through keeps the item up, the bar in its new
 // status, for MARK_FLASH_MS, then moves on; nothing else acts meanwhile.
 for (const [key, verdict] of [["c", "CLEAN"], ["d", "DIRTY"]]) {
   tests[key + " shows the marked status for " + MARK_FLASH_MS + " ms, then moves on; nothing acts meanwhile"] = async () => {

@@ -1,7 +1,7 @@
 "use strict";
 
-// Image review in the browser. The pygame client is the reference:
-// see docs/reference/specification.md, "Browser client".
+// Image review in the browser. The rules are in docs/reference/specification.md,
+// "Browser client", and docs/commands/browser.md.
 
 const TOKEN_HASH = /^#([A-Za-z0-9_-]+)$/;
 const MIN_DWELL_MS = 200;
@@ -12,7 +12,7 @@ const INSTANCE_HEADER = "X-Review-Instance"; // server.INSTANCE_HEADER
 const GRID_IMAGE_FETCHES = 4; // concurrent /image requests while a grid is drawn
 const GRID_RETRY_MS = 2000; // between /grids attempts while the server is busy
 const REPACK_DELAY_MS = 300; // resize debounce before grids are repacked
-const MARK_FLASH_MS = 200; // a marked item stays up this long, the bar in its new status, before the next (as pygame)
+const MARK_FLASH_MS = 200; // a marked item stays up this long, the bar in its new status, before the next
 
 const TOKEN_REJECTED = "token rejected (server restarted?) - open the new URL";
 const LOST_CONNECTION = "Lost connection — your marks so far are saved on the server";
@@ -22,7 +22,7 @@ const SERVER_CHANGED = "Server restarted or changed work directory - press Recon
 const NEXT_SERVE = "Stop serve (Ctrl-C), start the next one, then press Reconnect (r).";
 const WAITING = "Done; waiting for the next serve";
 const WAITING_DETAIL = "Done. Your marks are saved. " + NEXT_SERVE;
-// The end of a list with todo left elsewhere in the pass (as controller._end_message, NO_TODO_MESSAGE)
+// The end of a list with todo left elsewhere in the pass (see "End of a pass or batch" in docs/commands/browser.md)
 const NEXT_BATCH = "No todo images remaining - [b] next batch";
 const RELOAD_SINGLE = "No todo images remaining - press [s] to reload the list";
 const NOTHING_TO_UNDO = "Nothing to undo";
@@ -141,7 +141,7 @@ const state = {
   rotation: "auto", // grid mode's rotation policy: "auto" or "never"
   batch: null, // grid mode's batch, or null when no batch has grid items
   gridSize: null, // {width, height} in device pixels the grids are packed for, once measured
-  gridCache: null, // {key, plan}: the last /grids layout, as controller.GridCacheKey
+  gridCache: null, // {key, plan}: the last /grids layout, keyed by batch, keys, grid size and rotation
   gridsRequest: null, // the /grids request in flight, if any: never two at once
   buildSeq: 0, // bumped by every grid build or abandon, so a stale build is dropped
   repackTimer: null, // the pending resize repack, if any
@@ -596,9 +596,9 @@ async function startDwell(seq) {
   render();
 }
 
-// In grid mode a resize repacks, except on the end (or stop) screen: as the
-// controller, which repacks only while reviewing, the end screen keeps z, and
-// leaving it (z or an arrow) repacks first.
+// In grid mode a resize repacks, except on the end (or stop) screen: there it
+// does not, so the end screen keeps z, and leaving it (z or an arrow) repacks
+// first.
 function onResize() {
   const endScreen = state.index < 0 && state.items.length > 0 && state.repackTimer === null;
   if (!state.dead && gridMode() && !endScreen && (state.repackTimer !== null || gridSizeChanged())) {
@@ -642,7 +642,7 @@ function passDone() {
 }
 
 // Where the todo left in the pass, none of it in the list, is reviewed. Grid mode's list
-// is one batch, so there, as the controller, b moves on while a batch has grid items and
+// is one batch, so there b moves on while a batch has grid items and
 // s reviews what grids leave out; single mode's list is the whole pass, unless others
 // marked meanwhile.
 /** @returns {string | null} */
@@ -668,10 +668,9 @@ function showEnd() {
   render();
 }
 
-// An arrow past either end of the list: a stop sign (as the controller's
-// END_OF_LIST_MESSAGE), from which an arrow goes on round: -> the first item, <- the
-// last. With nothing left in the pass it is the end-of-pass screen instead, as
-// Reconnect is due then.
+// An arrow past either end of the list: a stop sign, from which an arrow goes on
+// round: -> the first item, <- the last. With nothing left in the pass it is the
+// end-of-pass screen instead, as Reconnect is due then.
 function showListEnd() {
   if (passDone()) {
     showEnd();
@@ -945,7 +944,7 @@ function describeKeys(keys) {
 async function mark(verdict) {
   const item = currentItem();
   if (item === null || !canJudge()) {
-    return; // too soon after the item appeared, or busy: ignored, as in the pygame client
+    return; // too soon after the item appeared, or busy: ignored
   }
   if (verdict === "CLEAN" && item.kind === "grid" && gridCleanRefused(item.keys, state.statuses)) {
     say(GRID_HAS_DIRTY);
@@ -989,7 +988,7 @@ async function mark(verdict) {
       say("Marked " + verdict + ": " + describeKeys(keys)); // a repack dropped the items meanwhile: no move
       return;
     }
-    // As the pygame client: the marked item stays up, the bar in its new status, for
+    // The marked item stays up, the bar in its new status, for
     // MARK_FLASH_MS, still busy (nothing else is judged, moved or sent), then the next
     // item (or the end screen). A stop (epoch), a repack (buildSeq) or a context loss or
     // other show (showSeq) meanwhile makes the move on stale, and it is dropped.
@@ -1123,7 +1122,7 @@ function leaveGrid() {
 
 // Build grid mode's items for state.batch and show the one holding `landKey`
 // (else the first). Messages instead when there is nothing to pack, the batch is
-// over MAX_GRID_KEYS (split, it would pack unlike pygame) or the window is too small.
+// over MAX_GRID_KEYS (split, its chunks would pack differently) or the window is too small.
 /** @param {string | null} landKey */
 async function buildGrids(landKey) {
   abandonItems();
@@ -1181,7 +1180,7 @@ function scheduleRepack() {
     state.landKey = itemKeys(item)[0];
   }
   abandonItems(); // also cancels the pending repack
-  state.marked = []; // as controller._rebuild_grids_for_resize: the old items are gone
+  state.marked = []; // the old items are gone, so z could not show what it undoes
   showNotice(COMPUTING_GRIDS);
   render();
   const repack = () => {
@@ -1203,7 +1202,7 @@ function canSwitch() {
   return !state.busy && !state.dead && state.pass !== null;
 }
 
-// As controller._restart_in_mode: reread the statuses, forget this page's marks
+// A mode switch (m, M, s, b): reread the statuses, forget this page's marks
 // and rebuild the items for `mode`. Grid mode stays on its batch while it has grid
 // items (else takes the first that has); with `nextBatchToo` it moves to the next
 // one with any, wrapping, and drops the cached layout.
