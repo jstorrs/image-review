@@ -1,23 +1,27 @@
 # image-review
 
-CLI tool for reviewing medical (DICOM) and general images for burned-in
-Protected Health Information (PHI).
+A command-line tool for reviewing medical (DICOM) and general images for
+burned-in Protected Health Information (PHI).
 
-Provides a three-phase workflow:
+The workflow has four steps:
 
-1. **Preprocess** raw DICOM/image files into normalized JPG batches
-2. **Review** images interactively in a fullscreen viewer (single or grid mode)
-3. **Status** reporting on review progress
+1. **Preprocess** raw DICOM and image files into normalized JPG batches.
+2. **Review** the images interactively in a fullscreen viewer, in single or
+   grid mode.
+3. **Status** reports on review progress.
+4. **Export** writes the allowlist of files that may be released.
+
+The documentation is at <https://jstorrs.github.io/image-review/>.
 
 ## Installation
 
-Requires Python >= 3.12.
+Requires Python >= 3.12. `pip install .` from a clone, or `pip install
+image-review` from a wheel or a package index, installs every command but
+`review`; add the viewer with `'.[viewer]'` / `'image-review[viewer]'`. See
+[Installation](docs/install.md) for the extras, cluster installs without
+root, compressed DICOMs and minimum dependency versions.
 
-```bash
-pip install .
-```
-
-## Quick Start
+## Quick start
 
 ```bash
 # Preprocess a directory of DICOMs or a ZIP archive
@@ -26,72 +30,51 @@ image-review preprocess /path/to/dicoms/ --work-dir ./review_work
 # Pass 1: grid triage — quickly mark entire grids CLEAN or DIRTY
 image-review review --mode grid
 
-# Pass 2: single review — inspect only the DIRTY images individually
+# Pass 2: single review — inspect only the flagged (pass-1 DIRTY) images individually
 image-review review --mode single
 
-# Check progress
+# Check progress (--check: exit 1 until every image has a verdict)
 image-review status
+
+# Write the allowlist of files that may be released (path + SHA-256), and a report of the rest
+image-review export --output allowlist.tsv --report report.tsv
 ```
 
-## Commands
+The default work directory is `./review_work`. Don't create work directories
+inside a git checkout (the repository's `.gitignore` excludes them as a
+safety net).
 
-### `image-review preprocess`
+The quick start is also on its own page: [Quick start](docs/quickstart.md).
 
-```
-image-review preprocess SOURCE [SOURCE ...] [--batch-size N]
-                                            [--work-dir DIR]
-                                            [--colormap NAME]
-```
+## Documentation
 
-Accepts ZIP files, directories, or individual image files. DICOM images are
-normalized with adaptive histogram equalization to enhance local contrast
-and a configurable colormap. Non-DICOM images are passed through (with
-the same contrast enhancement applied to grayscale). Output is organized into
-batch subdirectories with a `manifest.tsv` index.
+- [Local review](docs/tutorials/local-review.md): a walk-through of a whole
+  review on one machine.
+- [Browser review over SSH](docs/tutorials/browser-review.md): the
+  recommended way to review images that stay on the cluster, from your
+  laptop. There is nothing to install on the laptop but ssh and a browser,
+  and nothing to keep in sync: the page is served by `serve` itself, so it
+  always matches the server's version. The deprecated
+  [Python client](docs/tutorials/remote-review.md) must run the same version
+  as the server, and a mismatch is refused.
+- [Commands overview](docs/commands/index.md), with one page each for
+  [preprocess](docs/commands/preprocess.md),
+  [review](docs/commands/review.md), [status](docs/commands/status.md),
+  [export](docs/commands/export.md) and [serve](docs/commands/serve.md).
+- [Work directory](docs/reference/work-directory.md) and the
+  [specification](docs/reference/specification.md).
 
-### `image-review review`
+## Security
 
-```
-image-review review [--mode {single,grid}]            [--pass N]
-                    [--batch BATCH_ID]                 [--work-dir DIR]
-                    [--filter {unreviewed,clean,all}]  [--rotate/--no-rotate]
-```
+Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes. The
+[security model](docs/reference/security-model.md) states what the tool
+protects and its limits.
 
-Opens a fullscreen interactive session. In **grid mode**, images are
-bin-packed into composite grids for fast triage. In **single mode**, images
-are shown one at a time for detailed inspection.
+## Contributing
 
-| Key | Action |
-|-----|--------|
-| `c` | Mark CLEAN |
-| `d` | Mark DIRTY |
-| Left / Right | Navigate |
-| `n` | Jump to next todo item |
-| `u` | Toggle todo-only navigation |
-| Space | Toggle autoplay |
-| `s` | Single mode |
-| `m` | Grid mode (rotation allowed) |
-| `M` | Grid mode (no rotation) |
-| `h` | Help screen |
-| `w` | Select display |
-| `f` | Toggle fullscreen |
-| `q` / Escape | Quit |
+Development setup, the test, lint and type-check commands, and the project's
+conventions are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Xbox-style controllers are also supported (see help screen for mappings).
+## Changelog
 
-### `image-review status`
-
-```
-image-review status [--work-dir DIR]
-```
-
-Prints overall and per-batch counts of CLEAN / DIRTY / UNREVIEWED images.
-
-## Multi-Pass Workflow
-
-1. **Pass 1** (grid triage): Mark grids CLEAN or DIRTY. Err toward DIRTY.
-2. **Pass 2** (single review): Only DIRTY images are shown. Inspect individually.
-3. **Pass 3+**: Repeat on the shrinking DIRTY pool until confident.
-
-Sessions are resumable -- quitting saves all progress. The batch and pass
-number are auto-detected when not specified.
+See [CHANGELOG.md](CHANGELOG.md).

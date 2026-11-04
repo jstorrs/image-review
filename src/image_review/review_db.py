@@ -1,122 +1,524 @@
+import contextlib
 import csv
+import io
+import logging
 import os
-import sys
+import re
+import stat
 import tempfile
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import astuple, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, get_args
 
-VALID_STATUSES = {"CLEAN", "DIRTY"}
+from .access import policy_of_dir
+from .atomic import DIR_FSYNC_UNSUPPORTED, fsync_dir  # noqa: F401 (re-export)
+from .connection import MAX_PASS, package_version, parse_reviewer
+from .status import MARK_MODES, TODO_STATUSES, VERDICTS, ImageId, MarkMode, Status, Verdict, parse_choice
+
+log = logging.getLogger(__name__)
+
+HEADER = [
+    "image_id",
+    "batch",
+    "status",
+    "pass_number",
+    "timestamp",
+    "reviewer",
+    "mode",
+    "grid_size",
+    "tool_version",
+    "source_sha256",
+]
+# Older headers, which migrate() rewrites with HEADER: before the audit columns, and before source_sha256 (0.3.0, 0.4.0)
+LEGACY_HEADERS = (HEADER[:5], HEADER[:9])
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+# A row's mode in review.tsv: a MarkMode, or "undo" for a row written by undo_many (a restore or a tombstone).
+RowMode = MarkMode | Literal["undo"]
+# A row's status in review.tsv: a Verdict, or UNREVIEWED in a tombstone (mode "undo"), which erases the image's
+# earlier rows from the fold. FLAGGED is derived and never stored.
+RowStatus = Verdict | Literal["UNREVIEWED"]
+TOMBSTONE: RowStatus = "UNREVIEWED"
+# get_args() does not flatten a union of Literals, so these are built by hand.
+ROW_STATUSES: tuple[RowStatus, ...] = (*VERDICTS, TOMBSTONE)
+DECISION_MODES: tuple[RowMode | Literal[""], ...] = ("", *MARK_MODES, "undo")
+
+
+@dataclass(frozen=True, kw_only=True)
+class Decision:
+    image_id: ImageId
+    batch: str
+    status: RowStatus  # TOMBSTONE only in an undo row; latest() drops such an image_id
+    pass_number: int
+    timestamp: str
+    reviewer: str  # the client's unauthenticated claim; "" in rows from before it was recorded
+    mode: RowMode | Literal[""]  # "" in rows from before it was recorded
+    grid_size: int | None  # how many keys the verdict covered; None in rows from before it was recorded
+    tool_version: str  # image-review version that wrote the row; "" in rows from before it was recorded
+    # The manifest's SHA-256 of the source file (64 lowercase hex) when the verdict was recorded; "" in rows from
+    # before it was recorded or when the manifest has no hashes. Derived from PHI content: never leaves the work dir.
+    source_sha256: str
+
+    def applies_to(self, source_sha256: str | None) -> bool:
+        """Whether this verdict is on the content whose manifest hash is `source_sha256` (None: the manifest has
+        none). False only if both hashes are known and differ: a row without a hash (recorded before it was, or
+        migrated) is trusted by image_id, and so is any row when the manifest has nothing to compare with."""
+        return not (self.source_sha256 and source_sha256 and self.source_sha256 != source_sha256)
+
+
+def parse_sha256(text: str, name: str) -> str:
+    """A SHA-256 hex digest: exactly 64 lowercase hex characters. ValueError otherwise."""
+    if not _SHA256.fullmatch(text):
+        raise ValueError(f"{name} must be 64 lowercase hex characters")
+    return text
+
+
+def parse_decision(path: Path, line: int, fields: list[str], header: list[str]) -> Decision:
+    """One row of a review.tsv whose header is `header` (HEADER or one of LEGACY_HEADERS); a legacy row gets the
+    columns its header lacks empty."""
+    where = f"{path}:{line}"
+    if len(fields) != len(header):
+        raise ValueError(
+            f"{where}: expected {len(header)} tab-separated fields ({', '.join(header)}), got {len(fields)}"
+        )
+    padded = fields + [""] * (len(HEADER) - len(header))
+    image_id, batch, status, pass_text, timestamp, reviewer, mode, size_text, tool_version, source_sha256 = padded
+    if not image_id:
+        raise ValueError(f"{where}: image_id is empty")
+    row_status = parse_choice(status, ROW_STATUSES)
+    if row_status is None or (row_status == TOMBSTONE and mode != "undo"):
+        raise ValueError(
+            f"{where}: status must be one of {', '.join(get_args(Verdict))} ({TOMBSTONE} only in an undo row), got {status!r}"
+        )
+    try:
+        pass_number = int(pass_text)
+    except ValueError:
+        raise ValueError(f"{where}: pass_number must be an integer, got {pass_text!r}") from None
+    if pass_number < 1:
+        raise ValueError(f"{where}: pass_number must be at least 1, got {pass_number}")
+    if pass_number > MAX_PASS:
+        raise ValueError(f"{where}: pass_number must be at most {MAX_PASS}, got {pass_number}")
+    row_mode = parse_choice(mode, DECISION_MODES)
+    if row_mode is None:
+        raise ValueError(f"{where}: mode must be one of {', '.join(get_args(MarkMode))}, undo or empty, got {mode!r}")
+    grid_size = None
+    if size_text:
+        try:
+            grid_size = int(size_text)
+        except ValueError:
+            raise ValueError(f"{where}: grid_size must be an integer or empty, got {size_text!r}") from None
+        if grid_size < 1:
+            raise ValueError(f"{where}: grid_size must be at least 1, got {grid_size}")
+    try:
+        source_sha256 = parse_sha256(source_sha256, "source_sha256") if source_sha256 else ""
+    except ValueError as exc:
+        raise ValueError(f"{where}: {exc} or empty") from None
+    return Decision(
+        image_id=ImageId(image_id),
+        batch=batch,
+        status=row_status,
+        pass_number=pass_number,
+        timestamp=timestamp,
+        reviewer=reviewer,
+        mode=row_mode,
+        grid_size=grid_size,
+        tool_version=tool_version,
+        source_sha256=source_sha256,
+    )
+
+
+class ReviewLogChanged(RuntimeError):
+    """review.tsv is not the file this ReviewDB last loaded or wrote: another writer changed it. Nothing was written."""
+
+
+@dataclass(frozen=True)
+class PendingTruncate:
+    """A torn tail of review.tsv, from `offset` to the end, as seen in the file `ino` when it was `size` bytes."""
+
+    ino: int
+    size: int | None  # None: unknown after a failed append; only the inode is checked
+    offset: int
+
+    def matches(self, st: os.stat_result) -> bool:
+        return st.st_ino == self.ino and self.size in (None, st.st_size)
+
+
+@dataclass(frozen=True)
+class LegacyLog:
+    """A review.tsv with one of LEGACY_HEADERS, as loaded: every row, and the file (inode, size) they came from."""
+
+    ino: int
+    size: int
+    decisions: list[Decision]
+    width: int  # columns in its header
+
+
+def format_tsv(rows: Iterable[Sequence[object]]) -> str:
+    buf = io.StringIO()
+    csv.writer(buf, delimiter="\t").writerows(rows)  # csv's default "\r\n" line ending, as review.tsv has always used
+    return buf.getvalue()
+
+
+def decode_utf8(path: Path, data: bytes) -> str:
+    """`data` (the bytes of `path`) as text. ValueError naming the file and byte offset if it is not UTF-8."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path}: not valid UTF-8 at byte {exc.start}") from None
+
+
+def tsv_rows(path: Path, text: str) -> Iterator[tuple[int, list[str]]]:
+    """Every row of a tab-separated file's text (header first) with the line it ends on.
+
+    ValueError naming `path` and the line if csv refuses the text, as it does for a field over its 128 KiB limit.
+    """
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t")
+    try:
+        for fields in reader:
+            yield reader.line_num, fields
+    except csv.Error as exc:
+        raise ValueError(f"{path}:{reader.line_num}: {exc}") from None
+
+
+def parse_log(path: Path, data: bytes) -> tuple[list[Decision], int | None]:
+    """Every decision in review.tsv's bytes, in file order, and the header's width if it is one of LEGACY_HEADERS
+    (None: HEADER).
+
+    An empty file holds none and counts as current. Under HEADER, a last row with no line ending and an empty
+    source_sha256 is refused like any other bad line: a crash may have cut it at the tab before its hash.
+    """
+    if not data:
+        return [], None  # created but the first append never landed
+    rows = tsv_rows(path, decode_utf8(path, data))
+    _, header = next(rows, (1, None))
+    if header is None or (header != HEADER and header not in LEGACY_HEADERS):
+        raise ValueError(f"{path}:1: header must be {', '.join(HEADER)} (or an older one that migration rewrites)")
+    decisions = []
+    last_line = 1
+    for line, fields in rows:
+        decisions.append(parse_decision(path, line, fields, header))
+        last_line = line
+    if header == HEADER and decisions and not decisions[-1].source_sha256 and not data.endswith((b"\n", b"\r")):
+        raise ValueError(f"{path}:{last_line}: no line ending and an empty source_sha256 (cut short before its hash)")
+    return decisions, None if header == HEADER else len(header)
+
+
+def fold(rows: dict[ImageId, Decision], decisions: Iterable[Decision]) -> None:
+    """Apply decisions, in order, to rows (the last decision per image_id): a tombstone removes its image_id."""
+    for d in decisions:
+        if d.status == TOMBSTONE:
+            rows.pop(d.image_id, None)
+        else:
+            rows[d.image_id] = d
+
+
+def latest(decisions: Iterable[Decision]) -> dict[ImageId, Decision]:
+    """The last decision per image_id; an image_id whose last row is a tombstone has none."""
+    rows: dict[ImageId, Decision] = {}
+    fold(rows, decisions)
+    return rows
+
+
+def incomplete_last_mark(decisions: Sequence[Decision]) -> tuple[int, int] | None:
+    """(rows found, grid_size) if the trailing rows of one mark number fewer than its grid_size, else None.
+
+    A mark writes grid_size rows sharing one timestamp, reviewer and mode; a crash can leave some of them on disk,
+    cut at a line ending. The run is the trailing rows equal to the last row in all four; its length not being a
+    multiple of grid_size (two equal marks in one timestamp stay complete) means the last mark is cut short. Rows
+    with no grid_size (from before it was recorded) are never judged.
+    """
+    if not decisions:
+        return None
+    last = decisions[-1]
+    size = last.grid_size
+    if size is None:
+        return None
+    key = (last.timestamp, last.reviewer, last.mode, size)
+    count = 0
+    for d in reversed(decisions):
+        if (d.timestamp, d.reviewer, d.mode, d.grid_size) != key:
+            break
+        count += 1
+    return (count, size) if count % size else None
+
+
+@dataclass(frozen=True)
+class Change:
+    """One row mark_many wrote, and the image's decision just before it (None: it had none)."""
+
+    written: Decision
+    previous: Decision | None
 
 
 class ReviewDB:
-    HEADER = ["image_id", "batch", "status", "pass_number", "timestamp"]
-
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, *, sources: Mapping[ImageId, str]):
+        """`sources`: the manifest's source_sha256 per image_id (none for an image_id the manifest has no hash for),
+        recorded with each verdict mark_many writes, and what get_status and current_pass judge a row's staleness
+        against (see _current)."""
         self.work_dir = work_dir
+        self._sources = sources
         self.review_path = work_dir / "review.tsv"
-        self._rows: dict[str, dict] = {}  # keyed by image_id
+        self._rows: dict[ImageId, Decision] = {}  # keyed by image_id; last row wins (see latest(): never a tombstone)
+        self._truncate: PendingTruncate | None = None  # a torn tail to drop before the next append
+        self._cut_mark: tuple[int, int] | None = None  # (rows found, grid_size) of a last mark cut short; rows kept
+        self._legacy: LegacyLog | None = None  # an old-header file; appends refuse until migrate()
+        # review.tsv's (inode, size) as last loaded or written; None: absent when loaded, so only an empty file will do
+        self._seen: tuple[int, int] | None = None
         if self.review_path.exists():
             self._load()
 
     def _load(self) -> None:
-        with open(self.review_path, newline="") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            for row in reader:
-                try:
-                    row["pass_number"] = int(row["pass_number"])
-                    self._rows[row["image_id"]] = row
-                except (ValueError, KeyError) as exc:
-                    print(f"WARNING: skipping malformed row in {self.review_path}: {exc}", file=sys.stderr)
-
-    def _save(self) -> None:
-        fd, tmp = tempfile.mkstemp(dir=self.work_dir, suffix=".tsv")
+        with open(self.review_path, "rb") as f:
+            st = os.fstat(f.fileno())
+            data = f.read()
         try:
-            with os.fdopen(fd, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=self.HEADER, delimiter="\t")
-                writer.writeheader()
-                for row in self._rows.values():
-                    writer.writerow({**row, "pass_number": str(row["pass_number"])})
+            decisions, legacy = parse_log(self.review_path, data)
+        except ValueError as exc:
+            end = (
+                max(data.rfind(b"\n"), data.rfind(b"\r")) + 1
+            )  # just past the last complete line; csv also ends lines at a bare \r
+            if end == len(data):
+                raise
+            decisions, legacy = parse_log(
+                self.review_path, data[:end]
+            )  # raises if the problem is not only the last line
+            log.warning("ignoring the unfinished last line of %s (an interrupted write): %s", self.review_path, exc)
+            self._truncate = PendingTruncate(st.st_ino, len(data), end)
+        self._cut_mark = incomplete_last_mark(decisions)
+        if self._cut_mark is not None:
+            log.warning("the last mark in %s is cut short (an interrupted write); its rows are kept", self.review_path)
+        self._rows = latest(decisions)
+        self._seen = (st.st_ino, len(data))
+        if legacy is not None:
+            self._legacy = LegacyLog(st.st_ino, len(data), decisions, legacy)
+
+    def migrate(self) -> None:
+        """Rewrite an old-header review.tsv with HEADER, every row kept and the new columns empty; else nothing.
+
+        source_sha256 stays empty even where the manifest has a hash now: the file may have changed since the verdict.
+
+        Only for a writer holding the work dir lock. The new file is written and synced beside the old one, then
+        renamed over it, so readers see either file whole. A torn tail is dropped (it was never loaded).
+        """
+        if self._legacy is None:
+            return
+        legacy = self._legacy
+        st = os.stat(self.review_path)
+        if (st.st_ino, st.st_size) != (legacy.ino, legacy.size):
+            raise ReviewLogChanged(f"{self.review_path} changed since it was loaded; not migrating it")
+        file_mode = policy_of_dir(self.work_dir).file_mode
+        fd, tmp = tempfile.mkstemp(dir=self.work_dir, prefix=".review.tsv.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                os.fchmod(f.fileno(), file_mode)  # mkstemp creates 0600; teammates may need group access
+                f.write(format_tsv([HEADER, *map(astuple, legacy.decisions)]).encode("utf-8"))
+                f.flush()
+                os.fsync(f.fileno())
+                st = os.fstat(f.fileno())
             os.replace(tmp, self.review_path)
         except BaseException:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
             raise
+        self._legacy = None
+        self._truncate = None  # the torn tail was not copied
+        self._seen = (st.st_ino, st.st_size)
+        fsync_dir(self.work_dir)  # make the rename itself durable, where the filesystem can
 
-    def mark(self, image_id: str, batch: str, status: str, pass_number: int) -> None:
-        self.mark_many([image_id], batch, status, pass_number)
+    def _append(self, decisions: list[Decision]) -> None:
+        """Append decisions to review.tsv as one buffer (written in a loop that handles short writes), then fsync.
 
-    def mark_many(self, image_ids: list[str], batch: str, status: str, pass_number: int) -> None:
-        if status not in VALID_STATUSES:
-            raise ValueError(f"Invalid status {status!r}, must be one of {VALID_STATUSES}")
+        Earlier bytes never change, except a torn tail: one found by _load, or left by a failed append, is cut off first.
+        An old-header file is refused: its rows would not match the header until migrate() rewrites it. So is a file
+        that is not the one this ReviewDB last loaded or wrote (ReviewLogChanged): another writer appended to it or
+        replaced it, and a verdict decided from the state loaded here could override one recorded there.
+        """
+        if self._legacy is not None:
+            raise RuntimeError(
+                f"{self.review_path} has the old {self._legacy.width}-column header; migrate() it before appending"
+            )
+        rows = format_tsv(map(astuple, decisions))
+        file_mode = policy_of_dir(self.work_dir).file_mode
+        changed = (
+            f"{self.review_path} changed since it was loaded; not appending "
+            "(is another review or serve using this work directory?)"
+        )
+        try:  # create it only if it was absent when loaded: one deleted or moved since is a change, not a fresh start
+            fd = os.open(
+                self.review_path, os.O_RDWR | os.O_APPEND | (os.O_CREAT if self._seen is None else 0), file_mode
+            )
+        except FileNotFoundError:
+            raise ReviewLogChanged(changed) from None
+        try:
+            st = os.fstat(fd)
+            start = st.st_size
+            if self._truncate is not None:
+                if not self._truncate.matches(st):
+                    raise ReviewLogChanged(
+                        f"{self.review_path} changed since it was loaded; not truncating its unfinished last line"
+                    )
+                os.ftruncate(fd, self._truncate.offset)  # drop the torn tail
+                start = self._truncate.offset
+            elif (st.st_ino, st.st_size) != (self._seen if self._seen is not None else (st.st_ino, 0)):
+                raise ReviewLogChanged(changed)
+            if start == 0:
+                # a new (or empty) file: make its name durable before anything is written, so a failure leaves no rows
+                # on disk that memory lacks; the empty file left behind loads as no rows and the retry reopens it
+                fsync_dir(self.work_dir)
+            if start == 0:
+                if stat.S_IMODE(st.st_mode) != file_mode:
+                    os.fchmod(fd, file_mode)  # the umask may have stripped group bits teammates need to read it
+                payload = format_tsv([HEADER]) + rows
+            else:
+                last = os.pread(fd, 1, start - 1)
+                prefix = (
+                    "" if last == b"\n" else "\n" if last == b"\r" else "\r\n"
+                )  # finish a last line that parsed but lacks its ending
+                payload = prefix + rows
+            encoded = payload.encode("utf-8")
+            remaining = encoded
+            try:
+                while remaining:
+                    remaining = remaining[os.write(fd, remaining) :]  # os.write may write less than asked
+                os.fsync(fd)
+            except BaseException:
+                self._truncate = PendingTruncate(st.st_ino, None, start)  # whatever landed is a torn tail
+                with contextlib.suppress(OSError):
+                    os.ftruncate(fd, start)  # best effort; the next append retries it
+                with contextlib.suppress(OSError):  # the size, cut or not, so the next append can tell if it changed
+                    self._truncate = PendingTruncate(st.st_ino, os.fstat(fd).st_size, start)
+                raise
+        finally:
+            os.close(fd)
+        self._truncate = None
+        self._cut_mark = None
+        # what this writer wrote, not the file's size now: bytes another writer appended meanwhile are a change
+        self._seen = (st.st_ino, start + len(encoded))
+
+    def mark_many(
+        self, targets: list[tuple[ImageId, str]], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
+    ) -> list[Change]:
+        """Record one verdict on every (image_id, batch) in targets; grid_size is len(targets).
+
+        Returns each row written with the decision it replaced, for undo_many.
+        """
+        if status not in get_args(Verdict):
+            raise ValueError(f"Invalid status {status!r}, must be one of {get_args(Verdict)}")
+        if mode not in get_args(MarkMode):
+            raise ValueError(f"Invalid mode {mode!r}, must be one of {get_args(MarkMode)}")
+        if not 1 <= pass_number <= MAX_PASS:  # parse_decision would refuse the row when review.tsv is next loaded
+            raise ValueError(f"Invalid pass_number {pass_number!r}, must be from 1 to {MAX_PASS}")
+        reviewer = parse_reviewer(reviewer)  # a tab or newline would corrupt the log
         ts = datetime.now(UTC).isoformat()
-        for image_id in image_ids:
-            self._rows[image_id] = {
-                "image_id": image_id,
-                "batch": batch,
-                "status": status,
-                "pass_number": pass_number,
-                "timestamp": ts,
-            }
-        self._save()
+        tool_version = package_version()
+        changes = []
+        for image_id, batch in targets:
+            existing = self._rows.get(image_id)  # the raw row, even one for other content: undo restores it exactly
+            recorded_pass = max(existing.pass_number, pass_number) if existing else pass_number  # never decreases
+            changes.append(
+                Change(
+                    Decision(
+                        image_id=image_id,
+                        batch=batch,
+                        status=status,
+                        pass_number=recorded_pass,
+                        timestamp=ts,
+                        reviewer=reviewer,
+                        mode=mode,
+                        grid_size=len(targets),
+                        tool_version=tool_version,
+                        source_sha256=self._sources.get(image_id, ""),
+                    ),
+                    existing,
+                )
+            )
+        decisions = [c.written for c in changes]
+        self._append(
+            decisions
+        )  # on disk first; a failed append changes neither memory nor, once its tail is cut, the file
+        fold(self._rows, decisions)
+        return changes
 
-    def get_status(self, image_id: str, current_pass: int) -> str:
+    def undo_many(self, changes: list[Change], *, reviewer: str) -> None:
+        """Undo changes (one mark_many's result) in one append: each image's previous decision is written again
+        exactly (batch, status, pass_number, source_sha256; the pass may go down: it is a restore), or a tombstone in
+        the undone row's batch, pass and source_sha256 where there was none. Rows get mode "undo", `reviewer` and grid_size = images undone.
+        """
+        reviewer = parse_reviewer(reviewer)  # a tab or newline would corrupt the log
+        ts = datetime.now(UTC).isoformat()
+        tool_version = package_version()
+        by_image = {c.written.image_id: c for c in changes}  # an image_id given twice (keys sharing it) is undone once
+        decisions = [
+            replace(
+                c.previous if c.previous is not None else replace(c.written, status=TOMBSTONE),
+                timestamp=ts,
+                reviewer=reviewer,
+                mode="undo",
+                grid_size=len(by_image),
+                tool_version=tool_version,
+            )
+            for c in by_image.values()
+        ]
+        if not decisions:
+            return
+        self._append(decisions)  # on disk first, as in mark_many
+        fold(self._rows, decisions)
+
+    def decisions(self) -> dict[ImageId, Decision]:
+        """The latest decision per image_id (a copy; never a tombstone), as recorded: one for other content too (see
+        Decision.applies_to), which get_status counts as none.
+
+        ValueError if review.tsv ended in an unfinished line when loaded (the next append drops it), or its last mark
+        has fewer rows than its grid_size (the next append keeps them): the last verdict may be missing or
+        incomplete, so a result built from these decisions could be wrong. Both messages if both hold.
+        """
+        problems = []
+        if self._truncate is not None:
+            problems.append(
+                f"{self.review_path} ends in an unfinished line from an interrupted write, so the last verdict "
+                "may be missing. The next verdict recorded with `review` (or through `serve`) drops it; re-check the "
+                "last image reviewed before the interruption, then export again"
+            )
+        if self._cut_mark is not None:
+            found, size = self._cut_mark
+            problems.append(
+                f"the last mark in {self.review_path} was cut short by an interrupted write ({found} of {size} rows "
+                "written), so some images it covered may lack its verdict. The next verdict recorded with `review` "
+                "(or through `serve`) clears this; re-check the last grid or image reviewed before the interruption, "
+                "then export again"
+            )
+        if problems:
+            raise ValueError("; ".join(problems))
+        return dict(self._rows)
+
+    def _current(self, image_id: ImageId) -> Decision | None:
+        """The image's latest decision, or None if it has none or that verdict was recorded for other content (its
+        source_sha256 differs from the manifest's now: the file changed since), which counts as no verdict."""
         row = self._rows.get(image_id)
+        return row if row is not None and row.applies_to(self._sources.get(image_id)) else None
+
+    def get_status(self, image_id: ImageId, current_pass: int) -> Status:
+        row = self._current(image_id)
         if not row:
             return "UNREVIEWED"
-        if row["pass_number"] == current_pass:
-            return row["status"]
-        if row["status"] == "CLEAN":
-            return "CLEAN"
-        # DIRTY from a prior pass → treat as UNREVIEWED
-        return "UNREVIEWED"
+        if row.pass_number >= current_pass or row.status == "CLEAN":
+            return row.status  # this pass or a later one, as recorded; CLEAN holds across passes
+        return "FLAGGED"  # DIRTY in an earlier pass; needs re-review in this one
 
-    def images_by_status(self, manifest_rows: list[dict], pass_number: int, status_filter: str = "unreviewed", batch: str | None = None) -> list[dict]:
-        """Return manifest rows filtered by status.
-
-        status_filter: "unreviewed", "clean", or "all".
-        """
-        if status_filter not in ("all", "clean", "unreviewed"):
-            raise ValueError(f"Invalid status_filter {status_filter!r}, must be 'unreviewed', 'clean', or 'all'")
-        rows = [r for r in manifest_rows if not batch or r["batch"] == batch]
-        if status_filter == "all":
-            return rows
-        target = "CLEAN" if status_filter == "clean" else "UNREVIEWED"
-        return [r for r in rows if self.get_status(r["image_id"], pass_number) == target]
-
-    def current_pass(self, manifest_rows: list[dict]) -> int:
+    def current_pass(self, image_ids: Iterable[ImageId]) -> int:
         """Auto-detect the current pass number.
 
-        If any manifest image has no row in _rows, we're on pass 1.
-        Otherwise, next pass = max pass_number + 1.
+        If any manifest image has no current decision (none, or only one recorded for other content), we're on pass 1.
+        Otherwise, next pass = max pass_number + 1, at most MAX_PASS.
         """
-        manifest_ids = {row["image_id"] for row in manifest_rows}
-        if any(image_id not in self._rows for image_id in manifest_ids):
+        ids = set(image_ids)
+        rows = [row for i in ids if (row := self._current(i)) is not None]
+        if len(rows) < len(ids):
             return 1
-        max_pass = max(
-            (r["pass_number"] for r in self._rows.values() if r["image_id"] in manifest_ids),
-            default=0,
-        )
+        max_pass = max((row.pass_number for row in rows), default=0)
         # Stay on max_pass if it still has unfinished work
-        if any(self.get_status(r["image_id"], max_pass) == "UNREVIEWED" for r in manifest_rows):
+        if any(self.get_status(i, max_pass) in TODO_STATUSES for i in ids):
             return max_pass
-        return max_pass + 1
-
-    def summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, int]:
-        totals = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
-        for bc in self.batch_summary(manifest_rows, pass_number).values():
-            for k in totals:
-                totals[k] += bc[k]
-        return totals
-
-    def batch_summary(self, manifest_rows: list[dict], pass_number: int) -> dict[str, dict[str, int]]:
-        batches: dict[str, dict[str, int]] = {}
-        for row in manifest_rows:
-            batch = row["batch"]
-            if batch not in batches:
-                batches[batch] = {"CLEAN": 0, "DIRTY": 0, "UNREVIEWED": 0, "total": 0}
-            status = self.get_status(row["image_id"], pass_number)
-            batches[batch][status] += 1
-            batches[batch]["total"] += 1
-        return batches
+        return min(max_pass + 1, MAX_PASS)  # never a pass the server would refuse

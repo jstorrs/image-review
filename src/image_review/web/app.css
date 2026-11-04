@@ -1,0 +1,505 @@
+/* A dark neutral surround, so burned-in text in the image is easy to read. The
+   stage stays dark in either colour scheme; the bar and the overlays follow it. */
+:root {
+  color-scheme: dark;
+  --bg: #1a1a1a;
+  --stage: #101010;
+  --fg: #e6e6e6;
+  --border: #404040;
+  /* The bar takes the current item's status colour (data-status on #bar), with
+     text and buttons chosen per tint for contrast (WCAG AA, 4.5:1 or more) */
+  --neutral: #262626;
+  --neutral-fg: #e6e6e6;
+  --neutral-button: #3a3a3a;
+  --clean: #1d5c22;
+  --clean-fg: #ffffff;
+  --clean-button: #13431a;
+  --dirty: #a01818;
+  --dirty-fg: #ffffff;
+  --dirty-button: #741010;
+  --flagged: #e8a317;
+  --flagged-fg: #111111;
+  --flagged-button: #f6c86a;
+  /* The verdict buttons keep their own colours, darker on their own tint */
+  --clean-verdict: #2e7d32;
+  --dirty-verdict: #c62828;
+  --clean-verdict-on-clean: #2e7d32;
+  --dirty-verdict-on-dirty: #c62828;
+  --panel: #262626;
+  --panel-fg: #e6e6e6;
+  --panel-border: #5a5a5a;
+  --input: #101010;
+  --invalid: #ff8a80;
+  /* The stop sign at either end of the list: on the stage, dark in either scheme */
+  --stop: #c62828;
+  --stop-fg: #ffffff;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --border: #b5b5b5;
+    --neutral: #ececec;
+    --neutral-fg: #1a1a1a;
+    --neutral-button: #ffffff;
+    --clean: #2e7d32;
+    --clean-button: #1f5d23;
+    --dirty: #c62828;
+    --dirty-button: #8e1c1c;
+    --clean-verdict-on-clean: #14451a;
+    --dirty-verdict-on-dirty: #6e1212;
+    --flagged: #ffb300;
+    --flagged-button: #ffd666;
+    --panel: #fafafa;
+    --panel-fg: #1a1a1a;
+    --panel-border: #9e9e9e;
+    --input: #ffffff;
+    --invalid: #b3261e;
+  }
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.4 system-ui, sans-serif;
+}
+
+#stage {
+  position: relative; /* the overlays float over it, so opening one never resizes it */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--stage);
+}
+
+#image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Drawn at device pixels; app.js sets its CSS size to match, so it is never scaled here */
+#grid {
+  display: block;
+  flex: none;
+}
+
+.notice {
+  margin: 1rem;
+  padding: 1rem 1.5rem;
+  border: 1px solid var(--border);
+  font-size: 1.2rem;
+  overflow-wrap: anywhere;
+}
+
+/* The list-end screen: a stop sign over a few lines of text, centred in the
+   stage like a notice and never larger than it */
+#list-end {
+  box-sizing: border-box;
+  max-height: 100%;
+  margin: 1rem;
+  overflow: hidden;
+  text-align: center;
+  font-size: 1.2rem;
+}
+
+#list-end p {
+  margin: 0.4rem 0;
+}
+
+.stop-sign {
+  display: block;
+  width: min(8rem, 25vh);
+  height: min(8rem, 25vh);
+  margin: 0 auto 0.6rem;
+}
+
+.stop-face {
+  fill: var(--stop);
+}
+
+.stop-rim {
+  fill: none;
+  stroke: var(--stop-fg);
+  stroke-width: 3;
+}
+
+.stop-word {
+  font: 700 25px system-ui, sans-serif;
+  fill: var(--stop-fg);
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.stop-title {
+  font-weight: 700;
+}
+
+/* ---- The bar: one row of fixed height (a second, shorter one at or below
+   the breakpoint further down, set by the window's width alone), so no text
+   or visibility change resizes the stage (which would repack the grids and
+   clear undo). Nothing wraps; long text is cut short with an ellipsis and its
+   title holds it whole. Its font is a fixed 15px and its breakpoints below
+   are in px, so what fits at a width fits whatever the browser's default
+   font size (an em breakpoint would follow that default, the 15px text
+   would not); browser zoom scales both alike. Its sizes are in em of its
+   font. ---- */
+
+#bar {
+  --tint: var(--neutral);
+  --tint-fg: var(--neutral-fg);
+  --button: var(--neutral-button);
+  --bar-height: 2.8em;
+  --centre-height: 1.6em; /* the second row, at or below the breakpoint: text only */
+  --pad: 0.5em;
+  position: relative; /* the centre group's second row, below the breakpoint, is placed in it */
+  flex: none;
+  height: var(--bar-height);
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--pad);
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 15px; /* fixed, as the px breakpoints below */
+  color: var(--tint-fg);
+  background: var(--tint);
+  border-top: 1px solid var(--border);
+}
+
+#bar[data-status="CLEAN"] {
+  --tint: var(--clean);
+  --tint-fg: var(--clean-fg);
+  --button: var(--clean-button);
+  --clean-verdict: var(--clean-verdict-on-clean);
+}
+
+#bar[data-status="DIRTY"] {
+  --tint: var(--dirty);
+  --tint-fg: var(--dirty-fg);
+  --button: var(--dirty-button);
+  --dirty-verdict: var(--dirty-verdict-on-dirty);
+}
+
+#bar[data-status="FLAGGED"] {
+  --tint: var(--flagged);
+  --tint-fg: var(--flagged-fg);
+  --button: var(--flagged-button);
+}
+
+/* The row holds three groups: the controls on the left, the status message
+   (or, with none, the item's mode, progress and place) centred in the space
+   between, and the reviewer, "?" and Done or Reconnect pinned at the right end */
+.row {
+  flex: none;
+  height: var(--bar-height);
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.4em;
+  overflow: hidden;
+}
+
+.left,
+.centre,
+.right {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: inherit;
+}
+
+.left > *,
+.centre > *,
+.right > * {
+  flex: none;
+  margin: 0;
+}
+
+/* When the row is short of room the centre gives way first (it has none of its
+   own, only what is left over), then the reviewer's name, down to its "✎",
+   and only then the left group, cut at its right end. The right group never
+   shrinks below its content, so Done and Reconnect are never clipped. */
+.left {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.centre {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  justify-content: center;
+}
+
+/* Shrinks a million times faster than the left group, so in effect first;
+   pushed to the right end when the centre is a row of its own */
+.right {
+  flex: 0 1000000 auto;
+  margin-left: auto;
+}
+
+/* A message takes the centre's place; with none, the mode, progress and place
+   are shown (app.js empties the message, never hides it) */
+#status:not(:empty) ~ * {
+  display: none;
+}
+
+/* Empty, it stays rendered (a live region a screen reader keeps watching) but
+   out of the flow and unseen */
+#status:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+#status {
+  flex: 0 1 auto;
+}
+
+button {
+  padding: 0.25em 0.6em;
+  font: inherit;
+  color: var(--tint-fg, var(--panel-fg));
+  background: var(--button, var(--neutral-button));
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+#clean:not(:disabled) {
+  color: #ffffff;
+  background: var(--clean-verdict);
+}
+
+#dirty:not(:disabled) {
+  color: #ffffff;
+  background: var(--dirty-verdict);
+}
+
+/* The status word: the bar's colour is never the only cue */
+#item-status {
+  padding: 0 0.4em;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-weight: 700;
+}
+
+#scale {
+  padding: 0 0.3em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Below 100%: the bar's colours inverted, so it stands out on every tint */
+#scale.low {
+  color: var(--tint);
+  background: var(--tint-fg);
+  border-radius: 3px;
+  font-weight: 700;
+}
+
+#mode {
+  font-weight: 600;
+}
+
+/* What may be cut short: the where text first, then the others by their share */
+#mode,
+#progress,
+#where,
+#status,
+#reviewer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#mode {
+  flex: 0 0.3 auto;
+}
+
+#progress {
+  flex: 0 1 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+#where {
+  flex: 0 1000 auto;
+}
+
+/* The name's column may shrink to nothing (minmax(0, ...)), so the chip's
+   narrowest is its "✎" alone */
+#reviewer-chip {
+  flex: 0 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, max-content) auto;
+  column-gap: 0.3em;
+  align-items: center;
+  max-width: 12em;
+}
+
+/* Done and Reconnect share one place, as wide as the wider: Reconnect takes it
+   while offered, and showing it never moves or resizes anything */
+.end {
+  display: grid;
+}
+
+.end > button {
+  grid-area: 1 / 1;
+}
+
+.end > [hidden] {
+  display: block !important;
+  visibility: hidden;
+}
+
+/* Narrow windows drop the key hints from the buttons (the help lists the keys)
+   and tighten the spacing, leaving the text more room */
+@media (max-width: 960px) {
+  #bar {
+    --pad: 0.25em;
+  }
+
+  .row {
+    gap: 0.25em;
+  }
+
+  #bar button {
+    padding: 0.25em 0.4em;
+  }
+
+  #bar .key {
+    display: none;
+  }
+}
+
+/* Shorter labels for the narrowest windows (see below) */
+.short {
+  display: none;
+}
+
+/* The narrowest windows shorten Clean, Dirty and Undo to "C", "D" and "↶" (their
+   titles and labels keep the names), so the left group, scale badge included,
+   fits beside the right group down to 520 CSS pixels */
+@media (max-width: 640px) {
+  #bar .long {
+    display: none;
+  }
+
+  #bar .short {
+    display: inline;
+  }
+}
+
+/* At or below this width the centre group would cut the longest messages
+   short, so it gets a second row of its own, as wide as the bar, under the
+   left and right groups. The breakpoint depends on the window's width alone,
+   so the bar's height never changes with its content. */
+@media (max-width: 1408px) {
+  #bar {
+    height: calc(var(--bar-height) + var(--centre-height));
+  }
+
+  .centre {
+    position: absolute;
+    top: var(--bar-height);
+    right: 0;
+    left: 0;
+    height: var(--centre-height);
+    padding: 0 var(--pad);
+  }
+}
+
+/* ---- Overlays: over the stage, never part of its layout ---- */
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.box {
+  box-sizing: border-box;
+  max-width: min(38rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  overflow: auto;
+  padding: 1rem 1.5rem;
+  color: var(--panel-fg);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.box h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.2rem;
+}
+
+.box p {
+  margin: 0.5rem 0;
+}
+
+.name-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+#reviewer {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.4rem;
+  font: inherit;
+  color: var(--panel-fg);
+  background: var(--input);
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+}
+
+#reviewer.invalid {
+  border-color: var(--invalid);
+}
+
+.hint {
+  font-size: 0.9em;
+}
+
+.keys {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 1rem;
+  margin: 0;
+}
+
+.keys dt {
+  font-weight: 700;
+  font-family: ui-monospace, monospace;
+}
+
+.keys dd {
+  margin: 0;
+}

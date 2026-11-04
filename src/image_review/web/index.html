@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>image-review</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/helpers.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<main id="stage">
+<img id="image" alt="" hidden>
+<canvas id="grid" width="0" height="0" hidden></canvas>
+<p id="placeholder" class="notice" hidden></p>
+<p id="message" class="notice" hidden></p>
+<div id="list-end" hidden>
+<svg class="stop-sign" viewBox="0 0 100 100" aria-hidden="true">
+<polygon class="stop-face" points="29.3,0 70.7,0 100,29.3 100,70.7 70.7,100 29.3,100 0,70.7 0,29.3"/>
+<polygon class="stop-rim" points="31.4,5 68.6,5 95,31.4 95,68.6 68.6,95 31.4,95 5,68.6 5,31.4"/>
+<text class="stop-word" x="50" y="50">STOP</text>
+</svg>
+<p class="stop-title">End of the list</p>
+<p>&rarr; first item &middot; &larr; last item</p>
+<p id="list-end-detail"></p>
+</div>
+<div id="name-box" class="overlay" hidden>
+<div class="box" role="dialog" aria-labelledby="name-title">
+<h2 id="name-title">Who is reviewing?</h2>
+<p>Your name (1-64 characters) is recorded with every verdict.</p>
+<div class="name-row">
+<input id="reviewer" type="text" autocomplete="off" spellcheck="false" aria-labelledby="name-title">
+<button type="button" tabindex="-1" id="name-ok">OK</button>
+</div>
+<p class="hint">Enter accepts; Escape keeps the current name.</p>
+</div>
+</div>
+<div id="help" class="overlay" hidden>
+<div class="box" tabindex="-1" role="dialog" aria-labelledby="help-title">
+<h2 id="help-title">Keys</h2>
+<dl class="keys">
+<dt>c</dt><dd>Mark the image (or every image in the grid) CLEAN</dd>
+<dt>d</dt><dd>Mark it DIRTY</dd>
+<dt>&larr; &rarr;</dt><dd>Previous / next item, without marking; past either end a stop sign, then round to the other end</dd>
+<dt>z</dt><dd>Undo this page's latest mark and show it again</dd>
+<dt>m</dt><dd>Grid mode for the current batch (images may be rotated)</dd>
+<dt>M</dt><dd>Grid mode without rotation</dd>
+<dt>s</dt><dd>Single mode (rereads the list)</dd>
+<dt>b</dt><dd>Grid mode: the next batch with images to review</dd>
+<dt>r</dt><dd>Reconnect, when its button is shown: after a lost connection, after q, or at the end of a pass</dd>
+<dt>q</dt><dd>Done with this server: nothing more is sent; the page waits for the next serve</dd>
+<dt>? h</dt><dd>This help (Escape closes it)</dd>
+</dl>
+<p>The bar's colour is the item's status, also written in it: grey UNREVIEWED, green CLEAN, red DIRTY, amber FLAGGED (grey too on the end and stop-sign screens and while stopped). A scale badge such as &ldquo;&#9888; 46%&rdquo; means the image is shrunk to fit: small burned-in text can be lost, so enlarge the window.</p>
+<p>A verdict counts only once the item has been on screen for a moment; closing this help starts that wait again.</p>
+<p>When the pass is done the page says so: stop serve (Ctrl-C), start the next one, then press Reconnect (r). To move on to the next serve earlier (another batch), press q first. Your marks are saved as you make them.</p>
+</div>
+</div>
+</main>
+<footer id="bar" class="bar" data-status="">
+<div class="row">
+<div class="left">
+<button type="button" tabindex="-1" id="prev" title="Previous (&larr;)" disabled>&larr;</button>
+<button type="button" tabindex="-1" id="next" title="Next (&rarr;)" disabled>&rarr;</button>
+<button type="button" tabindex="-1" id="clean" class="verdict" title="Clean (c)" aria-label="Clean (c)" disabled>C<span class="long">lean</span><span class="key"> (c)</span></button>
+<button type="button" tabindex="-1" id="dirty" class="verdict" title="Dirty (d)" aria-label="Dirty (d)" disabled>D<span class="long">irty</span><span class="key"> (d)</span></button>
+<button type="button" tabindex="-1" id="undo" title="Undo (z)" aria-label="Undo (z)" disabled><span class="long">Undo</span><span class="short">&#8630;</span><span class="key"> (z)</span></button>
+<span id="item-status" hidden></span>
+<span id="scale" hidden title="Display scale: below 100% the image is shrunk and small text may be lost"></span>
+</div>
+<div class="centre">
+<span id="status" role="status">loading...</span>
+<span id="mode">Single</span>
+<span id="progress"></span>
+<span id="where"></span>
+</div>
+<div class="right">
+<button type="button" tabindex="-1" id="reviewer-chip" title="Reviewer (click to change)"><span id="reviewer-name"></span>&#9998;</button>
+<button type="button" tabindex="-1" id="help-button" title="Keys and help (? or h)">?</button>
+<span class="end">
+<button type="button" tabindex="-1" id="done">Done<span class="key"> (q)</span></button>
+<button type="button" tabindex="-1" id="reconnect" hidden>Reconnect<span class="key"> (r)</span></button>
+</span>
+</div>
+</div>
+</footer>
+</body>
+</html>

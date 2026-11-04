@@ -1,103 +1,140 @@
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import NamedTuple
+import logging
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import pygame as pg
-from rectpack import newPacker
 
-from .util import load_surface, safe_path
+from .layout import PlacedRect, fit_size, is_rotated, jpeg_size, plan_grids
+from .status import Key, Rotation
+from .store import ReviewStore
+from .util import load_surface
+
+log = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class GridSpec:
     surface: pg.Surface
-    image_ids: list[str] = field(default_factory=list)
-    batch: str = ""
+    keys: tuple[Key, ...]
+    min_scale: float  # the smallest fit_size / source size ratio among the images drawn
 
 
-class PlacedRect(NamedTuple):
-    rect_id: int
-    x: int
-    y: int
-    w: int
-    h: int
+def _composite_bin(
+    placed: Sequence[PlacedRect],
+    keys: Sequence[Key],
+    blobs: dict[Key, bytes],
+    sizes: dict[int, tuple[int, int]],
+    grid_w: int,
+    grid_h: int,
+    rotated: bool,
+    on_done: Callable[[], None],
+) -> tuple[GridSpec, list[int]]:
+    """Decode and blit one bin's images; their surfaces are released when this returns.
+
+    Returns the grid, holding only the keys whose pixels were drawn, and the rect ids that
+    failed to decode (their rectangles stay black)."""
+    canvas = pg.Surface((grid_w, grid_h))
+    canvas.fill((0, 0, 0))
+    drawn: list[Key] = []
+    min_scale = 1.0
+    failed: list[int] = []
+    for rect in placed:
+        rect_id, x, y, w, h = rect
+        key = keys[rect_id]
+        target = fit_size(*sizes[rect_id], grid_w, grid_h, rotated)
+        try:
+            surface = load_surface(blobs[key])
+            if surface.get_size() != sizes[rect_id]:
+                raise ValueError(f"decoded size {surface.get_size()} differs from header size {sizes[rect_id]}")
+            if surface.get_size() != target:
+                surface = pg.transform.smoothscale(surface, target)
+            if is_rotated(rect, sizes[rect_id], grid_w, grid_h, rotated):
+                surface = pg.transform.rotate(surface, -90)
+            if surface.get_size() != (w, h):
+                raise ValueError(f"surface size {surface.get_size()} differs from its packed rectangle {(w, h)}")
+        except Exception as exc:  # noqa: BLE001 - any decode failure makes the image unloadable, not fatal
+            log.warning("cannot load %s: %s", key, exc)
+            failed.append(rect_id)
+        else:
+            canvas.blit(surface, (x, y))
+            drawn.append(key)
+            min_scale = min(min_scale, target[0] / sizes[rect_id][0], target[1] / sizes[rect_id][1])
+        on_done()
+    return GridSpec(surface=canvas, keys=tuple(drawn), min_scale=min_scale), failed
 
 
 def pack_into_grids(
-    items: list[dict],
-    work_dir: Path,
+    keys: Sequence[Key],
+    store: ReviewStore,
     grid_w: int,
     grid_h: int,
     *,
-    allow_rotation: bool = True,
-) -> list[GridSpec]:
-    """Pack review items into grid canvases sized for the current screen.
+    rotation: Rotation = "auto",
+    on_progress: Callable[[int, int], None] | None = None,
+) -> tuple[list[GridSpec], list[Key]]:
+    """Pack the images named by `keys` into grid canvases sized for the current screen.
 
-    Each item is a manifest dict with keys: image_id, batch, preprocessed_path.
-    Returns a list of GridSpec, each holding a composited pygame surface.
+    Image bytes are fetched via the store. Images are packed at their fit_size, read from the image
+    header, and decoded one bin at a time while that bin is composited. `rotation` says whether images
+    may be rotated 90 degrees: always, never, or (auto) only if that needs fewer grids. Returns the
+    GridSpecs, each holding a composited pygame surface, and the keys left out of every grid (missing,
+    unreadable header, failed decode, or left unpacked), in input order. A grid holds only keys whose
+    pixels it shows. on_progress(i, n) is called as each of the n images is handled, ending with (n, n).
     """
-    # Load all surfaces upfront — avoids opening each file twice
-    surfaces = []
-    skipped: set[int] = set()
-    for idx, item in enumerate(items):
-        path = safe_path(work_dir, item["preprocessed_path"])
-        try:
-            surfaces.append(load_surface(str(path)))
-        except Exception as exc:
-            print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
-            surfaces.append(None)
-            skipped.add(idx)
+    n = len(keys)
+    done = 0
 
-    sizes = [s.get_size() if s is not None else (0, 0) for s in surfaces]
+    def advance() -> None:
+        nonlocal done
+        done += 1
+        if on_progress is not None:
+            on_progress(done, n)
 
-    # Bin-pack
-    packer = newPacker(rotation=allow_rotation)
-    packer.add_bin(grid_w, grid_h, float("inf"))
-    for idx, (w, h) in enumerate(sizes):
-        if idx not in skipped:
-            packer.add_rect(w, h, idx)
-    packer.pack()
+    blobs = store.image_bytes_many(list(keys))
 
-    # Identify which items were packed into which bins
-    packed = set()
-    bins: dict[int, list[PlacedRect]] = {}
-    for bin_idx, x, y, w, h, rect_id in packer.rect_list():
-        bins.setdefault(bin_idx, []).append(PlacedRect(rect_id, x, y, w, h))
-        packed.add(rect_id)
-
-    grids = []
-
-    # Composite each bin into a surface
-    for bin_idx in sorted(bins):
-        canvas = pg.Surface((grid_w, grid_h))
-        canvas.fill((0, 0, 0))
-        image_ids = []
-        batch = ""
-        for rect_id, x, y, w, h in bins[bin_idx]:
-            item = items[rect_id]
-            image_ids.append(item["image_id"])
-            if not batch:
-                batch = item["batch"]
-            img_surface = surfaces[rect_id]
-            orig_w, orig_h = img_surface.get_size()
-            if (w, h) == (orig_w, orig_h):
-                canvas.blit(img_surface, (x, y))
-            else:
-                rotated = pg.transform.rotate(img_surface, -90)
-                canvas.blit(rotated, (x, y))
-        grids.append(GridSpec(surface=canvas, image_ids=image_ids, batch=batch))
-
-    # Overflow: images too large to fit any bin become single-image grids
-    for idx in range(len(items)):
-        if idx in skipped:
+    # Sizes from the headers only: no image is decoded yet
+    sizes: dict[int, tuple[int, int]] = {}
+    left_out: set[int] = set()
+    for idx, key in enumerate(keys):
+        if key not in blobs:  # absent: the store already warned
+            left_out.add(idx)
+            advance()
             continue
-        if idx not in packed:
-            item = items[idx]
-            grids.append(GridSpec(
-                surface=surfaces[idx],
-                image_ids=[item["image_id"]],
-                batch=item["batch"],
-            ))
+        try:
+            w, h = jpeg_size(blobs[key])
+        except Exception as exc:  # noqa: BLE001 - an unreadable header makes the image unloadable, not fatal
+            log.warning("cannot load %s: %s", key, exc)
+            left_out.add(idx)
+            advance()
+            continue
+        sizes[idx] = (w, h)
 
-    return grids
+    # Bin-pack at the fit sizes; no pixels are read
+    plan = plan_grids(sizes, grid_w, grid_h, rotation)
+
+    # Composite one bin at a time, so at most one bin's decoded images are alive
+    grids = []
+    for placed in plan.bins:
+        grid, failed = _composite_bin(placed, keys, blobs, sizes, grid_w, grid_h, plan.rotated, advance)
+        left_out.update(failed)
+        if grid.keys:
+            grids.append(grid)
+
+    # fit_size makes every image fit a bin, so the packer should leave none out; any it does is
+    # left to the caller (shown as a single image, loaded on display) rather than dropped
+    for idx in plan.unpacked:
+        log.warning("%s was not packed into a grid", keys[idx])
+        left_out.add(idx)
+        advance()
+
+    log.debug(
+        "packed %d images into %d grids of %dx%d (rotation %s, rotated: %s); %d left out",
+        n,
+        len(grids),
+        grid_w,
+        grid_h,
+        rotation,
+        plan.rotated,
+        len(left_out),
+    )
+    return grids, [keys[idx] for idx in sorted(left_out)]

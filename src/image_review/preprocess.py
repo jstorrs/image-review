@@ -1,158 +1,2438 @@
-import csv
+import hashlib
+import importlib.metadata
+import importlib.util
 import io
-import sys
-from collections.abc import Iterator
-from pathlib import Path
-from zipfile import ZipFile
+import json
+import logging
+import math
+import multiprocessing
+import os
+import re
+import shutil
+import signal
+import stat
+import struct
+import unicodedata
+import warnings
+import zlib
+from collections import Counter, deque
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import Executor, Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import closing, contextmanager, suppress
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from functools import partial
+from itertools import chain, groupby, pairwise
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any, Literal, assert_never, cast
+from zipfile import ZIP_BZIP2, ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, BadZipFile, ZipFile, ZipInfo
 
-import matplotlib.pyplot as plt
+import imagecodecs
+import matplotlib
 import numpy as np
 import pydicom
 import skimage as ski
+import tifffile
+from PIL import ExifTags, Image, JpegImagePlugin, MpoImagePlugin, PngImagePlugin, TiffImagePlugin
+from pydicom.encaps import generate_fragmented_frames
+from pydicom.errors import InvalidDicomError
+from pydicom.uid import (
+    UID,
+    ExplicitVRBigEndian,
+    ExplicitVRLittleEndian,
+    ImplicitVRLittleEndian,
+    JPEG2000TransferSyntaxes,
+    JPEGLSTransferSyntaxes,
+    JPEGTransferSyntaxes,
+    MediaStorageDirectoryStorage,
+    RLELossless,
+)
+from scipy import ndimage as ndi
 from tqdm import tqdm
+
+from .access import MANIFEST_NAME, Access, Modes, modes
+from .atomic import fsync_dir, sync_parent
+from .connection import package_version
+from .export import ALL_ZERO_SUFFIX, NOTE_KINDS, NoteKind, has_unsafe_char
+from .review_db import format_tsv
+from .status import ImageId
+from .store import (
+    MANIFEST_HEADER,
+    NOTES_HEADER,
+    NOTES_NAME,
+    SKIPPED_HEADER,
+    SKIPPED_NAME,
+    SkipKind,
+    SkippedRow,
+    skipped_counts,
+)
+
+if TYPE_CHECKING:
+    import bz2
+    import lzma
+
+log = logging.getLogger(__name__)
 
 EROSION_KERNEL_SIZE = 5
 OUTLIER_PERCENTILE = 0.01
 INTENSITY_MARGIN = 0.02
-CLAHE_BINS = 96
+RANGE_TRIM = 0.0001  # fraction of the min-max range trimmed at each end before the percentiles: only the extremes
+CLAHE_KERNEL_SIZE = 96  # CLAHE tile size in pixels
+JPEG_QUALITY = 95
+JPEG_SUBSAMPLING = 0  # 4:4:4, so small coloured text keeps its edges
+SIDE_BY_SIDE_GAP = 4  # pixels between views placed side by side in one rendered image
+SIDE_BY_SIDE_FILL = 0.5  # mid-gray, the gap between an image's views (colour and alpha, or a DICOM's unused bits)
+UNUSED_BITS_FLOOR = 0.25  # the least gray of a pixel whose bits above BitsStored hold content, in their own view
+
+SNIFF_BYTES = 132  # enough for the DICOM preamble and its `DICM` prefix
+_DICOM_MAGIC_OFFSET = 128
+_DICOM_MAGIC = b"DICM"
+_ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")  # an archive, or an empty one
+_APPLEDOUBLE_MAGIC = b"\x00\x05\x16\x07"  # macOS `._name` metadata files
+_RASTER_MAGIC = (
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",  # JPEG
+    b"II*\x00",  # TIFF, little-endian
+    b"MM\x00*",  # TIFF, big-endian
+    b"II+\x00",  # BigTIFF, little-endian
+    b"MM\x00+",  # BigTIFF, big-endian
+    b"GIF87a",
+    b"GIF89a",
+    b"\x00\x00\x00\x0cjP  \r\n\x87\n",  # JPEG 2000 (JP2)
+    b"\xff\x4f\xff\x51",  # JPEG 2000 codestream (J2K)
+)
+_BMP_DIB_HEADER_SIZES = {12, 40, 52, 56, 64, 108, 124}
+_PNM_TYPES = {b"P1", b"P2", b"P3", b"P4", b"P5", b"P6"}
+_OVERLAY_FIRST_GROUP = 0x6000
+_OVERLAY_LAST_GROUP = 0x601E
+_OVERLAY_DATA_ELEMENT = 0x3000
+_OVERLAY_ROWS_ELEMENT = 0x0010
+_OVERLAY_COLUMNS_ELEMENT = 0x0011
+_OVERLAY_ORIGIN_ELEMENT = 0x0050
+_OVERLAY_BIT_POSITION_ELEMENT = 0x0102
+_ICON_IMAGE_SEQUENCE = (0x0088, 0x0200)
+_DICOM_SUFFIXES = {".dcm", ".dicom", ".ima"}
+_RASTER_SUFFIXES = {
+    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".webp",
+    ".jp2", ".j2k", ".jpx", ".pbm", ".pgm", ".ppm", ".pnm", ".heic", ".heif", ".avif",
+}  # fmt: skip
+_BARE_DICOM_GROUPS = {b"\x02\x00", b"\x08\x00"}  # (0002,xxxx) file meta or (0008,xxxx), little-endian
+_BARE_DICOM_MAX_FIRST_LENGTH = 256  # implicit VR: the first element is short (a group length, charset or UID)
+_DICOM_VRS = {
+    b"AE", b"AS", b"AT", b"CS", b"DA", b"DS", b"DT", b"FL", b"FD", b"IS", b"LO", b"LT", b"OB", b"OD", b"OF",
+    b"OL", b"OV", b"OW", b"PN", b"SH", b"SL", b"SQ", b"SS", b"ST", b"SV", b"TM", b"UC", b"UI", b"UL", b"UN",
+    b"UR", b"US", b"UT", b"UV",
+}  # fmt: skip
+_APPLEDOUBLE_REASON = "AppleDouble metadata (macOS resource fork)"
+_ARCHIVE_MAGIC = (
+    (b"\x1f\x8b", "gzip"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"Rar!\x1a\x07", "rar"),
+    *((b"BZh%d" % level, "bzip2") for level in range(10)),  # `BZh` and an ASCII digit
+)
+_ARCHIVE_SUFFIXES = {
+    ".gz": "gzip", ".tgz": "gzip", ".tar": "tar", ".7z": "7z", ".rar": "rar", ".bz2": "bzip2", ".xz": "xz", ".zst": "zstd",
+}  # fmt: skip
+_HEIF_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif", b"avis"}
+_ALPHA_MODES = {"RGBA", "RGBa", "LA", "La", "PA"}
+_HIGH_BIT_GRAY_MODES = {"I", "F", "I;16", "I;16L", "I;16B", "I;16N"}
+# Pillow's raw modes for 16-bit RGB, gray+alpha and RGBA PNGs, of which it keeps only the high byte
+_PNG_TRUNCATED_RAWMODES = {"RGB;16B", "LA;16B", "RGBA;16B"}
+_PNG_CHUNK_TYPE = re.compile(rb"[A-Za-z0-9_]{4}")  # Pillow stops reading at a chunk type that is not this
+# One input's trailing-data check, all its JPEG walks together, steps over at most this many markers and searches at
+# most FACTOR x its size + SLACK bytes; past either it is not checked, and says so. Real files use a few hundred
+# markers at most (tens, in practice) and search each byte about once. A compressed DICOM frame's walk to its JPEG
+# frame header has the same budget.
+JPEG_WALK_MAX_MARKERS = 100_000  # about half a second of walking
+JPEG_WALK_SEARCH_FACTOR = 4
+JPEG_WALK_SEARCH_SLACK = 1 << 20
+TRAILING_DATA_OVER_BUDGET = "not checked: too many JPEG markers or frames"
+# A JPEG marker: FF then a byte that is not stuffing (00), TEM (01), RST0-7 or another FF (fill)
+_JPEG_MARKER = re.compile(rb"\xff[^\x00\x01\xd0-\xd7\xff]")
+# A JPEG or JPEG-LS frame header: SOF0-15 bar DHT (C4), JPG (C8) and DAC (CC); DHP (DE), which gives a hierarchical
+# image's final size; and JPEG-LS SOF55 (F7). Each holds precision, height, width and the number of components.
+_JPEG_FRAME_MARKERS = frozenset({*range(0xC0, 0xD0)} - {0xC4, 0xC8, 0xCC} | {0xDE, 0xF7})
+_JP2_SIGNATURE = b"\x00\x00\x00\x0cjP  \r\n\x87\n"  # the JP2 file format's first box; the codestream is in `jp2c`
+# JPEG 2000 code-blocks, each capped by its precinct, of fewer than 2**this pixels are refused: OpenJPEG allocates a
+# few hundred bytes per code-block, so 1 x 1 blocks need hundreds of bytes per pixel. Coders use 64 x 64 (2**12).
+_J2K_MIN_CODE_BLOCK_LOG2 = 8
+# A COD of more than this many quality layers is refused: OpenJPEG allocates per layer, resolution, component and
+# precinct. Coders write one or a few (the most seen: 6); at 256, OpenJPEG measured no more than for one layer.
+_J2K_MAX_LAYERS = 256
+_J2K_TLM = 0xFF55
+_J2K_MAX_TLM_BYTES = 1 << 20  # TLM bodies, all together: OpenJPEG keeps about 10 bytes per byte; real ones are tiny
+_J2K_MAX_TILE_PARTS = 1 << 20  # tile-parts walked for coding parameters; OpenJPEG decodes at most 65535 tiles
+_J2K_SOT, _J2K_SOD, _J2K_EOC, _J2K_COD, _J2K_COC = 0xFF90, 0xFF93, 0xFFD9, 0xFF52, 0xFF53
+# The marker segments a JPEG 2000 Part 1 or HTJ2K (Part 15) codestream may have after SIZ in its main header (CAP,
+# COD, COC, TLM, PLM, CPF, QCD, QCC, RGN, POC, PPM, CRG, COM) and in a tile-part header (COD, COC, PLT, QCD, QCC, RGN,
+# POC, PPT, COM). Any other is refused: OpenJPEG skips an unknown one by scanning for the next marker it knows, not by
+# its length, so it could find a COD the check steps over; and Part 2's (MCT, MCC, MCO, ATK, ...) are copied into
+# every tile, which DICOM's JPEG 2000 transfer syntaxes that pydicom decodes do not allow anyway. CAP and CPF are
+# allowed because every installed decoder reads them by length (gdcm's OpenJPEG 2.3.0, pylibjpeg, Pillow); a Pillow
+# linked to OpenJPEG before 2.5 would scan them as unknown, but it is pydicom's last fallback.
+_J2K_MAIN_MARKERS = frozenset(
+    {0xFF50, 0xFF52, 0xFF53, 0xFF55, 0xFF57, 0xFF59, 0xFF5C, 0xFF5D, 0xFF5E, 0xFF5F, 0xFF60, 0xFF63, 0xFF64}
+)
+_J2K_TILE_MARKERS = frozenset({0xFF52, 0xFF53, 0xFF58, 0xFF5C, 0xFF5D, 0xFF5E, 0xFF5F, 0xFF61, 0xFF64})
+_RLE_NO_OPS = re.compile(rb"\x80+")  # RLE run headers that decode to nothing
+_RLE_HEADER_BYTES = 64  # the segment count and 15 segment offsets, each a little-endian uint32
+_RLE_MAX_SEGMENTS = 15
+_PIXEL_DATA_KEYWORDS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
+PROVENANCE_NAME = "preprocess.json"
+NOTE_VALUE_MAX = 64  # characters of one DICOM value quoted in a note detail
+PENDING_NAME = ".pending"  # staging subdirectory holding JPGs until their image_ids are known not to collide
+COLLISION_REASON = "image_id collides with another input (rename one of them)"
+BAD_NAME_REASON = "name is not UTF-8 or holds a control character or line separator; rename it"
+# Libraries that shape the output, by distribution name
+_LIBRARIES = ("pydicom", "numpy", "scikit-image", "Pillow", "matplotlib", "imagecodecs", "tifffile")
+# Optional pixel-data codecs, recorded when importable: module name -> distribution name
+_CODEC_DISTRIBUTIONS = {"gdcm": "python-gdcm", "pylibjpeg": "pylibjpeg", "openjpeg": "pylibjpeg-openjpeg"}
+MAX_INPUT_BYTES = 1 << 30  # a larger file, or ZIP entry, fails without being read: discovery holds each input whole
+MAX_RENDER_BYTES = 3 << 30  # an input estimated to need more memory than this to render (per worker) fails undecoded
+RenderPath = Literal[
+    "dicom-gray",  # MONOCHROME1/2 of up to 16 bits
+    "dicom-gray-wide",  # MONOCHROME1/2 of 32 bits, or floating point
+    "dicom-colour",  # RGB and YBR_* of up to 16 bits
+    "dicom-colour-wide",  # RGB and YBR_* of 32 bits
+    "dicom-palette",
+    "raster-gray8",  # modes 1 and L
+    "raster-gray16",  # modes I;16, I and F
+    "raster-rgb8",  # RGB, and what converts to it: CMYK, YCbCr, P without transparency
+    "raster-rgb16",  # 16-bit RGB, which Pillow would truncate (see `_pillow_truncates`)
+    "raster-alpha",  # a transparent image, rendered as two views; also a 16-bit CMYK TIFF
+    "raster-mpo",  # per pixel of the canvas holding all of an MPO's frames side by side
+]
+# Peak bytes of memory per pixel for each way an input is rendered, the input's own bytes included. Measured as the
+# peak resident set of `render_and_encode` less the interpreter's after imports, over the pixels, on noisy
+# gradients of 4000 x 4000 to 6800 x 6800 pixels (CPython 3.13, numpy 2.5, Pillow 12.3, pydicom 3.0). The most
+# seen: DICOM gray 73 (up to 16 bits; the colormap's float64 RGBA is most of it), 92 (float64), colour 96 (16 bits),
+# 120 (32 bits), palette 86; with content in every pixel's bits above BitsStored, and so their view (CPython 3.14,
+# Pillow 13.0): gray 78, 84 (32 bits), colour 102, 132 (32 bits), palette 91. Raster gray 40 (8 bits), 42 (16 bits and
+# wider), RGB 29, 16-bit RGB 36, transparent 109 (a 16-bit CMYK TIFF 60), and an MPO 39 per pixel of its canvas. Each
+# is the most seen without that view rounded up by about a tenth, which also covers the most seen with it.
+RENDER_BYTES_PER_PIXEL: Mapping[RenderPath, int] = {
+    "dicom-gray": 80,
+    "dicom-gray-wide": 100,
+    "dicom-colour": 108,
+    "dicom-colour-wide": 135,
+    "dicom-palette": 96,
+    "raster-gray8": 44,
+    "raster-gray16": 48,
+    "raster-rgb8": 32,
+    "raster-rgb16": 40,
+    "raster-alpha": 120,
+    "raster-mpo": 44,
+}
+OVERLAY_BYTES_PER_PIXEL = 2  # per pixel of each overlay plane drawn with `--draw-overlays`; 1.3 measured, as above
+IN_FLIGHT_PER_JOB = 2  # inputs submitted to the pool and not yet written, per worker: bounds the bytes held in memory
+WORKER_CHECK_SECONDS = 1.0  # how often the parent, waiting on a render, checks that no worker has died
+# Spawned workers read these at numpy import: one BLAS/OpenMP thread each, not one per core per worker
+_BLAS_THREAD_VARS = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+# Workers start fresh on every platform: no inherited threads, signal handlers or open ZIPs, as with macOS's default
+_SPAWN = multiprocessing.get_context("spawn")
+
+Kind = Literal["dicom", "raster"]
+Content = Literal[Kind, "zip"]
 
 
-def compress_image(image):
+@dataclass(frozen=True)
+class Note:
+    """One notable thing about a written input, for notes.tsv; it never fails the input."""
+
+    kind: NoteKind
+    detail: str
+
+
+Views = tuple[np.ndarray, ...]  # float32 [0, 1] (H, W) or (H, W, 3) views of one input, each processed on its own
+AlphaCounts = tuple[int, int]  # pixels not opaque, pixels in the images that were not opaque
+
+
+@dataclass(frozen=True)
+class Rejected:
+    """Content that is not rendered: `ignored` (not an input) or `failed` (e.g. a `.zip` name with other content)."""
+
+    kind: SkipKind
+    reason: str
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One discovered input, with its raw bytes (no decoding happens in discovery)."""
+
+    image_id: ImageId
+    kind: Kind
+    data: bytes = field(repr=False)
+
+
+@dataclass(frozen=True)
+class Rendered:
+    """One output image: (H, W, 3) uint8 RGB."""
+
+    image_id: ImageId
+    rgb: np.ndarray
+    notes: tuple[Note, ...]
+
+
+@dataclass(frozen=True)
+class Encoded:
+    """One output image as JPEG bytes, with the SHA-256 of the source file (or ZIP entry) it came from."""
+
+    image_id: ImageId
+    jpeg: bytes
+    source_sha256: str
+    notes: tuple[Note, ...]
+
+
+@dataclass(frozen=True)
+class Staged:
+    """An encoded image saved under a provisional name until it is known not to collide."""
+
+    image_id: ImageId
+    path: Path
+    source_sha256: str
+    jpeg_sha256: str
+    notes: tuple[Note, ...]
+
+
+@dataclass(frozen=True)
+class PreprocessResult:
+    found: int
+    written: int
+    batches: int
+    skipped: list[SkippedRow]
+    skipped_path: Path
+    notes: dict[NoteKind, int]  # notes.tsv rows per kind, every kind in NOTE_KINDS order
+    notes_path: Path
+
+
+class WorkerCrashed(RuntimeError):
+    """A worker process died (out of memory, or a crash in a decoder); the run is abandoned."""
+
+
+class WorkDirExists(ValueError):
+    """The work directory cannot be created: it is in use, or an earlier run left its staging dir."""
+
+
+class NotAnImage(Exception):
+    """A DICOM object that is not an image by design (a DICOMDIR index); recorded as ignored."""
+
+
+class Unsupported(Exception):
+    """A decodable input this tool does not render; the message starts with `unsupported:`."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(f"unsupported: {what}")
+
+
+class DecodeError(Exception):
+    """Compressed pixel data that no installed codec could decode; the message starts with `cannot decode`."""
+
+
+# ---------------------------------------------------------------- rendering (pure)
+
+
+def compress_image(image: np.ndarray) -> np.ndarray:
     same_vert = image == np.roll(image, 1, axis=0)
     same_horiz = image == np.roll(image, 1, axis=1)
     both = same_vert & same_horiz
     if both.ndim == 3:
         both = np.all(both, axis=2)
-    uniform = ski.morphology.erosion(
-        both,
-        np.ones((EROSION_KERNEL_SIZE, EROSION_KERNEL_SIZE), dtype=bool),
-    )
-    image = np.delete(image, np.all(uniform, axis=1), axis=0)
-    image = np.delete(image, np.all(uniform, axis=0), axis=1)
-    return image
+    # A square erosion is separable, and a row is dropped only if its whole eroded row is True. Every
+    # window cell lies in the row (reflection only repeats cells) and every cell is in its own window, so
+    # that equals eroding the per-row all() with a 1-D window; likewise for columns.
+    rows = ndi.minimum_filter1d(both.all(axis=1), EROSION_KERNEL_SIZE, mode="reflect")
+    cols = ndi.minimum_filter1d(both.all(axis=0), EROSION_KERNEL_SIZE, mode="reflect")
+    return image[~rows][:, ~cols]
 
 
-def preprocess_dicom(dcm: pydicom.FileDataset) -> np.ndarray:
-    img = ski.util.img_as_float32(dcm.pixel_array)
-    match dcm.PhotometricInterpretation:
-        case "MONOCHROME1":
-            img = ski.util.invert(img)
-        case "MONOCHROME2":
-            pass
-    bot, top = img.min(), img.max()
-    margin_initial = OUTLIER_PERCENTILE * (top - bot)
-    bot, top = bot + margin_initial, top - margin_initial
-    filtered = img[(img > bot) & (img < top)]
-    if filtered.size == 0:
-        return compress_image(img)
-    bot, top = np.quantile(filtered, [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
-    margin_final = INTENSITY_MARGIN * (top - bot)
-    bot, top = bot + margin_final, top - margin_final
-    if bot >= top:
-        return compress_image(img)
-    img = ski.exposure.rescale_intensity(img, (bot, top))
-    img = np.clip(img, 0, 1)
-    img = compress_image(img)
-    img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
-    return compress_image(img)
+def _crop(image: np.ndarray) -> np.ndarray:
+    """compress_image, but keep the uncropped image when cropping would leave nothing."""
+    cropped = compress_image(image)
+    return cropped if cropped.size else image
 
 
-_IMAGE_EXTENSIONS = {".dcm", ".jpg", ".jpeg", ".png"}
+def _sop_class(dcm: pydicom.FileDataset) -> UID | None:
+    """The SOP Class UID, if the dataset (or its file meta) has a single one."""
+    meta = getattr(dcm, "file_meta", None)
+    value = dcm.get("SOPClassUID") or (meta.get("MediaStorageSOPClassUID") if meta is not None else None)
+    return UID(value) if isinstance(value, str) and value else None  # not a MultiValue or other junk
 
 
-def load_from_zip(path: Path) -> Iterator[tuple[str, np.ndarray]]:
-    with ZipFile(path) as zf:
-        files = [
-            item.filename
-            for item in zf.infolist()
-            if Path(item.filename).suffix.lower() in _IMAGE_EXTENSIONS
-        ]
-        for file in tqdm(files, desc=path.name, position=1, leave=False):
-            image_id = f"{path.as_posix()}::{file}"
-            try:
-                with zf.open(file, "r") as fp:
-                    data = fp.read()
-                if file.lower().endswith(".dcm"):
-                    dcm = pydicom.dcmread(io.BytesIO(data))
-                    yield image_id, preprocess_dicom(dcm)
-                else:
-                    yield image_id, preprocess_non_dicom_bytes(data)
-            except Exception as exc:
-                tqdm.write(f"WARNING: skipping {image_id}: {exc}", file=sys.stderr)
+def _has_pixel_data(dcm: pydicom.FileDataset) -> bool:
+    return any(keyword in dcm for keyword in _PIXEL_DATA_KEYWORDS)
 
 
-def load_from_directory(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
-    dcm_files = sorted(path.glob("**/*.dcm"))
-    for f in tqdm(dcm_files, desc=path.name, position=1, leave=False):
-        image_id = f.as_posix()
+def _require_finite(arr: np.ndarray) -> None:
+    """Raise `Unsupported` if float `arr` holds NaN or infinity: min/max scaling would collapse the rendering."""
+    if arr.dtype.kind != "f":
+        return
+    n_nan = int(np.isnan(arr).sum())
+    n_inf = int(np.isinf(arr).sum())
+    if n_nan or n_inf:
+        raise Unsupported(f"non-finite pixel values ({n_nan} NaN, {n_inf} infinite)")
+
+
+def _gray_float32(arr: np.ndarray) -> np.ndarray:
+    """Convert grayscale samples to float32 only when every value is exact and the span will not overflow."""
+    _require_finite(arr)
+    with np.errstate(over="ignore", invalid="ignore"):
+        converted = arr.astype(np.float32)
+    if not np.isfinite(converted).all():
+        raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
+    if not np.can_cast(arr.dtype, np.float32, casting="safe"):
+        if arr.dtype.kind in "iu":
+            # A value rounded past the integer range (int64's max becomes 2**63) has no defined cast back: x86
+            # wraps it, ARM saturates it to the original value. Compare as Python ints, which are exact.
+            info = np.iinfo(arr.dtype)
+            if int(converted.max()) > info.max or int(converted.min()) < info.min:
+                raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
+        with np.errstate(over="ignore", invalid="ignore"):
+            restored = converted.astype(arr.dtype)
+        if not np.array_equal(arr, restored):
+            raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
+    lo, hi = float(arr.min()), float(arr.max())
+    if hi - lo > float(np.finfo(np.float32).max):
+        raise Unsupported("not implemented: grayscale values cannot be processed safely as float32")
+    return converted
+
+
+def _window(img: np.ndarray) -> np.ndarray:
+    """Map float `img`, not constant, to [0, 1] by its robust window, clipping what lies outside it.
+
+    The window runs from the OUTLIER_PERCENTILE to the 1 - OUTLIER_PERCENTILE quantile of the values strictly inside
+    the outer RANGE_TRIM of the min-max range (which leaves out only pixels at or very near the extremes, such as a
+    hot pixel), shrunk by INTENSITY_MARGIN. When there are no such values or they give no window (e.g. a two-valued
+    image), the quantiles of all the values are tried. Failing that, a plain min-max rescale.
+    """
+    lo, hi = float(img.min()), float(img.max())
+    margin_initial = RANGE_TRIM * (hi - lo)
+    inner = img[(img > lo + margin_initial) & (img < hi - margin_initial)]
+    for values in (inner, img):
+        if values.size:
+            bot, top = _core_range(values)
+            if bot < top:
+                return np.clip((img - bot) / (top - bot), 0, 1)
+    return (img - lo) / (hi - lo)
+
+
+def _core_range(values: np.ndarray) -> tuple[float, float]:
+    """The OUTLIER_PERCENTILE and 1 - OUTLIER_PERCENTILE quantiles of `values`, shrunk by INTENSITY_MARGIN."""
+    bot, top = np.quantile(values, [OUTLIER_PERCENTILE, 1 - OUTLIER_PERCENTILE])
+    margin = INTENSITY_MARGIN * (top - bot)
+    return float(bot + margin), float(top - margin)
+
+
+def _to_uint8(pixels: np.ndarray, bits: int) -> np.ndarray:
+    """Scale colour samples of nominal depth `bits` to uint8, by that depth alone: the data is never consulted, so
+    samples using only part of their range look dark. Samples outside [0, 2**bits - 1] (signed, non-conformant) clip."""
+    scaled = np.maximum(pixels, 0).astype(np.float64) * 255 / (2**bits - 1)
+    return np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
+
+
+def _overlay_groups(dcm: pydicom.FileDataset) -> list[int]:
+    """The overlay planes' groups: the even groups 0x6000-0x601E that have OverlayData (not decoded)."""
+    return [
+        group
+        for group in range(_OVERLAY_FIRST_GROUP, _OVERLAY_LAST_GROUP + 1, 2)
+        if (group, _OVERLAY_DATA_ELEMENT) in dcm
+    ]
+
+
+def _overlay_mask(dcm: pydicom.FileDataset, shape: tuple[int, int]) -> np.ndarray:
+    """Union of the overlay planes (see `_overlay_groups`) as a bool mask of `shape`.
+
+    Each plane is placed at its OverlayOrigin (1-based row, column; default 1, 1)
+    and clipped to the image. All False when there are no overlays. A plane that
+    cannot be decoded raises ValueError naming its group.
+    """
+    mask = np.zeros(shape, dtype=bool)
+    for group in _overlay_groups(dcm):
         try:
-            dcm = pydicom.dcmread(f)
-            yield image_id, preprocess_dicom(dcm)
+            plane = dcm.overlay_array(group)
+            if plane.ndim != 2:
+                raise ValueError(f"overlay array with shape {plane.shape}")
+            # Dataset.get() with a tuple tag returns the DataElement, which is subscriptable but not typed as iterable.
+            origin = cast(Sequence[int], dcm.get((group, _OVERLAY_ORIGIN_ELEMENT), [1, 1]))
+            row0, col0 = (int(v) - 1 for v in origin)
         except Exception as exc:
-            tqdm.write(f"WARNING: skipping {image_id}: {exc}", file=sys.stderr)
-    non_dcm_files = []
-    for ext in ("*.jpg", "*.jpeg", "*.png"):
-        non_dcm_files.extend(sorted(path.glob(f"**/{ext}")))
-    for f in tqdm(non_dcm_files, desc=f"{path.name} (non-DICOM)", position=1, leave=False):
-        image_id = f.as_posix()
-        yield image_id, None
+            raise ValueError(f"overlay 0x{group:04X} cannot be decoded: {exc}") from exc
+        top, left = max(row0, 0), max(col0, 0)
+        bottom, right = min(row0 + plane.shape[0], shape[0]), min(col0 + plane.shape[1], shape[1])
+        if top < bottom and left < right:
+            mask[top:bottom, left:right] |= plane[top - row0 : bottom - row0, left - col0 : right - col0].astype(bool)
+    return mask
 
 
-def load_single_file(path: Path) -> Iterator[tuple[str, np.ndarray | None]]:
-    image_id = path.as_posix()
+def _gray_dicom(pixels: np.ndarray, photometric: str, overlay: np.ndarray) -> np.ndarray:
+    """Float [0, 1] image from MONOCHROME1/2 pixels: windowing, overlay, crop, CLAHE, crop.
+
+    Overlay pixels are set to 1.0 after intensity mapping, so they come out at the top of the range.
+    """
+    img = _gray_float32(pixels)
+    if photometric == "MONOCHROME1":
+        img = -img
+    constant = img.min() >= img.max()
+    img = np.zeros_like(img) if constant else _window(img)
+    img[overlay] = 1.0
+    img = _crop(img)
+    return img if constant else _crop(ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE))
+
+
+def _gib(size: int) -> str:
+    """`size` in GiB to one decimal, rounded up so that a size over the limit never reads as equal to it."""
+    return f"{math.ceil(size * 10 / (1 << 30)) / 10:.1f}"
+
+
+def _check_render_memory(shape: str, path: RenderPath, pixels: int, extra: int = 0) -> None:
+    """Raise `Unsupported` if rendering `pixels` pixels by `path`, and `extra` bytes besides, is estimated to need
+    more than `MAX_RENDER_BYTES` (see `RENDER_BYTES_PER_PIXEL`): decoding makes many copies of the pixels, as floats,
+    so the memory is out of proportion to the input's size. `shape` describes the image in the reason."""
+    estimate = pixels * RENDER_BYTES_PER_PIXEL[path] + extra
+    if estimate > MAX_RENDER_BYTES:
+        raise Unsupported(
+            f"image too large ({shape}, about {_gib(estimate)} GiB to render; limit {_gib(MAX_RENDER_BYTES)} GiB)"
+        )
+
+
+def _decode_pixels(dcm: pydicom.FileDataset) -> np.ndarray:
+    """`dcm.pixel_array` as decoded, bits above BitsStored included (pydicom would clear them for some transfer
+    syntaxes only); a compressed file that cannot be decoded is a `DecodeError` naming its transfer syntax."""
+    dcm.pixel_array_options(correct_unused_bits=False)  # before the first access: pixel_array is cached
     try:
-        if path.suffix == ".dcm":
-            dcm = pydicom.dcmread(path)
-            yield image_id, preprocess_dicom(dcm)
-        else:
-            yield image_id, None
+        return dcm.pixel_array
     except Exception as exc:
-        tqdm.write(f"WARNING: skipping {image_id}: {exc}", file=sys.stderr)
+        syntax = dcm.file_meta.get("TransferSyntaxUID")
+        if syntax is None or not syntax.is_compressed:
+            raise
+        cause = (str(exc).strip().splitlines() or [""])[0]
+        raise DecodeError(f"cannot decode {syntax.name}: {type(exc).__name__}: {cause}") from exc
 
 
-def load_sources(sources: list[Path]) -> Iterator[tuple[str, np.ndarray | None]]:
-    for source in tqdm(sources, desc="Sources", position=0):
-        if source.suffix == ".zip":
-            yield from load_from_zip(source)
-        elif source.is_dir():
-            yield from load_from_directory(source)
-        else:
-            yield from load_single_file(source)
+def _split_unused_bits(raw: np.ndarray, bits_stored: int) -> tuple[np.ndarray, np.ndarray | None]:
+    """Integer `raw` reduced to its low `bits_stored` bits, and the content of the bits above them, if any held some.
+
+    The low bits are sign-extended when `raw` is signed (PixelRepresentation 1). A sample's bits above `bits_stored`
+    hold content unless they are all zero or (signed) the sign extension, both of which writers use. The content is
+    unsigned, of `raw`'s width, shifted down by `bits_stored`: the bits of each sample with content that differ from
+    the masked value, 0 elsewhere (see `_unused_bit_positions`); None when no sample has any. `raw` is returned as is
+    when its dtype has no bits above `bits_stored`.
+    """
+    width = raw.dtype.itemsize * 8
+    if bits_stored >= width:
+        return raw, None
+    shift = raw.dtype.type(width - bits_stored)
+    masked = np.right_shift(np.left_shift(raw, shift), shift)  # arithmetic right shift for signed dtypes
+    # Only a non-zero high field that is not the sign extension holds content: zero-filled negatives do not
+    content = (raw != masked) & (np.right_shift(raw, raw.dtype.type(bits_stored)) != 0)
+    if not content.any():
+        return masked, None
+    unsigned = np.dtype(f"u{raw.dtype.itemsize}")
+    differing = np.bitwise_xor(raw, masked).view(unsigned)
+    return masked, np.right_shift(np.where(content, differing, 0).astype(unsigned), unsigned.type(bits_stored))
+
+
+def _unused_bit_positions(high: np.ndarray | None, bits_stored: int) -> tuple[int, ...]:
+    """The positions above `bits_stored` set anywhere in `high`, the unused bits' content from `_split_unused_bits`."""
+    if high is None:
+        return ()
+    differing = int(np.bitwise_or.reduce(high, axis=None))
+    return tuple(bits_stored + bit for bit in range(differing.bit_length()) if differing >> bit & 1)
+
+
+def _unused_bits_view(high: np.ndarray) -> np.ndarray:
+    """Float32 [0, 1] grayscale of the unused bits' content `high` (see `_split_unused_bits`), colour samples reduced
+    by their maximum: black where it is 0, and from UNUSED_BITS_FLOOR up to white by its own maximum elsewhere, so a
+    single set bit is clearly visible beside much larger values and the content's shapes are kept."""
+    values = (high.max(axis=2) if high.ndim == 3 else high).astype(np.float32)
+    scaled = UNUSED_BITS_FLOOR + (1 - UNUSED_BITS_FLOOR) * values / values.max()
+    return np.where(values > 0, scaled, 0).astype(np.float32)
+
+
+def _check_high_bit(dcm: pydicom.FileDataset) -> None:
+    """Raise `Unsupported` if HighBit is present and not BitsStored - 1: the stored bits would not be the low ones
+    `_split_unused_bits` keeps, so bits below them (which can hold text) would be neither rendered nor noted."""
+    high_bit, bits_stored = dcm.get("HighBit"), dcm.get("BitsStored")
+    if high_bit is not None and bits_stored is not None and int(high_bit) != int(bits_stored) - 1:
+        raise Unsupported(f"HighBit {int(high_bit)} with BitsStored {int(bits_stored)} is not supported")
+
+
+def _stored_pixels(dcm: pydicom.FileDataset) -> tuple[np.ndarray, np.ndarray | None]:
+    """The decoded pixels with bits above BitsStored masked, and the content of those bits, if any (see
+    `_split_unused_bits`); first `_check_high_bit`, before decoding. Float pixels have no unused bits and are
+    returned as is."""
+    _check_high_bit(dcm)
+    raw = _decode_pixels(dcm)
+    _require_finite(raw)
+    if raw.dtype.kind not in "iu":
+        return raw, None
+    return _split_unused_bits(raw, int(dcm.BitsStored))
+
+
+def _palette_entry_bits(dcm: pydicom.FileDataset) -> int:
+    """The depth to scale PALETTE COLOR entries by: the lookup table descriptor's declared depth, except that a
+    16-bit descriptor over tables whose every red, green and blue entry is at most 255 means 8-bit entries (a common
+    writer quirk) and gives 8. Only the tables decide this, never the image pixels. The tables are expanded by
+    `apply_color_lut` over their own index range (segmented tables too, at most 65536 entries); if that fails the
+    declared depth stands."""
+    count, first, declared = (int(v) for v in dcm.RedPaletteColorLookupTableDescriptor)
+    if declared != 16:
+        return declared
+    try:
+        tables = pydicom.pixels.apply_color_lut(np.arange(first, first + (count or 2**16)), dcm)
+        return 8 if int(tables[..., :3].max()) <= 255 else declared
+    except Exception:  # noqa: BLE001 - unreadable tables: keep the declared depth, do not fail the input
+        return declared
+
+
+def _colour_dicom(dcm: pydicom.FileDataset, photometric: str) -> tuple[np.ndarray, np.ndarray | None]:
+    """(H, W, 3) uint8 from RGB, YBR_* (pydicom's pixel_array yields RGB) or PALETTE COLOR pixels, and the content of
+    their unused bits, if any (see `_stored_pixels`; palette indices are masked before the lookup). RGB is scaled by
+    BitsStored and palette entries by the lookup table descriptor's depth, or 8 for 8-bit entries under a 16-bit
+    descriptor (see `_palette_entry_bits` and `_to_uint8`)."""
+    pixels, high = _stored_pixels(dcm)
+    if pixels.dtype.kind == "f":  # no depth to scale by: 0..1 floats would render near black
+        raise Unsupported("float colour pixel data")
+    bits = int(dcm.BitsStored)
+    if photometric == "PALETTE COLOR":
+        pixels = pydicom.pixels.apply_color_lut(pixels, dcm)
+        bits = _palette_entry_bits(dcm)  # the entries' depth, not the indices'
+    if pixels.ndim != 3 or pixels.shape[2] != 3:
+        raise Unsupported(f"pixel array with shape {pixels.shape}")
+    return _to_uint8(pixels, bits), high
+
+
+def _overlay_plane_pixels(dcm: pydicom.FileDataset) -> int:
+    """The pixels of the overlay planes (see `_overlay_groups`), by their OverlayRows and OverlayColumns, which are
+    decoded at that size whatever the image's."""
+    total = 0
+    for group in _overlay_groups(dcm):
+        rows, columns = dcm.get((group, _OVERLAY_ROWS_ELEMENT)), dcm.get((group, _OVERLAY_COLUMNS_ELEMENT))
+        if rows is not None and columns is not None:
+            with suppress(TypeError, ValueError):  # empty or multi-valued: `_overlay_mask` reports the plane
+                total += int(rows.value) * int(columns.value)
+    return total
+
+
+def _unreadable(what: str) -> Unsupported:
+    """The failure for compressed pixel data whose header cannot be found or parsed; `what` is fixed text, never
+    library text or file bytes."""
+    return Unsupported(f"cannot read compressed pixel data header ({what})")
+
+
+def _jpeg_frame_size(data: bytes) -> tuple[int, int, int]:
+    """(width, height, components) from the first frame header (see `_JPEG_FRAME_MARKERS`) of JPEG or JPEG-LS `data`.
+
+    Only the marker segments between SOI and the frame header are read, stepped over by their length and the next
+    marker found as `_jpeg_end` does, within a `_WalkBudget`. A height of 0, which a DNL marker after the first scan
+    (JPEG) or an LSE marker (JPEG-LS, for oversize dimensions) would set, is refused: the decoders cannot be held to a
+    size the frame header does not give. No SOI, a scan, EOI or a nested SOI before any frame header, or a truncated
+    one, is unreadable.
+    """
+    if data[:2] != b"\xff\xd8":
+        raise _unreadable("no JPEG SOI marker")
+    budget = _WalkBudget.for_data(data)
+    pos = 2
+    try:
+        while (pos := budget.next_marker(data, pos)) + 1 < len(data):
+            marker = data[pos + 1]
+            if marker in _JPEG_FRAME_MARKERS:
+                if pos + 10 > len(data):
+                    raise _unreadable("truncated JPEG frame header")
+                height, width, components = struct.unpack_from(">HHB", data, pos + 5)
+                if height == 0:  # JPEG sets it in a DNL marker, JPEG-LS in an LSE marker
+                    raise _unreadable("JPEG frame header without a height (DNL or LSE)")
+                return width, height, components
+            if marker in (0xD8, 0xD9, 0xDA) or pos + 4 > len(data):  # SOI, EOI, SOS
+                break
+            length = int.from_bytes(data[pos + 2 : pos + 4], "big")
+            pos += 4 if length < 2 else 2 + length
+    except _OverBudget:
+        raise _unreadable("too many JPEG markers") from None
+    raise _unreadable("no JPEG frame header")
+
+
+def _jp2_codestream_start(data: bytes) -> int:
+    """The offset of the codestream in JP2 file `data`: the contents of its first top-level `jp2c` box."""
+    pos = 0
+    while pos + 8 <= len(data):  # every box is at least 8 bytes, so this steps forward at least that far
+        length, box = struct.unpack_from(">L4s", data, pos)
+        header = 8
+        if length == 1:  # a 64-bit length follows the type
+            if pos + 16 > len(data):
+                break
+            length, header = struct.unpack_from(">Q", data, pos + 8)[0], 16
+        elif length == 0:  # the last box, to the end
+            length = len(data) - pos
+        if box == b"jp2c":
+            return pos + header
+        if length < header:
+            raise _unreadable("bad JP2 box length")
+        pos += length
+    raise _unreadable("no JP2 codestream box")
+
+
+def _j2k_coding_segments(data: bytes, pos: int) -> Iterator[tuple[int, int, int]]:
+    """(marker, start, end) of the body of each COD and COC marker segment in JPEG 2000 codestream `data`: in the main
+    header from `pos` (just past SIZ) to the first SOT, then in each tile-part header (SOT to SOD), the next tile-part
+    being Psot bytes on from SOT, as decoders find it. After a tile-part there must be another, EOC or the end of the
+    data, and only the markers of `_J2K_MAIN_MARKERS` and `_J2K_TILE_MARKERS` may come before it. Every step moves
+    forward by at least four bytes, at most `_J2K_MAX_TILE_PARTS` tile-parts are walked, and the TLM bodies may hold at
+    most `_J2K_MAX_TLM_BYTES` in all."""
+    tile_parts = tlm_bytes = 0
+    while pos + 4 <= len(data):
+        marker, length = struct.unpack_from(">HH", data, pos)
+        if marker == _J2K_EOC:
+            return
+        if marker == _J2K_SOT:
+            tile_parts += 1
+            if tile_parts > _J2K_MAX_TILE_PARTS:
+                raise _unreadable("too many JPEG 2000 tile-parts")
+            if pos + 12 > len(data):
+                return
+            (psot,) = struct.unpack_from(">L", data, pos + 6)
+            if 0 < psot < 14:
+                raise _unreadable("bad JPEG 2000 tile-part length")
+            tile_end = len(data) if psot == 0 else pos + psot  # 0: the last tile-part, to the end
+            header = pos + 12
+            while header + 4 <= min(tile_end, len(data)):
+                marker, length = struct.unpack_from(">HH", data, header)
+                if marker == _J2K_SOD:
+                    break
+                if marker not in _J2K_TILE_MARKERS:
+                    raise _unreadable("unexpected JPEG 2000 marker")
+                if length < 2:
+                    raise _unreadable("bad JPEG 2000 marker segment")
+                if marker in (_J2K_COD, _J2K_COC):
+                    yield marker, header + 4, min(header + 2 + length, len(data))
+                header += 2 + length
+            pos = tile_end
+            if pos + 2 <= len(data) and struct.unpack_from(">H", data, pos)[0] not in (_J2K_SOT, _J2K_EOC):
+                raise _unreadable("bad JPEG 2000 tile-part length")
+            continue
+        if marker not in _J2K_MAIN_MARKERS:
+            raise _unreadable("unexpected JPEG 2000 marker")
+        if length < 2:
+            raise _unreadable("bad JPEG 2000 marker segment")
+        if marker == _J2K_TLM:
+            tlm_bytes += length - 2
+            if tlm_bytes > _J2K_MAX_TLM_BYTES:
+                raise Unsupported(f"JPEG 2000 TLM markers over {_J2K_MAX_TLM_BYTES >> 20} MiB")
+        if marker in (_J2K_COD, _J2K_COC):
+            yield marker, pos + 4, min(pos + 2 + length, len(data))
+        pos += 2 + length
+
+
+def _j2k_code_block_log2(data: bytes, start: int, end: int, index_bytes: int) -> int:
+    """log2 of the pixels of the smallest code-block of COD (`index_bytes` 0) or COC (`index_bytes`, the size of its
+    component index) body `data[start:end]`, over its resolutions: 2**(xcb + 2) by 2**(ycb + 2), each side capped by
+    the precinct's in band coordinates (PPx at the lowest resolution, PPx - 1 above; 2**15 without precincts)."""
+    style = start + index_bytes
+    coding = style + (1 if index_bytes else 5)  # COD has progression order, layers and MCT before it
+    if coding + 5 > end:
+        raise _unreadable("truncated JPEG 2000 COD or COC marker")
+    levels, xcb, ycb = data[coding], data[coding + 1] + 2, data[coding + 2] + 2
+    if data[style] & 1:  # precinct sizes follow, one byte (PPy << 4 | PPx) per resolution
+        if coding + 6 + levels > end:
+            raise _unreadable("truncated JPEG 2000 COD or COC marker")
+        precincts = data[coding + 5 : coding + 6 + levels]
+    else:
+        precincts = b"\xff" * (levels + 1)
+    return min(
+        min(xcb, max((size & 0xF) - (r > 0), 0)) + min(ycb, max((size >> 4) - (r > 0), 0))
+        for r, size in enumerate(precincts)
+    )
+
+
+def _check_j2k_coding(data: bytes, pos: int, components: int) -> None:
+    """Raise `Unsupported` if any COD or COC of codestream `data` (see `_j2k_coding_segments`) gives code-blocks of
+    fewer than 2**`_J2K_MIN_CODE_BLOCK_LOG2` pixels (see `_j2k_code_block_log2`), or a COD more than
+    `_J2K_MAX_LAYERS` quality layers; there must be a COD. Every COD and COC is checked, whichever components and
+    tiles it applies to."""
+    index_bytes = 1 if components < 257 else 2
+    has_cod = False
+    for marker, start, end in _j2k_coding_segments(data, pos):
+        has_cod |= marker == _J2K_COD
+        if marker == _J2K_COD and end >= start + 4 and struct.unpack_from(">H", data, start + 2)[0] > _J2K_MAX_LAYERS:
+            raise Unsupported(f"JPEG 2000 quality layers over {_J2K_MAX_LAYERS}")
+        if _j2k_code_block_log2(data, start, end, 0 if marker == _J2K_COD else index_bytes) < _J2K_MIN_CODE_BLOCK_LOG2:
+            raise Unsupported(f"JPEG 2000 code-blocks of fewer than {1 << _J2K_MIN_CODE_BLOCK_LOG2} pixels")
+    if not has_cod:
+        raise _unreadable("no JPEG 2000 COD marker")
+
+
+def _j2k_frame_size(data: bytes) -> tuple[int, int, int]:
+    """(width, height, components) from the SIZ marker of JPEG 2000 or HTJ2K `data`, a codestream or a JP2 file:
+    Xsiz - XOsiz, Ysiz - YOsiz and Csiz. SIZ must follow SOC, as the standard requires. The code-blocks are checked
+    too (see `_check_j2k_coding`), as their number and layers, not only the size, set the decoders' memory."""
+    start = _jp2_codestream_start(data) if data.startswith(_JP2_SIGNATURE) else 0
+    if data[start : start + 4] != b"\xff\x4f\xff\x51":  # SOC, SIZ
+        raise _unreadable("no JPEG 2000 SOC and SIZ markers")
+    if start + 42 > len(data):
+        raise _unreadable("truncated JPEG 2000 SIZ marker")
+    xsiz, ysiz, xosiz, yosiz = struct.unpack_from(">4L", data, start + 8)
+    (components,) = struct.unpack_from(">H", data, start + 40)
+    if xosiz >= xsiz or yosiz >= ysiz:
+        raise _unreadable("empty JPEG 2000 image area")
+    (siz_length,) = struct.unpack_from(">H", data, start + 4)
+    _check_j2k_coding(data, start + 4 + siz_length, components)
+    return xsiz - xosiz, ysiz - yosiz, components
+
+
+def _rle_decoded_length(data: bytes, start: int, end: int, limit: int) -> int:
+    """The bytes that RLE segment `data[start:end]` decodes to, by walking its run headers as pydicom decodes them (a
+    run cut short by the end decodes to what is left), without decoding; the walk stops once past `limit`. A row of
+    no-ops is skipped by one regex match, so every other step but the last decodes at least a byte: the steps are at
+    most about twice `limit`, however long the segment."""
+    end, pos, total = min(end, len(data)), start, 0
+    while pos < end and total <= limit:  # every step moves forward
+        header = data[pos]
+        if header < 128:  # copy the next header + 1 bytes
+            total += min(header + 1, end - pos - 1)
+            pos += header + 2
+        elif header > 128:  # repeat the next byte 257 - header times
+            total += 257 - header if pos + 1 < end else 0
+            pos += 2
+        else:  # 128 is a no-op, as are those after it
+            pos = cast(re.Match[bytes], _RLE_NO_OPS.match(data, pos, end)).end()
+    return total
+
+
+def _check_rle_frame(data: bytes, segment_bytes: int, segments: int) -> None:
+    """Raise `Unsupported` unless RLE Lossless frame `data` has `segments` segments, none of which decodes to more
+    than `segment_bytes` bytes (see `_rle_decoded_length`). pydicom requires the count, and keeps the first
+    `segment_bytes` of a longer segment, having decoded it all."""
+    if len(data) < _RLE_HEADER_BYTES:
+        raise _unreadable("truncated RLE header")
+    (count,) = struct.unpack_from("<L", data)
+    if count > _RLE_MAX_SEGMENTS:
+        raise _unreadable("bad RLE segment count")
+    if count != segments:
+        raise Unsupported(f"RLE pixel data has {count} segments, not SamplesPerPixel x BitsAllocated / 8 ({segments})")
+    offsets = [*struct.unpack_from(f"<{count}L", data, 4), len(data)]
+    for start, end in pairwise(offsets):
+        if _rle_decoded_length(data, start, end, segment_bytes) > segment_bytes:
+            raise Unsupported(f"RLE segment decodes to more than Rows x Columns ({segment_bytes}) bytes")
+
+
+def _encapsulated_frame(dcm: pydicom.FileDataset) -> bytes:
+    """The one frame of `dcm`'s encapsulated PixelData, its fragments joined, split into frames as pydicom's decoder
+    splits them (by the Extended or Basic Offset Table). pydicom also decodes any frame past NumberOfFrames, so a
+    second frame is refused; so are no frame and an encapsulation that cannot be parsed."""
+    try:
+        extended = None
+        if "ExtendedOffsetTable" in dcm and "ExtendedOffsetTableLengths" in dcm:
+            extended = (dcm.ExtendedOffsetTable, dcm.ExtendedOffsetTableLengths)
+            if len(extended[0]) != len(extended[1]):  # pydicom ignores the table then
+                extended = None
+        frames = generate_fragmented_frames(dcm.PixelData, number_of_frames=1, extended_offsets=extended)
+        first = next(frames, None)
+        more = next(frames, None) is not None
+    except Exception:  # noqa: BLE001 - pydicom's text names nothing fixed; the input fails either way
+        raise _unreadable("bad encapsulation") from None
+    if first is None:
+        raise _unreadable("no frame")
+    if more:
+        raise Unsupported("compressed pixel data holds more than one frame")
+    return b"".join(first)
+
+
+def _check_compressed_frame(dcm: pydicom.FileDataset, rows: int, columns: int) -> None:
+    """Raise `Unsupported` unless compressed PixelData decodes to the declared size: a JPEG, JPEG-LS, JPEG 2000 or
+    HTJ2K frame header's size and components must be Columns x Rows and SamplesPerPixel (and JPEG 2000's code-blocks
+    not tiny), and RLE must have the segments `_check_rle_frame` requires. Only headers are read; nothing is decoded.
+    Native pixel data, and a transfer syntax pydicom has no decoder for (it fails before decoding, as before), pass;
+    a compressed one it decodes that cannot be checked fails. A transfer syntax UID that is not one value fails.
+    Missing SamplesPerPixel or BitsAllocated is left to pydicom, which refuses to decode without them."""
+    value = dcm.file_meta.get("TransferSyntaxUID")
+    if value is None:
+        return
+    if not isinstance(value, str):  # several values
+        raise Unsupported("transfer syntax UID is not a single value")
+    syntax = UID(value)  # a value written with a VR other than UI reads as a plain str
+    try:
+        pydicom.pixels.get_decoder(syntax)
+    except NotImplementedError:
+        return
+    if not syntax.is_compressed:
+        return
+    if syntax not in (*JPEGTransferSyntaxes, *JPEGLSTransferSyntaxes, *JPEG2000TransferSyntaxes, RLELossless):
+        raise Unsupported(f"cannot check compressed pixel data dimensions ({syntax.name})")
+    samples, bits = dcm.get("SamplesPerPixel"), dcm.get("BitsAllocated")
+    if samples is None or bits is None:
+        return
+    if "PixelData" not in dcm:
+        raise _unreadable("no PixelData")
+    frame = _encapsulated_frame(dcm)
+    if syntax == RLELossless:
+        _check_rle_frame(frame, rows * columns, int(samples) * (int(bits) // 8))
+        return
+    size = _j2k_frame_size(frame) if syntax in JPEG2000TransferSyntaxes else _jpeg_frame_size(frame)
+    width, height, components = size
+    if (width, height) != (columns, rows):
+        raise Unsupported(f"compressed pixel data is {width} x {height}, not Columns x Rows {columns} x {rows}")
+    if components != int(samples):
+        raise Unsupported(f"compressed pixel data has {components} components, not SamplesPerPixel {samples}")
+
+
+def _check_dicom_memory(dcm: pydicom.FileDataset, path: RenderPath, draw_overlays: bool) -> None:
+    """`_check_render_memory` for the single frame of `dcm`, before it is decoded, and for the overlay planes if they
+    are drawn; then `_check_compressed_frame`, so that the frame decodes to no more than that. A missing or zero Rows
+    or Columns is left to the decoder, which refuses it before decoding."""
+    rows, columns = dcm.get("Rows"), dcm.get("Columns")
+    if rows and columns:
+        overlays = _overlay_plane_pixels(dcm) * OVERLAY_BYTES_PER_PIXEL if draw_overlays else 0
+        _check_render_memory(f"{columns} x {rows}", path, int(rows) * int(columns), overlays)
+        _check_compressed_frame(dcm, int(rows), int(columns))
+
+
+def preprocess_dicom(
+    dcm: pydicom.FileDataset, colormap: str = "inferno", *, draw_overlays: bool = False
+) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Render a single-frame DICOM to (H, W, 3) uint8: grayscale through `colormap`, colour as is.
+
+    Overlay planes are drawn at maximum brightness only if `draw_overlays` (an undecodable one then raises);
+    otherwise they are not decoded and the image is the PixelData alone. Bits above BitsStored are masked before
+    rendering; when they held content, it is shown as a view of its own to the right (see `_unused_bits_view`,
+    cropped on its own and placed as `preprocess_raster` places an alpha view), and their positions are returned with
+    the image, for `_dicom_notes`.
+    """
+    if not _has_pixel_data(dcm):
+        sop_class = _sop_class(dcm)
+        if sop_class == MediaStorageDirectoryStorage:
+            raise NotAnImage("DICOMDIR index")
+        raise Unsupported(f"no pixel data ({sop_class.name})" if sop_class else "no pixel data")
+    frames = int(dcm.get("NumberOfFrames") or 1)
+    if frames > 1:
+        raise Unsupported(f"multi-frame DICOM ({frames} frames)")
+    photometric = dcm.get("PhotometricInterpretation")
+    match photometric:
+        case "MONOCHROME1" | "MONOCHROME2":
+            wide = int(dcm.get("BitsAllocated") or 16) > 16
+            _check_dicom_memory(dcm, "dicom-gray-wide" if wide else "dicom-gray", draw_overlays)
+            pixels, high = _stored_pixels(dcm)
+            if pixels.ndim != 2:
+                raise Unsupported(f"pixel array with shape {pixels.shape}")
+            overlay = _overlay_mask(dcm, pixels.shape) if draw_overlays else np.zeros(pixels.shape, dtype=bool)
+            image = apply_colormap(_gray_dicom(pixels, photometric, overlay), colormap)
+        case (
+            "RGB"
+            | "PALETTE COLOR"
+            | "YBR_FULL"
+            | "YBR_FULL_422"
+            | "YBR_PARTIAL_420"
+            | "YBR_PARTIAL_422"
+            | "YBR_ICT"
+            | "YBR_RCT"
+        ):
+            if photometric == "PALETTE COLOR":
+                path: RenderPath = "dicom-palette"
+            else:
+                path = "dicom-colour-wide" if int(dcm.get("BitsAllocated") or 8) > 16 else "dicom-colour"
+            _check_dicom_memory(dcm, path, draw_overlays)
+            rgb, high = _colour_dicom(dcm, photometric)
+            if draw_overlays:
+                rgb[_overlay_mask(dcm, rgb.shape[:2])] = 255
+            image = _crop(rgb)
+        case _:
+            raise Unsupported(f"photometric interpretation {photometric}")
+    if high is None:
+        return image, ()
+    view = _linear_view(_crop(_unused_bits_view(high)))
+    return _beside([image, view]), _unused_bit_positions(high, int(dcm.BitsStored))
+
+
+def _overlay_note(dcm: pydicom.FileDataset) -> Note | None:
+    groups = [f"0x{group:04X}" for group in _overlay_groups(dcm)]
+    if not groups:
+        return None
+    return Note("overlay-plane", f"group{'s' if len(groups) > 1 else ''} {', '.join(groups)}")
+
+
+def _bit_overlay_groups(dcm: pydicom.FileDataset) -> dict[int, list[int]]:
+    """OverlayBitPosition -> the groups 0x6000-0x601E that have one and no OverlayData (a retired overlay stored in
+    PixelData's unused bits); a position that cannot be read as one integer is left out."""
+    groups: dict[int, list[int]] = {}
+    for group in range(_OVERLAY_FIRST_GROUP, _OVERLAY_LAST_GROUP + 1, 2):
+        if (group, _OVERLAY_DATA_ELEMENT) in dcm or (group, _OVERLAY_BIT_POSITION_ELEMENT) not in dcm:
+            continue
+        try:
+            position = int(dcm[group, _OVERLAY_BIT_POSITION_ELEMENT].value)
+        except Exception:  # noqa: BLE001, S112 - a malformed position names no group; it must never fail the input
+            continue
+        groups.setdefault(position, []).append(group)
+    return groups
+
+
+def _unused_bits_note(dcm: pydicom.FileDataset, unused_bits: tuple[int, ...]) -> Note | None:
+    """A note for the bits above BitsStored that held content, each followed by the overlay groups that claim it."""
+    if not unused_bits:
+        return None
+    claims = _bit_overlay_groups(dcm)
+    labels = [f"{bit}" + "".join(f" (overlay 0x{group:04X})" for group in claims.get(bit, [])) for bit in unused_bits]
+    return Note("overlay-unused-bits", f"bit{'s' if len(labels) > 1 else ''} {', '.join(labels)}")
+
+
+def _truncated(text: str) -> str:
+    """`text`, cut to `NOTE_VALUE_MAX` characters plus `…` when longer, so a note stays a short line."""
+    return text if len(text) <= NOTE_VALUE_MAX else text[:NOTE_VALUE_MAX] + "…"
+
+
+def _icon_note(dcm: pydicom.FileDataset) -> Note | None:
+    """A note for the top-level IconImageSequence: the first icon's size and photometric (`?` when missing).
+
+    Only those attributes are read, never the icon's pixels, each cut to `NOTE_VALUE_MAX` characters; a sequence
+    that cannot be read is noted as unreadable rather than failing the input.
+    """
+    if _ICON_IMAGE_SEQUENCE not in dcm:
+        return None
+    try:
+        items = dcm[_ICON_IMAGE_SEQUENCE].value
+        if not items:
+            return None
+        rows, cols, photometric = (
+            "?" if value in (None, "") else _truncated(str(value))
+            for value in (items[0].get(keyword) for keyword in ("Rows", "Columns", "PhotometricInterpretation"))
+        )
+        count = f", {len(items)} items" if len(items) > 1 else ""
+        detail = f"IconImageSequence: {rows}x{cols} {photometric}{count}"
+    except Exception as exc:  # noqa: BLE001 - a bad icon must never fail the input
+        detail = f"IconImageSequence: unreadable ({type(exc).__name__})"
+    return Note("icon-image", detail)
+
+
+def _pixel_data_tail_note(dcm: pydicom.FileDataset) -> Note | None:
+    """The `trailing-data` note for native PixelData that runs past its one frame, which pydicom renders the first
+    frame of without a word: more than the frame's expected length, except one pad byte when that length is odd. Its
+    detail is `_unrendered_detail`'s. Encapsulated PixelData is skipped (the compressed-frame checks cover it, and
+    multi-frame inputs never get here). Any failure of the check is itself a note, so export denies the file."""
+    try:
+        syntax = dcm.file_meta.get("TransferSyntaxUID")
+        if syntax is None or syntax.is_compressed or "PixelData" not in dcm:
+            return None
+        data = bytes(dcm.PixelData)
+        expected = pydicom.pixels.utils.get_expected_length(dcm, "bytes")
+        if len(data) <= expected + expected % 2:
+            return None
+        return Note("trailing-data", _unrendered_detail(data, ((expected, len(data)),), "of PixelData after its frame"))
+    except Exception as exc:  # noqa: BLE001 - an unreadable check must never fail the input, only be noted
+        return Note("trailing-data", f"trailing data unreadable: {type(exc).__name__}")
+
+
+def _dicom_notes(dcm: pydicom.FileDataset, unused_bits: tuple[int, ...]) -> tuple[Note, ...]:
+    """What `dcm` holds that downstream tools should strip, in NOTE_KINDS order; `unused_bits` are the positions above
+    BitsStored that held content, from the decode that rendered it (see `preprocess_dicom`)."""
+    notes = (_overlay_note(dcm), _unused_bits_note(dcm, unused_bits), _icon_note(dcm), _pixel_data_tail_note(dcm))
+    return tuple(note for note in notes if note is not None)
 
 
 def apply_colormap(img: np.ndarray, colormap: str = "inferno") -> np.ndarray:
-    cm = plt.get_cmap(colormap)
+    cm = matplotlib.colormaps[colormap]
     return ski.util.img_as_ubyte(cm(img)[:, :, :3])
 
 
-def _preprocess_non_dicom_array(img: np.ndarray) -> np.ndarray:
+def _side_by_side(views: list[np.ndarray], fill: float) -> np.ndarray:
+    """Place views of one dtype (float, or uint8) left to right, top-aligned, padded and separated by `fill`.
+
+    If any view is RGB, grayscale views are promoted to RGB.
+    """
+    if any(v.ndim == 3 for v in views):
+        views = [v if v.ndim == 3 else np.stack([v] * 3, axis=2) for v in views]
+    height = max(v.shape[0] for v in views)
+    channels, dtype = views[0].shape[2:], views[0].dtype
+    parts = []
+    for i, view in enumerate(views):
+        if i:
+            parts.append(np.full((height, SIDE_BY_SIDE_GAP, *channels), fill, dtype=dtype))
+        padded = np.full((height, view.shape[1], *channels), fill, dtype=dtype)
+        padded[: view.shape[0]] = view
+        parts.append(padded)
+    return np.concatenate(parts, axis=1)
+
+
+def _with_alpha(color: np.ndarray, alpha: np.ndarray) -> tuple[Views, AlphaCounts]:
+    """The views of float `color` with float `alpha` (both in [0, 1]), and the pixels not opaque.
+
+    Opaque alpha is just dropped. Otherwise the views are the channels with
+    alpha ignored (shown left) and alpha itself as grayscale, transparent black
+    and opaque white (shown right), so content hidden under transparent pixels
+    and content carried only by alpha are both visible. They are processed
+    separately (see `preprocess_raster`), so alpha cannot flatten the colour.
+    """
+    not_opaque = int((alpha < 1).sum())
+    if not not_opaque:
+        return (color,), (0, 0)
+    return (color, alpha), (not_opaque, alpha.size)
+
+
+def _alpha_notes(counts: AlphaCounts) -> tuple[Note, ...]:
+    """The `alpha` note for pixels that were not opaque, if any."""
+    not_opaque, total = counts
+    return (Note("alpha", f"{not_opaque} of {total} pixels not opaque"),) if not_opaque else ()
+
+
+def _windowed_gray(arr: np.ndarray) -> np.ndarray:
+    """Float32 [0, 1] from grayscale samples as a DICOM's are (see `_gray_dicom`): `_window`, so one extreme
+    pixel cannot push the content into a single bin of CLAHE's 256; zeros when constant."""
+    img = _gray_float32(arr)
+    return np.zeros_like(img) if img.min() >= img.max() else _window(img)
+
+
+def _high_bit_gray(im: Image.Image) -> np.ndarray:
+    """An I/F/I;16 image as float32 [0, 1], windowed (see `_windowed_gray`)."""
+    return _windowed_gray(np.asarray(im))
+
+
+def _decode_frame(im: Image.Image) -> tuple[Views, AlphaCounts]:
+    """Decode the current frame to its views (see `_with_alpha`) and alpha counts."""
+    transparency = im.info.get("transparency")
+    if im.mode in _HIGH_BIT_GRAY_MODES:
+        gray = _high_bit_gray(im)
+        if transparency is None:
+            return (gray,), (0, 0)
+        alpha = (np.asarray(im) != transparency).astype(np.float32)  # tRNS key on native values
+        return _with_alpha(gray, alpha)
+    if im.mode in _ALPHA_MODES or transparency is not None:
+        is_gray = im.mode in ("1", "L", "LA", "La")
+        arr = ski.util.img_as_float32(np.asarray(im.convert("LA" if is_gray else "RGBA")))
+        color = arr[:, :, 0] if is_gray else arr[:, :, :3]
+        return _with_alpha(color, arr[:, :, -1])
+    if im.mode in ("1", "L"):
+        return (ski.util.img_as_float32(np.asarray(im)),), (0, 0)
+    return (ski.util.img_as_float32(np.asarray(im.convert("RGB"))),), (0, 0)
+
+
+def _pillow_truncates(im: Image.Image) -> bool:
+    """Whether Pillow would keep only the high byte of the samples: a 16-bit RGB, gray+alpha or RGBA PNG, or a
+    16-bit unsigned RGB (with or without extra samples) or CMYK TIFF. Read from the header, before any pixels are
+    decoded."""
+    if isinstance(im, PngImagePlugin.PngImageFile):
+        return bool(im.tile) and im.tile[0][3] in _PNG_TRUNCATED_RAWMODES
+    if isinstance(im, TiffImagePlugin.TiffImageFile):
+        tags = im.tag_v2
+        samples = tags.get(TiffImagePlugin.SAMPLESPERPIXEL, 1)
+        photometric = tags.get(TiffImagePlugin.PHOTOMETRIC_INTERPRETATION)
+        return (
+            set(_as_tuple(tags.get(TiffImagePlugin.BITSPERSAMPLE, 1))) == {16}
+            and set(_as_tuple(tags.get(TiffImagePlugin.SAMPLEFORMAT, 1))) == {1}  # unsigned integers
+            and (
+                (photometric == tifffile.PHOTOMETRIC.RGB and samples >= 3)
+                or (photometric == tifffile.PHOTOMETRIC.SEPARATED and samples == 4)  # CMYK
+            )
+        )
+    return False
+
+
+def _as_tuple(value: object) -> tuple[object, ...]:
+    return value if isinstance(value, tuple) else (value,)
+
+
+def _png_samples(data: bytes) -> tuple[np.ndarray, np.ndarray | None]:
+    """A 16-bit PNG's colour, (H, W) gray or (H, W, 3) RGB, and its alpha, if any, as integers."""
+    try:
+        samples = imagecodecs.png_decode(data)  # (H, W, 2 | 3 | 4); a tRNS colour key becomes an alpha channel
+    except Exception as exc:
+        # The class only: libpng's message can arrive as undecodable stack bytes, which differ from run to run
+        raise DecodeError(f"cannot decode 16-bit PNG: {type(exc).__name__}") from exc
+    if samples.shape[2] == 2:
+        return samples[:, :, 0], samples[:, :, 1]
+    return samples[:, :, :3], samples[:, :, 3] if samples.shape[2] == 4 else None
+
+
+def _unpremultiplied(colour: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Straight colour from premultiplied 16-bit `colour`, clipped; 0 where alpha is 0, as Pillow does."""
+    straight = colour.astype(np.uint32) * 65535 // np.maximum(alpha, 1)[:, :, None]
+    return np.where(alpha[:, :, None] > 0, np.minimum(straight, 65535), 0).astype(np.uint16)
+
+
+def _decode_tiff(data: bytes) -> tuple[Views, AlphaCounts]:
+    """Decode the first page of a 16-bit TIFF that Pillow would truncate (see `_pillow_truncates`) to float32
+    [0, 1] (H, W, 3), or with its alpha view (see `_full_depth`).
+
+    RGB: the first extra sample is alpha when ExtraSamples marks it associated (premultiplied; unpremultiplied as
+    Pillow does) or unassociated alpha, or when a fourth sample has no ExtraSamples at all, as Pillow reads it. CMYK:
+    inks scale by 65535, then RGB = (1 - [C, M, Y]) * (1 - K), Pillow's conversion.
+    """
+    with tifffile.TiffFile(io.BytesIO(data)) as tif:
+        page = tif.pages[0]
+        assert isinstance(page, tifffile.TiffPage)
+        samples = page.asarray()
+        if page.planarconfig == tifffile.PLANARCONFIG.SEPARATE:
+            samples = np.moveaxis(samples, 0, -1)
+        photometric, extra = page.photometric, page.extrasamples
+    if samples.ndim != 3:
+        raise Unsupported(f"TIFF with shape {samples.shape}")
+    if photometric == tifffile.PHOTOMETRIC.SEPARATED:
+        ink = samples.astype(np.float32) / 65535
+        return ((1 - ink[:, :, :3]) * (1 - ink[:, :, 3:4]),), (0, 0)
+    colour = samples[:, :, :3]
+    first_extra = extra[0] if extra else (tifffile.EXTRASAMPLE.UNASSALPHA if samples.shape[2] == 4 else None)
+    if first_extra == tifffile.EXTRASAMPLE.ASSOCALPHA:
+        return _full_depth(_unpremultiplied(colour, samples[:, :, 3]), samples[:, :, 3])
+    if first_extra == tifffile.EXTRASAMPLE.UNASSALPHA:
+        return _full_depth(colour, samples[:, :, 3])
+    return _full_depth(colour, None)
+
+
+def _full_depth(colour: np.ndarray, alpha: np.ndarray | None) -> tuple[Views, AlphaCounts]:
+    """16-bit samples to float32 [0, 1] by their depth alone, colour and alpha alike (see `_with_alpha`); the data is
+    never consulted, so no pixel affects how another is scaled. The exception is a gray colour (2-D), which is
+    windowed as any high-bit grayscale is (see `_windowed_gray`); its alpha is still scaled by depth."""
+    scaled = _windowed_gray(colour) if colour.ndim == 2 else colour.astype(np.float32) / 65535
+    if alpha is None:
+        return (scaled,), (0, 0)
+    return _with_alpha(scaled, alpha.astype(np.float32) / 65535)
+
+
+def _png_chunks(data: bytes) -> Iterator[tuple[bytes, int, int]]:
+    """(type, start, end) of the data of each chunk of PNG `data`, in file order, through IEND.
+
+    The walk stops at IEND or at a chunk whose header runs past the end of `data`; the declared lengths are trusted
+    only to move along, so a chunk's data may run past the end too.
+    """
+    pos = 8  # after the signature
+    while pos + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[pos : pos + 8])
+        yield kind, pos + 8, pos + 8 + length
+        if kind == b"IEND":
+            return
+        pos += 12 + length  # length, type, data, CRC
+
+
+def _png_exif(data: bytes) -> tuple[bytes, ...]:
+    """The data of every `eXIf` chunk of PNG `data`, in file order, found by walking its chunks up to IEND.
+
+    No pixels are decoded. Readers differ on which of several chunks counts (Pillow takes the last), so all are kept.
+    """
+    return tuple(data[start:end] for kind, start, end in _png_chunks(data) if kind == b"eXIf")
+
+
+def _png_end(data: bytes) -> int:
+    """The offset where Pillow stops reading PNG `data`: just past IEND's 8-byte header, which is all it reads of IEND
+    (or past an empty IEND's CRC, or the end of `data` if that CRC is cut short, so the CRC is not counted), else the
+    start of the first chunk whose type is not four `[A-Za-z0-9_]` bytes or whose data and CRC run past the end, else
+    where the walk ends (a PNG without IEND whose last chunk is whole ends there)."""
+    pos = 8  # after the signature
+    for kind, start, end in _png_chunks(data):
+        if kind == b"IEND":
+            return min(start + 4, len(data)) if end == start else start
+        if not _PNG_CHUNK_TYPE.fullmatch(kind) or end + 4 > len(data):
+            return start - 8
+        pos = end + 4
+    return pos
+
+
+class _OverBudget(Exception):
+    """A JPEG walk (a trailing-data check, or `_jpeg_frame_size`) ran out of its `_WalkBudget`."""
+
+
+@dataclass
+class _WalkBudget:
+    """What one input's trailing-data check may still do, all its JPEG walks (an MPO's frames) together: marker steps
+    and bytes searched. Spending past either raises `_OverBudget`, so time and memory stay linear in the file size."""
+
+    markers: int
+    search_bytes: int
+
+    @classmethod
+    def for_data(cls, data: bytes) -> "_WalkBudget":
+        return cls(JPEG_WALK_MAX_MARKERS, JPEG_WALK_SEARCH_FACTOR * len(data) + JPEG_WALK_SEARCH_SLACK)
+
+    def next_marker(self, data: bytes, pos: int) -> int:
+        """The offset of the first JPEG marker (see `_JPEG_MARKER`) at or after `pos` in `data`, or len(data) if none,
+        from one regex search over no more bytes than are left."""
+        self.markers -= 1
+        stop = min(len(data), pos + self.search_bytes + 2)  # a marker's two bytes are not counted
+        found = _JPEG_MARKER.search(data, pos, stop)
+        if self.markers < 0 or (found is None and stop < len(data)):
+            raise _OverBudget
+        marker = found.start() if found else len(data)
+        self.search_bytes -= marker - pos
+        return marker
+
+
+def _jpeg_end(data: bytes, start: int = 0, budget: _WalkBudget | None = None) -> int | None:
+    """The offset just past the first EOI of the JPEG at `start` in `data`, or None when it has none.
+
+    From SOI, marker segments are skipped by their length; any other bytes (entropy-coded data, as in a progressive
+    file's several scans, or stray bytes before a marker, which Pillow and libjpeg skip too) are passed over to the
+    next marker by one regex search. Byte stuffing (FF00), RST0-7, TEM and FF fill bytes are not markers. A segment
+    declaring a length below 2 is passed over after its two length bytes, as Pillow and libjpeg do. There is no end at
+    the end of `data`, at a nested SOI, or at a segment that runs past the end. Every read is bounded by the length of
+    `data` and the position only moves forward. Each marker and each byte searched is spent from `budget` (a fresh
+    one for `data` if None; see `_WalkBudget`).
+    """
+    if data[start : start + 2] != b"\xff\xd8":
+        return None
+    budget = _WalkBudget.for_data(data) if budget is None else budget
+    pos = start + 2
+    while (pos := budget.next_marker(data, pos)) + 1 < len(data):
+        marker = data[pos + 1]
+        if marker == 0xD9:  # EOI
+            return pos + 2
+        if marker == 0xD8 or pos + 4 > len(data):
+            return None
+        length = int.from_bytes(data[pos + 2 : pos + 4], "big")
+        if length >= 2 and pos + 2 + length > len(data):
+            return None
+        pos += 4 if length < 2 else 2 + length
+    return None
+
+
+def _uncovered(length: int, covered: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """The (start, end) runs of [0, `length`) outside every (start, end) range in `covered`, in order."""
+    runs: list[tuple[int, int]] = []
+    pos = 0
+    for start, end in sorted(covered):
+        if start > pos:
+            runs.append((pos, start))
+        pos = max(pos, end)
+    if pos < length:
+        runs.append((pos, length))
+    return tuple(runs)
+
+
+def _mpo_unrendered(
+    data: bytes, first_end: int, offsets: Iterable[int], budget: _WalkBudget
+) -> tuple[tuple[int, int], ...]:
+    """The runs of an MPO `data` that no frame covers: outside [0, `first_end`) and each later frame's [start, EOI).
+
+    `offsets` are where Pillow reads each frame (absolute; the first at 0). A repeated offset is walked once, all from
+    one `budget`; an offset not at `FF D8 FF` (which Pillow rejects) or whose EOI is not found covers nothing, so its
+    bytes are reported.
+    """
+    ends = {
+        start: _jpeg_end(data, start, budget)
+        for start in sorted(set(offsets) - {0})
+        if data[start : start + 3] == b"\xff\xd8\xff"
+    }
+    return _uncovered(len(data), [(0, first_end), *((start, end) for start, end in ends.items() if end is not None)])
+
+
+def _unrendered_detail(data: bytes, runs: Sequence[tuple[int, int]], where: str) -> str:
+    """The `trailing-data` detail for the bytes in `runs` of `data`, `where` they are (fixed text and counts only: the
+    detail goes to a TSV). What they look like is read from the first run's first `SNIFF_BYTES`."""
+    count = sum(end - start for start, end in runs)
+    head = data[runs[0][0] : min(runs[0][1], runs[0][0] + SNIFF_BYTES)]
+    if all(data.count(b"\x00", start, end) == end - start for start, end in runs):
+        what = ALL_ZERO_SUFFIX
+    elif _has_preamble(head):
+        what = "; they begin with a DICOM preamble"
+    elif head.startswith(b"\xff\xd8\xff"):
+        what = "; they begin with a JPEG signature"
+    elif head.startswith(b"\x89PNG\r\n\x1a\n"):
+        what = "; they begin with a PNG signature"
+    elif _is_raster(head):
+        what = "; they begin with another image signature"
+    else:
+        what = ""
+    return f"{count} bytes {where}{what}"
+
+
+def _trailing_data_notes(data: bytes, image_format: str | None, frame_offsets: Sequence[int] = ()) -> tuple[Note, ...]:
+    """The `trailing-data` note for bytes of a JPEG, MPO or PNG image `data` that are not rendered (none for other
+    formats).
+
+    A JPEG's image ends at its first EOI, a PNG's where Pillow stops reading it (see `_png_end`). An MPO's frames,
+    at `frame_offsets` (see `_mpf_offsets`; none given falls back to the first EOI alone), cover their own
+    [SOI, EOI) ranges, and any byte outside them is counted, between frames or after them (see `_mpo_unrendered`). A
+    JPEG whose first EOI is not found gets `JPEG end not found`. The JPEG walks share one `_WalkBudget`; running out
+    of it gives `TRAILING_DATA_OVER_BUDGET` instead. A failure is itself a note, with only fixed text and the exception
+    class.
+    """
+    try:
+        if image_format not in ("JPEG", "MPO", "PNG"):
+            return ()
+        budget = _WalkBudget.for_data(data)
+        end = _png_end(data) if image_format == "PNG" else _jpeg_end(data, 0, budget)
+        if end is None:
+            return (Note("trailing-data", "JPEG end not found"),)
+        if image_format == "MPO":
+            runs = _mpo_unrendered(data, end, frame_offsets, budget)
+        else:
+            runs = _uncovered(len(data), [(0, end)])
+        if not runs:
+            return ()
+        if len(runs) == 1 and runs[0][1] == len(data):  # one run, at the end: a tail
+            return (Note("trailing-data", _unrendered_detail(data, runs, f"after the {image_format} end")),)
+        return (Note("trailing-data", _unrendered_detail(data, runs, "between or after the MPO's frames")),)
+    except _OverBudget:
+        return (Note("trailing-data", TRAILING_DATA_OVER_BUDGET),)
+    except Exception as e:  # noqa: BLE001 - any failure must surface as a note, never fail or hide the input
+        return (Note("trailing-data", f"trailing data unreadable: {type(e).__name__}"),)
+
+
+def _mpf_offsets(im: Image.Image) -> tuple[int, ...]:
+    """Where Pillow reads each frame of an MPO `im` (absolute offsets, the first 0), from its private
+    `_MpoImageFile__mpoffsets` (Pillow 10.3 to 12.3 at least, set when it is opened or adopted as an MPO): its
+    `mpoffset` base is deleted once used, and finding it again could disagree with Pillow on a crafted file. () for
+    other images, or when they cannot be read: the trailing-data check then reports everything after the first EOI,
+    which hides nothing."""
+    if im.format != "MPO":
+        return ()
+    try:
+        return tuple(int(offset) for offset in cast(Any, im)._MpoImageFile__mpoffsets)
+    except Exception:  # noqa: BLE001 - a missing or malformed attribute must not fail the input
+        return ()
+
+
+def _raw_profile_exif(text: str) -> bytes:
+    """The EXIF bytes of an ImageMagick "Raw profile type exif" text, decoded as Pillow does (a ValueError if bad)."""
+    return bytes.fromhex("".join(text.split("\n")[3:]))
+
+
+def _tiff_has_subifds(data: bytes) -> bool:
+    """Whether the first IFD of TIFF or BigTIFF `data` has a SubIFDs (330) entry, from its raw entry list.
+
+    Every read is bounded by the length of `data`; an IFD that runs past it is read as far as it goes.
+    """
+    order = "<" if data[:2] == b"II" else ">"
+    big = struct.unpack_from(order + "H", data, 2)[0] == 43
+    offset = struct.unpack_from(order + ("Q" if big else "I"), data, 8 if big else 4)[0]
+    count_size, entry_size = (8, 20) if big else (2, 12)
+    if offset + count_size > len(data):
+        return False
+    (count,) = struct.unpack_from(order + ("Q" if big else "H"), data, offset)
+    first = offset + count_size
+    entries = min(count, (len(data) - first) // entry_size)
+    return any(struct.unpack_from(order + "H", data, first + i * entry_size)[0] == 330 for i in range(entries))
+
+
+def _thumbnail_size(ifd1: Mapping[int, object], *, compressed: bool) -> str:
+    """The thumbnail's byte count from IFD1 (JPEGInterchangeFormatLength, or the sum of StripByteCounts), or `?`."""
+    if compressed:
+        length = ifd1.get(0x0202)
+        return str(length) if isinstance(length, int) else "?"
+    counts = ifd1.get(0x0117)
+    counts = (counts,) if isinstance(counts, int) else counts
+    if isinstance(counts, tuple) and counts and all(isinstance(c, int) for c in counts):
+        return str(sum(counts))
+    return "?"
+
+
+def _exif_notes(raw: bytes | None, prefix: str = "") -> tuple[Note, ...]:
+    """The `embedded-thumbnail` notes for the EXIF bytes `raw` (None: no EXIF), each detail starting with `prefix`.
+
+    Parsed with a fresh `Image.Exif`, never the image's own. A compressed thumbnail has JPEGInterchangeFormat
+    (0x0201) in IFD1, an uncompressed one StripOffsets (0x0111). A failure to read is itself a note, with only fixed
+    text or the exception class in it (the detail goes to a TSV).
+    """
+    if not raw:
+        return ()
+    notes: list[Note] = []
+    try:
+        with warnings.catch_warnings(record=True) as caught:  # Pillow reports most corrupt EXIF as a warning only
+            warnings.simplefilter("always")
+            exif = Image.Exif()
+            exif.load(raw)
+            ifd1 = exif.get_ifd(ExifTags.IFD.IFD1)
+        if 0x0201 in ifd1:
+            notes.append(
+                Note(
+                    "embedded-thumbnail",
+                    f"{prefix}EXIF IFD1 thumbnail ({_thumbnail_size(ifd1, compressed=True)} bytes)",
+                )
+            )
+        elif 0x0111 in ifd1:
+            size = _thumbnail_size(ifd1, compressed=False)
+            notes.append(Note("embedded-thumbnail", f"{prefix}EXIF IFD1 thumbnail, uncompressed ({size} bytes)"))
+        if any(issubclass(w.category, UserWarning) for w in caught):
+            notes.append(Note("embedded-thumbnail", f"{prefix}EXIF unreadable: corrupt"))
+    except Exception as e:  # noqa: BLE001 - any parse failure must surface as a note, never fail or hide the input
+        notes.append(Note("embedded-thumbnail", f"{prefix}EXIF unreadable: {type(e).__name__}"))
+    return tuple(notes)
+
+
+def _subifd_notes(data: bytes) -> tuple[Note, ...]:
+    """The `embedded-thumbnail` note for the SubIFDs (tag 330) of the first page of TIFF or BigTIFF `data`.
+
+    Whether the tag is there comes from the raw entry list, and its value from tifffile, which drops a tag whose value
+    it cannot read: `TIFF SubIFDs unreadable: invalid value` then.
+    """
+    try:
+        present = _tiff_has_subifds(data)
+        with tifffile.TiffFile(io.BytesIO(data)) as tif:
+            page = tif.pages[0]
+            assert isinstance(page, tifffile.TiffPage)
+            tag = page.tags.get("SubIFDs")
+            value = None if tag is None else tag.value
+    except Exception as e:  # noqa: BLE001 - any failure must surface as a note, never fail or hide the input
+        return (Note("embedded-thumbnail", f"TIFF SubIFDs unreadable: {type(e).__name__}"),)
+    if isinstance(value, tuple | list) and value:
+        return (Note("embedded-thumbnail", f"TIFF SubIFDs ({len(value)})"),)
+    if isinstance(value, int):
+        return (Note("embedded-thumbnail", "TIFF SubIFDs (1)"),)
+    return (Note("embedded-thumbnail", "TIFF SubIFDs unreadable: invalid value"),) if present or tag is not None else ()
+
+
+def _embedded_image_notes(im: Image.Image, data: bytes) -> tuple[Note, ...]:
+    """The `embedded-thumbnail` notes for the first frame of `im`, opened from `data`.
+
+    These are its EXIF IFD1 thumbnails and a TIFF's SubIFDs. Only the file's metadata is read: no pixels are decoded
+    and `im` is left as it was. A PNG's EXIF is every `eXIf` chunk and a "Raw profile type exif" text chunk read
+    before the pixels (`im.info`; Pillow reads one after them only on load, which is not done here).
+    """
+    if im.format == "TIFF":
+        return _subifd_notes(data)
+    if im.format != "PNG":
+        raw = im.info.get("exif")
+        return _exif_notes(raw if isinstance(raw, bytes) else None)
+    notes = [note for chunk in _png_exif(data) for note in _exif_notes(chunk)]
+    profile = im.info.get("Raw profile type exif")
+    if isinstance(profile, str):
+        try:
+            notes += _exif_notes(_raw_profile_exif(profile))
+        except ValueError as e:
+            notes.append(Note("embedded-thumbnail", f"EXIF unreadable: {type(e).__name__}"))
+    return tuple(notes)
+
+
+def _open_image(data: bytes) -> Image.Image:
+    """`Image.open` of `data`, with every image an MPF lists readable as a frame on any Pillow.
+
+    Pillow 12 leaves an Ultra HDR file (MPF listing a gain map, XMP with `hdrgm:Version`) a plain JPEG, so its gain map
+    would not be rendered, where Pillow 10.3 opens it as an MPO. A plain JPEG whose MPF lists more than one image is
+    therefore adopted as an MPO, as Pillow does for any other such file. When the MPF is malformed, or adopting fails,
+    the plain JPEG is kept (opened afresh: a failed adoption leaves the first one half converted), and its extra
+    bytes are left to the `trailing-data` note."""
+    im = Image.open(io.BytesIO(data))
+    if type(im) is not JpegImagePlugin.JpegImageFile:
+        return im
+    try:
+        mpheader = cast(Any, im)._getmp()
+        if mpheader is not None and mpheader[45057] > 1:
+            return MpoImagePlugin.MpoImageFile.adopt(im, mpheader)
+    except Exception:  # noqa: BLE001 - a malformed MPF must not fail an input that renders as its primary image
+        im.close()
+        return JpegImagePlugin.JpegImageFile(io.BytesIO(data))
+    return im
+
+
+def _open_raster(data: bytes) -> Image.Image:
+    """`_open_image` of `data`; Pillow's decompression bomb error (over twice `Image.MAX_IMAGE_PIXELS`) is
+    `Unsupported`, as the estimate (see `_check_raster_memory`) would have found the image too large."""
+    try:
+        return _open_image(data)
+    except Image.DecompressionBombError as exc:
+        pixels = 2 * (Image.MAX_IMAGE_PIXELS or 0)
+        raise Unsupported(f"image too large (over {pixels} pixels, Pillow's decompression bomb limit)") from exc
+
+
+def _mpo_frame_sizes(data: bytes, frames: int) -> list[tuple[int, int]]:
+    """(width, height) of each of an MPO's `frames`, from their headers alone: seeking to a frame parses its JPEG
+    header, no pixels. It is done on an image of its own, as seeking the one being rendered back to its first frame
+    would parse that frame's EXIF again, unguarded as `Image.open` guards it, and fail where the rendering does not.
+    Stops at the first frame that cannot be positioned; the rendering fails there too, before decoding it."""
+    with _open_image(data) as probe:
+        sizes = [probe.size]
+        for index in range(1, frames):
+            try:
+                probe.seek(index)
+            except Exception:  # noqa: BLE001 - whatever stops this seek stops the rendering's, which reports it
+                break
+            sizes.append(probe.size)
+    return sizes
+
+
+def _raster_path(im: Image.Image) -> RenderPath:
+    """How `decode_raster` renders the single-frame `im`, by its mode as `_decode_frame` branches on it."""
+    if im.mode in _ALPHA_MODES or im.info.get("transparency") is not None:
+        return "raster-alpha"
+    if _pillow_truncates(im):
+        return "raster-rgb16" if len(im.getbands()) == 3 else "raster-alpha"  # an alpha or CMYK sample as well
+    if im.mode in _HIGH_BIT_GRAY_MODES:
+        return "raster-gray16"
+    return "raster-gray8" if im.mode in ("1", "L") else "raster-rgb8"
+
+
+def _check_raster_memory(im: Image.Image, data: bytes, frames: int) -> None:
+    """`_check_render_memory` for `im`, with `frames` frames (only an MPO has several), from the headers alone. An
+    MPO is one canvas of its frames side by side, as `_side_by_side` places them."""
+    if frames == 1:
+        width, height = im.size
+        _check_render_memory(f"{width} x {height}", _raster_path(im), width * height)
+        return
+    sizes = _mpo_frame_sizes(data, frames)
+    width = sum(w for w, _ in sizes) + SIDE_BY_SIDE_GAP * (len(sizes) - 1)
+    height = max(h for _, h in sizes)
+    _check_render_memory(f"{len(sizes)} frames, {width} x {height} side by side", "raster-mpo", width * height)
+
+
+def decode_raster(data: bytes) -> tuple[Views, tuple[Note, ...]]:
+    """Decode with PIL, branching on mode, to float32 [0, 1] views, (H, W) grayscale or (H, W, 3) RGB, and notes.
+
+    Grayscale modes (including 16-bit) stay grayscale; everything else (CMYK,
+    YCbCr, P, ...) becomes RGB. There is one view, except for a transparent
+    image's colour and alpha (see `_with_alpha`, which also gives the `alpha`
+    note; counts are summed over an MPO's frames). The notes also hold any `embedded-thumbnail` notes (see
+    `_embedded_image_notes`; an MPO's later frames are prefixed `frame N: `), then any `trailing-data` note (see
+    `_trailing_data_notes`), both read from the file without decoding pixels. A 16-bit
+    colour or alpha PNG or 16-bit RGB or CMYK TIFF, which Pillow would truncate
+    to its high byte, is decoded at full depth instead (see `_full_depth` and
+    `_decode_tiff`); its gray+alpha stays grayscale. An MPO (JPEG with extra MPF images: HDR gain
+    maps, previews, adopted on any Pillow; see `_open_image`) is one view of all its frames side by side; any
+    other multi-frame image is unsupported.
+    """
+    with _open_raster(data) as im:
+        frames = getattr(im, "n_frames", 1)
+        if frames > 1 and im.format != "MPO":
+            raise Unsupported(f"multi-frame image ({frames} frames)")
+        _check_raster_memory(im, data, frames)  # before the 16-bit branch and any `load`
+        embedded = _embedded_image_notes(im, data)  # while `im` is open, before the 16-bit branch below returns
+        trailing = _trailing_data_notes(data, im.format, _mpf_offsets(im))
+        if _pillow_truncates(im):
+            views, counts = _full_depth(*_png_samples(data)) if im.format == "PNG" else _decode_tiff(data)
+            return views, _alpha_notes(counts) + embedded + trailing
+        decoded = []
+        for index in range(frames):
+            im.seek(index)
+            if index:
+                raw = im.info.get("exif")
+                embedded += _exif_notes(raw if isinstance(raw, bytes) else None, f"frame {index}: ")
+            im.load()
+            decoded.append(_decode_frame(im))
+    counts = (sum(c[0] for _, c in decoded), sum(c[1] for _, c in decoded))
+    notes = _alpha_notes(counts) + embedded + trailing
+    if len(decoded) == 1:
+        return decoded[0][0], notes
+    return (_side_by_side([v for views, _ in decoded for v in views], fill=0.0),), notes
+
+
+def _preprocess_view(img: np.ndarray) -> np.ndarray:
+    """Normalize one decoded view to (H, W, 3) uint8, applying CLAHE to grayscale."""
     if img.ndim == 2:
         img = ski.util.img_as_float32(img)
-        img = ski.exposure.equalize_adapthist(img, CLAHE_BINS)
+        img = ski.exposure.equalize_adapthist(img, kernel_size=CLAHE_KERNEL_SIZE)
         img = ski.util.img_as_ubyte(img)
-    return img
+        return np.stack([img] * 3, axis=2)
+    if img.ndim == 3 and img.shape[2] == 3:
+        return ski.util.img_as_ubyte(img)
+    raise Unsupported(f"image with shape {img.shape}")
 
 
-def preprocess_non_dicom(path: Path) -> np.ndarray:
-    return _preprocess_non_dicom_array(ski.io.imread(path))
+def _linear_view(img: np.ndarray) -> np.ndarray:
+    """An alpha or unused-bits view to (H, W, 3) uint8, linearly: alpha transparent black, opaque white, constant
+    alpha its own gray."""
+    gray = ski.util.img_as_ubyte(img)
+    return np.stack([gray] * 3, axis=2)
 
 
-def preprocess_non_dicom_bytes(buf: bytes) -> np.ndarray:
-    return _preprocess_non_dicom_array(ski.io.imread(io.BytesIO(buf)))
+def preprocess_raster(views: Views) -> np.ndarray:
+    """Normalize decoded views to one (H, W, 3) uint8 image. The first view is the image, as it would be by itself
+    (CLAHE if grayscale, which equalizes by the whole image's range, so another view must not set it); a second is
+    alpha, shown linearly (see `_linear_view`). They are placed side by side."""
+    return _beside([_preprocess_view(views[0]), *(_linear_view(v) for v in views[1:])])
 
 
-def _consume_batch(source_iter, batch_size):
-    """Consume up to batch_size items from the source iterator.
+def _beside(processed: list[np.ndarray]) -> np.ndarray:
+    """(H, W, 3) uint8 views to one image, side by side and separated by SIDE_BY_SIDE_FILL (see `_side_by_side`);
+    one view as is. Placed as uint8, not floats, which would cost 24 bytes a pixel more at the peak."""
+    if len(processed) == 1:
+        return processed[0]
+    return _side_by_side(processed, fill=round(SIDE_BY_SIDE_FILL * 255))
 
-    Returns list of (image_id, array_or_None, resolved_path_or_None).
+
+def _has_preamble(head: bytes) -> bool:
+    """Whether the 128-byte preamble is followed by `DICM`; false for input too short to hold it."""
+    return head[_DICOM_MAGIC_OFFSET : _DICOM_MAGIC_OFFSET + len(_DICOM_MAGIC)] == _DICOM_MAGIC
+
+
+def read_dicom(data: bytes) -> pydicom.FileDataset:
+    """Read DICOM with or without the preamble, `DICM` and file meta.
+
+    `force` lets pydicom read a bare dataset; a file with the preamble reads the
+    same either way. `force` parses anything, so a bare dataset is
+    `InvalidDicomError` unless it has a SOP Class UID or pixel data (an
+    ACR-NEMA file may have only the latter). A bare dataset is uncompressed by
+    definition, so its transfer syntax is the encoding pydicom detected.
     """
-    entries = []
-    for image_id, array in source_iter:
-        resolved = Path(image_id) if array is None else None
-        entries.append((image_id, array, resolved))
-        if len(entries) >= batch_size:
-            break
-    return entries
+    dcm = pydicom.dcmread(io.BytesIO(data), force=True)
+    if not _has_preamble(data) and _sop_class(dcm) is None and not _has_pixel_data(dcm):
+        first = min([*dcm.file_meta.keys(), *dcm.keys()], default=None)
+        if first is not None and first.group in (0x0002, 0x0008):
+            raise InvalidDicomError("not DICOM (no preamble, no SOP Class UID and no pixel data)")
+        raise InvalidDicomError("not DICOM (no preamble and no recognizable DICOM elements)")
+    if "TransferSyntaxUID" not in dcm.file_meta:
+        implicit, little = dcm.original_encoding
+        if implicit:
+            dcm.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
+        else:
+            dcm.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian if little else ExplicitVRBigEndian
+    return dcm
+
+
+def render(kind: Kind, image_id: ImageId, data: bytes, colormap: str, *, draw_overlays: bool = False) -> Rendered:
+    """Render one input's image: a DICOM's PixelData only, nothing else embedded in the file.
+
+    A rendering carries its notes (see `_dicom_notes`, `decode_raster`). A failure raises.
+    """
+    match kind:
+        case "dicom":
+            dcm = read_dicom(data)
+            rgb, unused_bits = preprocess_dicom(dcm, colormap, draw_overlays=draw_overlays)
+            return Rendered(image_id, rgb, _dicom_notes(dcm, unused_bits))
+        case "raster":
+            img, notes = decode_raster(data)
+            return Rendered(image_id, preprocess_raster(img), notes)
+
+
+# ---------------------------------------------------------------- discovery (IO)
+
+
+def _is_raster(head: bytes) -> bool:
+    return (
+        head.startswith(_RASTER_MAGIC)
+        or (head.startswith(b"RIFF") and head[8:12] == b"WEBP")
+        or (
+            head.startswith(b"BM")
+            and len(head) >= 18
+            and int.from_bytes(head[14:18], "little") in _BMP_DIB_HEADER_SIZES
+        )
+        or (head[:2] in _PNM_TYPES and head[2:3].isspace())
+        or (head[4:8] == b"ftyp" and head[8:12] in _HEIF_BRANDS)  # HEIF/AVIF: Pillow decides
+    )
+
+
+def _is_bare_dicom(head: bytes) -> bool:
+    """A dataset without preamble: a little-endian (0002|0008,xxxx) first element with a VR or a short even length.
+
+    The element number may be odd: (0008,0005) Specific Character Set often comes first.
+    """
+    if len(head) < 8 or head[:2] not in _BARE_DICOM_GROUPS:
+        return False
+    implicit_length = int.from_bytes(head[4:8], "little")
+    return head[4:6] in _DICOM_VRS or (implicit_length <= _BARE_DICOM_MAX_FIRST_LENGTH and implicit_length % 2 == 0)
+
+
+def _unsupported_archive(name: str) -> Rejected:
+    return Rejected("failed", f"unsupported: {name} archive")
+
+
+def classify(name: str, head: bytes) -> Content | Rejected:
+    """Classify an input by its first `SNIFF_BYTES` bytes; `name` is its path (or ZIP entry name).
+
+    The name only matters when the content is not recognized: macOS metadata is
+    ignored, a DICOM or image suffix leaves the decision to the decoder (so a
+    damaged file fails rather than being dropped), and a `.zip` or other archive
+    name fails. Compressed archives (gzip, bzip2, xz, zstd, 7z, rar, tar) fail as unsupported.
+    """
+    if _has_preamble(head):
+        return "dicom"
+    if head.startswith(_ZIP_MAGIC):
+        return "zip"
+    for magic, archive in _ARCHIVE_MAGIC:
+        if head.startswith(magic):
+            return _unsupported_archive(archive)
+    if _is_raster(head):
+        return "raster"
+    path = PurePosixPath(name)
+    if head.startswith(_APPLEDOUBLE_MAGIC) or path.name.startswith("._") or "__MACOSX" in path.parts:
+        return Rejected("ignored", _APPLEDOUBLE_REASON)
+    if _is_bare_dicom(head):
+        return "dicom"
+    suffix = path.suffix.lower()
+    if suffix in _DICOM_SUFFIXES:
+        return "dicom"
+    if suffix in _RASTER_SUFFIXES:
+        return "raster"
+    if suffix in _ARCHIVE_SUFFIXES:  # tar's `ustar` is at offset 257, beyond the sniffed bytes
+        return _unsupported_archive(_ARCHIVE_SUFFIXES[suffix])
+    if suffix == ".zip":
+        return Rejected("failed", "unrecognized content for a .zip file")
+    return Rejected("ignored", "not an image (unrecognized content)")
+
+
+def _bad_char(c: str) -> bool:
+    """A character skipped.tsv cannot hold: a surrogate (from a name that is not UTF-8) or one export refuses."""
+    return unicodedata.category(c) == "Cs" or has_unsafe_char(c)
+
+
+def _escape_name(text: str) -> str:
+    """`text` with each bad character spelled out: a surrogate from a non-UTF-8 byte as that byte (`\\xff`), an
+    ASCII control as `\\xNN`, any other (C1, U+2028/U+2029, another surrogate) as `\\uNNNN`, so no two differ only
+    in spelling a byte that is on disk and one that is not."""
+
+    def escape(c: str) -> str:
+        code = ord(c)
+        if 0xDC80 <= code <= 0xDCFF:  # os.fsdecode's surrogateescape for the byte code - 0xDC00
+            return f"\\x{code - 0xDC00:02x}"
+        if not _bad_char(c):
+            return c
+        return f"\\x{code:02x}" if code < 0x80 else f"\\u{code:04x}"
+
+    return "".join(map(escape, text))
+
+
+def _checked_name(item: Candidate | SkippedRow) -> Candidate | SkippedRow:
+    """`item`, or a failed row under its escaped id if that id could not be written to skipped.tsv or exported."""
+    if any(map(_bad_char, item.image_id)):
+        return SkippedRow(ImageId(_escape_name(item.image_id)), "failed", BAD_NAME_REASON)
+    return item
+
+
+def _clean_reason(reason: str) -> str:
+    """One line, and reproducible: runs of bad characters (see `_bad_char`) become a space, object reprs `<data>`."""
+    reason = re.sub(r"<[^<>]* object at 0x[0-9a-fA-F]+>", "<data>", reason)
+    return "".join(" " if bad else "".join(run) for bad, run in groupby(reason, _bad_char)).strip()
+
+
+def _failed(image_id: ImageId, exc: Exception) -> SkippedRow:
+    reason = str(exc) if isinstance(exc, Unsupported | DecodeError) else f"{type(exc).__name__}: {exc}"
+    return SkippedRow(image_id, "failed", _clean_reason(reason))
+
+
+def _candidate(image_id: ImageId, kind: Kind, read: Callable[[], bytes]) -> Candidate | SkippedRow:
+    """The input with the bytes `read` returns, or a failed row if they cannot be read."""
+    try:
+        return Candidate(image_id, kind, read())
+    except Exception as exc:  # noqa: BLE001 - an unreadable input is recorded in skipped.tsv
+        return _failed(image_id, exc)
+
+
+def _check_input_size(size: int) -> None:
+    """Raise `Unsupported` if `size` bytes, as stated by the file system or the ZIP directory, are over
+    `MAX_INPUT_BYTES`: the input is then not read."""
+    if size > MAX_INPUT_BYTES:
+        raise Unsupported(f"input too large ({size} bytes; limit {MAX_INPUT_BYTES})")
+
+
+def _check_zip_entry(info: ZipInfo) -> None:
+    """Raise `Unsupported` for an entry that is not to be opened: over `MAX_INPUT_BYTES` when inflated, even to
+    sniff it, encrypted (said so, as the method check would otherwise name AES's method 99), or compressed by a
+    method other than STORED, DEFLATED, BZIP2 and LZMA (named by its number). `_zip_entry_pieces` decodes each of
+    the four no further than the declared size (deflate: up to about 4 KiB past it)."""
+    _check_input_size(info.file_size)
+    if info.flag_bits & 0x1:  # ZipCrypto, or AES (method 99): zipfile would ask for a password, not decrypt
+        raise Unsupported("encrypted ZIP entry (decrypt the archive first)")
+    if info.compress_type not in (ZIP_STORED, ZIP_DEFLATED, ZIP_BZIP2, ZIP_LZMA):
+        raise Unsupported(f"ZIP compression method {info.compress_type}")
+
+
+def _read_zip_entry(zf: ZipFile, path: Path, info: ZipInfo) -> bytes:
+    """The bytes of the entry in the archive at `path`, decoded no further than its declared size (deflate: plus the
+    up to 4 KiB zlib may decode past it): `ZipFile.read` would let one call inflate up to `MAX_N` (1 GiB, 2 GiB on
+    Python 3.14) of a deflated entry whose directory understates its size, and decompress a bzip2 or LZMA one whole.
+    Such an entry fails its CRC check unless the CRC was written for the stated prefix; then only that prefix is
+    read. An entry holding fewer bytes than declared raises `BadZipFile`, as `zipfile` would not; so does one whose
+    CRC-32 does not match, in `zipfile`'s words, for every method."""
+    buf = io.BytesIO()  # not `b"".join`, which holds the pieces and the whole at once: twice the entry
+    for piece in _zip_entry_pieces(zf, path, info, info.file_size):
+        buf.write(piece)
+    data = buf.getvalue()
+    if len(data) != info.file_size:
+        raise BadZipFile(
+            f"File {info.filename!r} is {len(data)} bytes, not the {info.file_size} the ZIP directory states"
+        )
+    if zlib.crc32(data) != info.CRC:
+        raise BadZipFile(f"Bad CRC-32 for file {info.filename!r}")
+    return data
+
+
+def _read_input(path: Path, size: int) -> bytes:
+    """The bytes of the file at `path`, of `size` bytes as stat said, read from one descriptor and no further than
+    `MAX_INPUT_BYTES`: a file that has grown past that since is refused, not read to its end."""
+    _check_input_size(size)
+    with open(path, "rb") as f:
+        data = f.read(size + 1)  # not MAX_INPUT_BYTES + 1: the reader would reserve that much for any file
+        if len(data) > size:  # it has grown: read on, to the limit
+            data += f.read(MAX_INPUT_BYTES + 1 - len(data))
+    if len(data) > MAX_INPUT_BYTES:
+        raise Unsupported(f"input too large (more than {MAX_INPUT_BYTES} bytes; limit {MAX_INPUT_BYTES})")
+    return data
+
+
+_ZIP_LOCAL_HEADER = struct.Struct(
+    "<4s2B4HL2L2H"
+)  # the 30-byte local file header; the last two are name and extra lengths
+_ZIP_DATA_DESCRIPTOR_MAX = 24  # 12 or 16 bytes (signature optional), 20 or 24 for ZIP64
+_ZIP_PIECE = 1 << 16  # the most compressed bytes read, and decoded bytes produced, at a time
+_ZIP_SNIFF_CHECKED = 4096  # `ZipExtFile.MIN_READ_SIZE`: a sniff decodes that much, so reaches the CRC check below it
+_ZIP_LZMA_HEADER = struct.Struct("<BBHBI")  # ZIP's LZMA header: version, properties size, lc/lp/pb byte, dict size
+
+
+def _zip_local_header(f: io.BufferedReader, info: ZipInfo) -> tuple[int, int]:
+    """The (name, extra) lengths in the local header of `info`, read from `f`, the archive opened; `Unsupported`
+    if there is no readable header there."""
+    f.seek(info.header_offset)
+    header = f.read(_ZIP_LOCAL_HEADER.size)
+    if len(header) < _ZIP_LOCAL_HEADER.size or not header.startswith(b"PK\x03\x04"):
+        raise Unsupported(
+            f"ZIP entry has no readable local header at byte {info.header_offset} (concatenated, "
+            "self-extracting or damaged archive)"
+        )
+    *_, name_len, extra_len = _ZIP_LOCAL_HEADER.unpack(header)
+    return name_len, extra_len
+
+
+def _zip_data_start(info: ZipInfo, name_len: int, extra_len: int) -> int:
+    """Where the compressed data of `info` starts, after a local header with these name and extra lengths."""
+    return info.header_offset + _ZIP_LOCAL_HEADER.size + name_len + extra_len
+
+
+def _zip_entry_span(info: ZipInfo, name_len: int, extra_len: int) -> tuple[int, int]:
+    """The (start, end) bytes an entry takes in its archive: local header (with the lengths read from it, which may
+    differ from the central directory's), data, and, if general-purpose flag bit 3 is set, up to a data descriptor."""
+    end = _zip_data_start(info, name_len, extra_len) + info.compress_size
+    return info.header_offset, end + (_ZIP_DATA_DESCRIPTOR_MAX if info.flag_bits & 0x8 else 0)
+
+
+def _zip_compressed(path: Path, info: ZipInfo) -> Generator[bytes, None, None]:
+    """The `compress_size` compressed bytes of `info` in the archive at `path`, in pieces of at most `_ZIP_PIECE`.
+    The sizes are the central directory's (ZIP64 already resolved by `zipfile`), so a data descriptor is not read."""
+    with open(path, "rb") as f:
+        f.seek(_zip_data_start(info, *_zip_local_header(f, info)))
+        left = info.compress_size
+        while left > 0:
+            data = f.read(min(_ZIP_PIECE, left))
+            if not data:
+                raise BadZipFile(f"Truncated data for file {info.filename!r}")
+            left -= len(data)
+            yield data
+
+
+def _lzma1_filter(header: bytes, name: str, size: int) -> dict[str, int]:
+    """The raw LZMA1 filter that ZIP's 9-byte LZMA `header` (of entry `name`) describes, to decode `size` bytes: two
+    version bytes, a properties size that must be 5, then the properties, a lc/lp/pb byte (`(pb * 5 + lp) * 9 + lc`,
+    below 225, with lc + lp at most 4) and the dictionary size. liblzma allocates the whole dictionary up front, so
+    it is cut to `size` (at least liblzma's 4 KiB minimum): no match can reach further back than what is decoded."""
+    import lzma
+
+    _major, _minor, props_size, lclppb, dict_size = _ZIP_LZMA_HEADER.unpack(header)
+    pb, rest = divmod(lclppb, 9 * 5)
+    lp, lc = divmod(rest, 9)
+    if props_size != 5 or pb > 4 or lc + lp > 4:
+        raise BadZipFile(f"Bad LZMA properties for file {name!r}")
+    return {"id": lzma.FILTER_LZMA1, "lc": lc, "lp": lp, "pb": pb, "dict_size": min(dict_size, max(size, 4096))}
+
+
+def _zip_decoder(
+    info: ZipInfo, compressed: Iterator[bytes], size: int
+) -> "tuple[bz2.BZ2Decompressor | lzma.LZMADecompressor, Iterator[bytes]]":
+    """A decoder for the first `size` bytes of the bzip2 or LZMA entry `info`, and the `compressed` pieces left for it
+    to decode: for LZMA, those after the 9-byte header that sets up its filter. `bz2` and `lzma` are imported here,
+    as `zipfile` does, so that a Python built without them fails only on such an entry."""
+    if info.compress_type == ZIP_BZIP2:
+        import bz2
+
+        return bz2.BZ2Decompressor(), compressed
+    import lzma
+
+    need, header = _ZIP_LZMA_HEADER.size, b""
+    while len(header) < need and (piece := next(compressed, b"")):
+        header += piece
+    if len(header) < need:
+        raise BadZipFile(f"Truncated data for file {info.filename!r}")
+    decoder = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[_lzma1_filter(header[:need], info.filename, size)])
+    return decoder, chain([header[need:]], compressed)
+
+
+def _decoded(
+    decoder: "bz2.BZ2Decompressor | lzma.LZMADecompressor", compressed: Iterator[bytes], size: int
+) -> Iterator[bytes]:
+    """What `decoder` makes of the `compressed` pieces, at most `size` bytes in all and `_ZIP_PIECE` at a time. It
+    ends at the end of the stream (bytes after it are ignored, as `zipfile` does), or when the input does: an LZMA
+    stream need not carry an end marker, so its EOS flag (bit 1) is not relied on."""
+    left = size
+    while left > 0 and not decoder.eof:
+        data = next(compressed, None) if decoder.needs_input else b""
+        if data is None:
+            return
+        out = decoder.decompress(data, min(_ZIP_PIECE, left))
+        left -= len(out)
+        if out:
+            yield out
+
+
+def _zip_entry_pieces(zf: ZipFile, path: Path, info: ZipInfo, size: int) -> Generator[bytes, None, None]:
+    """The first `size` (at most) decoded bytes of `info` in `zf`, the archive at `path`, in pieces. STORED and
+    DEFLATED are read through `zipfile`, each read asking for no more than is left; zipfile checks their CRC when the
+    declared size is reached. BZIP2 and LZMA are decoded here from the raw bytes: `ZipExtFile` decompresses each read
+    of theirs with no `max_length` before Python 3.12.15, 3.13.16 and 3.14.8 (gh-156002), so one 4 KiB read could
+    make 1 GiB. Opening the entry first keeps zipfile's checks of its local header and its errors for a missing
+    module, without reading any data."""
+    # Once the Python floor guarantees the gh-156002 fix, the bzip2 decoder can be replaced by zipfile's
+    # `read(file_size)`, as for STORED and DEFLATED. LZMA must keep its own decoder (or zipfile gain an equivalent
+    # bound): zipfile builds its filter from the header's dict_size, so it would lose the cut in `_lzma1_filter`.
+    if info.compress_type in (ZIP_BZIP2, ZIP_LZMA):
+        with zf.open(info):
+            pass
+        with closing(_zip_compressed(path, info)) as compressed:
+            yield from _decoded(*_zip_decoder(info, compressed, size), size)
+        return
+    left = size
+    with zf.open(info) as f:
+        while left > 0 and (data := f.read(min(_ZIP_PIECE, left))):
+            left -= len(data)
+            yield data
+
+
+def _zip_entry_head(zf: ZipFile, path: Path, info: ZipInfo) -> bytes:
+    """The first `SNIFF_BYTES` decoded bytes of `info`, to classify it, decoding no more. A bzip2 or LZMA entry of at
+    most `_ZIP_SNIFF_CHECKED` bytes is read whole, its size and CRC checked, as zipfile checks the CRC of a STORED or
+    DEFLATED one that short when sniffing it: a damaged short entry then fails whatever its method."""
+    if info.compress_type in (ZIP_BZIP2, ZIP_LZMA) and info.file_size <= _ZIP_SNIFF_CHECKED:
+        return _read_zip_entry(zf, path, info)
+    with closing(_zip_entry_pieces(zf, path, info, SNIFF_BYTES)) as pieces:
+        return b"".join(pieces)
+
+
+def _check_zip_covered(path: Path, zf: ZipFile) -> None:
+    """Raise `Unsupported` if the archive at `path` holds bytes before its central directory that no listed entry
+    covers: `zipfile` reads only the directory, so what a concatenated, self-extracting or damaged archive holds
+    elsewhere would be reviewed by nobody and mentioned nowhere. A local header that cannot be read fails it too."""
+    # `start_dir` (where the central directory starts, adjusted for prepended bytes) is undocumented but has been set
+    # by `ZipFile._RealGetContents` for as long as `zipfile` has handled such archives; without it, fail closed.
+    start_dir = getattr(zf, "start_dir", None)
+    if not isinstance(start_dir, int):
+        raise Unsupported("ZIP directory offset unavailable, so its entries cannot be checked for hidden bytes")
+    with open(path, "rb") as f:
+        spans = [_zip_entry_span(info, *_zip_local_header(f, info)) for info in zf.infolist()]
+    outside = sum(end - start for start, end in _uncovered(start_dir, spans))
+    if outside:
+        raise Unsupported(
+            f"ZIP holds {outside} bytes outside its listed entries (concatenated, self-extracting or damaged archive)"
+        )
+
+
+def _discover_zip(path: Path) -> Iterator[Candidate | SkippedRow]:
+    zip_id = ImageId(path.as_posix())
+    try:
+        zf = ZipFile(path)
+    except Exception as exc:  # noqa: BLE001 - any failure to open the archive is recorded as a skip
+        yield _failed(zip_id, exc)
+        return
+    with zf:
+        try:
+            _check_zip_covered(path, zf)
+        except Exception as exc:  # noqa: BLE001 - an archive that cannot be checked is recorded as failed
+            yield _failed(zip_id, exc)
+            return
+        # Repeated names are distinct entries: read each by its ZipInfo and give
+        # later ones `#2`, `#3`, ... An entry literally named `a.png#2` can still
+        # clash with the second `a.png`; `colliding_ids` catches that after rendering.
+        files = [info for info in zf.infolist() if not info.is_dir()]
+        if not files:
+            yield SkippedRow(zip_id, "ignored", "zip contains no files")
+        seen: Counter[str] = Counter()
+        for info in files:
+            seen[info.filename] += 1
+            nth = seen[info.filename]
+            image_id = ImageId(f"{zip_id}::{info.filename}" + (f"#{nth}" if nth > 1 else ""))
+            try:
+                _check_zip_entry(info)
+                head = _zip_entry_head(zf, path, info)
+            except Exception as exc:  # noqa: BLE001 - an unreadable entry (encrypted, bad compression) is recorded as failed
+                yield _failed(image_id, exc)
+                continue
+            match classify(info.filename, head):
+                case "zip":
+                    yield SkippedRow(image_id, "failed", "unsupported: nested zip")
+                case Rejected(kind, reason):
+                    yield SkippedRow(image_id, kind, reason)
+                case "dicom" | "raster" as kind:
+                    yield _candidate(image_id, kind, partial(_read_zip_entry, zf, path, info))
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+
+def _discover_file(path: Path, named: bool = False) -> Iterator[Candidate | SkippedRow]:
+    """Classify one file by content (reading only its first bytes); a ZIP yields its entries.
+
+    A file `named` as a source was asked for explicitly, so a file that would be
+    ignored fails instead (macOS metadata stays ignored).
+    """
+    image_id = ImageId(path.as_posix())
+    try:
+        info = path.stat()  # follows symlinks
+        if stat.S_ISREG(info.st_mode):  # a FIFO would block the read
+            with open(path, "rb") as f:
+                outcome = classify(path.as_posix(), f.read(SNIFF_BYTES))
+        else:
+            outcome = Rejected("ignored", "not a regular file")
+    except OSError as exc:
+        yield _failed(image_id, exc)
+        return
+    match outcome:
+        case "zip":
+            yield from _discover_zip(path)
+        case Rejected("ignored", reason) if named and reason != _APPLEDOUBLE_REASON:
+            yield SkippedRow(image_id, "failed", reason)
+        case Rejected(kind, reason):
+            yield SkippedRow(image_id, kind, reason)
+        case "dicom" | "raster" as kind:
+            yield _candidate(image_id, kind, partial(_read_input, path, info.st_size))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _symlinked_directory(link: Path, target: Path, source_dirs: tuple[Path, ...]) -> SkippedRow:
+    """The row for a symlinked directory, which is never entered (it could lead out of the source).
+
+    `target` is the resolved link. An enclosing directory is the link's own
+    directory or any ancestor of it (so the source root and its ancestors).
+    """
+    link_id = ImageId(link.as_posix())
+    link_dir = link.parent.resolve()
+    if target == link_dir or target in link_dir.parents:
+        return SkippedRow(link_id, "ignored", "symlink to an enclosing directory")
+    for source in source_dirs:
+        if target == source or source in target.parents:
+            return SkippedRow(
+                link_id, "ignored", f"symlinked directory already included via SOURCE {_escape_name(source.as_posix())}"
+            )
+    return SkippedRow(
+        link_id,
+        "failed",
+        f"symlinked directory not followed; pass its target {_escape_name(target.as_posix())} as a SOURCE",
+    )
+
+
+def _discover_directory(
+    root: Path, exclude: frozenset[Path], source_dirs: tuple[Path, ...]
+) -> Iterator[Candidate | SkippedRow]:
+    """Walk `root` in sorted order without entering symlinked directories (see `_symlinked_directory`) or `exclude`.
+
+    An unreadable directory (including `root`) becomes a failed row. Symlinked
+    files are read; a dangling symlink is a failed row.
+    """
+    errors: list[OSError] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=errors.append):
+        yield from (_failed(ImageId(Path(e.filename).as_posix()), e) for e in errors)
+        errors.clear()
+        here = Path(dirpath)
+        entered = []
+        for name in sorted(dirnames):
+            sub = here / name
+            target = sub.resolve()
+            if target in exclude or any(e in target.parents for e in exclude):
+                continue
+            if sub.is_symlink():
+                yield _symlinked_directory(sub, target, source_dirs)
+            else:
+                entered.append(name)
+        dirnames[:] = entered
+        for name in sorted(filenames):
+            yield from _discover_file(here / name)
+    yield from (_failed(ImageId(Path(e.filename).as_posix()), e) for e in errors)
+
+
+def discover(sources: list[Path], exclude: frozenset[Path] = frozenset()) -> Iterator[Candidate | SkippedRow]:
+    """Yield every input under `sources`, classified by content; nothing under `exclude` (resolved paths)."""
+    source_dirs = tuple(s.resolve() for s in sources if s.is_dir())
+    for source in tqdm(sources, desc="Sources", position=0):
+        items = (
+            _discover_directory(source, exclude, source_dirs) if source.is_dir() else _discover_file(source, named=True)
+        )
+        # Every image_id is minted in discovery, and later ones (collision rows) derive from these.
+        for item in tqdm(items, desc=source.name, position=1, leave=False, unit="input"):
+            yield _checked_name(item)
+
+
+# ---------------------------------------------------------------- processing and writing (IO)
+
+
+def encode_jpeg(rgb: np.ndarray) -> bytes:
+    """Encode to JPEG bytes in memory: quality 95, 4:4:4 chroma so small text stays crisp."""
+    buf = io.BytesIO()
+    Image.fromarray(rgb).save(buf, "JPEG", quality=JPEG_QUALITY, subsampling=JPEG_SUBSAMPLING)
+    return buf.getvalue()
+
+
+def render_and_encode(candidate: Candidate, colormap: str, *, draw_overlays: bool) -> Encoded | SkippedRow:
+    """Hash, render and JPEG-encode one input's bytes into its output row: an encoded image or a skipped row.
+
+    Pure, and the unit of work sent to pool workers (so it and its arguments pickle). The rendered image
+    carries the SHA-256 of `data`. A failure of the input is a single `SkippedRow`.
+    """
+    kind, image_id, data = candidate.kind, candidate.image_id, candidate.data
+    try:
+        source_sha256 = hashlib.sha256(data).hexdigest()
+        rendered = render(kind, image_id, data, colormap, draw_overlays=draw_overlays)
+        return Encoded(rendered.image_id, encode_jpeg(rendered.rgb), source_sha256, rendered.notes)
+    except NotAnImage as exc:
+        return SkippedRow(image_id, "ignored", _clean_reason(str(exc)))
+    except Exception as exc:  # noqa: BLE001 - one bad input must not abort the run; it is recorded in skipped.tsv
+        return _failed(image_id, exc)
+
+
+Outcome = tuple[ImageId, Encoded | SkippedRow]  # (input image_id, its output row)
+
+
+def _outcomes_serial(
+    items: Iterable[Candidate | SkippedRow], colormap: str, *, draw_overlays: bool
+) -> Iterator[Outcome]:
+    for item in items:
+        yield (
+            item.image_id,
+            (render_and_encode(item, colormap, draw_overlays=draw_overlays) if isinstance(item, Candidate) else item),
+        )
+
+
+def _outcomes_pooled(
+    items: Iterable[Candidate | SkippedRow], colormap: str, pool: Executor, limit: int, *, draw_overlays: bool
+) -> Iterator[Outcome]:
+    """`_outcomes_serial`, rendered by `pool`: yielded in input order, with at most `limit` inputs submitted and
+    not yet yielded. Workers hash.
+
+    A dead worker breaks the pool and every input in flight with it, so the run fails (`WorkerCrashed`) rather
+    than retrying in this process, where the same input could take the whole run down without a message.
+    """
+    queue: deque[tuple[ImageId, Future[Encoded | SkippedRow] | Encoded | SkippedRow]] = deque()
+    in_flight = 0
+
+    def start(item: Candidate | SkippedRow) -> Future[Encoded | SkippedRow] | Encoded | SkippedRow:
+        if isinstance(item, SkippedRow):
+            return item
+        with _sigint_blocked():  # a worker spawned here starts with SIGINT blocked, until it ignores it
+            # the pool keeps the bytes until the result is back; `limit` bounds them
+            return pool.submit(render_and_encode, item, colormap, draw_overlays=draw_overlays)
+
+    def finish() -> Outcome:
+        nonlocal in_flight
+        image_id, row = queue[0]
+        if isinstance(row, Future):
+            row = _result(row, pool)
+            in_flight -= 1
+        queue.popleft()
+        return image_id, row
+
+    try:
+        for item in items:
+            queue.append((item.image_id, start(item)))
+            in_flight += isinstance(queue[-1][1], Future)
+            while queue and (in_flight >= limit or not isinstance(queue[0][1], Future)):
+                yield finish()
+        while queue:
+            yield finish()
+    except BrokenProcessPool as exc:
+        first = queue[0][0] if queue else "unknown"
+        raise WorkerCrashed(
+            f"a preprocess worker died (out of memory, or a crash in a decoder); {in_flight} input(s) were in "
+            f"flight, starting with {first}; no work directory was made. "
+            "Re-run with --jobs 1 to find the input, or with more memory."
+        ) from exc
+
+
+@contextmanager
+def _outcomes(
+    items: Iterable[Candidate | SkippedRow], colormap: str, jobs: int, *, draw_overlays: bool
+) -> Iterator[Iterator[Outcome]]:
+    """The outcomes of `items`, rendered by `jobs` worker processes, or in this one for 1."""
+    if jobs > 1:
+        with _worker_pool(jobs) as pool:
+            yield _outcomes_pooled(items, colormap, pool, IN_FLIGHT_PER_JOB * jobs, draw_overlays=draw_overlays)
+    else:
+        yield _outcomes_serial(items, colormap, draw_overlays=draw_overlays)
+
+
+def _workers(pool: Executor) -> list[multiprocessing.process.BaseProcess]:
+    """The pool's worker processes; none for another executor or a pool already shut down.
+
+    `_processes` is private (Python 3.14 adds `terminate_workers`), so it is read defensively: an AttributeError
+    here must never replace the exception being handled.
+    """
+    processes = getattr(pool, "_processes", None)
+    return list(processes.values()) if isinstance(processes, dict) else []
+
+
+def _result(future: Future[Encoded | SkippedRow], pool: Executor) -> Encoded | SkippedRow:
+    """`future.result()`, checking every `WORKER_CHECK_SECONDS` that no worker has exited.
+
+    A worker killed (e.g. by the OOM killer) while sending a result leaves the pool's manager thread waiting
+    for the rest of the message forever, so the future would never complete. Without `max_tasks_per_child`
+    workers exit only at shutdown, so any exit before then is a death.
+    """
+    while True:
+        try:
+            return future.result(timeout=WORKER_CHECK_SECONDS)
+        except TimeoutError:
+            dead = [w for w in _workers(pool) if w.exitcode is not None]
+            if dead:
+                raise BrokenProcessPool(f"worker {dead[0].pid} exited with code {dead[0].exitcode}") from None
+
+
+@contextmanager
+def _sigint_blocked() -> Iterator[None]:
+    """Block SIGINT in this thread; a process spawned meanwhile inherits the mask through exec."""
+    if not hasattr(signal, "pthread_sigmask"):  # Windows
+        yield
+        return
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _ignore_sigint() -> None:
+    """Pool worker initializer: Ctrl-C reaches the whole process group, but only the parent should act on it.
+
+    The worker started with SIGINT blocked (`_sigint_blocked`); a Ctrl-C pending since then is discarded.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+
+
+@contextmanager
+def _single_threaded_blas() -> Iterator[None]:
+    """Set each of `_BLAS_THREAD_VARS` the user has not set to 1 while workers are spawned (they inherit the
+    environment); restore the environment afterwards."""
+    added = [name for name in _BLAS_THREAD_VARS if name not in os.environ]
+    try:
+        os.environ.update(dict.fromkeys(added, "1"))
+        yield
+    finally:
+        for name in added:
+            os.environ.pop(name, None)
+
+
+def _abandon(pool: Executor) -> None:
+    """Stop the pool's workers now, so `shutdown` cannot hang.
+
+    A worker killed mid-send leaves the manager thread reading a cut-off result; it sees EOF only once every
+    write end of the result pipe is closed. This process's end is closed first (EOF still waits for the
+    workers' ends to close as they die), then the workers are killed and joined. Each step is attempted even
+    if an earlier one fails, or a second Ctrl-C interrupts it.
+    """
+    with suppress(BaseException):
+        writer = getattr(getattr(pool, "_result_queue", None), "_writer", None)
+        if writer is not None:
+            writer.close()
+    workers: list[multiprocessing.process.BaseProcess] = []
+    with suppress(BaseException):
+        workers = _workers(pool)
+    for worker in workers:
+        with suppress(BaseException):
+            worker.kill()
+    for worker in workers:
+        with suppress(BaseException):
+            worker.join()
+
+
+@contextmanager
+def _worker_pool(jobs: int) -> Iterator[Executor]:
+    """A spawn-context process pool whose workers run single-threaded BLAS and ignore SIGINT.
+
+    On any exception (Ctrl-C, SIGTERM through `interrupt_on`, a dead worker, a write error) the workers are
+    killed, queued inputs are cancelled and the pool is joined, so nothing waits on a render and no worker
+    outlives the run.
+    """
+    with _single_threaded_blas():
+        pool = ProcessPoolExecutor(max_workers=jobs, mp_context=_SPAWN, initializer=_ignore_sigint)
+        try:
+            yield pool
+        except BaseException:
+            _abandon(pool)  # never raises: it must not replace the exception being raised
+            raise
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _write_new(path: Path, perm: int, data: bytes, *, sync: bool = True) -> None:
+    """Create `path` exclusively with `perm` as its creation mode, write `data` to it, and fsync it unless not `sync`.
+
+    A POSIX default ACL on the parent makes Linux ignore the umask, so the mode
+    is given explicitly (an ACL's other entry can only narrow it).
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, perm)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+        if sync:
+            f.flush()
+            os.fsync(f.fileno())
+
+
+def _write_tsv(path: Path, header: list[str], rows: Sequence[tuple[str, ...]], perm: int) -> None:
+    _write_new(path, perm, format_tsv([header, *rows]).encode("utf-8"))
+
+
+def _library_versions() -> dict[str, str]:
+    """Versions of the libraries that shape the output; the optional codecs only when importable."""
+    versions = {name: importlib.metadata.version(name) for name in _LIBRARIES}
+    for module, distribution in _CODEC_DISTRIBUTIONS.items():
+        if importlib.util.find_spec(module) is None:
+            continue
+        try:
+            versions[module] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            versions[module] = "unknown"
+    return versions
+
+
+def provenance(
+    *,
+    sources: list[Path],
+    batch_size: int,
+    colormap: str,
+    access: Access,
+    jobs: int,
+    draw_overlays: bool,
+    result: PreprocessResult,
+    created: datetime,
+    tool_version: str,
+    libraries: dict[str, str],
+) -> dict[str, Any]:
+    """The content of preprocess.json: how this work dir was made. Sources are absolute, resolved paths, escaped like
+    a bad image_id (`_escape_name`)."""
+    skipped = skipped_counts(result.skipped)
+    return {
+        "tool_version": tool_version,
+        "created": created.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sources": [_escape_name(s.resolve().as_posix()) for s in sources],
+        "parameters": {
+            "batch_size": batch_size,
+            "colormap": colormap,
+            "clahe_kernel_size": CLAHE_KERNEL_SIZE,
+            "outlier_percentile": OUTLIER_PERCENTILE,
+            "intensity_margin": INTENSITY_MARGIN,
+            "range_trim": RANGE_TRIM,
+            "jpeg_quality": JPEG_QUALITY,
+            "jpeg_subsampling": JPEG_SUBSAMPLING,
+            "draw_overlays": draw_overlays,
+            "max_input_bytes": MAX_INPUT_BYTES,
+            "max_render_bytes": MAX_RENDER_BYTES,
+            "render_bytes_per_pixel": dict(RENDER_BYTES_PER_PIXEL),
+            "access": access,
+            "jobs": jobs,  # how the run was made, not what it made: the output is the same for any value
+        },
+        "libraries": libraries,
+        "counts": {
+            "inputs": result.found,
+            "written": result.written,
+            "skipped_failed": skipped.failed,
+            "skipped_ignored": skipped.ignored,
+            "notes": result.notes,
+        },
+    }
+
+
+def staging_path(output_dir: Path) -> Path:
+    return output_dir.parent / f".{output_dir.name}.partial"
+
+
+def _claim_staging(output_dir: Path, dir_mode: int) -> Path:
+    """Refuse an in-use work dir, then create the staging dir next to it with the policy's mode.
+
+    The work dir keeps the staging dir's mode through the final rename.
+    """
+    if output_dir.is_symlink() or (output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir()))):
+        raise WorkDirExists(
+            f"work directory {output_dir} already exists; choose a new --work-dir or remove the old one"
+        )
+    staging = staging_path(output_dir)
+    try:
+        staging.mkdir(mode=dir_mode)
+    except FileExistsError:
+        raise WorkDirExists(f"a previous preprocess into {output_dir} did not finish; remove {staging}") from None
+    try:
+        os.chmod(staging, dir_mode)  # mkdir's mode is masked by the umask and drops setgid
+    except BaseException:
+        staging.rmdir()  # a leftover would make every later run refuse
+        raise
+    return staging
 
 
 def run_preprocess(
@@ -160,45 +2440,213 @@ def run_preprocess(
     output_dir: Path,
     batch_size: int = 300,
     colormap: str = "inferno",
-) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_dir / "manifest.tsv"
+    access: Access = "private",
+    jobs: int = 1,
+    *,
+    draw_overlays: bool = False,
+) -> PreprocessResult:
+    """Render every discovered input into a staging dir, then rename it to `output_dir`.
 
-    manifest_rows = []
-    batch_num = 0
+    Every directory and file follows the `access` policy (see `access.modes`),
+    enforced by a umask held for the whole run and restored afterwards.
 
-    # Stream batches from the generator to avoid holding all arrays in memory
-    source_iter = load_sources(sources)
-    while True:
-        entries = _consume_batch(source_iter, batch_size)
-        if not entries:
-            break
-        batch_num += 1
-        batch_id = f"batch_{batch_num:03d}"
-        batch_dir = output_dir / batch_id
-        batch_dir.mkdir(parents=True, exist_ok=True)
+    Every input ends up in exactly one of manifest.tsv or skipped.tsv; notes.tsv lists
+    what written inputs hold that their images do not show; preprocess.json
+    records how the work dir was made (see `provenance`). Write
+    errors (OSError on the work directory) propagate and abort the run. The
+    work dir appears only on success; an existing non-empty one is refused
+    (`WorkDirExists`), so verdicts can never attach to a replaced image.
 
-        for idx, (image_id, array, resolved) in enumerate(entries):
-            img_filename = f"img_{idx + 1:05d}.jpg"
-            img_path = batch_dir / img_filename
+    `jobs` > 1 renders in that many worker processes; the output is identical
+    to `jobs` = 1, which renders in this process. A dead worker fails the run
+    (`WorkerCrashed`).
 
-            if array is not None and array.dtype in (np.float32, np.float64):
-                rgb = apply_colormap(array, colormap)
-                ski.io.imsave(str(img_path), rgb)
-            elif array is not None:
-                ski.io.imsave(str(img_path), array)
-            else:
-                img = preprocess_non_dicom(resolved)
-                ski.io.imsave(str(img_path), img)
+    Overlay planes are listed in notes.tsv but not drawn on the images unless `draw_overlays`.
+    """
+    policy = modes(access)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)  # before the umask: parents get normal permissions
+    previous_umask = os.umask(policy.umask)
+    try:
+        staging = _claim_staging(output_dir, policy.dir_mode)
+        exclude = frozenset({output_dir.resolve(), staging.resolve()})  # never ingest our own output
+        try:
+            found, manifest_rows, skipped, notes = _render_into(
+                sources=sources,
+                exclude=exclude,
+                staging=staging,
+                batch_size=batch_size,
+                colormap=colormap,
+                policy=policy,
+                jobs=jobs,
+                draw_overlays=draw_overlays,
+            )
+            _write_tsv(staging / MANIFEST_NAME, MANIFEST_HEADER, manifest_rows, policy.file_mode)
+            _write_tsv(
+                staging / SKIPPED_NAME,
+                SKIPPED_HEADER,
+                [(s.image_id, s.kind, s.reason) for s in skipped],
+                policy.file_mode,
+            )
+            _write_tsv(staging / NOTES_NAME, NOTES_HEADER, notes, policy.file_mode)
+            written = len(manifest_rows)
+            note_counts = Counter(kind for _, kind, _ in notes)
+            result = PreprocessResult(
+                found,
+                written,
+                -(-written // batch_size),
+                skipped,
+                output_dir / SKIPPED_NAME,
+                {kind: note_counts[kind] for kind in NOTE_KINDS},
+                output_dir / NOTES_NAME,
+            )
+            record = provenance(
+                sources=sources,
+                batch_size=batch_size,
+                colormap=colormap,
+                access=access,
+                jobs=jobs,
+                draw_overlays=draw_overlays,
+                result=result,
+                created=datetime.now(UTC),
+                tool_version=package_version(),
+                libraries=_library_versions(),
+            )
+            _write_new(
+                staging / PROVENANCE_NAME, policy.file_mode, (json.dumps(record, indent=2) + "\n").encode("utf-8")
+            )
+            if output_dir.exists():
+                output_dir.rmdir()  # an empty directory the user made
+            fsync_dir(staging)  # the work dir's entries, before it gets its final name
+            os.rename(staging, output_dir)
+            # Best effort: the work dir is complete, and failing would leave one the next run refuses.
+            sync_parent(output_dir)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    finally:
+        os.umask(previous_umask)
+    return result
 
-            manifest_rows.append((batch_id, img_path.relative_to(output_dir).as_posix(), image_id))
 
-    # Write manifest
-    with open(manifest_path, "w", newline="") as f:
-        writer = csv.writer(f, delimiter="\t")
-        writer.writerow(["batch", "preprocessed_path", "image_id"])
-        writer.writerows(manifest_rows)
+def colliding_ids(images: Iterable[tuple[ImageId, str, str]]) -> frozenset[ImageId]:
+    """The image_ids, among `(image_id, source_sha256, jpeg_sha256)` triples, naming more than one distinct
+    `(source_sha256, jpeg_sha256)` pair.
 
-    print(f"Preprocessed {len(manifest_rows)} images in {batch_num} batches -> {output_dir}")
+    Verdicts are stored per image_id, so such an id would let a verdict on one image
+    cover another nobody saw; and export attests a single source_sha256 per id, so
+    two different sources that render the same JPG collide too. The same source
+    reached twice (through overlapping SOURCEs) has the same pair: not a collision.
+    """
+    pairs: dict[ImageId, set[tuple[str, str]]] = {}
+    for image_id, source_sha256, jpeg_sha256 in images:
+        pairs.setdefault(image_id, set()).add((source_sha256, jpeg_sha256))
+    return frozenset(image_id for image_id, found in pairs.items() if len(found) > 1)
 
 
+def _stage(
+    *,
+    sources: list[Path],
+    exclude: frozenset[Path],
+    pending: Path,
+    colormap: str,
+    policy: Modes,
+    jobs: int,
+    draw_overlays: bool,
+) -> list[Staged | SkippedRow]:
+    """Discover and render every input, writing its JPG into `pending`.
+
+    Returns one `Staged` or `SkippedRow` per input, in discovery order.
+    Inputs are rendered by `jobs` worker processes, or in this one for 1; either way this process writes
+    every file, in discovery order.
+    """
+    inputs: list[Staged | SkippedRow] = []
+    count = 0
+
+    items = discover(sources, exclude)
+    with _outcomes(items, colormap, jobs, draw_overlays=draw_overlays) as outcomes:
+        for _, outcome in outcomes:
+            if isinstance(outcome, SkippedRow):
+                if outcome.kind == "failed":
+                    log.warning("skipping %s: %s", outcome.image_id, outcome.reason)
+                inputs.append(outcome)
+                continue
+            count += 1
+            path = pending / f"{count:08d}.jpg"
+            _write_new(path, policy.file_mode, outcome.jpeg, sync=False)  # a lost JPG fails its hash check; see spec
+            jpeg_sha256 = hashlib.sha256(outcome.jpeg).hexdigest()
+            inputs.append(Staged(outcome.image_id, path, outcome.source_sha256, jpeg_sha256, outcome.notes))
+    return inputs
+
+
+def _place(
+    inputs: list[Staged | SkippedRow],
+    *,
+    staging: Path,
+    batch_size: int,
+    policy: Modes,
+) -> tuple[list[tuple[str, str, str, str, str]], list[SkippedRow], list[tuple[str, NoteKind, str]]]:
+    """Move the JPGs of inputs without a colliding image_id into batches under `staging`.
+
+    An input with a colliding image becomes one `failed` row and its JPG is deleted.
+    Returns the manifest rows, the skipped rows and the note rows of placed inputs, all in discovery order.
+    """
+    collisions = colliding_ids(
+        (row.image_id, row.source_sha256, row.jpeg_sha256) for row in inputs if isinstance(row, Staged)
+    )
+    manifest_rows: list[tuple[str, str, str, str, str]] = []
+    skipped: list[SkippedRow] = []
+    notes: list[tuple[str, NoteKind, str]] = []
+    batch_dirs: list[Path] = []
+    for row in inputs:
+        if isinstance(row, SkippedRow):
+            skipped.append(row)
+            continue
+        if row.image_id in collisions:
+            row.path.unlink()
+            log.warning("skipping %s: %s", row.image_id, COLLISION_REASON)
+            skipped.append(SkippedRow(row.image_id, "failed", COLLISION_REASON))
+            continue
+        batch_index, slot = divmod(len(manifest_rows), batch_size)
+        batch_id = f"batch_{batch_index + 1:03d}"
+        batch_dir = staging / batch_id
+        if slot == 0:
+            batch_dir.mkdir()
+            os.chmod(batch_dir, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
+            batch_dirs.append(batch_dir)
+        img_path = batch_dir / f"img_{slot + 1:05d}.jpg"
+        os.rename(row.path, img_path)
+        key = img_path.relative_to(staging).as_posix()
+        manifest_rows.append((batch_id, key, row.image_id, row.source_sha256, row.jpeg_sha256))
+        notes.extend((row.image_id, note.kind, _clean_reason(note.detail)) for note in row.notes)
+    for batch_dir in batch_dirs:
+        fsync_dir(batch_dir)  # the renamed-in entries; the JPGs' contents are not synced (a lost one fails its hash)
+    return manifest_rows, skipped, notes
+
+
+def _render_into(
+    *,
+    sources: list[Path],
+    exclude: frozenset[Path],
+    staging: Path,
+    batch_size: int,
+    colormap: str,
+    policy: Modes,
+    jobs: int,
+    draw_overlays: bool,
+) -> tuple[int, list[tuple[str, str, str, str, str]], list[SkippedRow], list[tuple[str, NoteKind, str]]]:
+    """Render every input into `PENDING_NAME`, then move the JPGs of inputs without a colliding image_id into batches."""
+    pending = staging / PENDING_NAME
+    pending.mkdir()
+    os.chmod(pending, policy.dir_mode)  # explicit: mkdir's mode is masked and drops setgid
+    inputs = _stage(
+        sources=sources,
+        exclude=exclude,
+        pending=pending,
+        colormap=colormap,
+        policy=policy,
+        jobs=jobs,
+        draw_overlays=draw_overlays,
+    )
+    manifest_rows, skipped, notes = _place(inputs, staging=staging, batch_size=batch_size, policy=policy)
+    pending.rmdir()  # every staged JPG was moved or deleted
+    return len(inputs), manifest_rows, skipped, notes
