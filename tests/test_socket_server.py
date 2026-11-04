@@ -19,7 +19,6 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 import image_review
@@ -63,6 +62,11 @@ ASSETS = [
 ]
 SCRIPT_NAMES = ["helpers.js", "app.js"]  # in the order the page loads them
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
+
+
+def grid_rules() -> dict:
+    """The grid rules the page is checked against (tests/web/grid-rules.json)."""
+    return json.loads((Path(__file__).parent / "web" / "grid-rules.json").read_text())
 
 
 def web_scripts() -> str:
@@ -839,7 +843,7 @@ class TestWebFiles(unittest.TestCase):
 
     @requires_node
     def test_grid_status_parity(self):
-        from image_review.status import grid_clean_refused, grid_status
+        from image_review.status import grid_clean_refused
 
         cases = [
             dict(zip([f"k{i}" for i in range(n)], combo, strict=True))
@@ -857,9 +861,12 @@ class TestWebFiles(unittest.TestCase):
             """,
             cases,
         )
+        # grid_status was frozen from controller.py at 8e96267; the page's behaviour is now the spec
+        frozen = grid_rules()["grid_status"]
+        self.assertEqual(len(frozen), len(cases))
         expected = [
-            [grid_status(statuses, tuple(statuses)), grid_clean_refused(statuses, tuple(statuses))]
-            for statuses in cases
+            [status, grid_clean_refused(statuses, tuple(statuses))]
+            for status, statuses in zip(frozen, cases, strict=True)
         ]
         self.assertEqual(got, expected)
 
@@ -899,41 +906,19 @@ class TestWebFiles(unittest.TestCase):
 
     @requires_node
     def test_grid_eligibility_parity(self):
-        from image_review.controller import ReviewSession, next_batch
-        from image_review.store import ManifestRow
-
-        # Two batches interleaved in the manifest, so manifest order differs from batch order
-        rows = [ManifestRow(f"k{i}", "b2" if i % 2 == 0 else "b1") for i in range(4)]
-        batches = ["b1", "b2"]
+        # Expectations were frozen from controller.py at 8e96267; the page's behaviour is now the spec.
+        # Only the default filter with nothing marked this session is asserted here.
+        tables = grid_rules()["eligibility"]
+        for by_marked in tables.values():
+            for table in by_marked.values():
+                self.assertEqual(len(table), 256)
+        expected = tables["unreviewed"]["none"]
+        # Four keys; the page's manifest below interleaves two batches, so manifest order differs from batch order
         cases = [
-            dict(zip([r.key for r in rows], combo, strict=True))
-            for combo in itertools.product(["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"], repeat=len(rows))
+            dict(zip(["k0", "k1", "k2", "k3"], combo, strict=True))
+            for combo in itertools.product(["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"], repeat=4)
         ]
-        expected = []
-        for statuses in cases:
-            session = SimpleNamespace(
-                manifest=rows,
-                _statuses=statuses,
-                status_filter="unreviewed",
-                mode="grid",
-                pass_number=3,
-                _marked_this_session=set(),
-            )
-            session._key_todo = lambda key, s=session: ReviewSession._key_todo(s, key)
-            session._held_back_count = lambda batch, s=session: ReviewSession._held_back_count(s, batch)
-
-            def has_rows(batch, s=session):
-                return bool(ReviewSession._review_rows(s, batch))
-
-            expected.append(
-                {
-                    "keys": {b: [r.key for r in ReviewSession._review_rows(session, b)] for b in batches},
-                    "held": {b or "all": ReviewSession._held_back_count(session, b) for b in [*batches, None]},
-                    "message": ReviewSession._held_back_message(session, None, in_session=True),
-                    "first": next_batch(batches, None, has_rows, wrap=False),
-                    "after": {b: next_batch(batches, b, has_rows, wrap=True) for b in batches},
-                }
-            )
+        self.assertEqual(len(cases), len(expected))
         got = self.run_helpers(
             r"""
             const manifest = ["k0", "k1", "k2", "k3"].map((key, i) => ({ key, batch: i % 2 === 0 ? "b2" : "b1" }));
