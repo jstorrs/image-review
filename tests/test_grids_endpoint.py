@@ -2,7 +2,6 @@ import csv
 import http.client
 import json
 import os
-import ssl
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,7 +22,6 @@ from tests.fixtures import (
     dropping_packer,
     make_work_dir,
     socket_dir,
-    start_server,
     start_unix_server,
     temp_dir,
 )
@@ -300,41 +298,6 @@ class TestParity(GridsTestCase):
         always = self.grids(self.keys, 640, 400, "always")
         self.assertLess(len(auto["grids"]), len(never["grids"]))
         self.assertEqual(auto, always)
-
-
-class TestOverTls(unittest.TestCase):
-    def setUp(self):
-        self.work_dir = temp_dir(self)
-        make_work_dir(self.work_dir)
-        self.server, self.target, stop = start_server(self.work_dir)
-        self.addCleanup(stop)
-        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        self.ctx.check_hostname = False
-        self.ctx.verify_mode = ssl.CERT_NONE
-
-    def post(self, body: bytes | None) -> int:
-        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
-        self.addCleanup(conn.close)
-        conn.request("POST", "/grids", body=body, headers={"Authorization": f"Bearer {self.target.token}"})
-        resp = conn.getresponse()
-        resp.read()
-        return resp.status
-
-    def test_grids_is_not_served(self):
-        self.assertEqual(self.post(None), 404)
-
-    def test_body_on_grids_is_refused(self):
-        body = json.dumps({"keys": KEYS, "width": 640, "height": 480, "rotation": "auto"}).encode()
-        self.assertEqual(self.post(body), 400)
-
-    def test_no_instance_header_sent_or_required(self):
-        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
-        self.addCleanup(conn.close)
-        conn.request("GET", "/manifest", headers={"Authorization": f"Bearer {self.target.token}"})
-        resp = conn.getresponse()
-        resp.read()
-        self.assertEqual(resp.status, 200)
-        self.assertIsNone(resp.getheader(INSTANCE_HEADER))
 
 
 if __name__ == "__main__":

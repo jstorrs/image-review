@@ -4,6 +4,14 @@
 
 ### Upgrading: breaking and behaviour changes
 
+- **The Python remote client and `serve`'s HTTPS mode are removed.** `review --remote`/`--via`, `status
+  --remote`/`--via`, `serve --https`/`--bind`/`--port`, export's hidden `--remote`, and the server's `GET /version`
+  and `GET /skipped` are gone; the options now exit 2 as unknown. `$IMAGE_REVIEW_REMOTE` is no longer read, not
+  refused: unset it, since without `--work-dir`, `review` and `status` now open `./review_work`. Review remotely in a
+  browser with plain `image-review serve`, and run `status` and `export` where the work directory is (for example
+  over ssh).
+  `cryptography` is no longer a dependency. `~/.image-review/connection-*.txt` files left by killed `serve --https`
+  runs hold dead tokens and can be deleted.
 - **Grayscale rendering changed.** DICOM grayscale windowing is restored to the original method, replacing 0.4.0's
   tail compression (and the 1% range trim that preceded it): the values outside the outer 0.01% of the min-max range
   are set aside, the 1st and 99th percentiles of the rest, shrunk by 2%, are the window, and values outside it are
@@ -47,10 +55,10 @@
   reporting as if no input had failed or been ignored.
 - A `manifest.tsv` listing one `image_id` with two different `source_sha256` values is now rejected when the work
   directory is opened, instead of `export` silently using the first.
-- **Wire API v9: client and server must be upgraded together.** `/statuses`,
-  `POST /mark` and `POST /undo` now answer 400 for a pass above one million.
-  A v9 client refuses a server of any other version (0.4.0 speaks v8), and
-  older clients refuse a v9 server.
+- **`/statuses`, `POST /mark` and `POST /undo` now answer 400 for a pass above
+  one million.** The browser page served by `serve` keeps to this bound; with
+  the Python client removed (see above), there is no separately installed
+  client left to upgrade with the server.
 - A `review.tsv` already holding a `pass_number` above one million is now
   refused when the work directory is opened; edit it by hand to remove or
   correct those rows.
@@ -99,7 +107,7 @@
 - preprocess now syncs the work directory's files and directories before reporting success, so a power loss right
   after a run no longer leaves a missing work directory, missing batch entries, or truncated or empty TSVs. The JPGs'
   contents are not synced: a lost one fails its hash check.
-- The browser page now rejects a pass number above 1,000,000 from the server, as the other clients already did.
+- The browser page now rejects a pass number above 1,000,000 from the server.
 - The status bar's centre message no longer draws over the status word and the red scale warning on a narrow
   display. It is centred between the left and right texts, shrunk to as small as 18 px to fit, and cut with "…" if
   still too wide (the controller also logs it as a warning).

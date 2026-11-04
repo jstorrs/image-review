@@ -39,7 +39,6 @@ ROWS = [
 
 # Every variable the CLI reads from the environment; cleared so a developer's exports cannot leak into a test
 CLEAN_ENV: dict[str, str | None] = {
-    "IMAGE_REVIEW_REMOTE": None,
     "IMAGE_REVIEW_VIA": None,
     "IMAGE_REVIEW_DIRECT": None,
     "IMAGE_REVIEW_SOCKET_PATH": None,
@@ -173,18 +172,9 @@ def _serve_in_thread(server, store):
     return stop
 
 
-def start_server(work_dir: Path, port: int = 0):
-    """Serve work_dir on 127.0.0.1 in a thread; returns (server, target, stop). The store holds the work dir lock until stop(), which is idempotent."""
-    from image_review.server import make_server
-    from image_review.store import LocalStore
-
-    store = LocalStore(work_dir)
-    server, target = make_server(store, "127.0.0.1", port)
-    return server, target, _serve_in_thread(server, store)
-
-
 def start_unix_server(work_dir: Path, path: Path):
-    """Serve work_dir on the Unix socket `path` in a thread; returns (server, token, stop). As start_server."""
+    """Serve work_dir on the Unix socket `path` in a thread; returns (server, token, stop). The store holds the work
+    dir lock until stop(), which is idempotent."""
     from image_review.server import make_unix_server
     from image_review.store import LocalStore
 

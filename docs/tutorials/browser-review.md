@@ -4,9 +4,7 @@ Review images where they are, without copying them off the cluster, in a
 browser on your laptop. This is the recommended way to review remotely. There
 is nothing to install on the laptop but ssh and a browser, and nothing to keep
 in sync: the page is served by `serve` itself, so it always matches the
-server's version. (The deprecated
-[Python client](remote-review.md) must run the same version as the server,
-and a mismatch is refused.)
+server's version.
 
 `image-review serve` runs on a compute node and listens on a Unix socket, and
 your laptop forwards a local port to it with ssh. The traffic is plain HTTP
@@ -14,8 +12,8 @@ inside the ssh tunnel, with no TLS on the node. The page reviews single
 images or, in grid mode, packed grids of a batch's images.
 **Read the browser review section of
 [the security model](../reference/security-model.md#browser-review-over-a-unix-socket)
-first**: it lists the differences from the HTTPS mode (a URL that
-holds the token) and the questions to ask your HPC administrator if
+first**: it lists the limits of browser review (no TLS on the node, a URL
+that holds the token) and the questions to ask your HPC administrator if
 forwarding does not work.
 
 Install image-review on the cluster; a plain install has every command but
@@ -156,11 +154,11 @@ When you are finished for the day, stop the server with Ctrl-C, then the
 ssh command, and close the tab: closing it is what forgets the token.
 
 For how `--via`, `--direct` and `--ssh-host` shape the printed command, see
-[Socket mode](../commands/serve.md#socket-mode) on the serve page.
+[What serve prints](../commands/serve.md#what-serve-prints) on the serve page.
 
 **Batch mode.** Under `sbatch` stdout is not a terminal, so the URL is
 written to a private file instead
-([what serve prints](../commands/serve.md#socket-mode)). The job output gives
+([what serve prints](../commands/serve.md#what-serve-prints)). The job output gives
 the ssh command and the file's path; fetch the URL from your laptop (use the
 absolute path, not `~`):
 

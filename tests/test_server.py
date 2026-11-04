@@ -4,79 +4,29 @@ import http.client
 import io
 import json
 import logging
-import os
 import select
-import signal
 import socket
-import socketserver
-import ssl
-import stat
-import subprocess
-import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from image_review.cli import PACKAGE_LOGGER, LogFormatter, cli
-from image_review.connection import API_VERSION, MAX_PASS, RemoteTarget
+from image_review.cli import PACKAGE_LOGGER, LogFormatter
+from image_review.connection import MAX_PASS, is_int_at_least, package_version
 from image_review.review_db import ReviewLogChanged
-from image_review.server import INSTANCE_HEADER, ReviewHandler, ReviewServer, make_server
-from image_review.store import LocalStore, load_manifest
+from image_review.server import INSTANCE_HEADER, ReviewHandler, ReviewServer
+from image_review.store import load_manifest
 from tests.fixtures import (
     HAS_AF_UNIX,
     ROWS,
     UnixHTTPConnection,
-    invoke_cli,
     make_work_dir,
     socket_dir,
-    start_server,
     start_unix_server,
     temp_dir,
-    wait_for_file,
 )
 
-FP = "a" * 64
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
-
-
-class MakeServerChecksTest(unittest.TestCase):
-    def setUp(self):
-        work_dir = temp_dir(self)
-        make_work_dir(work_dir)
-        self.store = LocalStore(work_dir)
-        self.addCleanup(self.store.close)
-
-    def assert_refused(self, host: str, message: str, *, binds: bool):
-        close = mock.patch.object(ReviewServer, "server_close", autospec=True, side_effect=ReviewServer.server_close)
-        with close as closed, self.assertRaisesRegex(ValueError, message):
-            make_server(self.store, host, 0)
-        self.assertEqual(closed.call_count, 1 if binds else 0)
-
-    def test_wildcard_hosts_refused_before_binding(self):
-        for host in ["0.0.0.0", "::", "", "  ", "0:0:0:0:0:0:0:0"]:
-            with self.subTest(host=host):
-                self.assert_refused(host, "Refusing to bind a wildcard", binds=False)
-
-    def test_unspecified_bound_address_closes_socket(self):
-        self.assert_refused("0", "Refusing to bind a wildcard", binds=True)
-
-    def test_unadvertisable_host_closes_socket(self):
-        self.assert_refused("127.1", "cannot be advertised", binds=True)
-
-    def test_tls_manifest_failure_binds_nothing(self):
-        work_dir = temp_dir(self)
-        make_work_dir(work_dir)
-        store = LocalStore(work_dir)
-        self.addCleanup(store.close)
-        with (
-            mock.patch.object(store, "manifest", side_effect=OSError),
-            mock.patch.object(socketserver.TCPServer, "server_bind") as server_bind,
-            self.assertRaises(OSError),
-        ):
-            make_server(store, "127.0.0.1", 0)
-        server_bind.assert_not_called()
 
 
 @unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
@@ -176,68 +126,6 @@ class ServerTestCase(unittest.TestCase):
     def post_undo(self, payload):
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         return self.request("POST", "/undo", body=body)[:2]
-
-
-class TlsServerTestCase(unittest.TestCase):
-    """The few tests that only make sense over the TLS server (serve --https)."""
-
-    def setUp(self):
-        self.work_dir = temp_dir(self)
-        make_work_dir(self.work_dir)
-        self.server, self.target, stop = start_server(self.work_dir)
-        self.addCleanup(stop)
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        self.ctx = ctx
-
-    def request(self, method, path, body=None, token="default", headers=None):
-        token = self.target.token if token == "default" else token
-        hdrs = dict(headers or {})
-        if token is not None:
-            hdrs["Authorization"] = f"Bearer {token}"
-        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
-        self.addCleanup(conn.close)
-        conn.request(method, path, body=body, headers=hdrs)
-        resp = conn.getresponse()
-        data = resp.read()
-        return resp, data, conn
-
-
-class TestTlsTransport(TlsServerTestCase):
-    def test_peer_cert_matches_fingerprint(self):
-        from image_review.connection import cert_fingerprint
-
-        _, _, conn = self.request("GET", "/current_pass")
-        der = conn.sock.getpeercert(binary_form=True)
-        self.assertEqual(cert_fingerprint(der), self.target.fingerprint)
-
-    def test_keep_alive_not_delayed_by_nagle(self):
-        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
-        self.addCleanup(conn.close)
-        headers = {"Authorization": f"Bearer {self.target.token}"}
-        # Nagle + delayed ACK costs ~40 ms per request (~1.2 s for 30), every time.
-        # A loaded machine can slow one run, but not all of three, so any fast run passes.
-        elapsed = []
-        for _ in range(3):
-            start = time.perf_counter()
-            for _ in range(30):
-                conn.request("GET", "/current_pass", headers=headers)
-                self.assertEqual(conn.getresponse().read(), b'{"pass": 1}')
-            elapsed.append(time.perf_counter() - start)
-            if elapsed[-1] < 0.9:
-                return
-        self.fail(f"30 keep-alive requests took {elapsed} s in 3 attempts; want one under 0.9 s")
-
-    def test_no_public_routes_or_csp_over_tls(self):
-        resp, data, _ = self.request("GET", "/")
-        self.assertEqual((resp.status, data), (404, b""))
-        self.assertIsNone(resp.getheader("Content-Security-Policy"))
-        self.assertIsNone(resp.getheader("Referrer-Policy"))
-        resp, data, _ = self.request("GET", "/", token=None)
-        self.assertEqual((resp.status, data), (401, b""))
-        self.assertIsNone(resp.getheader("Content-Security-Policy"))
-        self.assertIsNone(resp.getheader("Referrer-Policy"))
 
 
 class TestTransport(ServerTestCase):
@@ -418,12 +306,14 @@ class TestLogging(ServerTestCase):
             self.server.handle_error(None, ("127.0.0.1", 1))
         self.assertEqual(logs.records[0].getMessage(), "connection error: unknown")
         try:
-            raise ssl.SSLError("secret-detail")
-        except ssl.SSLError:
+            raise ConnectionResetError("secret-detail")
+        except ConnectionResetError:
             with self.assertLogs(SERVER_LOGGER, "WARNING") as logs:
                 self.server.handle_error(None, ("127.0.0.1", 1))
         (record,) = logs.records
-        self.assertEqual((record.levelno, record.getMessage()), (logging.WARNING, "connection error: SSLError"))
+        self.assertEqual(
+            (record.levelno, record.getMessage()), (logging.WARNING, "connection error: ConnectionResetError")
+        )
 
 
 class TestPreAuthIdleSockets(ServerTestCase):
@@ -445,7 +335,7 @@ def read_until_closed(sock: socket.socket, limit: float) -> bytes:
     try:
         while chunk := sock.recv(65536):
             chunks.append(chunk)
-    except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):  # closed with our bytes unread
+    except (BrokenPipeError, ConnectionResetError):  # closed with our bytes unread
         pass
     return b"".join(chunks)
 
@@ -453,8 +343,7 @@ def read_until_closed(sock: socket.socket, limit: float) -> bytes:
 def trickle_until_closed(sock: socket.socket, data: bytes, limit: float) -> tuple[float, int]:
     """Send `data` a byte every 0.1 s, far inside the per-receive timeout, until the server closes.
 
-    Returns the seconds taken and the bytes sent. A TLS 1.3 socket is readable right after the handshake (session
-    tickets) though no application data comes, so readability alone does not mean the server closed.
+    Returns the seconds taken and the bytes sent.
     """
     start = time.monotonic()
     for sent, byte in enumerate(data):
@@ -462,19 +351,14 @@ def trickle_until_closed(sock: socket.socket, data: bytes, limit: float) -> tupl
             break
         try:
             sock.sendall(bytes([byte]))
-        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+        except (BrokenPipeError, ConnectionResetError):
             return time.monotonic() - start, sent
         if not select.select([sock], [], [], 0.1)[0]:
             continue
-        sock.setblocking(False)
         try:
             reply = sock.recv(65536)
-        except (ssl.SSLWantReadError, BlockingIOError):
-            continue  # only TLS records with no data in them
-        except (ConnectionResetError, ssl.SSLEOFError):
+        except ConnectionResetError:
             reply = b""
-        finally:
-            sock.settimeout(10)
         if reply != b"":
             raise AssertionError("server replied to a trickled request")
         return time.monotonic() - start, sent + 1
@@ -608,217 +492,6 @@ class TestRequestBudget(ServerTestCase):
         self.assertEqual(json.loads(reply.partition(b"\r\n\r\n")[2]), {"batch_001/a.jpg": "CLEAN"})
 
 
-class TestNoKeyFilesLeft(unittest.TestCase):
-    def test_make_server_leaves_temp_dir_empty(self):
-        with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as scratch:
-            make_work_dir(Path(work))
-            with mock.patch.object(tempfile, "tempdir", scratch), LocalStore(Path(work)) as store:
-                server, _ = make_server(store, "127.0.0.1", 0)
-            server.server_close()
-            self.assertEqual(os.listdir(scratch), [])
-
-
-class TestServeCommand(unittest.TestCase):
-    def setUp(self):
-        root = temp_dir(self)
-        self.work = root / "work"
-        self.work.mkdir()
-        make_work_dir(self.work)
-        self.home = root / "home"
-        self.home.mkdir()
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_non_tty_writes_private_file_and_hides_token(self):
-        seen = {}
-        closed = []
-        orig_close = ReviewServer.server_close
-
-        def fake_serve(server, *a, **k):
-            files = list((self.home / ".image-review").glob("connection-*.txt"))
-            seen["files"] = files
-            seen["file_mode"] = stat.S_IMODE(files[0].stat().st_mode)
-            seen["dir_mode"] = stat.S_IMODE(files[0].parent.stat().st_mode)
-            seen["uri"] = files[0].read_text().strip()
-            raise KeyboardInterrupt
-
-        def fake_close(server):
-            closed.append(True)
-            orig_close(server)
-
-        with (
-            mock.patch.object(ReviewServer, "serve_forever", fake_serve),
-            mock.patch.object(ReviewServer, "server_close", fake_close),
-        ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
-        self.assertEqual(result.exit_code, 0, result.output)
-        target = RemoteTarget.parse(seen["uri"])
-        self.assertNotIn(target.token, result.output)
-        self.assertNotIn("ir://", result.output.replace("--remote", ""))
-        self.assertNotIn("$(cat ", result.output)  # the file exists on the cluster, not the laptop
-        self.assertIn(f"$(ssh <user>@<login-node> cat {seen['files'][0]})", result.output)
-        self.assertIn(str(seen["files"][0]), result.output)
-        self.assertEqual(seen["file_mode"], 0o600)
-        self.assertEqual(seen["dir_mode"], 0o700)
-        self.assertEqual(list((self.home / ".image-review").iterdir()), [])
-        self.assertEqual(closed, [True])
-        self.assertFalse((self.work / "review.lock").exists())
-
-    def test_locked_work_dir_exits_1(self):
-        lock = self.work / "review.lock"
-        lock.write_text(
-            json.dumps({"host": "node042", "user": "alice", "pid": 1234, "started": "2026-09-30T12:00:00Z"})
-        )
-        with mock.patch.object(ReviewServer, "serve_forever") as serve_forever:
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
-        self.assertEqual(result.exit_code, 1, result.output)
-        serve_forever.assert_not_called()
-        for part in ("alice", "node042", "pid 1234", str(lock)):
-            self.assertIn(part, result.output)
-        self.assertTrue(lock.exists())
-
-    def test_serve_holds_lock_while_serving(self):
-        seen = []
-
-        def fake_serve(server, *a, **k):
-            seen.append(json.loads((self.work / "review.lock").read_text())["pid"])
-            raise KeyboardInterrupt
-
-        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(seen, [os.getpid()])
-        self.assertFalse((self.work / "review.lock").exists())
-
-    def test_loose_existing_dir_is_tightened(self):
-        d = self.home / ".image-review"
-        d.mkdir(mode=0o755)
-        d.chmod(0o755)
-        from image_review.server import write_connection_file
-
-        path = write_connection_file(RemoteTarget("h", 1, "t", FP))
-        self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-
-    def test_write_private_file_replaces_stale_file(self):
-        from image_review.server import write_private_file
-
-        d = self.home / ".image-review"
-        d.mkdir(mode=0o700)
-        stale = d / "x.txt"
-        stale.write_text("old")
-        stale.chmod(0o644)
-        path = write_private_file("x.txt", "new\n")
-        self.assertEqual(path, stale)
-        self.assertEqual(path.read_text(), "new\n")
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-
-    def test_tty_prints_connection_string(self):
-        class Tty(io.StringIO):
-            def isatty(self):
-                return True
-
-        with (
-            mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt),
-            mock.patch("sys.stdout", Tty()) as out,
-        ):
-            code = cli.main(
-                ["serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1"], standalone_mode=False
-            )
-        self.assertIn("ir://127.0.0.1:", out.getvalue())
-        self.assertIsNone(code)
-
-    def test_sigterm_cleans_up_connection_file(self):
-        env = {**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"}
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "image_review.cli",
-                "serve",
-                "--work-dir",
-                str(self.work),
-                "--https",
-                "--bind",
-                "127.0.0.1",
-            ],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        self.addCleanup(proc.kill)
-        directory = self.home / ".image-review"
-        wait_for_file(self, proc, directory, "connection-*.txt")
-        time.sleep(0.3)  # let serve_forever start
-        proc.send_signal(signal.SIGTERM)
-        _, err = proc.communicate(timeout=20)
-        self.assertEqual(proc.returncode, 0, err)
-        self.assertEqual(list(directory.iterdir()), [])
-        self.assertFalse((self.work / "review.lock").exists())
-
-    def test_missing_manifest(self):
-        empty = self.home / "empty"
-        empty.mkdir()
-        result = invoke_cli("serve", "--work-dir", str(empty))
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("No preprocessed data found", result.output)
-
-    def test_bad_bind_and_port(self):
-        cases = [
-            (["--bind", "0.0.0.0"], "Refusing to bind a wildcard"),
-            (["--bind", "::"], "Refusing to bind a wildcard"),
-            (["--bind", ""], "Refusing to bind a wildcard"),
-            (["--bind", "::1"], "Cannot listen on ::1"),
-            (["--bind", "0"], "Refusing to bind a wildcard"),
-            (["--bind", "127.1"], "cannot be advertised"),
-            (["--port", "70000"], "Invalid value for '--port'"),
-            (["--port", "-1"], "Invalid value for '--port'"),
-        ]
-        for args, message in cases:
-            with self.subTest(args=args):
-                result = invoke_cli("serve", "--work-dir", str(self.work), *args)
-                self.assertEqual(result.exit_code, 2 if "--port" in args else 1, result.output)
-                self.assertNotIsInstance(result.exception, OSError)
-                self.assertNotIn("Traceback", result.output)
-                self.assertIn(message, result.output)
-                self.assertFalse((self.work / "review.lock").exists())
-
-    def test_connection_file_failure_releases_lock(self):
-        with (
-            mock.patch("image_review.server.write_connection_file", side_effect=OSError("disk full")),
-            mock.patch.object(ReviewServer, "serve_forever") as serve_forever,
-        ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("Cannot write connection file: disk full", result.output)
-        serve_forever.assert_not_called()
-        self.assertFalse((self.work / "review.lock").exists())
-
-    def test_store_closed_under_store_lock(self):
-        servers = []
-        lock_held_at_close = []
-        real_close = LocalStore.close
-
-        def fake_serve(server, *a, **k):
-            servers.append(server)
-            raise KeyboardInterrupt
-
-        def close(store):
-            lock_held_at_close.append(servers[0].store_lock.locked())
-            real_close(store)
-
-        with (
-            mock.patch.object(ReviewServer, "serve_forever", fake_serve),
-            mock.patch.object(LocalStore, "close", close),
-        ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(lock_held_at_close[0])  # a handler thread's mark cannot interleave with the release
-        self.assertFalse((self.work / "review.lock").exists())
-
-
 class TestAuth(ServerTestCase):
     def test_missing_and_wrong_token_rejected_everywhere(self):
         requests = [
@@ -826,8 +499,6 @@ class TestAuth(ServerTestCase):
             ("GET", "/image?key=batch_001/a.jpg"),
             ("GET", "/statuses?pass=1"),
             ("GET", "/current_pass"),
-            ("GET", "/skipped"),
-            ("GET", "/version"),
             ("POST", "/mark"),
             ("POST", "/undo"),
             ("GET", "/nope"),
@@ -881,33 +552,6 @@ class TestReads(ServerTestCase):
     def test_image_without_key_is_400(self):
         resp, _, _ = self.request("GET", "/image")
         self.assertEqual(resp.status, 400)
-
-    def test_version(self):
-        from importlib.metadata import version
-
-        resp, data, _ = self.request("GET", "/version")
-        self.assertEqual(resp.status, 200)
-        self.assertEqual(json.loads(data), {"api": API_VERSION, "version": version("image-review")})
-
-    def test_api_version_is_9(self):
-        self.assertEqual(API_VERSION, 9)
-        self.assertEqual(self.get_json("/version")["api"], 9)
-
-    def test_skipped_absent_is_zero_counts(self):
-        resp, data, _ = self.request("GET", "/skipped")
-        self.assertEqual((resp.status, json.loads(data)), (200, {"failed": 0, "ignored": 0}))
-
-    def test_skipped_counts_only_no_paths(self):
-        rows = [(f"{image_id}", "failed", "cannot read /src/secret/dir") for _, _, image_id in ROWS[:2]]
-        rows.append(("/src/patient_x/notes.txt", "ignored", "not an image"))
-        text = "image_id\tkind\treason\n" + "".join("\t".join(r) + "\n" for r in rows)
-        (self.work_dir / "skipped.tsv").write_text(text)
-        resp, data, _ = self.request("GET", "/skipped")
-        self.assertEqual(resp.status, 200)
-        self.assertEqual(json.loads(data), {"failed": 2, "ignored": 1})
-        self.assertNotIn(b"/", data)
-        for _, _, image_id in ROWS:
-            self.assertNotIn(image_id.encode(), data)
 
     def test_statuses_and_current_pass(self):
         self.assertEqual(self.get_json("/current_pass"), {"pass": 1})
@@ -1208,51 +852,44 @@ class TestUndo(ServerTestCase):
         self.assertEqual(resp.status, 404)
 
 
-class TestRemoteTarget(unittest.TestCase):
-    def test_round_trip(self):
-        for host in ("node01.cluster.example", "node_01", "127.0.0.1", "::1"):
-            with self.subTest(host=host):
-                t = RemoteTarget(host, 8443, "tok-en_1", FP)
-                self.assertEqual(RemoteTarget.parse(t.to_uri()), t)
-        self.assertEqual(RemoteTarget("h", 1, "t", FP).to_uri(), f"ir://h:1/?token=t&fp=sha256:{FP}")
+class TestIsIntAtLeast(unittest.TestCase):
+    def test_table(self):
+        for value, minimum, expected in [
+            (True, 0, False),
+            (True, 1, False),
+            (False, 0, False),
+            (0, 0, True),
+            (0, 1, False),
+            (1, 0, True),
+            (1, 1, True),
+            (-1, 0, False),
+            (-1, 1, False),
+            (1.0, 0, False),
+            (1.0, 1, False),
+            ("1", 0, False),
+            ("1", 1, False),
+            (None, 0, False),
+            (None, 1, False),
+        ]:
+            with self.subTest(value=value, minimum=minimum):
+                self.assertIs(is_int_at_least(value, minimum), expected)
 
-    def test_token_not_in_repr(self):
-        self.assertNotIn("tok", repr(RemoteTarget("h", 1, "tok", FP)))
 
-    def test_parse_rejections(self):
-        bad = [
-            f"http://h:1/?token=t&fp=sha256:{FP}",
-            f"ir://h/?token=t&fp=sha256:{FP}",
-            f"ir://:1/?token=t&fp=sha256:{FP}",
-            f"ir://h:1/?fp=sha256:{FP}",
-            f"ir://h:1/?token=&fp=sha256:{FP}",
-            "ir://h:1/?token=t",
-            f"ir://h:1/?token=t&fp={FP}",
-            "ir://h:1/?token=t&fp=sha256:abcd",
-            f"ir://h:1/?token=t&fp=sha256:{FP.upper()}",
-            f"ir://h:notaport/?token=t&fp=sha256:{FP}",
-            f"ir://h:0/?token=t&fp=sha256:{FP}",
-            f"ir://h:70000/?token=t&fp=sha256:{FP}",
-            f"ir://u:p@h:1/?token=t&fp=sha256:{FP}",
-            f"ir://u@h:1/?token=t&fp=sha256:{FP}",
-            f"ir://h:1/x?token=t&fp=sha256:{FP}",
-            f"ir://h:1/?token=t&fp=sha256:{FP}#frag",
-            f"ir://h:1/?token=t&fp=sha256:{FP}&extra=1",
-            f"ir://h:1/?token=t&token=u&fp=sha256:{FP}",
-            f"ir://h:1/?token=a%20b&fp=sha256:{FP}",
-            f"ir://h:1/?token=a.b&fp=sha256:{FP}",
-            f"ir://-h:1/?token=t&fp=sha256:{FP}",
-            f"ir://h%41:1/?token=t&fp=sha256:{FP}",
-            f"ir://h-:1/?token=t&fp=sha256:{FP}",
-            f"ir://1.2.3.400:1/?token=t&fp=sha256:{FP}",
-            f"ir://[::zz]:1/?token=t&fp=sha256:{FP}",
-            f"ir://[fe80::1%25eth0]:1/?token=t&fp=sha256:{FP}",
-            f"ir://h..x:1/?token=t&fp=sha256:{FP}",
-            "",
-        ]
-        for uri in bad:
-            with self.subTest(uri=uri), self.assertRaises(ValueError):
-                RemoteTarget.parse(uri)
+class TestPackageVersion(unittest.TestCase):
+    def setUp(self):
+        package_version.cache_clear()
+        self.addCleanup(package_version.cache_clear)
+
+    def test_installed_version(self):
+        from importlib.metadata import version
+
+        self.assertEqual(package_version(), version("image-review"))
+
+    def test_unknown_when_not_installed(self):
+        from importlib.metadata import PackageNotFoundError
+
+        with mock.patch("importlib.metadata.version", side_effect=PackageNotFoundError):
+            self.assertEqual(package_version(), "unknown")
 
 
 if __name__ == "__main__":

@@ -24,8 +24,7 @@ Include:
 
 - the version (`image-review --version` or `pip show image-review`);
 - your OS and Python version;
-- the mode: local review, browser review with `serve`, or the deprecated
-  `review --remote`;
+- the mode: local review, or browser review with `serve`;
 - what you observed;
 - how to reproduce it.
 
@@ -38,8 +37,8 @@ Reproduce the problem with synthetic images. Never attach or paste:
   `skipped.tsv`, `preprocess.json` or `review.tsv`;
 - export allowlists or reports;
 - job output or logs that name source paths;
-- tokens, `ir://` connection strings, `http://127.0.0.1:8080/#TOKEN` URLs, or
-  the connection and URL files under `~/.image-review/`.
+- tokens, `http://127.0.0.1:8080/#TOKEN` URLs, or the URL files under
+  `~/.image-review/`.
 
 If you already sent something like that, say so in your report so it can be
 deleted.

@@ -65,7 +65,7 @@ class ReviewStore(Protocol):
     def __exit__(self, *exc_info: object) -> None: ...
 
     def close(self) -> None:
-        """Release what the store holds (connections, the work dir lock). Idempotent."""
+        """Release what the store holds (the work dir lock). Idempotent."""
         ...
 
     def manifest(self) -> list[ManifestRow]: ...
@@ -95,7 +95,7 @@ class ReviewStore(Protocol):
         """Undo the latest mark not yet undone, restoring each image's decision from before it; `reviewer` is recorded.
 
         Returns the new status of every key affected, as mark does; {} when there is nothing to undo. The marks
-        that can be undone are the store's (the server's, for a remote store), held in memory since it was opened.
+        that can be undone are the store's, held in memory since it was opened.
         """
         ...
 
@@ -329,7 +329,7 @@ class LocalStore:
         self, keys: list[Key], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
     ) -> dict[Key, Status]:
         """Also raises KeyError for an unknown key and ValueError for repeated keys or a `single` mark of other than
-        one key, recording nothing; a RemoteStore surfaces the server's 400 for those as RemoteError."""
+        one key, recording nothing."""
         self._require_writable()
         targets = [self._by_key[k] for k in keys]  # an unknown key raises before anything is written
         if len(set(keys)) != len(keys):

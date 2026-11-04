@@ -233,7 +233,7 @@ class TestSession(SessionTestCase):
         set_info.assert_called_once_with(GRID_HAS_DIRTY)
 
     def test_store_refusal_of_grid_clean_is_not_an_outage(self):
-        # A RemoteStore raises GridCleanRefused on the server's 409; the statuses are then re-read
+        # The store raises GridCleanRefused when its own statuses refuse the grid CLEAN; the statuses are then re-read
         s = ReviewSession(self.store, reviewer="tester", mode="grid")
         s._items = [GridItem(keys=("batch_001/a.jpg", "batch_001/b.jpg"), surface=pg.Surface((1, 1)), source_scale=1.0)]
         s._cursor = 0

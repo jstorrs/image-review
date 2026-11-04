@@ -18,8 +18,8 @@ display:
 
 | Install | Commands | Dependencies |
 |---|---|---|
-| `pip install .` | `preprocess`, `serve`, `status`, `export`, `--help` | click, cryptography, rectpack; pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
-| `pip install '.[viewer]'` | also `review` (local, or the deprecated `--remote`) | pygame-ce |
+| `pip install .` | `preprocess`, `serve`, `status`, `export`, `--help` | click, rectpack; pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
+| `pip install '.[viewer]'` | also `review` | pygame-ce |
 
 `[all]` is the same as `[viewer]`, and `[preprocess]` and `[codecs]` are still
 accepted but add nothing, since their dependencies are installed by default.
@@ -32,14 +32,6 @@ browser. Running `review` without the viewer extra exits 1 with
 Every install brings several hundred MB of native wheels. On Linux the
 imagecodecs wheels need glibc 2.28 or later (manylinux_2_28), and python-gdcm
 2.27 or later; on an older Linux, such as CentOS/RHEL 7, installation may fail.
-
-The deprecated [Python client](tutorials/remote-review.md) also needs:
-
-- `[viewer]` on the laptop, for `review --remote` (deprecated).
-- `cryptography`, for the TLS certificate of `serve --https` (deprecated).
-  It is a core dependency, so it is installed everywhere.
-- An OpenSSH client on the laptop for `review --via` and `status --via`
-  (deprecated; built into macOS, Linux and Windows 10+).
 
 ## Cluster install without root
 
@@ -59,9 +51,7 @@ pip install -e .
 
 If the repository is private, the https URL needs credentials (or use an
 `ssh://git@github.com/jstorrs/image-review` URL with a key on the cluster).
-Activate the same environment in your `sbatch` scripts. With the deprecated
-Python client, use the same image-review version on the laptop and on the
-cluster.
+Activate the same environment in your `sbatch` scripts.
 
 ## Compressed DICOMs
 
@@ -100,7 +90,7 @@ minimums are: click >= 8.3.0, imagecodecs >= 2024.6.1, matplotlib >= 3.8.4,
 numpy >= 2.1, pydicom >= 3.0.1, Pillow >= 10.3 except 11.x (which misdecodes
 an MPO frame whose mode differs from the one before), scikit-image >= 0.23.1,
 scipy >= 1.13, tifffile >= 2024.1.30, tqdm >= 4.60, pygame-ce >= 2.3.1,
-cryptography >= 41, python-gdcm >= 3.0.25, pylibjpeg >= 2.0,
+python-gdcm >= 3.0.25, pylibjpeg >= 2.0,
 pylibjpeg-openjpeg >= 2.3, and rectpack pinned at 0.2.2 (unmaintained; grid
 packing depends on its exact behavior).
 

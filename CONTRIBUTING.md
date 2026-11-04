@@ -123,7 +123,7 @@ When writing a page:
   includes it), so it may contain no relative links.
 - Use no MyST directives or roles other than the toctrees in `docs/index.md`
   and the changelog include: `docs/` is read on GitHub too.
-- Link to a heading with GitHub's slug (`remote-review.md#4-batch-mode-sbatch`);
+- Link to a heading with GitHub's slug (`browser-review.md#2-review-in-the-browser`);
   MyST resolves it, and the strict build fails on a slug that matches no
   heading.
 
@@ -172,11 +172,6 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
   function contracts), and other pages only where their summary or link
   becomes wrong. Before committing, grep `docs/` and the README for the old
   wording.
-- **Wire changes bump `API_VERSION`.** Any change to the server's request or
-  response shapes, or to the `Status` vocabulary, bumps `API_VERSION` in
-  `src/image_review/connection.py`, so a client and server of different
-  versions fail with a clear message. See the API version rule in
-  [the specification](docs/reference/specification.md#endpoints).
 - **Changelog.** Add user-visible changes to [CHANGELOG.md](CHANGELOG.md),
   and put anything that needs action from people sharing work directories
   under its *Upgrading* heading.

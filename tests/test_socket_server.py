@@ -80,8 +80,6 @@ ROUTES = [
     ("GET", "/image?key=batch_001/a.jpg"),
     ("GET", "/statuses?pass=1"),
     ("GET", "/current_pass"),
-    ("GET", "/skipped"),
-    ("GET", "/version"),
     ("POST", "/mark"),
     ("POST", "/undo"),
     ("GET", "/nope"),
@@ -288,12 +286,11 @@ class TestSocketRequests(SocketServerTestCase):
             self.assertNotIn("Error", text)
 
 
-# The API routes a page loaded from another serve is refused on (ROUTES less /version and /current_pass)
+# The API routes a page loaded from another serve is refused on (ROUTES less /current_pass)
 INSTANCE_ROUTES = [
     ("GET", "/manifest"),
     ("GET", "/image?key=batch_001/a.jpg"),
     ("GET", "/statuses?pass=1"),
-    ("GET", "/skipped"),
     ("POST", "/mark"),
     ("POST", "/undo"),
     ("POST", "/grids"),
@@ -335,14 +332,11 @@ class TestServerInstance(SocketServerTestCase):
         self.addCleanup(stop)
         self.assertNotEqual(other.instance, self.server.instance)
 
-    def test_version_and_current_pass_need_no_instance(self):
+    def test_current_pass_needs_no_instance(self):
         for instance in (None, "stale"):
             with self.subTest(instance=instance):
                 resp, data = self.request("GET", "/current_pass", instance=instance)
                 self.assertEqual((resp.status, json.loads(data)), (200, {"pass": 1}))
-                resp, data = self.request("GET", "/version", instance=instance)
-                self.assertEqual(resp.status, 200)
-                self.assertIn("api", json.loads(data))
 
     def test_other_routes_without_the_instance_are_412(self):
         before = self.review_tsv()
@@ -387,7 +381,6 @@ class TestServerInstance(SocketServerTestCase):
         self.assertEqual(resp.status, 200)
         self.assertTrue(json.loads(data))
         self.assertEqual(self.request("GET", "/image?key=batch_001/a.jpg")[0].status, 200)
-        self.assertEqual(self.request("GET", "/skipped")[0].status, 200)
         self.assertEqual(self.request("POST", "/grids", body=json.dumps(GRIDS_ALL).encode())[0].status, 200)
         self.assertEqual(self.request("GET", "/nope")[0].status, 404)
 
@@ -1142,6 +1135,29 @@ class TestPrivateFile(unittest.TestCase):
                 write_private_file("x.txt", "secret\n")
             self.assertEqual(list((home / ".image-review").iterdir()), [])
 
+    def test_loose_existing_dir_is_tightened(self):
+        home = socket_dir(self)
+        directory = home / ".image-review"
+        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            path = write_private_file("x.txt", "secret\n")
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_replaces_stale_file(self):
+        home = socket_dir(self)
+        directory = home / ".image-review"
+        directory.mkdir(mode=0o700)
+        stale = directory / "x.txt"
+        stale.write_text("old")
+        stale.chmod(0o644)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            path = write_private_file("x.txt", "new\n")
+        self.assertEqual(path, stale)
+        self.assertEqual(path.read_text(), "new\n")
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
 
 class TestParseToken(unittest.TestCase):
     def test_accepted(self):
@@ -1273,13 +1289,6 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn(shlex.quote(f"{getpass.getuser()}@{socket.getfqdn()}"), result.output)
 
-    def test_ssh_host_requires_socket_mode(self):
-        result = self.serve("--https", "--ssh-host", "node042.example.org")
-        self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("--ssh-host cannot be used in HTTPS mode (--https, --bind or --port).", result.output)
-        self.assertFalse((self.work / "review.lock").exists())
-        self.assertFalse(self.dir.exists())
-
     def test_bad_ssh_host_refused(self):
         for bad in ["", "-oProxyCommand=x", "a@b", "a b", "a;b"]:
             with self.subTest(bad=bad):
@@ -1367,29 +1376,6 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertIn(f"-L 127.0.0.1:8080:{path} ", result.output)
         self.assertFalse(path.exists())
 
-    def test_socket_path_from_environment_ignored_in_https_mode(self):
-        path = self.home / "env.sock"
-        seen = []
-
-        def fake_serve(server, *a, **k):
-            seen.append(type(server).__name__)
-            raise KeyboardInterrupt
-
-        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
-            result = invoke_cli(
-                "serve",
-                "--work-dir",
-                str(self.work),
-                "--https",
-                "--bind",
-                "127.0.0.1",
-                env={"IMAGE_REVIEW_SOCKET_PATH": str(path)},
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(seen, ["ReviewServer"])
-        self.assertFalse(path.exists())
-        self.assertNotIn("Unix socket", result.output)
-
     def test_socket_path_option_overrides_environment(self):
         env_path = self.home / "env.sock"
         path = self.home / "cli.sock"
@@ -1458,33 +1444,6 @@ class TestServeSocketCommand(unittest.TestCase):
                 self.assertFalse(self.dir.exists() and list(self.dir.iterdir()))
                 self.assertFalse((self.work / "review.lock").exists())
 
-    def test_token_from_environment_ignored_in_https_mode(self):
-        token = "0123456789abcdef0123456789abcdef"
-        seen = []
-
-        def fake_serve(server, *a, **k):
-            seen.append(type(server).__name__)
-            self.assertNotEqual(getattr(server, "token", None), token)
-            raise KeyboardInterrupt
-
-        for value in (token, "not a valid token"):  # ignored, so not even parsed
-            with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
-                result = invoke_cli(
-                    "serve",
-                    "--work-dir",
-                    str(self.work),
-                    "--https",
-                    "--bind",
-                    "127.0.0.1",
-                    env={"IMAGE_REVIEW_TOKEN": value},
-                )
-            self.assertEqual(result.exit_code, 0, result.output)
-            self.assertNotIn(value, result.output)
-            self.assertNotIn("IMAGE_REVIEW_TOKEN", result.output)
-            leftovers = [p.read_text() for p in self.dir.iterdir()] if self.dir.exists() else []
-            self.assertFalse(any(value in text for text in leftovers))
-        self.assertEqual(seen, ["ReviewServer"] * 2)
-
     def test_empty_token_from_environment_counts_as_unset(self):
         result = self.serve(env={"IMAGE_REVIEW_TOKEN": ""})
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1548,24 +1507,6 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertIn(f"-L 127.0.0.1:8080:{path} ", result.output)
         self.assertFalse(path.exists())
 
-    def test_conflicting_options_exit_2(self):
-        modes = (["--https"], ["--bind", "x"], ["--port", "0"], ["--port", "1"])
-        socket_options = (
-            ("--socket-path", [str(self.home / "a.sock")]),
-            ("--via", ["a@b"]),
-            ("--direct", []),
-            ("--ssh-host", ["n"]),
-        )
-        for mode, (option, values) in itertools.product(modes, socket_options):
-            args = [*mode, option, *values]
-            with self.subTest(args=args):
-                result = self.serve(*args)
-                self.assertEqual(result.exit_code, 2, result.output)
-                self.assertIn(f"{option} cannot be used in HTTPS mode (--https, --bind or --port).", result.stderr)
-                self.assertNotIn("WARNING", result.stderr)
-                self.assertFalse((self.work / "review.lock").exists())
-                self.assertFalse(self.dir.exists())
-
     def test_socket_flag_is_gone(self):
         result = self.serve("--socket")
         self.assertEqual(result.exit_code, 2, result.output)
@@ -1574,27 +1515,22 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertFalse((self.work / "review.lock").exists())
         self.assertFalse(self.dir.exists())
 
-    def test_via_from_environment_ignored_in_https_mode(self):
-        result = self.serve("--https", "--bind", "127.0.0.1", env={"IMAGE_REVIEW_VIA": "carol@login"})
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("image-review review --remote", result.output)
-        self.assertNotIn("Unix socket", result.output)
-
-    def test_direct_from_environment_ignored_in_https_mode(self):
-        result = self.serve("--https", "--bind", "127.0.0.1", env={"IMAGE_REVIEW_DIRECT": "1"})
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("image-review review --remote", result.output)
-        self.assertNotIn("Unix socket", result.output)
-
-    def test_invalid_direct_from_environment_refused_in_either_mode(self):
-        for args in ([], ["--https", "--bind", "127.0.0.1"]):
+    def test_https_options_are_gone(self):
+        for args in (["--https"], ["--bind", "127.0.0.1"], ["--port", "0"]):
             with self.subTest(args=args):
-                result = self.serve(*args, env={"IMAGE_REVIEW_DIRECT": "maybe"})
+                result = self.serve(*args)
                 self.assertEqual(result.exit_code, 2, result.output)
-                self.assertIn("--direct", result.stderr)
-                self.assertNotIn("WARNING", result.stderr)
+                self.assertRegex(result.stderr, rf"No such option:? '?{args[0]}'?")
                 self.assertFalse((self.work / "review.lock").exists())
                 self.assertFalse(self.dir.exists())
+
+    def test_invalid_direct_from_environment_refused(self):
+        result = self.serve(env={"IMAGE_REVIEW_DIRECT": "maybe"})
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--direct", result.stderr)
+        self.assertNotIn("WARNING", result.stderr)
+        self.assertFalse((self.work / "review.lock").exists())
+        self.assertFalse(self.dir.exists())
 
     def test_plain_serve_is_socket_mode(self):
         seen = []
@@ -1608,40 +1544,6 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(seen, [UnixReviewServer])
         self.assertNotIn("WARNING", result.stderr)
-        self.assertNotIn("ir://", result.output)
-
-    def test_https_mode_warns_once(self):
-        """--https, --bind and --port each select HTTPS mode, which logs one deprecation warning."""
-        seen = []
-
-        def fake_serve(server, *a, **k):
-            (connection_file,) = self.dir.glob("connection-*.txt")  # stdout is not a terminal
-            seen.append((type(server), connection_file.read_text()))
-            raise KeyboardInterrupt
-
-        for args in (["--https"], ["--bind", "127.0.0.1"], ["--port", "0"], ["--https", "--bind", "127.0.0.1"]):
-            seen.clear()
-            with (
-                self.subTest(args=args),
-                mock.patch("socket.getfqdn", return_value="127.0.0.1"),
-                mock.patch.object(ReviewServer, "serve_forever", fake_serve),
-            ):
-                result = invoke_cli("serve", "--work-dir", str(self.work), *args)
-                self.assertEqual(result.exit_code, 0, result.output)
-                ((server_type, connection_string),) = seen
-                self.assertIs(server_type, ReviewServer)
-                self.assertTrue(connection_string.startswith("ir://127.0.0.1:"), connection_string)
-                self.assertIn("image-review review --remote", result.stdout)
-                self.assertEqual(result.stderr.count("is deprecated"), 1, result.stderr)
-                self.assertEqual(result.stderr.count("WARNING"), 1, result.stderr)
-                self.assertIn("WARNING image_review.cli: serve over HTTPS", result.stderr)
-                self.assertFalse(self.dir.exists() and list(self.dir.glob("serve-*.sock")))
-
-    def test_https_warning_survives_quiet(self):
-        with mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt):
-            result = invoke_cli("-q", "serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(result.stderr.count("is deprecated"), 1, result.stderr)
 
     def test_no_unix_sockets_exits_1(self):
         with mock.patch.object(cli, "has_unix_sockets", return_value=False):
@@ -1649,53 +1551,67 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIsInstance(result.exception, SystemExit)
         self.assertNotIn("Traceback", result.output)
-        self.assertIn(
-            "this system has no Unix sockets; browser review needs one (serve --https is deprecated)", result.stderr
-        )
+        self.assertIn("this system has no Unix sockets; browser review needs one\n", result.stderr)
         self.assertNotIn("WARNING", result.stderr)
         self.assertFalse((self.work / "review.lock").exists())
         self.assertFalse(self.dir.exists())
 
-    def test_no_unix_sockets_still_serves_https(self):
+    def test_locked_work_dir_exits_1_naming_the_holder(self):
+        lock = self.work / "review.lock"
+        lock.write_text(
+            json.dumps({"host": "node042", "user": "alice", "pid": 1234, "started": "2026-09-30T12:00:00Z"})
+        )
+        with mock.patch.object(ReviewServer, "serve_forever") as serve_forever:
+            result = invoke_cli("serve", "--work-dir", str(self.work))
+        self.assertEqual(result.exit_code, 1, result.output)
+        serve_forever.assert_not_called()
+        for part in ("alice", "node042", "pid 1234", str(lock)):
+            self.assertIn(part, result.output)
+        self.assertTrue(lock.exists())
+        self.assertFalse(self.dir.exists() and list(self.dir.iterdir()))
+
+    def test_serve_holds_lock_while_serving(self):
         seen = []
 
         def fake_serve(server, *a, **k):
-            seen.append(type(server))
+            seen.append(json.loads((self.work / "review.lock").read_text())["pid"])
             raise KeyboardInterrupt
 
-        with (
-            mock.patch.object(cli, "has_unix_sockets", return_value=False),
-            mock.patch("socket.getfqdn", return_value="127.0.0.1"),
-            mock.patch.object(ReviewServer, "serve_forever", fake_serve),
-        ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https")
+        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+            result = invoke_cli("serve", "--work-dir", str(self.work))
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(seen, [ReviewServer])
+        self.assertEqual(seen, [os.getpid()])
+        self.assertFalse((self.work / "review.lock").exists())
 
-    def test_https_flag_drops_socket_environment(self):
-        path = self.home / "env.sock"
-        seen = []
+    def test_store_closed_under_store_lock(self):
+        servers = []
+        lock_held_at_close = []
+        real_close = LocalStore.close
 
         def fake_serve(server, *a, **k):
-            seen.append(type(server))
+            servers.append(server)
             raise KeyboardInterrupt
 
-        env = {
-            "IMAGE_REVIEW_SOCKET_PATH": str(path),
-            "IMAGE_REVIEW_VIA": "-oProxyCommand=x",  # invalid, but dropped before parsing
-            "IMAGE_REVIEW_DIRECT": "1",
-            "IMAGE_REVIEW_TOKEN": "not a valid token",
-        }
+        def close(store):
+            lock_held_at_close.append(servers[0].store_lock.locked())
+            real_close(store)
+
         with (
-            mock.patch("socket.getfqdn", return_value="127.0.0.1"),
             mock.patch.object(ReviewServer, "serve_forever", fake_serve),
+            mock.patch.object(LocalStore, "close", close),
         ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", env=env)
+            result = invoke_cli("serve", "--work-dir", str(self.work))
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(seen, [ReviewServer])
-        self.assertFalse(path.exists())
-        self.assertNotIn("Unix socket", result.output)
-        self.assertNotIn("IMAGE_REVIEW", result.output)
+        self.assertTrue(lock_held_at_close[0])  # a handler thread's mark cannot interleave with the release
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_missing_manifest(self):
+        empty = self.home / "empty"
+        empty.mkdir()
+        result = invoke_cli("serve", "--work-dir", str(empty))
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("No preprocessed data found", result.output)
+        self.assertFalse(self.dir.exists() and list(self.dir.iterdir()))
 
     def test_bad_via_from_environment_names_the_variable(self):
         result = self.serve(env={"IMAGE_REVIEW_VIA": "-oProxyCommand=x"})

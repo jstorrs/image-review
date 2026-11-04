@@ -23,14 +23,13 @@ Put the option before the command, e.g. `image-review -q status`:
 |---|---|
 | (default) | INFO and up |
 | `-q`, `--quiet` | Only warnings and errors |
-| `-v`, `--verbose` | Debug messages too (currently few: the work directory opened, the server connected to, the ssh tunnel command, grid packing counts and rotation) |
+| `-v`, `--verbose` | Debug messages too (currently few: the work directory opened, grid packing counts and rotation) |
 
 `-q` and `-v` together are a usage error (exit 2).
 
 Errors and warnings cover:
 
-- ERROR: the review session lost its server, or a server request failed with
-  a 500.
+- ERROR: a server request failed with a 500.
 - WARNING:
   - an image that cannot be loaded or was left out of every grid;
   - an input skipped by `preprocess`;
@@ -40,9 +39,7 @@ Errors and warnings cover:
   - a failed server connection;
   - `export --allow-live` overriding a held lock;
   - an `export --output` or `--report` file that could not be given the work
-    directory's group;
-  - a deprecated remote path (`serve` over HTTPS, `review --remote` or
-    `status --remote`).
+    directory's group.
 
 Only `serve` and `export` log at INFO. `serve` logs one line per request,
 with the peer address, method, path without its query string, and status.

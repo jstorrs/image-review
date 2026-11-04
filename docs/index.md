@@ -24,9 +24,7 @@ To review images that stay on an HPC cluster, see
 [Browser review over SSH](tutorials/browser-review.md), the recommended
 remote workflow. There is nothing to install on the laptop but ssh and a
 browser, and nothing to keep in sync: the page is served by `serve` itself,
-so it always matches the server's version. The deprecated
-[Python client](tutorials/remote-review.md) must run the same version as the
-server, and a mismatch is refused.
+so it always matches the server's version.
 
 The files in a work directory are described in
 [Work directory](reference/work-directory.md).
@@ -47,7 +45,6 @@ quickstart.md
 
 tutorials/local-review.md
 Remote review in a browser <tutorials/browser-review.md>
-Remote review, Python client (deprecated) <tutorials/remote-review.md>
 ```
 
 ```{toctree}

@@ -203,7 +203,8 @@ class JpegSizeTest(unittest.TestCase):
 class ImportTest(unittest.TestCase):
     def test_cli_server_and_layout_import_without_heavy_dependencies(self):
         code = (
-            "import sys, image_review.cli, image_review.server, image_review.layout\n"
+            "import sys, image_review.cli, image_review.server, image_review.layout, image_review.tunnel, "
+            "image_review.connection, image_review.signals\n"
             "print(sorted(m for m in ('pygame', 'PIL', 'numpy', 'skimage', 'matplotlib') if m in sys.modules))"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)

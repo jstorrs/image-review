@@ -1,15 +1,13 @@
-"""Bearer-token server exposing a ReviewStore: HTTPS over TCP, or plain HTTP on a Unix socket.
+"""Bearer-token server exposing a ReviewStore over plain HTTP on a Unix socket, for browser review over SSH.
 
 Must stay importable without pygame/numpy/skimage. Original image_ids never
 leave the store; clients only ever see keys (preprocessed paths).
 """
 
-import datetime
 import hashlib
 import hmac
 import importlib.resources
 import io
-import ipaddress
 import json
 import logging
 import os
@@ -17,10 +15,8 @@ import re
 import secrets
 import socket
 import socketserver
-import ssl
 import stat
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -29,21 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
-
-from .connection import (
-    API_VERSION,
-    MAX_PASS,
-    RemoteTarget,
-    Token,
-    cert_fingerprint,
-    is_int_at_least,
-    package_version,
-    parse_reviewer,
-)
+from .connection import MAX_PASS, Token, is_int_at_least, parse_reviewer
 from .layout import GridPlan, is_rotated, jpeg_size, plan_grids
 from .status import (
     MARK_MODES,
@@ -61,19 +43,17 @@ from .store import ReviewStore
 log = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1 << 20
-CERT_VALIDITY = datetime.timedelta(days=30)
 HANDLER_TIMEOUT_SECONDS = 60  # each socket receive or send
-HANDSHAKE_TIMEOUT_SECONDS = 10
 # Reading one whole request (request line, headers, body) must finish this long after the server starts waiting
 # for its request line, so idle keep-alive time counts too. Unlike the per-receive timeout, a trickle can't reset it.
 REQUEST_DEADLINE_SECONDS = 60
 # Bytes of request line and headers one request may send; its body adds its Content-Length once the token is checked.
 # Bounds what a client without the token can make the server buffer and parse (the stdlib alone allows 100 lines of
-# 64 KiB). A browser's or the Python client's headers, token and instance id included, take a few hundred bytes to
-# 2 KiB; cookies other localhost apps set (socket mode) can add a few KiB.
+# 64 KiB). A browser's headers, token and instance id included, take a few hundred bytes to 2 KiB; cookies other
+# localhost apps set can add a few KiB.
 MAX_HEAD_BYTES = 64 * 1024
-# Open connections at once; the next is closed at accept, before it gets a thread. Clients use about 9 (remote's 8
-# workers, a browser's ~6 per origin); headroom keeps a few idle or stray sockets from locking the reviewer out.
+# Open connections at once; the next is closed at accept, before it gets a thread. A browser uses about 6 per origin;
+# headroom keeps a few idle or stray sockets from locking the reviewer out.
 MAX_CONNECTIONS = 64
 MAX_GRID_KEYS = 1000
 MIN_GRID_SIDE = 256
@@ -237,42 +217,6 @@ def grids_payload(
     return {"grids": grids, "left_out": left_out}
 
 
-def generate_cert(host: str) -> tuple[x509.Certificate, bytes]:
-    """Self-signed EC P-256 certificate; returns (certificate, PEM private key)."""
-    key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host[:64])])
-    now = datetime.datetime.now(datetime.UTC)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(minutes=5))
-        .not_valid_after(now + CERT_VALIDITY)
-        .sign(key, hashes.SHA256())
-    )
-    key_pem = key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    )
-    return cert, key_pem
-
-
-def make_ssl_context(cert: x509.Certificate, key_pem: bytes) -> ssl.SSLContext:
-    """Load the cert/key via a private temp dir that is removed immediately."""
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    with tempfile.TemporaryDirectory() as tmp:  # mkdtemp creates it 0700
-        cert_path, key_path = Path(tmp) / "cert.pem", Path(tmp) / "key.pem"
-        cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-        key_path.touch(mode=0o600)
-        key_path.write_bytes(key_pem)
-        context.load_cert_chain(cert_path, key_path)
-    return context
-
-
 @dataclass(frozen=True)
 class Reply:
     status: int
@@ -302,8 +246,7 @@ class DeadlineReader(io.RawIOBase):
     `budget` bytes have been received.
 
     Each receive waits at most until the deadline and at most `timeout` (the handler's per-receive timeout); the
-    socket's timeout is then restored to `timeout`, so writes keep their own. On an SSLSocket recv_into returns
-    already-decrypted bytes first. The budget counts bytes received, including any BufferedReader reads ahead.
+    socket's timeout is then restored to `timeout`, so writes keep their own. The budget counts bytes received, including any BufferedReader reads ahead.
     """
 
     def __init__(self, sock: socket.socket, timeout: float):
@@ -337,14 +280,10 @@ class ReviewHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = HANDLER_TIMEOUT_SECONDS
     request_deadline: float = REQUEST_DEADLINE_SECONDS  # read per request, so tests can patch it
-    disable_nagle_algorithm = True  # headers and body are separate writes
     server: "ReviewServer"
 
     def setup(self) -> None:
-        # Bound pre-auth time: the TLS handshake (deferred from accept) gets a short timeout.
-        # A failure propagates to server.handle_error, which logs the class name and closes.
-        self.request.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
-        self.request.do_handshake()
+        # The request deadline bounds pre-auth time
         super().setup()  # applies the normal timeout
         self._bound_reads()
 
@@ -426,8 +365,6 @@ class ReviewHandler(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
         store, lock = self.server.store, self.server.store_lock
         match (method, url.path):
-            case ("GET", "/version"):
-                return json_reply({"api": API_VERSION, "version": package_version()})
             case ("GET", "/manifest"):
                 with lock:
                     rows = store.manifest()
@@ -443,10 +380,6 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 with lock:
                     current = store.current_pass()
                 return json_reply({"pass": current})
-            case ("GET", "/skipped"):
-                with lock:
-                    skipped = store.skipped()
-                return json_reply({"failed": skipped.failed, "ignored": skipped.ignored})
             case ("POST", "/mark"):
                 req = parse_mark(self._read_body(), self.server.known_keys)
                 with lock:
@@ -454,7 +387,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                         changed = store.mark(
                             req.keys, req.status, req.pass_number, reviewer=req.reviewer, mode=req.mode
                         )
-                    except GridCleanRefused:  # the clients refuse this first; their statuses may be stale
+                    except GridCleanRefused:  # the page refuses this first; its statuses may be stale
                         return GRID_CLEAN_REFUSED
                 return json_reply(changed)
             case ("POST", "/undo"):
@@ -591,9 +524,9 @@ CONTENT_SECURITY_POLICY = (
 
 
 # The server run a socket-mode request was meant for (UnixReviewServer.instance), sent on every reply and
-# required on every API request but these two: the page's first load and its Reconnect start there.
+# required on every API request but this one: the page's first load and its Reconnect start there.
 INSTANCE_HEADER = "X-Review-Instance"
-INSTANCE_FREE_ROUTES = frozenset({("GET", "/version"), ("GET", "/current_pass")})
+INSTANCE_FREE_ROUTES = frozenset({("GET", "/current_pass")})
 # A page loaded from an earlier serve (keys collide across work dirs): nothing is read, recorded or packed
 STALE_PAGE = Reply(412, json.dumps({"error": "the page was loaded from another serve; reconnect"}).encode(), close=True)
 
@@ -612,13 +545,6 @@ class UnixReviewHandler(ReviewHandler):
 
     server: "UnixReviewServer"
 
-    disable_nagle_algorithm = False  # TCP_NODELAY fails on AF_UNIX
-
-    def setup(self) -> None:
-        # No TLS handshake to bound: skip ReviewHandler.setup. The request deadline still bounds pre-auth time.
-        socketserver.StreamRequestHandler.setup(self)
-        self._bound_reads()
-
     def _peer(self) -> str:
         return "unix"  # accept() gives no peer address on AF_UNIX
 
@@ -627,8 +553,8 @@ class UnixReviewHandler(ReviewHandler):
         if not is_local_host(self.headers.get_all("Host", [])):
             self._send(Reply(400, close=True))
             return
-        # The three static files are served without the token: they hold no PHI and no secret, and the page
-        # cannot present the token before it has loaded. Exact GET paths only, in socket mode only. CSRF does
+        # The four static files are served without the token: they hold no PHI and no secret, and the page
+        # cannot present the token before it has loaded. Exact GET paths only. CSRF does
         # not apply: browsers never attach an Authorization header on their own.
         path = self.path.partition("?")[0]  # not urlsplit: it raises ValueError on targets like "http://["
         if method == "GET" and path in self.server.assets:
@@ -736,46 +662,6 @@ def _escape(text: str) -> str:
     return text.encode("unicode_escape").decode("ascii")
 
 
-_WILDCARD_MESSAGE = "Refusing to bind a wildcard address; pass this node's hostname with --bind."
-
-
-def _is_unspecified(address: str) -> bool:
-    try:
-        return ipaddress.ip_address(address).is_unspecified
-    except ValueError:
-        return False
-
-
-def make_server(store: ReviewStore, host: str, port: int) -> tuple[ReviewServer, RemoteTarget]:
-    """Create the TLS server (deprecated HTTPS mode). Raises ValueError for a wildcard or unadvertisable host, OSError if binding fails.
-
-    No listening socket is left behind on failure.
-    """
-    if not host.strip() or _is_unspecified(host.strip()):
-        raise ValueError(_WILDCARD_MESSAGE)
-    token = secrets.token_urlsafe(16)
-    cert, key_pem = generate_cert(host)
-    context = make_ssl_context(cert, key_pem)
-    server = ReviewServer((host, port), store, token)
-    try:
-        if _is_unspecified(str(server.server_address[0])):  # e.g. "0" binds to 0.0.0.0
-            raise ValueError(_WILDCARD_MESSAGE)
-        # Handshake happens in the handler thread so a stalled client can't block accept()
-        server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
-        fingerprint = cert_fingerprint(cert.public_bytes(serialization.Encoding.DER))
-        target = RemoteTarget(host=host, port=server.server_address[1], token=token, fingerprint=fingerprint)
-        try:
-            RemoteTarget.parse(target.to_uri())
-        except ValueError as e:
-            raise ValueError(
-                f"--bind {host!r} cannot be advertised to clients ({e}); use a hostname or dotted IPv4 address."
-            ) from None
-    except BaseException:
-        server.server_close()
-        raise
-    return server, target
-
-
 def private_dir() -> Path:
     """Return ~/.image-review, created or tightened to 0700 and checked to be ours."""
     directory = Path.home() / ".image-review"
@@ -805,11 +691,6 @@ def write_private_file(name: str, text: str) -> Path:
         path.unlink(missing_ok=True)  # never leave a partly written file holding a secret
         raise
     return path
-
-
-def write_connection_file(target: RemoteTarget) -> Path:
-    """Write the connection string to ~/.image-review/ as a private file."""
-    return write_private_file(f"connection-{safe_name(target.host)}-{target.port}.txt", target.to_uri() + "\n")
 
 
 SUN_PATH_SIZE = 104 if sys.platform == "darwin" else 108  # sockaddr_un.sun_path, including the NUL

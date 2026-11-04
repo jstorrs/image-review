@@ -5,7 +5,6 @@ image-review review [--mode {single,grid}]            [--pass N]
                     [--batch BATCH_ID]                 [--work-dir DIR]
                     [--filter {unreviewed,clean,all}]  [--rotate {auto,always,never}]
                     [--reviewer NAME]
-                    [--remote CONNECTION_STRING [--via DESTINATION]]
 ```
 
 Opens a fullscreen interactive session. In **grid mode**, images are
@@ -45,8 +44,6 @@ grid.
 | `--rotate` | `auto` | Rotate images 90 degrees in grids: `auto` = only when that saves a grid, `always` or `never` |
 | `--reviewer` | your login name; `$IMAGE_REVIEW_REVIEWER` | Name recorded with each verdict; see [Recorded verdicts](#recorded-verdicts) |
 | `--work-dir` | `./review_work` | Work directory containing preprocessed data |
-| `--remote` | `$IMAGE_REVIEW_REMOTE` | Deprecated: review a server started with `image-review serve --https` instead of a local `--work-dir`; see [Connecting to a server](#connecting-to-a-server) |
-| `--via` | `$IMAGE_REVIEW_VIA` | Deprecated: reach that server through an SSH tunnel via a login node, e.g. `--via user@login.cluster`; requires `--remote` |
 
 ## Keys and gamepad
 
@@ -116,7 +113,6 @@ again undoes the mark before that, and so on. Keys do not repeat, so holding
   is no longer among them.
 - The history lives in memory only and is gone when you quit. It does not
   carry over to a new batch opened with `b`.
-- After a lost connection `z` does nothing; see [Lost connection](#lost-connection).
 - An undo appends rows to `review.tsv` that restore each image's previous
   verdict and pass, or mark it UNREVIEWED again; see
   [Undo rows](../reference/work-directory.md#undo-rows).
@@ -159,9 +155,7 @@ example when one of its images shares a source file with an image marked
 DIRTY elsewhere. CLEAN on such a grid is refused, unless every image in it is
 DIRTY (that reverses the grid's own verdict), and the status bar says "grid contains an
 image already marked DIRTY - review it in single mode"; DIRTY is still
-accepted. Over a server, the server applies the same rule, so a CLEAN is
-refused even when another client marked an image DIRTY since your viewer last
-looked. An image that grid mode left out of the grids then says "image
+accepted. An image that grid mode left out of the grids then says "image
 already marked DIRTY in another pass - review it in single mode". A refused
 CLEAN records nothing, does not advance and leaves nothing to undo.
 
@@ -251,15 +245,11 @@ be read or decoded is shown as a dark placeholder instead:
 
 ```
 Cannot load image: KEY
-image could not be fetched
+image could not be read or decoded
 It can only be marked DIRTY
 ```
 
-Over a server, a JPEG that is missing, altered or unreadable on the server
-is answered with HTTP 404, and the second line says "image could not be
-fetched". "image could not be read or decoded" is for bytes that arrived but
-do not decode, and for every failure in a local review, a missing or altered
-file included. The error itself is only logged, as a warning naming the
+The error itself is only logged, as a warning naming the
 image.
 
 The placeholder takes part in navigation, `n`, todo-only and autoplay like
@@ -272,76 +262,6 @@ shown, so one that loads again is shown normally.
 
 Grid mode packs only images it can load; one it cannot is shown on its own,
 after the grids.
-
-## Connecting to a server
-
-`--remote` and `--via` are deprecated and will be removed in a future
-release. The Python client must run the same image-review version as the
-server, and a mismatch is refused; browser review has no client to install
-or keep in sync, because the server serves the page itself and it always
-matches. See [Browser review over SSH](../tutorials/browser-review.md).
-Selecting the remote client, by `--remote` or by `$IMAGE_REVIEW_REMOTE`,
-logs one WARNING (see [Logging](index.md#logging)) after the exclusivity
-check below and before the connection string is parsed. `--via` adds no
-second one. `{SOURCE}` is " (from $IMAGE_REVIEW_REMOTE)" when the
-connection string came from the environment, and empty otherwise:
-
-```text
-review --remote{SOURCE} is deprecated and will be removed in a future release: it must run the same image-review version as the server. Use browser review instead: plain `image-review serve` where the work directory is, then a browser through ssh -L; the page comes from the server itself, so it always matches. See https://jstorrs.github.io/image-review/tutorials/browser-review.html
-```
-
-`--remote` and `--work-dir` are mutually exclusive (exit 2). When
-`--remote` came from `$IMAGE_REVIEW_REMOTE`, the message says
-"IMAGE_REVIEW_REMOTE is set; unset it to use --work-dir." `--via` on the
-command line without `--remote` is also an error (exit 2), but a
-`$IMAGE_REVIEW_VIA` left in the environment is ignored by a local review.
-
-With `--via`, the ssh tunnel comes up first, and its password or MFA prompts
-appear in the terminal before the viewer window opens. The review then
-starts only after these checks pass; each failure exits 1 with its message:
-
-- A connection string or `--via` value that cannot be parsed:
-  "Invalid --remote connection string: …" or "Invalid --via: …".
-- The server's certificate does not match the connection string: "The
-  certificate presented by HOST:PORT does NOT match the connection string.
-  The connection was aborted before any credentials were sent. Do not
-  continue unless you know why the server's identity changed." With `--via`
-  it adds that another local process may have grabbed the forwarded port,
-  and to retry.
-- "Server at HOST:PORT rejected the access token (connection string from a
-  different or restarted server?)".
-- "Server at HOST:PORT returned HTTP N" for any other error reply.
-- "Cannot reach server at HOST:PORT: …". With `--via`, when the cause was a
-  network error, it adds "(the login node may not be able to reach the
-  server; see the ssh output above)".
-- Different image-review versions: "server speaks API vS, this client vC"
-  or "server is too old to report its API version", each ending "install the
-  same image-review version on both machines".
-- An ssh tunnel that fails to come up gives the tunnel's own message.
-
-`HOST:PORT` is followed by "(via DESTINATION)" when `--via` is used. For
-setting up the server, the tunnel and the environment variables, see
-[Remote review with the Python client (deprecated)](../tutorials/remote-review.md).
-
-## Lost connection
-
-With `--remote`, if the server cannot be reached or answers with an HTTP
-error such as a 500 or a 401, the viewer shows:
-
-```
-Lost connection to server - progress saved. Press q to quit.
-```
-
-This can happen while loading an image, marking, undoing, switching mode,
-rebuilding the grids after a resize, moving to the next batch, or re-reading
-the statuses after a refused CLEAN. The viewer also logs the reason.
-Two errors are not a lost connection: a missing image is shown as a
-[placeholder](#images-that-cannot-be-loaded), and a
-[refused CLEAN](#refused-clean-on-a-grid) shows its own message.
-Every mark up to the last one is saved on the server; a mark that failed is
-not. Autoplay stops, and only `q`, Escape, the gamepad's Start and closing
-the window do anything: no navigation, mode switch or `z`. Quit, then run the
-same command again while the server is still running.
 
 ## Another writer on the work directory
 
@@ -374,8 +294,7 @@ covered and the image-review version. The columns are described in
 default your login name. It must be 1-64 printable characters, not all
 spaces (no tabs or newlines), else the command exits 2; so does a missing
 login name with no `--reviewer`. The name is an
-unauthenticated claim made by the client, recorded as given; nothing
-verifies it, also with `--remote`.
+unauthenticated claim, recorded as given; nothing verifies it.
 
 **Upgrade everyone sharing a work directory together.** See
 [Upgrading an older file](../reference/work-directory.md#upgrading-an-older-file).

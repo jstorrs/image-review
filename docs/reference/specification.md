@@ -32,8 +32,6 @@ and **export** the allowlist of files that may be released.
   extra's own top-level modules is translated; any other import failure
   surfaces unchanged (one of image-review's modules, a missing core
   dependency, a broken install)
-- `review --via` / `status --via` additionally need an OpenSSH client (`ssh`)
-  on the client machine
 
 ## Architecture
 
@@ -45,11 +43,10 @@ store.py            ReviewStore Protocol, LocalStore, pure filter/summary functi
 lock.py             The work directory's review.lock: acquire, release, live_writer (stdlib only)
 export.py           Export rows, the allowlist split and their TSV formats: export_rows, split_allowlist, format_allowlist, format_report (stdlib only)
 atomic.py           write_new_file: create a file atomically, never overwriting (stdlib only)
-server.py           bearer-token server exposing a ReviewStore: plain HTTP on a Unix socket (browser review), or HTTPS (deprecated)
-connection.py       RemoteTarget: the ir:// connection string; API_VERSION, package_version, parse_reviewer
-remote.py           RemoteStore: ReviewStore client with certificate pinning (deprecated client)
-tunnel.py           SSH local port-forward for --via (deprecated client)
-signals.py          interrupt_on / interrupt_once: signals to KeyboardInterrupt, shared by serve, review and the tunnel
+server.py           bearer-token server exposing a ReviewStore over plain HTTP on a Unix socket (browser review)
+connection.py       Shared limits and parsers: MAX_PASS, parse_reviewer, parse_token, is_int_at_least, package_version
+tunnel.py           parse_via, parse_ssh_host: the parts of the ssh command serve prints
+signals.py          interrupt_on / interrupt_once: signals to KeyboardInterrupt, shared by preprocess, review, export and serve
 controller.py       Review session orchestration and event loop
 viewer.py           Fullscreen pygame display
 layout.py           Pure grid layout: jpeg_size, fit_size, plan_grids (stdlib and rectpack only)
@@ -59,19 +56,18 @@ util.py             Shared utilities (surface loading)
 ```
 
 All review-time data access goes through a `ReviewStore`. The controller and
-grid packer never touch the work directory; `LocalStore` serves it directly,
-and `RemoteStore` talks to an `image-review serve` process that wraps a
-`LocalStore`. `status.py`, `store.py`, `lock.py`, `export.py`, `atomic.py`, `server.py`,
-`connection.py`, `remote.py`, `tunnel.py`, `signals.py` and `layout.py` import without pygame,
+grid packer never touch the work directory; `LocalStore` serves it to a local
+`review`, and `image-review serve` wraps a `LocalStore` for the browser page.
+`status.py`, `store.py`, `lock.py`, `export.py`, `atomic.py`, `server.py`,
+`connection.py`, `tunnel.py`, `signals.py` and `layout.py` import without pygame,
 PIL, numpy or skimage.
 
 ```
-review (pygame)             serve (compute node)
-  ReviewSession                 ReviewServer (HTTPS)
-    |                             |
-  ReviewStore  --RemoteStore--> LocalStore --> ReviewDB --> review.tsv
-    |            (TLS, pinned;      |
-  LocalStore      optional ssh -L)  +--> manifest.tsv, batch_NNN/*.jpg
+review (pygame, local)         serve (compute node)             browser (laptop)
+  ReviewSession                  UnixReviewServer  <--ssh -L---  web/ page
+    |                              |
+  LocalStore                     LocalStore --> ReviewDB --> review.tsv
+                                   +--> manifest.tsv, batch_NNN/*.jpg
 ```
 
 ## CLI Interface
@@ -829,9 +825,7 @@ written, even when empty) and `preprocess.json`. The summary line and the exit s
 ### `image-review review`
 
 The synopsis, options and defaults are in
-[`image-review review`](../commands/review.md); the option rules and startup
-error messages are in
-[Connecting to a server](../commands/review.md#connecting-to-a-server).
+[`image-review review`](../commands/review.md).
 `--reviewer` defaults to `getpass.getuser()` at run time and is checked by
 `connection.parse_reviewer` (1-64 characters, all `str.isprintable()`, not
 all whitespace). `--batch` is checked by `unknown_batch_message` against the
@@ -839,40 +833,23 @@ manifest's batches once the store is open.
 
 Opens a store (see below), initializes pygame, creates a `ReviewSession`,
 runs the event loop, then shuts down pygame. pygame starts only after the
-store (and tunnel) is up, so ssh password/MFA prompts keep terminal focus.
+store is open.
 
-**Store selection** (`cli.open_store`, shared by `review` and `status`):
-
-- Without `--remote`: `LocalStore(work_dir)` (writable for `review`, holding
-  the work dir lock until the command exits; `read_only=True` for `status`),
-  entered as a context manager like `RemoteStore`. `WorkDirLocked` is a
-  `ClickException` (exit 1) with its message. A `--via` whose parameter
-  source is not the environment is a `UsageError`.
-- With `--remote`: `--work-dir` is a `UsageError`, worded by the `--remote`
-  parameter source. Then `warn_remote_deprecated` logs one WARNING (so a
-  usage error logs none), before parsing or connecting; it names
-  `$IMAGE_REVIEW_REMOTE` when the `--remote` parameter source is the
-  environment, and `--via` adds none. `status` has its own text (the fix is
-  `status --work-dir`, since the browser has no status report). The string is parsed with `RemoteTarget.parse` and
-  `--via` validated with `parse_via`; either failure is a `ClickException`
-  naming the option (`$IMAGE_REVIEW_VIA` when that is the source). `_remote_store` enters `ssh_tunnel` first when `--via`
-  is given, and the `RemoteStore` connects to `127.0.0.1:<local port>`
-  instead of the advertised host; it calls `check_api()` before yielding. The
-  store is closed before the tunnel.
-- Startup failures: `_remote_failure` turns `TunnelError` and `ApiMismatch`
-  (their own messages), `FingerprintMismatch`, and `RemoteError` with status
-  401, any other status, or no status into `ClickException`s. The login-node
-  hint is added only with `--via` when the `RemoteError`'s cause is an
-  `OSError`.
+**Store** (`cli.open_local_store`, shared by every command that opens one):
+`review` opens `LocalStore(work_dir)` writable, holding the work dir lock
+until the command exits; `status` opens it with `read_only=True` (no lock).
+Both resolve `--work-dir` with `_existing_work_dir` (default `./review_work`;
+a missing directory is a `BadParameter`, exit 2) and enter the store as a
+context manager. `WorkDirLocked` is a `ClickException` (exit 1) with its
+message.
 
 ### `image-review status`
 
 ```
-image-review status [--check] [--work-dir DIR | --remote CONNECTION_STRING [--via DESTINATION]]
+image-review status [--check] [--work-dir DIR]
 ```
 
-Same store selection as `review`, but a local store is opened read-only (no
-lock). The command fetches the manifest, the current pass and that pass's
+Opens the store read-only (no lock; see `review`). The command fetches the manifest, the current pass and that pass's
 statuses from the store and prints the report. The counts come from the pure
 `store.summary` and `store.batch_summary`, which are pass-aware. Then it calls
 `store.skipped()`; a `ValueError` from a malformed `skipped.tsv` becomes a
@@ -885,9 +862,8 @@ when `skipped.tsv` is missing or malformed are in
 
 **Exit status**: 0, unless `--check` is given. Then it exits 1 if any image is
 UNREVIEWED or `store.skipped()` reports a `failed` row, else 0; the meaning is
-in [Checking from a script](../commands/status.md#checking-from-a-script). The
-skipped counts come from `store.skipped()`, so it works the same over
-`--remote`. Errors (bad store, malformed `skipped.tsv`) exit 1 or 2 as without
+in [Checking from a script](../commands/status.md#checking-from-a-script).
+Errors (bad store, malformed `skipped.tsv`) exit 1 or 2 as without
 `--check`.
 
 ### `image-review export`
@@ -898,10 +874,8 @@ image-review export [--work-dir DIR] [--output FILE] [--report FILE] [--allow-li
 
 Writes the allowlist of releasable files and the optional report of the
 rest. What they hold, how to use them, the exit codes and the main messages
-are in [export](../commands/export.md); this section is the mechanism. Local only:
-`--remote` is declared (hidden) only to be refused with a `UsageError`; it has
-no envvar, so `$IMAGE_REVIEW_REMOTE` is ignored and does not get in the way
-of `--work-dir`. There is no server endpoint for it, so `image_id`s and
+are in [export](../commands/export.md); this section is the mechanism. Local
+only: there is no server endpoint for it, so `image_id`s and
 `source_sha256`s never go over the wire. The whole command runs under
 `interrupt_on(*TERMINATION_SIGNALS)`, so SIGTERM/SIGHUP unwind like Ctrl-C and
 remove a half-written output.
@@ -1083,56 +1057,27 @@ crash) can leave it behind, holding source paths, to be deleted by hand.
 
 ```
 image-review serve [--work-dir DIR] [--socket-path PATH] [--via DEST | --direct] [--ssh-host NODE]
-image-review serve [--work-dir DIR] --https [--bind HOST] [--port N]    # deprecated
 ```
 
 The options, the token, the option rules and their exit codes, what `serve`
 prints and how it stops are in [serve](../commands/serve.md); this section is
-the mechanism. `--bind` and `--ssh-host` default to `socket.getfqdn()`,
+the mechanism. `--ssh-host` defaults to `socket.getfqdn()`,
 `--socket-path` to `default_socket_path()`, `--via` is checked with
 `tunnel.parse_via` and `--ssh-host` with `tunnel.parse_ssh_host`.
 
-The mode is HTTPS when `--https` is set or `--bind` or `--port` has the
-parameter source `COMMANDLINE` (so `--port 0` counts); otherwise it is
-socket mode. The [option rules](../commands/serve.md#option-rules) are
-`UsageError`s raised before the work directory is opened and before
-anything is logged; "on the command line" means the parameter source
-`COMMANDLINE`. In HTTPS mode, a value that comes only from the environment
-(`$IMAGE_REVIEW_SOCKET_PATH`, `$IMAGE_REVIEW_VIA`, `$IMAGE_REVIEW_DIRECT`)
-is dropped, not refused, and `$IMAGE_REVIEW_TOKEN` is not read; click drops
-an empty environment value, but still refuses an invalid
-`$IMAGE_REVIEW_DIRECT` while parsing. In socket mode, a missing
-`socket.AF_UNIX` (`cli.has_unix_sockets`) is a `ClickException`, raised after
-the option rules.
-
-In HTTPS mode, after the option rules and the parsing below, and before the
-store opens, `serve` logs `cli.SERVE_HTTPS_DEPRECATED` once through
-`log.warning` on `image_review.cli`, with `{command}` filled from
-`click.get_current_context().info_name`.
+The [option rules](../commands/serve.md#option-rules) are `UsageError`s
+raised before the work directory is opened and before anything is logged;
+"on the command line" means the parameter source `COMMANDLINE`. click drops
+an empty environment value, but refuses an invalid `$IMAGE_REVIEW_DIRECT`
+while parsing. A missing `socket.AF_UNIX` (`cli.has_unix_sockets`) is a
+`ClickException`, raised after the option rules.
 
 Opens a writable `LocalStore` (holding the work dir lock for the server's
 lifetime; `WorkDirLocked` is a `ClickException`, exit 1), calls
-`server.make_server`, and serves until interrupted.
-`make_server` itself refuses wildcard binds (`0.0.0.0`, `::`, empty), any
-address the server ends up bound to that is unspecified, and a host whose
-connection string would not parse (`RemoteTarget.parse` round trip), raising
-`ValueError` after closing its socket; the command reports these as
-`ClickException`s.
+`server.make_unix_server` (see *Unix-socket server*) at `--socket-path` or
+`default_socket_path()`, and serves until interrupted.
 
-**Connection string delivery**: on a TTY the string is printed. Otherwise
-`server.write_connection_file` writes it to
-`~/.image-review/connection-<host>-<port>.txt` (host through `safe_name`;
-`private_dir()` creates the directory 0700, requires it to be a directory
-owned by the user, and tightens it to 0700 if looser; `write_private_file`
-unlinks a stale file, then creates it `O_EXCL|O_NOFOLLOW` with mode 0600 and
-removes a partly written one).
-
-**Socket mode**: `serve` without `--https`, `--bind` or
-`--port` calls `server.make_unix_server` (see *Unix-socket server*) at
-`--socket-path` or `default_socket_path()` instead of `make_server`.
-
-`$IMAGE_REVIEW_TOKEN` is read with `os.environ`, not a click option, and only
-in socket mode. A value goes through `connection.parse_token`; its
+`$IMAGE_REVIEW_TOKEN` is read with `os.environ`, not a click option. A value goes through `connection.parse_token`; its
 `ValueError` never holds the value. It is passed to
 `make_unix_server(store, path, token)` (None generates `token_urlsafe(16)`).
 `--via`, `--ssh-host` and the token are parsed before the work directory is
@@ -1145,14 +1090,18 @@ The printed ssh command is `ssh_forward_command`:
 127.0.0.1:PORT:SOCKET USER@NODE`. `VIA` is the `jump` argument: `--via`,
 else `USER@<login-node>`; with `--direct` it is `None` and `-J VIA` is
 omitted. `NODE` is `--ssh-host`, else `socket.getfqdn()`. The user-facing
-description is in [Socket mode](../commands/serve.md#socket-mode).
+description is in [What serve prints](../commands/serve.md#what-serve-prints).
 `PORT` is `BROWSER_PORT` (8080), `SOCKET`
 is the absolute path that was bound, `USER` is `getpass.getuser()`, else
 `<user>`. Each of `VIA`, the `-L` argument and `USER@NODE` goes through
 `shlex.quote`. The URL is `browser_url(token)`. Off a TTY,
 `write_private_file` writes it to
-`browser-{safe_name(short_host())}-{pid}.txt`, and the printed `cat` path is
-quoted twice, as the remote shell parses it again.
+`~/.image-review/browser-{safe_name(short_host())}-{pid}.txt`
+(`private_dir()` creates the directory 0700, requires it to be a directory
+owned by the user, and tightens it to 0700 if looser; `write_private_file`
+unlinks a stale file, then creates it `O_EXCL|O_NOFOLLOW` with mode 0600 and
+removes a partly written one), and the printed `cat` path is quoted twice,
+as the remote shell parses it again.
 
 **Cleanup**: the option checks and parsing run first. Everything after
 them (opening the store, binding, announcing, serving) runs under
@@ -1165,7 +1114,7 @@ one cannot interrupt the cleanup below. Cleanup is registered on one
 `server.store_lock`) and then `server_close` as soon as the server is bound,
 and the announced file's removal is registered as soon as it is written. A
 failure at any later point therefore releases them, and they run in reverse:
-the file, the socket (`server_close` also removes a Unix socket file), then
+the file, the socket (`server_close` also removes the socket file), then
 the store.
 
 ## Data Files
@@ -1200,7 +1149,8 @@ and raises `ValueError("<key> does not match its recorded hash")` on a
 mismatch. Every caller already treats that as an unloadable image: the grid
 packer leaves it out of every grid, the review session shows a placeholder that
 takes only DIRTY (see *Unloadable Images*), and the server answers `/image`
-with 404 (which the client raises as `KeyError`, again a placeholder). This
+with 404 (`loadJpeg` in the browser page returns null for any non-OK reply,
+and the page shows "Cannot load image: KEY" instead of the image). This
 catches what Pillow's strict decode cannot: a JPG whose scan data was cut short
 but which still ends in an EOI marker decodes without error, with grey rows,
 and could otherwise be marked CLEAN with its missing rows never seen. The cost
@@ -1409,7 +1359,7 @@ by that rule (not a `StoreUnavailable`).
 
 | Name | Description |
 |------|-------------|
-| `Key` | `NewType("Key", str)`: a manifest key, the `preprocessed_path` (see *Key versus `image_id`*). A string becomes a `Key` only where it is parsed (`load_manifest`, the client's `parse_manifest` and `parse_statuses`, the server's `parse_mark` and `/image` check), so the type checker keeps keys and source paths apart |
+| `Key` | `NewType("Key", str)`: a manifest key, the `preprocessed_path` (see *Key versus `image_id`*). A string becomes a `Key` only where it is parsed (`load_manifest`, and the server's `parse_mark`, `parse_grids` and `/image` check), so the type checker keeps keys and source paths apart |
 | `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the escaped bad-name ids derived there; preprocess mints no `#icon` id), `parse_decision`, `load_manifest`, `load_skipped`, `load_notes`, and `export_rows` (a file's id with `#icon` removed, or an ambiguous `X#icon` kept as a file of its own). Server, client and controller never see one |
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
@@ -1438,10 +1388,10 @@ image preprocessed more than once); they share a review status.
 | `image_bytes(key) -> bytes` | JPG bytes; `KeyError` for an unknown key |
 | `image_bytes_many(keys) -> dict[str, bytes]` | Bytes for the keys that loaded; missing or unloadable keys are omitted with a logged warning |
 | `statuses(pass_number) -> dict[str, Status]` | Pass-aware status of every manifest key |
-| `mark(keys, status, pass_number, *, reviewer, mode) -> dict[str, Status]` | Record a verdict given by `reviewer` (an unauthenticated claim) in `mode` (`single` or `grid`); returns the new status of every key affected, including keys that share an `image_id` with a marked key. Raises `status.GridCleanRefused`, recording nothing, for a `grid` CLEAN that `grid_clean_refused` refuses against the keys' current statuses (a key DIRTY or FLAGGED, unless every key is DIRTY); `LocalStore` enforces this itself, so every writer holds to it. `LocalStore` also raises `KeyError` for an unknown key and `ValueError` for repeated keys or a `single` mark of other than one key, recording nothing; `RemoteStore` surfaces the server's 400 for those as `RemoteError` |
+| `mark(keys, status, pass_number, *, reviewer, mode) -> dict[str, Status]` | Record a verdict given by `reviewer` (an unauthenticated claim) in `mode` (`single` or `grid`); returns the new status of every key affected, including keys that share an `image_id` with a marked key. Raises `status.GridCleanRefused`, recording nothing, for a `grid` CLEAN that `grid_clean_refused` refuses against the keys' current statuses (a key DIRTY or FLAGGED, unless every key is DIRTY); `LocalStore` enforces this itself, so every writer holds to it. `LocalStore` also raises `KeyError` for an unknown key and `ValueError` for repeated keys or a `single` mark of other than one key, recording nothing |
 | `undo(pass_number, *, reviewer) -> dict[str, Status]` | Undo the latest mark not yet undone (one `mark` call: one image or a whole grid), restoring each of its images' decision from before it (see *Undo rows*); `reviewer` is checked and recorded like `mark`'s. Returns the new status, at `pass_number`, of every key affected, as `mark` does; `{}` when there is nothing to undo |
 | `current_pass() -> int` | Auto-detected pass number |
-| `close()`, `__enter__`, `__exit__` | Release what the store holds (`RemoteStore`: pool and connections; `LocalStore`: the work dir lock); idempotent. Stores are context managers that close on exit |
+| `close()`, `__enter__`, `__exit__` | Release what the store holds (`LocalStore`: the work dir lock); idempotent. Stores are context managers that close on exit |
 | `skipped() -> SkippedCounts` | Counts of `failed` and `ignored` rows in preprocess's `skipped.tsv` (frozen `SkippedCounts(failed, ignored)`); zero counts if the file is absent; `ValueError` naming `file:line` if it is malformed |
 
 ### `LocalStore(work_dir, read_only=False)`
@@ -1540,13 +1490,13 @@ therefore costs one store call and no re-fetch.
 
 ### Store Failures
 
-`StoreUnavailable` (raised by `RemoteStore` as `RemoteError`) while loading an
+`StoreUnavailable` (`LocalStore` raises none; the handling stays for a store
+that can become unreachable) while loading an
 image, marking, restarting a mode, or moving to the next batch is treated as a lost connection, not an
 unloadable image: autoplay and the pending auto-advance are cancelled, the
 status snapshot is left unchanged (a failed mark is not applied), the viewer
-shows the lost-connection screen of
-[Lost connection](../commands/review.md#lost-connection) and the reason is
-logged (ERROR). The session is then `DISCONNECTED`: `_handle_event` passes no
+shows "Lost connection to server - progress saved. Press q to quit." and the
+reason is logged (ERROR). The session is then `DISCONNECTED`: `_handle_event` passes no
 key to a screen handler, and only quitting acts, so nothing reaches the store
 again. A failed mode restart or next-batch move clears the item list. Any
 other failure to load an image is an unloadable image (see *Unloadable Images*).
@@ -1615,7 +1565,7 @@ The store applies the same rule to every grid mark, so the server's
 `POST /mark` answers 409 (see *Error semantics*) and a snapshot gone stale
 (e.g. another client marked a key DIRTY since it was read) cannot record such
 a CLEAN either.
-`RemoteStore.mark` raises `GridCleanRefused` for the 409; it is not a lost
+`LocalStore.mark` raises `GridCleanRefused`; it is not a lost
 connection: the session logs and shows the same refusal (for a left-out
 single, `controller.IMAGE_HAS_DIRTY`), re-reads the statuses (a `StoreUnavailable` there is a lost
 connection) and repaints the item's status. Nothing is recorded, so the undo
@@ -1873,8 +1823,8 @@ left out of every grid (missing, unreadable header, failed decode, or left unpac
 grid holds only keys whose pixels it shows. What to do with the left-out keys is
 left to the caller. At most one bin's decoded images are alive at a time.
 
-1. **Load**: Fetch all image bytes with `store.image_bytes_many()` (an
-   8-worker pool for `RemoteStore`, a simple loop for `LocalStore`); compressed
+1. **Load**: Fetch all image bytes with `store.image_bytes_many()` (a
+   simple loop for `LocalStore`); compressed
    JPGs are small. Read each image's dimensions from the JPEG header up to its
    start of scan with `layout.jpeg_size(bytes)`, which decodes no pixels and
    raises `ValueError` on an unreadable or truncated header. Images that are
@@ -2033,52 +1983,44 @@ Otherwise it returns `max(pass_number)` if any image's status at that pass is
 in `TODO_STATUSES` (UNREVIEWED or FLAGGED), or `max(pass_number) + 1` if the
 pass is fully complete, never more than `connection.MAX_PASS` (1000000).
 
-## Connection String (`connection.py`)
+## Shared limits and parsers (`connection.py`)
 
-`RemoteTarget(host, port, token, fingerprint)`, a frozen dataclass; `token` is
-excluded from `repr`.
+Stdlib only; used by the CLI, the server and the review database.
 
-Format: `ir://HOST:PORT/?token=TOKEN&fp=sha256:FINGERPRINT`, where `HOST` is a
-hostname, dotted IPv4 address or bracketed IPv6 address; `TOKEN` is
-`[A-Za-z0-9_-]+` (`secrets.token_urlsafe(16)`); `FINGERPRINT` is 64 lowercase
-hex characters, the SHA-256 of the server certificate in DER form
-(`cert_fingerprint`).
-
-`RemoteTarget.parse` is strict and raises `ValueError` with a specific message
-for: a scheme other than `ir`; user info; a path other than `/` or empty, or a
-fragment; no host; an invalid IPv4, IPv6 (zone ids rejected) or host name; a
-missing or invalid port (1-65535); a query that is not exactly one `token=` and
-one `fp=`; a malformed token or fingerprint. `to_uri()` is the inverse.
+- `MAX_PASS` (1000000): the highest pass number accepted anywhere;
+  `current_pass()` never answers above it.
+- `parse_reviewer(value)`: a reviewer name, 1-`MAX_REVIEWER_LENGTH` (64)
+  characters, all `str.isprintable()` (no tab, newline or other control
+  character), not all whitespace; `ValueError` otherwise.
+- `parse_token(raw) -> Token`: an operator-supplied access token, 22-256
+  characters from `[A-Za-z0-9_-]`; surrounding whitespace is refused, not
+  stripped. Its `ValueError` never holds the value. `Token` is a `NewType`
+  over `str` for a token that passed it (or was generated).
+- `is_int_at_least(value, minimum)`: a `TypeGuard` for a JSON integer (never
+  a `bool`) of at least `minimum`.
+- `package_version()`: the installed `image-review` version, or `"unknown"`
+  when it is not installed as a package; cached for the process. It is
+  recorded in `review.tsv` and `preprocess.json`.
 
 ## Server (`server.py`)
 
 The threat model these sections implement is summarized in [the security model](security-model.md).
 
-`make_server(store, host, port) -> (ReviewServer, RemoteTarget)` generates a
-token, a certificate, the TLS context and the listening server. It enforces
-the no-wildcard and advertisable-host checks (see `serve`) and leaves no
-listener behind when it raises.
+`make_unix_server(store, path, token=None) -> (UnixReviewServer, token)`
+creates the listening server (see *Unix-socket server*); it leaves no socket
+file behind when it raises.
 `ReviewServer` is a `ThreadingHTTPServer` (daemon threads) holding the store,
 the token, a store lock, and the sets of known keys and batches taken from the
 manifest at start. It runs at most 64 connections at once, each with a 60 s
 deadline per request ([Headers and connection
 handling](#headers-and-connection-handling)); `UnixReviewServer` inherits both.
 
-### TLS and certificate lifecycle
-
-A new self-signed EC P-256 certificate (CN = host, truncated to 64 characters;
-valid from 5 minutes ago for 30 days) is generated at every start, along with
-a new token. The key is written to a private temporary directory (0700, key
-file 0600) only long enough for `load_cert_chain`, then the directory is
-removed. TLS >= 1.2. The certificate fingerprint goes into the connection
-string. Nothing is reused across runs.
-
 ### Authentication
 
 Every request must carry `Authorization: Bearer <token>`, checked with
 `hmac.compare_digest` before any routing; otherwise 401 and the connection is
-closed (any request body is left unread). The one exception is socket mode,
-which serves three static files without it (see Unix-socket server).
+closed (any request body is left unread). The one exception is the four
+static files of the page, served without it (see Unix-socket server).
 
 ### Endpoints
 
@@ -2087,43 +2029,33 @@ the boundary (`parse_pass`, `parse_mark`, `parse_undo`, `parse_grids`).
 
 | Request | Response |
 |---------|----------|
-| `GET /version` | `{"api": N, "version": str}`: the wire API version (`connection.API_VERSION`) and the installed `image-review` package version (`"unknown"` if not installed) |
 | `GET /manifest` | `[{"key": str, "batch": str}, ...]` |
 | `GET /image?key=K` | `image/jpeg` bytes; 404 if the key is unknown (checked against the manifest's keys before the store is asked), unreadable, or does not match its recorded `jpeg_sha256` |
 | `GET /statuses?pass=N` | `{key: "CLEAN"\|"DIRTY"\|"UNREVIEWED"\|"FLAGGED", ...}` for every key; `N` an integer from 1 to `connection.MAX_PASS` (1000000) |
 | `GET /current_pass` | `{"pass": N}` |
-| `GET /skipped` | `{"failed": N, "ignored": M}` (counts of the `kind` column of the work dir's `skipped.tsv`; both 0 if it has none). Only counts are sent, never `image_id`s or reasons (which contain source paths) |
 | `POST /mark` | Body `{"keys": [str, ...], "status": "CLEAN"\|"DIRTY", "pass": N, "reviewer": str, "mode": "single"\|"grid"}`; `reviewer` is checked with `connection.parse_reviewer` (1-64 printable characters, no tab, newline or other control character, not all whitespace) and recorded as the client's unauthenticated claim; other fields are ignored; `keys` must be distinct, and a `single` mark must name exactly one key (otherwise 400, nothing recorded); responds `{key: status, ...}` for every key affected (as `ReviewStore.mark`). A `grid` CLEAN that the store refuses with `GridCleanRefused` (`status.grid_clean_refused` against its current statuses for `pass`: a key DIRTY or FLAGGED, unless every key is DIRTY) is answered 409 and records nothing; `single` marks and DIRTY verdicts are never refused with 409 |
 | `POST /undo` | Body `{"pass": N, "reviewer": str}`, checked as for `/mark`; other fields are ignored. Undoes the server store's latest mark (`ReviewStore.undo`); responds `{key: status, ...}` for every key affected, or `{}` when there is nothing to undo |
-| `POST /grids` | Socket mode only (404 over TLS): grid layouts for the browser client; see *Unix-socket server* |
+| `POST /grids` | Grid layouts for the browser page; see *Unix-socket server* |
 
-Only keys and skip counts appear on the wire; original `image_id`s never do.
+Only keys appear on the wire; original `image_id`s never do.
 
-**API version rule.** `connection.API_VERSION` (an integer, currently 9; v2
-added `GET /skipped`; v3 added `FLAGGED` to the `Status` vocabulary, which
-`/statuses` responses may contain; `/mark` responses hold only the verdict
-just recorded; v4 dropped `batch` from the `/mark` body, the server taking
-each key's batch from the manifest, and added `reviewer` and `mode`; v5 added
-`POST /undo`; v6 made `GET /skipped` always send counts, never `null`, and
-refused repeated query parameters with 400; v7 made `/mark` refuse a grid
-CLEAN over a DIRTY or FLAGGED key with 409; v8 made `/mark` refuse a single
-mark without exactly one key, and repeated keys, with 400; v9 made `pass` above
-`connection.MAX_PASS` (1000000) a 400 on `/statuses`, `/mark` and `/undo`) is shared by client
-and server. Any change to request or response shapes, or to the `Status`
-vocabulary, must bump it. Client and server are installed separately, so skew is expected and must fail clearly rather than as a
-malformed reply or a 404.
+**No API version.** The page and the server ship together: `serve` serves
+the page itself, so there is no wire version to negotiate. A page that
+outlives the `serve` run it was loaded from (a tab left open across a
+restart) is refused with 412 by the `X-Review-Instance` check (see
+*Unix-socket server*), recording nothing, until it reconnects.
 
 ### Error semantics
 
 | Status | Cause |
 |--------|-------|
-| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark` and `POST /undo` (and, in socket mode, `POST /grids`); a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` (not an integer from 1 to `MAX_PASS`, 1000000) on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid, repeated keys, a `single` mark without exactly one key; `/grids` as described under *Unix-socket server* |
+| 400 | Bad request: `Transfer-Encoding` present; a body on anything but `POST /mark`, `POST /undo` and `POST /grids`; a query parameter appearing more than once; `/image` without exactly one `key`; a missing or invalid `pass` (not an integer from 1 to `MAX_PASS`, 1000000) on `/statuses`; `/mark` or `/undo` with a missing, repeated or oversized (> 1 MiB) `Content-Length`, invalid JSON, non-object body, a missing or invalid `pass` or `reviewer`; `/mark` with empty or non-string `keys`, an unknown key, a status other than CLEAN/DIRTY, a `mode` other than single/grid, repeated keys, a `single` mark without exactly one key; `/grids` as described under *Unix-socket server* |
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 409 | `POST /mark`: CLEAN with `mode: "grid"` on keys holding a DIRTY or FLAGGED status in that pass, unless every key is DIRTY (`status.grid_clean_refused`); body `{"error": "grid holds a DIRTY or FLAGGED image"}` (no keys); nothing is recorded |
-| 412 | Socket mode only: an API request other than `GET /version` and `GET /current_pass` without exactly one `X-Review-Instance` header equal to this server run's (see *Unix-socket server*); body `{"error": "the page was loaded from another serve; reconnect"}`; nothing is read, recorded or packed |
+| 412 | An API request other than `GET /current_pass` without exactly one `X-Review-Instance` header equal to this server run's (see *Unix-socket server*); body `{"error": "the page was loaded from another serve; reconnect"}`; nothing is read, recorded or packed |
 | 500 | Any unexpected store failure; only the exception class name is logged |
-| 503 | Socket mode: `POST /grids` while another `/grids` request is being computed; retry later |
+| 503 | `POST /grids` while another `/grids` request is being computed; retry later |
 
 400, 401, 412, 500 and unknown-route 404 replies send `Connection: close`,
 because a request body may be unread, and so does a public page file (socket
@@ -2139,7 +2071,7 @@ once per grid CLEAN, small beside the synced append the mark itself does.
 
 Every response, including stdlib error pages, carries `Cache-Control:
 no-store` and `X-Content-Type-Options: nosniff`. The server speaks HTTP/1.1
-with keep-alive; Nagle is disabled (headers and body are separate writes).
+with keep-alive.
 Each request (request line, headers and body) must be read within 60 s of the
 server starting to wait for its request line, so time a keep-alive connection
 spends idle counts toward its next request; past that the connection is closed
@@ -2149,15 +2081,10 @@ with no reply and no log line. The request line and headers may total at most
 closed with no reply and no log line. A store failure that is itself a timeout
 (e.g. `ETIMEDOUT` on NFS) is still a 500. Each receive and each send also has its own 60 s
 timeout, so a slow image download is bounded per write, not by the request
-deadline. At most 64 connections are open at once (both modes): the next one is
+deadline. At most 64 connections are open at once: the next one is
 closed at `accept()`, before it gets a thread, and a WARNING `connection limit
 (64) reached; refusing connections until one closes` is logged once each time
-the server fills. The TLS handshake is deferred to the
-handler thread (so a stalled client cannot block `accept()`) and gets a 10 s
-deadline before authentication; a failed handshake is logged as
-`connection error: <ExceptionClass>` and the connection closed. The client's
-readiness probe through `--via` (a TCP connect and close) produces one such
-`SSLEOFError` line per client start.
+the server fills.
 
 ### Concurrency limits
 
@@ -2259,15 +2186,15 @@ control characters in the peer, method and path are escaped (`_escape`, at the
 call site), and stdlib `log_message` output (which can echo request lines) is
 suppressed. What is never logged is listed in the
 [security model](security-model.md#the-server-image-review-serve).
-Two other records exist: WARNING `connection error: <ExceptionClass>` for failed
-handshakes and other connection-level failures, and ERROR `internal error:
+Two other records exist: WARNING `connection error: <ExceptionClass>` for
+connection-level failures, and ERROR `internal error:
 <ExceptionClass>` for 500s. On the Unix-socket server the peer is the
 literal `unix` (`accept` gives no peer address there).
 
 ### Unix-socket server
 
 `make_unix_server(store, path, token=None) -> (UnixReviewServer, token)`
-(a given, parsed `Token` is used as is; None generates `token_urlsafe(16)`) serves the same
+(a given, parsed `Token` is used as is; None generates `token_urlsafe(16)`) serves the
 API as plain HTTP on a Unix domain socket, for a browser reaching it through
 `ssh -L PORT:PATH node`. TLS is not used; ssh provides the transport. The path
 is made absolute and must fit `sun_path` (108 bytes, 104 on macOS) and contain
@@ -2285,27 +2212,23 @@ Four static files are served without the token: `GET /` (`index.html`),
 `/helpers.js`, `/app.js` and `/app.css`, from `web/` in the package, read once by
 `load_assets()` at startup so no request path touches the filesystem. They
 hold no PHI and no secret, and the page cannot send the token before it has
-loaded. Only these exact GET paths (a query string is ignored) are public,
-and only in socket mode; `POST /`, `HEAD /`, `/index.html` and every other
+loaded. Only these exact GET paths (a query string is ignored) are public;
+`POST /`, `HEAD /`, `/index.html` and every other
 path fall through to the token check, and the usual framing checks (no
 `Transfer-Encoding`, no request body) apply first. CSRF does not apply,
 because browsers never attach an `Authorization` header on their own. The
 page takes the token from the URL fragment, which is never sent to the
-server. Every socket-mode response carries `Content-Security-Policy:
+server. Every response carries `Content-Security-Policy:
 default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
 and `Referrer-Policy: no-referrer`, besides `Cache-Control: no-store` and
-`X-Content-Type-Options: nosniff`. TLS mode has no public routes and sends
-none of the new headers. The public routes needed no `API_VERSION` bump and
-do not change the HTTPS API: they exist only in socket mode, which the
-versioned pygame client cannot reach, and the page is served by the same
-server it calls. (v7 and v8 are for the refusals on `/mark`; v9 is for the pass bound on `/statuses`, `/mark` and `/undo`.)
+`X-Content-Type-Options: nosniff`.
 
 Each `UnixReviewServer` start draws an instance id, `token_urlsafe(16)`. It
 names the server run and is not an access secret, but it is never logged.
-Every socket-mode response, stdlib error pages and the public files included,
-carries it as `X-Review-Instance`. Every API request except `GET /version`
-and `GET /current_pass` (where the page's first load and its Reconnect start)
+Every response, stdlib error pages and the public files included, carries it
+as `X-Review-Instance`. Every API request except `GET /current_pass` (where
+the page's first load and its Reconnect start)
 must carry exactly one `X-Review-Instance` request header equal to it;
 otherwise the server answers 412 with `{"error": "the page was loaded from
 another serve; reconnect"}`, closes the connection, and reads, records and
@@ -2315,12 +2238,9 @@ same 400 or 401 as before and learns nothing from a 412; the public files
 need no header. Why the check exists (a tab and its token outliving a
 restarted serve, with keys that repeat across work directories) is in the
 [security model](security-model.md#browser-review-over-a-unix-socket),
-under "A page belongs to one serve". TLS mode sends no such header and
-requires none; it needed no `API_VERSION` bump, since only the page served
-by this server calls it.
+under "A page belongs to one serve".
 
-`POST /grids` (socket mode only; over TLS it is an unknown path, 404, and a
-body on it is refused with 400 as on any bodyless route) lays out images into
+`POST /grids` lays out images into
 grids for the browser client with the code the pygame client uses
 (`layout.plan_grids`), so a grid verdict covers the same images in both. The
 body, parsed by `parse_grids` into a `GridsRequest`, is `{"keys": [str, ...],
@@ -2366,9 +2286,6 @@ One `/grids` request is computed at a time; another arriving meanwhile gets
 503 with the connection kept open, meaning retry later. Packing is not
 cancelled when the client disconnects, so a reloaded page may see 503 until
 the earlier request finishes. Nothing about individual keys is logged.
-`/grids` needed no `API_VERSION` bump for the same reason as the public
-routes: it exists only in socket mode, whose page is served by the server it
-calls.
 
 `default_socket_path()` is `~/.image-review/serve-<short-host>-<pid>.sock`.
 When that path would be `SUN_PATH_SIZE` bytes or more, the host part is replaced
@@ -2696,93 +2613,20 @@ empties the rest of the stack.
   per tab). After a rejected token (or with none) `q` only frees the images
   and the review, and the page keeps its message.
 
-## Remote Store (`remote.py`)
+## ssh command parts (`tunnel.py`)
 
-`RemoteStore(target)` implements `ReviewStore` over HTTPS, connecting to
-`target.host:target.port`. With `--via`, the CLI passes a copy of the target
-with host `127.0.0.1` and the forwarded local port (the local end of the ssh
-tunnel), keeping the pin and token. It is a context manager; `close()` shuts down the
-pool and closes every connection. Images are returned as bytes and never
-cached on disk.
+Validates the two values `serve` puts into the ssh command it prints (see
+`serve`), which the operator pastes into a shell. Both raise `ValueError` with
+a message that names the rule.
 
-**Startup check.** `RemoteStore.check_api()` GETs `/version` (parsed by
-`parse_version`; a malformed reply raises `RemoteError`) and raises
-`ApiMismatch` (a `RemoteError`) if the server answers 404 or reports a
-different `api`; the messages are in
-[Connecting to a server](../commands/review.md#connecting-to-a-server).
-`cli._remote_store` calls it after entering the store and
-before yielding, and `cli.open_store` turns `ApiMismatch` into a
-`ClickException` (exit 1).
+**`parse_via(raw)`**: the login node for `-J` (`user@host`, `host` or a
+config alias). Empty, leading `-` (option injection) and any character
+outside `[A-Za-z0-9._@%:\[\]/-]` are rejected.
 
-**Certificate pinning**: `PinnedHTTPSConnection` disables CA and host name
-verification and instead compares the peer certificate's SHA-256 fingerprint
-to the pinned one (`hmac.compare_digest`) inside `connect()`. Because
-`http.client` reconnects transparently, every connection and every automatic
-reconnect is checked before any request (and so the token) is sent.
-Mismatch raises `FingerprintMismatch` and is never retried. TLS >= 1.2.
-
-**Connections and retry**: one persistent connection per thread. If a request
-fails with a stale-connection error (connection reset/remote disconnect,
-broken pipe, SSL EOF/zero return, `CannotSendRequest`, `ResponseNotReady`),
-the connection is closed and the request retried once on a fresh one; a
-second failure raises `RemoteError("connection lost: ...")`. Timeout is 30 s.
-`POST /mark` and `POST /undo` are not idempotent (a replayed mark writes a
-second row and pushes a second undo entry; a replayed undo undoes a second
-mark), so they are never retried: each is sent once on a fresh connection (the
-thread's connection is closed first, so the request reconnects and re-checks
-the pin), and any transport error raises `RemoteError`; the reviewer re-marks.
-Any other `OSError` or `HTTPException` raises `RemoteError` immediately.
-
-**Error mapping**: `RemoteError(StoreUnavailable)` carries `status`, the HTTP
-status when the server answered, else `None`. A non-200 reply raises
-`RemoteError` with that status, except `image_bytes`, where 404 raises
-`KeyError(key)` (an unloadable image, not an outage), and `mark`, where 409
-raises `status.GridCleanRefused` (a refused grid CLEAN, not an outage).
-Responses are parsed strictly (`parse_manifest`, `parse_statuses`,
-`parse_pass`, `parse_skipped`); malformed payloads raise `RemoteError`.
-
-**`image_bytes_many`**: fetches distinct keys concurrently on an 8-worker
-pool; a `KeyError` (404) is warned about and omitted, like `LocalStore`; any
-`RemoteError` cancels the remaining fetches and propagates.
-
-## SSH Tunnel (`tunnel.py`)
-
-For clients that can reach only a login node. `ssh_tunnel(via, host, port,
-*, ready_timeout=120)` is a context manager that yields a free local port.
-The tunnel carries the already-pinned TLS connection end to end and adds no
-trust of its own.
-
-**argv**:
-
-```
-ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
-    -o ControlPath=none -L 127.0.0.1:LOCAL:HOST:PORT -- VIA
-```
-
-stdout goes to `/dev/null`; stdin and stderr are inherited so password/MFA
-prompts and ssh errors reach the terminal. `ControlPath=none` keeps the
-forward out of a shared ControlMaster so none is left behind after exit (this
-also means every `--via` authenticates afresh). `LOCAL` is a free port found
-by binding 127.0.0.1:0 (a small race window: if another process takes it, the
-pin makes the connection fail rather than leak credentials).
-
-**Readiness**: polls every 0.1 s until a TCP connect to `127.0.0.1:LOCAL`
-succeeds. `TunnelError` if ssh exits first (status 0 gets a hint about
-`ForkAfterAuthentication`/`ControlPersist`; other statuses point at the ssh
-output), if `ready_timeout` elapses, or if `ssh` is missing or cannot be run.
-The probe connection is accepted and dropped by the server, which logs one
-`SSLEOFError`.
-
-**Teardown**: on every exit path (normal, exception, interrupt) ssh is sent
-SIGTERM, waited on for 5 s, then killed. While the tunnel is up (main thread
-only) SIGTERM and SIGHUP are converted to `KeyboardInterrupt` so this runs; a
-signal that was ignored at entry is left ignored (`nohup`) and previous
-handlers are restored on exit.
-
-**`parse_via(raw)`**: validates the destination (`user@host`, `host` or a
-config alias). Empty, leading `-` (option injection) and any character outside
-`[A-Za-z0-9._@%:\[\]/-]` are rejected with `ValueError`; the destination is
-also passed after `--`.
+**`parse_ssh_host(raw)`**: the node name for `--ssh-host` (hostname, IPv4 or
+bracketed IPv6), with no user part. Empty, leading `-`, any `@` (the user
+name is added by `serve`) and any character outside `[A-Za-z0-9._:\[\]-]`
+are rejected.
 
 ## Multi-Pass Review Workflow
 

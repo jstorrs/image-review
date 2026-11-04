@@ -15,8 +15,7 @@ are the people you chose.
 - **Original files, DICOM headers, source paths and `review.tsv`** stay where
   `preprocess` ran. What travels to a reviewer's machine is the preprocessed
   JPGs, their batch and file names (`batch_001/img_00001.jpg`), review
-  statuses and pass numbers, the reviewer name the client sends, skip counts
-  and the server's version string.
+  statuses and pass numbers, and the reviewer name the page sends.
 - **The threats considered** are other users on shared cluster nodes and
   network observers or impostors between the laptop and the cluster.
 - **Not considered:** a malicious cluster administrator or root user, a
@@ -29,50 +28,33 @@ of human reviewers.
 
 ## The server (`image-review serve`)
 
-The bullets marked deprecated apply only to `serve --https`, the HTTPS mode
-for the deprecated `review --remote` client. The default, browser review, is
-in [its own section](#browser-review-over-a-unix-socket).
+`serve` serves browser review on a Unix socket; what is particular to that
+is in [its own section](#browser-review-over-a-unix-socket).
 
-- **Transport (deprecated HTTPS mode).** HTTPS with a self-signed certificate
-  generated at every start, TLS 1.2 or later. The certificate's SHA-256
-  fingerprint is part of the connection string, and the client checks it on
-  every connection before it sends the token, so a wrong or replaced server is
-  rejected. Nothing is reused across runs.
-- **Token.** Every request must carry the bearer token, compared in constant
-  time before any routing (in socket mode, all but the three
-  public page files; see below). The token is a password: anyone holding the
-  connection string (`ir://...`) can view the images and record verdicts
-  while the server runs. Do not paste it into chat or tickets. A new token
-  and certificate are generated at each start, so an old string stops working.
-- **Delivery of the connection string (deprecated HTTPS mode).** When stdout is
-  not a terminal, it goes to a 0600 file in `~/.image-review/`, a 0700 directory
-  you own, so other users cannot read it ([HTTPS
-  mode](../commands/serve.md#https-mode)). The remaining exposure is root on any
-  node that mounts the home directory, backups or snapshots of it, and any
-  process running as you. A hard kill leaves the file behind
-  ([Stopping](../commands/serve.md#stopping)).
-- **Binding (deprecated HTTPS mode).** Wildcard addresses (`0.0.0.0`, `::`,
-  empty) are refused; the server binds and advertises one named host (default:
-  this machine's FQDN).
+- **Token.** Every request but those for the four public page files (see
+  below) must carry the bearer token, compared in constant time before any
+  routing. The token is a password: anyone holding the URL can view the
+  images and record verdicts while the server runs. Do not paste it into
+  chat or tickets. Unless it comes from `$IMAGE_REVIEW_TOKEN`, a new token is
+  generated at each start, so an old URL stops working.
 - **Logging.** One INFO line per request: peer address, method, path without
   its query string, and status. Access tokens, `Authorization` headers, query
   strings, image keys, `image_id`s, source paths, request bodies, and the
   messages of exceptions raised while serving (only their class names) are
-  never logged in the request line or the error records. No log record, client
-  or server, contains the token. Client-supplied
+  never logged in the request line or the error records. No log record
+  contains the token. Client-supplied
   fields in server records are escaped, so control characters cannot reach the
   terminal. Other records are not so restricted: startup and work-directory
   messages (for example a `review.tsv` torn-line warning or a failure opening
-  the work directory) can name file paths and parse errors. Client-side
-  warnings from `review` and `status` do name image keys, and `preprocess`
+  the work directory) can name file paths and parse errors. Warnings from
+  `review` and `status` do name image keys, and `preprocess`
   warnings name the failed source file (its `image_id`), on the machine where it runs. Levels
   and format are in [Commands](../commands/index.md#logging).
 - **Caching.** Every response carries `Cache-Control: no-store` (and
   `X-Content-Type-Options: nosniff`).
 - **`image_id`s never leave the server.** The manifest's `image_id` is the
   source path and may hold identifiers. The wire carries only preprocessed
-  paths (keys), skip counts, statuses and JPG bytes. `/skipped` sends counts,
-  never reasons or paths.
+  paths (keys), statuses, grid layouts and JPG bytes.
 - **Reviewer identity is a claim.** The `reviewer` name in each mark is sent by
   the client and recorded as given (1-64 printable characters). The server
   does not authenticate it: whoever holds the token can record verdicts under
@@ -93,9 +75,9 @@ in [its own section](#browser-review-over-a-unix-socket).
   read whole within 60 s, however slowly its bytes arrive, and its request
   line and headers may total at most 64 KiB; only after the token check may a
   body (at most 1 MiB) follow. A connection without the token gets one
-  request: every reply to it closes the connection. In the deprecated HTTPS
-  mode any user on the cluster can connect to the port without the token, so
-  one can fill the 64 slots and keep the reviewer out. Each connection lasts
+  request: every reply to it closes the connection. Anyone who can reach the
+  server without the token (see [The laptop side](#browser-review-over-a-unix-socket))
+  can still fill the 64 slots and keep the reviewer out. Each connection lasts
   at most one request deadline (60 s), but by reconnecting as slots free they
   can keep the reviewer out for as long as they keep at it. What they can no
   longer do is exhaust the serve user's processes on the node (each
@@ -104,17 +86,12 @@ in [its own section](#browser-review-over-a-unix-socket).
   64 KiB, 4 MiB across all 64 slots plus the parser's copies (each connection
   used to be able to make it buffer about 6.5 MB of headers, over 50 MB while
   parsing them).
-- **`--via` (deprecated).** `review --via` and `status --via` run `ssh` to
-  forward a local port to the compute node. ssh protects the hop to the login
-  node; TLS with the pinned certificate covers the whole path to the compute
-  node, and the tunnel adds no trust of its own.
 
 ## Browser review over a Unix socket
 
-This is what `image-review serve` does by default, and the recommended way to
-review remotely. It serves a browser page on a Unix socket on the compute
-node, reached through `ssh -L`. It differs from the deprecated HTTPS mode in
-two ways: there is no TLS on the node, and the token is in the URL you open.
+This is what `image-review serve` does, and the way to review remotely. It
+serves a browser page on a Unix socket on the compute node, reached through
+`ssh -L`. There is no TLS on the node, and the token is in the URL you open.
 The points below are its limits.
 
 - **No TLS.** ssh encrypts the path from the laptop to the node. On the node
@@ -132,8 +109,7 @@ The points below are its limits.
   grids; it reads the image list and statuses, asks for grid layouts,
   fetches each image and records verdicts and undos through the same API,
   with the token.
-- **Grid layouts cost the server work.** In socket mode only, `POST /grids`
-  lets a token holder make the server read image files (to learn each
+- **Grid layouts cost the server work.** `POST /grids` lets a token holder make the server read image files (to learn each
   image's size from its header) and run the bin packer. It is bounded to at
   most 1000 known keys per request, grid sides of 256-16384 pixels, and one
   request computed at a time (others get 503), but the bound is loose: a
@@ -151,11 +127,15 @@ The points below are its limits.
   of the tab's history entry. It can still stay in browser history and
   autocomplete, and in the clipboard. By default it stops working when the
   server stops. Treat the URL like a password. When stdout is not a terminal
-  it goes to `~/.image-review/browser-<short-host>-<pid>.txt`, with the same
-  protection and exposure as the connection file above
-  ([Socket mode](../commands/serve.md#socket-mode)). Browser extensions that
-  can read all sites can read the token and the images.
-- **A reused token** (`$IMAGE_REVIEW_TOKEN`, socket mode only) no longer dies
+  it goes to `~/.image-review/browser-<short-host>-<pid>.txt`, a 0600 file in
+  a 0700 directory you own, so other users cannot read it
+  ([What serve prints](../commands/serve.md#what-serve-prints)). The
+  remaining exposure is root on any node that mounts the home directory,
+  backups or snapshots of it, and any process running as you. A hard kill
+  leaves the file behind ([Stopping](../commands/serve.md#stopping)).
+  Browser extensions that can read all sites can read the token and the
+  images.
+- **A reused token** (`$IMAGE_REVIEW_TOKEN`) no longer dies
   at a restart, only when the job's shell ends. `serve` writes it to disk
   only in the 0600 URL file when stdout is not a terminal (removed on exit);
   a copy of that file (e.g. in a home snapshot) stays valid for the whole
@@ -179,7 +159,7 @@ The points below are its limits.
   nobody saw there (every key of a grid). Each serve start therefore draws a
   random instance id, sent on every reply; the page keeps the one it loaded
   from and sends it on every request, and the server refuses (412) any API
-  request but `/version` and `/current_pass` that does not carry this
+  request but `/current_pass` that does not carry this
   server's id (none, a repeated one, or another), reading, recording and
   packing nothing, so the tab's reads cannot mix two servers either. The
   page then stops and asks for Reconnect, which loads the new server from
@@ -214,9 +194,10 @@ The points below are its limits.
   once the next item is shown. In grid mode each image is decoded to an
   `ImageBitmap`, drawn into one `<canvas>` and closed once drawn; the canvas
   holds the grid's pixels until the next grid is drawn, and is cleared and its
-  buffer freed (sized to 0) when the page leaves grid mode. Both carry the
-  same swap, crash-dump and screenshot caveats as the viewer, plus whatever
-  the browser itself does with its memory and caches. Pressing `q` frees
+  buffer freed (sized to 0) when the page leaves grid mode. Memory is not a
+  guarantee: swap, crash dumps and core files can write it to disk, and
+  screenshots, screen recording and screen sharing capture what is shown,
+  as can whatever the browser itself does with its memory and caches. Pressing `q` frees
   the images and the canvas on the page but keeps the token and the
   reviewer name, so Reconnect can load the next server. They stay in the
   tab's `sessionStorage` until the tab is closed; the page has no button to
@@ -242,24 +223,6 @@ The points below are its limits.
 - Do Unix sockets work on the shared home filesystem (NFS, GPFS, Lustre)?
 - With `job_container/tmpfs`, does an adopted ssh session see the job's
   private `/tmp`?
-
-## The client (`image-review review --remote`, deprecated)
-
-The viewer holds the preprocessed images in memory only. The tool makes no
-deliberate attempt to write them to disk. Several things are outside its
-control, so do not treat "RAM only" as a guarantee:
-
-- **swap**: the operating system may page memory to disk;
-- **crash dumps and core files**;
-- **screenshots, screen recording and screen sharing**, which capture what is
-  displayed;
-- a compromised or shared laptop.
-
-Keep the connection string out of `ps` by putting it in
-`IMAGE_REVIEW_REMOTE` rather than on the command line. To keep it out of shell
-history too, do not type it: use
-`export IMAGE_REVIEW_REMOTE="$(ssh user@login-node cat <file>)"` (see
-[Batch mode](../tutorials/remote-review.md#4-batch-mode-sbatch)), or start the line with a space and set `HISTCONTROL=ignorespace`.
 
 ## Local disk
 
@@ -309,7 +272,8 @@ world-readable.
   never overwrite an existing file, and a failed write leaves at most a
   report, which releases nothing
   ([Refusals and output files](../commands/export.md#refusals-and-output-files)).
-  `export` refuses `--remote` so that source paths never travel.
+  `export` reads only a work directory on its own machine, so source paths
+  never travel.
 
 ## Integrity
 
