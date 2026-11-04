@@ -2320,21 +2320,24 @@ in with `textContent`. Both scripts are type-checked strictly with `tsc` (`npm r
 typecheck`; see CONTRIBUTING).
 
 `m` (rotation `auto`) and `M` (`never`) switch to grid mode and `s` back to
-single mode; each switch rereads `/statuses`, empties the stack of marked keys
-and rebuilds the list. It reviews one batch: `m`/`M` stay on the current batch
-while it has UNREVIEWED keys, else take the first in sorted order (by code
-point, as Python sorts) that has; `b` moves to the next that has, wrapping
-(`nextBatch`, which goes round once back to the current batch itself). A key
-is packed when `isGridTodo` accepts its status: todo and in `GRID_ELIGIBLE`
-(UNREVIEWED or CLEAN), i.e. UNREVIEWED, since a grid verdict covers every
-image in it and one keypress must never clear an image already judged DIRTY
-(this pass) or FLAGGED (DIRTY in an earlier one). The batch's UNREVIEWED keys
-go to `POST /grids` in manifest order at the stage's size in device pixels,
+single mode; each switch, and `f` (see *Re-check filter*), rereads `/statuses`,
+empties the stack of marked keys and rebuilds the list. It reviews one batch:
+`m`/`M` stay on the current batch while it has keys to pack (`gridBatches`),
+else take the first in sorted order (by code point, as Python sorts) that
+has; `b` moves to the next that has a todo one (`gridTodoBatches`; the same
+batches under the `todo` filter), wrapping (`nextBatch`, which goes round
+once back to the current batch itself). A key is packed when `isGridRow`
+accepts its status: listed by the filter (`inFilter`) and in `GRID_ELIGIBLE`
+(UNREVIEWED or CLEAN), under the `todo` filter UNREVIEWED, since a grid
+verdict covers every image in it and one keypress must never clear an image
+already judged DIRTY (this pass) or FLAGGED (DIRTY in an earlier one). The
+batch's keys to pack go to `POST /grids` in manifest order at the stage's size in device pixels,
 as the *Unix-socket server* contract requires; a batch over `MAX_GRID_KEYS`,
 a stage under 256 device pixels or a batch with none shows a message instead
 (for none, `showEnd`: the end-of-pass screen, or `elsewhereHint`, which is
-the held-back message `heldBackMessage` when no batch has grid items, its K
-being `heldBackCount` over every batch: the pass's FLAGGED keys). One
+the held-back message `heldBackMessage` when no batch has todo grid items, its K
+being `heldBackCount` over every batch: the todo keys the filter lists that
+are not in `GRID_ELIGIBLE`, under the `todo` filter the pass's FLAGGED keys). One
 `/grids` request is in flight at a time (a newer build waits for it, and a
 stale reply is dropped); a 503 shows "Server busy computing grids; retrying"
 and is retried every 2 s while the layout is still wanted. The last layout
@@ -2378,9 +2381,10 @@ as a grid mark: "image already marked DIRTY in another pass - review it in
 single mode"), rereads `/statuses` into its status map, pushes nothing on the
 stack of marked keys and stays on the item. A grid's status (`gridStatus`)
 is DIRTY when any key is DIRTY or FLAGGED, else UNREVIEWED while any key is
-UNREVIEWED, else CLEAN; an item is todo when its status is UNREVIEWED or
-FLAGGED (`isTodo`), so a grid holding such an image is not todo and the move
-after a mark skips it, while a partly undone grid is todo again. A resize
+UNREVIEWED, else CLEAN; under the `todo` filter an item is todo when its
+status is UNREVIEWED or FLAGGED (`isTodo`, through `isItemTodo`), so a grid
+holding such an image is not todo and the move after a mark skips it, while a
+partly undone grid is todo again. A resize
 repack empties the stack of marked keys at once (the old items are gone, and
 a grid marked DIRTY is not among the new ones, so `z` then says "Nothing to
 undo"); a repack due
@@ -2413,11 +2417,12 @@ empties the rest of the stack.
   offered (the place is as wide as the wider of the two, so neither moves
   anything). Centre, centred in the space between (or in its own row): the
   status message (`#status`, `role="status"`) while it is not empty, else the
-  mode ("Single", "Grid · auto" or "Grid · never"), the progress and the
+  mode ("Single", "Grid · auto" or "Grid · never", with "· re-check: CLEAN"
+  or "· re-check: all" after it under those filters), the progress and the
   item's batch and key (in grid mode "grid (N images)"). Empty, the message
   stays rendered (its live region kept) but out of the flow and unseen. The
   reviewer's own moves empty the message: Left/Right, a mark moving on, a mode
-  switch (`m`, `M`, `s`, `b`). An undo, a Reconnect and startup set their own
+  switch (`m`, `M`, `s`, `b`, `f`). An undo, a Reconnect and startup set their own
   message as they move ("Undone …", "Undid another client's mark …",
   "Reconnected …", the name prompt). A show the reviewer did not start (a
   resize repack, a redraw after a context loss) leaves the message as it is,
@@ -2442,8 +2447,8 @@ empties the rest of the stack.
   cue.
 - **Overlays**: the help and the name box float over the stage (absolutely
   positioned, out of its layout) and never change its size; at most one is
-  up. While one is up, `c`, `d`, `z`, Left/Right, `m`/`M`, `s`, `b`, `q` and
-  `r` do nothing, every review button (Done and Reconnect included) and the
+  up. While one is up, `c`, `d`, `z`, Left/Right, `m`/`M`, `s`, `b`, `f`, `q`
+  and `r` do nothing, every review button (Done and Reconnect included) and the
   reviewer chip are disabled, and no dwell runs: opening one clears the
   dwell, and closing it starts a fresh one for the item under it (painted,
   then `MIN_DWELL_MS`), so nothing is judged on an image that was covered.
@@ -2469,8 +2474,9 @@ empties the rest of the stack.
   back in the field. The name field is the page's only focusable control
   (the help's scrolling box has `tabindex="-1"`).
 - **Startup**: `GET /current_pass`, `/manifest`, `/statuses?pass=N`. The
-  list is the keys whose status is UNREVIEWED or FLAGGED, shuffled
-  (Fisher-Yates); keys stay in it after they are marked. The bar shows the
+  filter is `todo` (it is never stored), so the list is the keys whose status
+  is UNREVIEWED or FLAGGED, shuffled (Fisher-Yates); keys stay in it after
+  they are marked. The bar shows the
   progress as "Pass N · K / T left" (K todo of the T listed; in grid mode
   "Pass N · BATCH (k/B) · K / T left"); see *Layout*.
 - **Images**: `GET /image?key=K`. The reply must be `image/jpeg` and end in
@@ -2505,7 +2511,8 @@ empties the rest of the stack.
 - **Marking**: one `POST /mark` with the item's keys and `mode` the display
   mode (`single`, or `grid` for every item in grid mode), controls disabled
   while it is in flight, never retried. On a 200 the keys are pushed on the
-  page's stack of marked keys and the reply updates the status map. The
+  page's stack of marked keys (and, under `clean` or `all`, added to the
+  re-checked set) and the reply updates the status map. The
   marked item then stays up for `MARK_FLASH_MS` (200 ms) with the
   bar in its new status (colour and word; a grid's from `gridStatus`), and the
   page is busy meanwhile: no verdict, move, undo, mode switch, `q` or `r`
@@ -2516,13 +2523,19 @@ empties the rest of the stack.
   on (a context loss redraws the marked grid instead). A mark whose items a
   resize repack dropped while it was in flight does not move and says "Marked
   STATUS: KEY" (or "grid of N images"). With none left, the end screen says
-  what is next. Only when no manifest row of the pass is todo (UNREVIEWED or
+  what is next. Under `clean` or `all`, once no row the filter lists is todo
+  (`anyTodo`), it is "All batches done for pass N (filter: F) - press [f] to
+  change the filter", or, when the pass is done too, "All batches done for
+  pass N (filter: F)." and the end-of-pass hint and Reconnect below; when the
+  filter lists no manifest row at all, "No images to review for pass N
+  (filter: F)" (the viewer's wording) in place of "All batches done". Under
+  `todo`, only when no manifest row of the pass is todo (UNREVIEWED or
   FLAGGED) is it the end of the pass: "Pass N: nothing left to review. Stop
   serve (Ctrl-C), start the next one, then press Reconnect (r)." with the
   Reconnect button, offered while no request is in flight and the page has not
   stopped (a stop takes the hint off the stage; see *Errors*). Otherwise
   (`elsewhereHint`): in grid mode (whose list is one batch) "No todo images
-  remaining - [b] next batch" while any batch has grid items, else the
+  remaining - [b] next batch" while any batch has todo grid items, else the
   pass-wide "No grid items for pass N; K FLAGGED/DIRTY images need single-mode
   review - press [s]"; in single mode (whose list is the whole pass, so only
   when other clients changed statuses meanwhile) "No todo images remaining -
@@ -2540,20 +2553,53 @@ empties the rest of the stack.
   end screen's hint (e.g. "No todo images remaining - [b] next batch" or the
   held-back "No grid items for pass N; …", see *Marking*). No item
   is current there: the bar is neutral, no dwell runs, and `c`/`d` and their
-  buttons do nothing; `z`, `m`/`M`, `s`, `b`, `q`, `?`/`h` act as on any
+  buttons do nothing; `z`, `m`/`M`, `s`, `b`, `f`, `q`, `?`/`h` act as on any
   screen, and in grid mode a resize does not repack, as on the end screen. A
   stop (lost connection, rejected token, `q`) takes the stop sign off. A
   further step goes on round: Right to the first item, Left to the last,
   whichever end it was reached from, with a fresh dwell. The end screen
   behaves the same way under Left/Right. Stepping onto the stop screen is a
-  move, so it empties the status message. With no todo row left in the pass,
-  a step past either end shows the end-of-pass screen (with Reconnect)
-  instead of the stop sign, since the next serve is due; Left/Right go round
-  from it too. A list with no items keeps its own screen, and the arrows do
+  move, so it empties the status message. Once no row the filter lists is
+  todo (`filterDone`; under `todo`, no todo row left in the pass), a step
+  past either end shows the end screen instead of the stop sign: under
+  `todo` the end-of-pass screen (with Reconnect), since the next serve is
+  due; under `clean` or `all` the "All batches done … (filter: F)" screen
+  (see *Marking*), which is the end-of-pass screen, "… (filter: F). Stop
+  serve…" with Reconnect, only when the pass is done too. Left/Right go
+  round from it too. A list with no items keeps its own screen, and the arrows do
   nothing.
+- **Re-check filter**: `state.filter` (`Filter`: `todo`, `clean` or `all`)
+  picks the keys the list holds (`inFilter`, as `store.filter_rows`): the
+  todo ones, the CLEAN ones, or every key; grid mode packs those in
+  `GRID_ELIGIBLE` (`isGridRow`). `f` takes the next (`nextFilter`: todo,
+  clean, all, todo) as a mode switch does (rereads `/statuses`, empties the
+  stack of marked keys, rebuilds the list; in grid mode the current batch is
+  packed again while it has keys to pack) and empties `state.rechecked`, the
+  keys marked under the current `clean` or `all` filter less those undone.
+  That set is kept across `s`, `m`, `M`, `b` and a Reconnect that the same
+  serve answers (the same `X-Review-Instance`), forgotten when `loadReview`
+  sees another instance (its keys may name other images), and dropped by
+  `q`. Under `clean` or `all` a key is todo while UNREVIEWED or FLAGGED or
+  until re-checked (`isKeyTodo`, as the viewer's `_key_todo`), and an item
+  while any of its keys is (`isItemTodo`); the progress, the move after a
+  mark, the stop screen's count, `b`, the end screen and `heldBackCount`
+  follow that. A grid build lands on the grid holding its landing key (a
+  resize repack's or a Reconnect's), todo or not; with none (`m`, `M`, `b`
+  and `f` pass none), and in single mode, the list lands on the first todo
+  item (`firstTodoIndex`), or on the end screen when no item is todo; under
+  `todo` every item is todo when the list is built, so that is the first
+  item. The frozen controller tables in `tests/web/grid-rules.json`
+  (each filter, with nothing or `k0` and `k2` re-checked) are the oracle for
+  `gridKeys`, `gridBatches`, `heldBackCount` and `heldBackMessage`. While
+  the filter is not `todo` the bar's mode reads "… · re-check: CLEAN" or
+  "… · re-check: all" (within `#mode`, so the bar's layout is unchanged).
+  Verdicts go to the current pass and the grid CLEAN rule is unchanged. The
+  user-facing rules are in "Re-checking CLEAN images" on
+  [The browser page](../commands/browser.md#re-checking-clean-images).
 - **Undo**: `z` (and a button), also on the end and stop screens. With an
   empty stack it says "Nothing to undo" without a request. Otherwise
-  `POST /undo`; `{}` empties the stack and says "Nothing to undo". If the
+  `POST /undo`; `{}` empties the stack and says "Nothing to undo". The keys
+  the reply names (after a resync, the entry's) leave the re-checked set. If the
   reply holds any key of the entry on top of the stack, it is popped and the
   item holding those keys is shown again with a fresh dwell (a grid is drawn
   again from its images). If a repack is pending when the reply arrives, the
@@ -2569,7 +2615,8 @@ empties the rest of the stack.
   only), `r` (Reconnect, only while its button is shown) and `q` (done with
   this server, in any state), in either case, so Caps Lock does not matter;
   `m` (grid, rotation `auto`) and `M` (`never`), told apart by the event's
-  Shift state rather than the letter's case, so Caps Lock is safe; and
+  Shift state rather than the letter's case, so Caps Lock is safe; `f` (the
+  next filter, see *Re-check filter*); and
   Left/Right; `?` or `h` toggles the help and Escape closes the help or
   the name box (see *Overlays*, which also lists what an overlay blocks).
   Ignored while the name field has focus, with Ctrl/Alt/Meta, and on key
@@ -2608,12 +2655,15 @@ empties the rest of the stack.
   the `X-Review-Instance` of its reply, which every later request sends (a
   reply without it is an unexpected reply); until that reload is in, every
   control is busy, so no key or button sends a request. It then rebuilds
-  the current mode: single mode's todo list, reshuffled; in grid mode the
+  the current mode under the current filter, keeping its re-checked set
+  when the same serve answers and forgetting it for another (see *Re-check
+  filter*): single mode's list, reshuffled, from its first todo item (else
+  the end screen); in grid mode the
   current batch and rotation (as `m` keeps the batch), laid out afresh by
   `/grids` and landing on the
   grid holding the previous item's first key (kept across a failed
   Reconnect, and the key a pending repack would have landed on), else the
-  first. Every item then starts a fresh dwell. The status message says
+  first todo item; with no todo item, the end screen. Every item then starts a fresh dwell. The status message says
   "Reconnected", or "Reconnected; now on pass N" if the current pass
   changed or was forgotten by `q` (the new pass is reviewed); after `q` the
   server may serve another work directory or batch, so grid mode starts
@@ -2632,9 +2682,9 @@ empties the rest of the stack.
   stops the page as a lost connection does, so every request in flight
   turns stale and nothing more is sent. It leaves grid mode (canvas sized to
   0, hidden), revokes the image's blob URL and clears the `<img>`, and drops
-  the pass, manifest, statuses, items, marked keys and cached layout, but
-  keeps the token and the reviewer name (in `sessionStorage` and in memory)
-  and the mode and rotation; the batch and the landing key are forgotten
+  the pass, manifest, statuses, items, marked keys, re-checked set and cached
+  layout, but keeps the token and the reviewer name (in `sessionStorage` and
+  in memory) and the mode, rotation and filter; the batch and the landing key are forgotten
   too, since another work directory's keys and batch names usually match
   these. Every control is disabled, the Done
   button and the reviewer chip included, but Reconnect is shown; the

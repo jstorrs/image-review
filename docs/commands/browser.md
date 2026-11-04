@@ -41,23 +41,27 @@ Press `?` (or `h`, or click the "?" button) for the list of keys.
 | `M` | -- | Grid mode without rotating images (rotation `never`) |
 | `s` | -- | Back to single mode (rereads the list) |
 | `b` | -- | Grid mode only: the next batch with images to review |
+| `f` | -- | The next filter: todo, CLEAN, all; see [Re-checking CLEAN images](#re-checking-clean-images) |
 | `r` | Reconnect | Only while Reconnect is shown: after a lost connection or a server change, after `q` or at the end of a pass; see [Lost connection and Reconnect](#lost-connection-and-reconnect) |
 | `q` | Done | Done with this server: the page waits for the next one; see [Done](#done) |
 | `?` or `h` | ? | Show or hide the help (Escape also closes it) |
 
-`m`, `M`, `s` and `b` reread the current pass's statuses from the server
+`m`, `M`, `s`, `b` and `f` reread the current pass's statuses from the server
 before they rebuild the list. Letters work with Caps Lock on; `M` is Shift
 and `m`. A held key acts once, and keys pressed with Ctrl, Alt or Cmd are
 left to the browser. There is no gamepad support, and none of the
-[`review`](review.md#keys-and-gamepad) viewer's `n`, `u`, Space, `w` or `f`.
+[`review`](review.md#keys-and-gamepad) viewer's `n`, `u`, Space or `w`; `f`
+is the filter here, not the viewer's full screen.
 
 Where the keys differ from the viewer's:
 
 - Escape only closes the help or the name box; it does not quit.
 - `b` acts anywhere in grid mode, not only at the end of the list, and
   rereads only the statuses of the same pass, not which pass is current.
-- While the grids are being computed, `q` (Done) and `s`, `m`, `M` and `b`
-  still act; the viewer drops every key then.
+- While the grids are being computed, `q` (Done) and `s`, `m`, `M`, `b` and
+  `f` still act; the viewer drops every key then.
+- `f` replaces the viewer's `--filter` option: see
+  [Re-checking CLEAN images](#re-checking-clean-images).
 
 While the help or the name box is open nothing can be marked or moved, and
 the review buttons, Done and Reconnect included, are disabled. Once it
@@ -72,9 +76,11 @@ Everything is in one bar at the bottom of the page:
   word and the [scale](#the-scale).
 - **Right:** your name, "?" and Done (or Reconnect in its place).
 - **Middle:** a message (what was undone, refusals, errors) when there is
-  one; otherwise the mode ("Single", "Grid · auto" or "Grid · never"), the
-  progress (pass, in grid mode the batch, and how many are left) and the
-  item: "batch · key" for an image, "grid (N images)" for a grid.
+  one; otherwise the mode ("Single", "Grid · auto" or "Grid · never",
+  followed by "· re-check: CLEAN" or "· re-check: all" while
+  [re-checking](#re-checking-clean-images)), the progress (pass, in grid mode
+  the batch, and how many are left) and the item: "batch · key" for an image,
+  "grid (N images)" for a grid.
 
 Your own moves (arrows, marking, switching mode) clear the message; an undo
 or Reconnect says what it did. A refusal or error stays until your next
@@ -155,7 +161,9 @@ The workflow built on passes is in
 ## Todo images
 
 "Todo" means UNREVIEWED or FLAGGED. Single mode lists every todo image of
-the pass; grid mode, the UNREVIEWED images of one batch. Marked images stay
+the pass; grid mode, the UNREVIEWED images of one batch. That is the default
+filter, `todo`; the others are in
+[Re-checking CLEAN images](#re-checking-clean-images). Marked images stay
 in the list: Left and Right still reach them, a mark moves on to the next
 todo item after the current one, going round, and the bar counts the todo
 items left, e.g. "Pass 1 · 41 / 300 left".
@@ -175,6 +183,51 @@ No grid items for pass N; K FLAGGED/DIRTY images need single-mode review - press
 
 K counts the FLAGGED images of the whole pass. It says "image needs" when K
 is 1. `s` switches to single mode to review them.
+
+### Re-checking CLEAN images
+
+`f` changes which images the list holds, so images already judged CLEAN can
+be looked at again. Each press takes the next filter, going round:
+
+| Filter | The bar adds | Single mode lists | Grid mode packs |
+|--------|--------------|-------------------|-----------------|
+| `todo` (the default) | nothing | the todo images | the batch's UNREVIEWED images |
+| `clean` | "· re-check: CLEAN" | the CLEAN images | the batch's CLEAN images |
+| `all` | "· re-check: all" | every image | the batch's CLEAN and UNREVIEWED images |
+
+The filter is not remembered: every page load starts at `todo`. Like a mode
+switch, `f` rereads the statuses, forgets what `z` could [undo](#undo) and
+rebuilds the list; grid mode packs the current batch again under the new
+filter.
+
+Under `clean` and `all` every image listed is a re-check, so an image is todo
+while it is UNREVIEWED or FLAGGED, or until you mark it under that filter. A
+grid is todo while any image in it is. The bar counts the todo items left, the
+move after a mark skips the images you have re-checked, and `b` goes to the
+next batch with any left. Undoing a mark makes its images todo again. The
+page remembers the images you re-checked until the filter changes or you
+press `q`: `s`, `m`, `M` and `b` keep them, and so does Reconnect when the
+same serve answers; a Reconnect to another serve forgets them, as its images
+may have the same names. `s`, `m`, `M`, `b` and `f`, and a Reconnect in
+single mode, start at the first item still to re-check, or at the end screen
+when none is left; in grid mode a resize repack or a Reconnect lands on the
+grid you were on, re-checked or not.
+
+Verdicts are recorded in the current pass, as always: CLEAN on a CLEAN image
+records CLEAN again, with your name, and DIRTY changes it. Grid mode still
+holds DIRTY and FLAGGED images back for single mode (see
+[Refused CLEAN on a grid](#refused-clean-on-a-grid), which is unchanged):
+under `all` the "No grid items for pass N" message counts the DIRTY images
+you have not re-checked and every FLAGGED one.
+
+When every image the filter lists has been re-checked the end screen says
+"All batches done for pass N (filter: clean) - press [f] to change the
+filter", or, when nothing in the pass is left to review either, "All batches
+done for pass N (filter: all). Stop serve (Ctrl-C), start the next one, then
+press Reconnect (r)." with Reconnect. When the filter lists no image at all
+(`clean` in a pass with no CLEAN image) it says "No images to review for
+pass N (filter: clean)" in place of "All batches done". Past either end of
+the list the arrows then show this end screen instead of the stop sign.
 
 ## Images that cannot be loaded
 
@@ -208,8 +261,8 @@ once, so holding `z` down undoes one mark. It works on the end and stop
 screens too. The bar says what it undid, e.g. "Undone:
 batch_001/img_00001.jpg is UNREVIEWED" or "Undone: grid of 12 images".
 
-- Only marks made on this page since the last mode switch (`m`, `M`, `s`,
-  `b`) can be undone; beyond them `z` says "Nothing to undo".
+- Only marks made on this page since the last mode or filter switch (`m`,
+  `M`, `s`, `b`, `f`) can be undone; beyond them `z` says "Nothing to undo".
 - A Reconnect forgets them too, and so, in grid mode, does a resize that
   repacks the grids (see [Grid mode](#grid-mode)): a grid marked DIRTY is no
   longer among the new ones.
@@ -290,9 +343,13 @@ again to go round to the other end: Right goes to the first item and Left
 to the last.
 
 There is no image on the stop sign, so `c` and `d` do nothing; `z`, `m`,
-`M`, `s`, `b` and `q` work as anywhere. Once nothing in the pass is left to
-review, the arrows past an end show the
-[end-of-pass screen](#end-of-a-pass-or-batch) instead.
+`M`, `s`, `b`, `f` and `q` work as anywhere. Once nothing in the pass is left
+to review, the arrows past an end show the
+[end-of-pass screen](#end-of-a-pass-or-batch) instead. While
+[re-checking](#re-checking-clean-images) they show the end screen once nothing
+the filter lists is left to re-check; it is the end-of-pass screen, in its
+"All batches done for pass N (filter: F). Stop serve…" form, only when the
+pass is done too.
 
 ## End of a pass or batch
 
@@ -300,15 +357,18 @@ When the whole pass is done the page shows the end-of-pass screen, "Pass
 N: nothing left to review. Stop serve (Ctrl-C), start the next one, then
 press Reconnect (r).", and offers Reconnect for the next server.
 
-When the list is done but the pass is not, an end screen says what is left:
+When the list is done but the pass is not, an end screen says what is left
+(while re-checking, see [Re-checking CLEAN images](#re-checking-clean-images)
+for the screen once every image the filter lists is re-checked):
 
 - In single mode, which happens only when another client's marks changed
   the pass meanwhile: "No todo images remaining - press [s] to reload the
   list".
 - In grid mode, where the list is one batch, while another batch has grids:
   "No todo images remaining - [b] next batch".
-- In grid mode, when only FLAGGED images are left: the "No grid items for
-  pass N" message from [Todo images](#todo-images).
+- In grid mode, when only FLAGGED images are left (while re-checking, DIRTY
+  ones too): the "No grid items for pass N" message from
+  [Todo images](#todo-images).
 
 ## Lost connection and Reconnect
 
@@ -338,9 +398,11 @@ again: see "The laptop side" in
 
 Reconnect says "Reconnecting...", then reloads the pass, the image list and the
 statuses, and rebuilds the list in the mode you were in (grid mode lands on the
-grid you were on). It says "Reconnected", or "Reconnected; now on pass N" when
-the pass changed or after `q`. It forgets which marks `z` could [undo](#undo)
-and waits the 200 ms again before a verdict counts. After `q` it loads whatever
+grid you were on), keeping the [filter](#re-checking-clean-images), and the
+images you re-checked when the same serve answers (forgotten for another). It says
+"Reconnected", or "Reconnected; now on pass N" when the pass changed or after
+`q`. It forgets which marks `z` could [undo](#undo) and waits the 200 ms again
+before a verdict counts. After `q` it loads whatever
 the new server serves, from its first item (in grid mode, the first batch with
 grids).
 
@@ -368,7 +430,9 @@ grids).
 `q` (or the Done button) means done with this server. The page stops: it
 sends nothing more, frees the images and says "Done; waiting for the next
 serve", with "Done. Your marks are saved. Stop serve (Ctrl-C), start the
-next one, then press Reconnect (r)." in the image area. The tab keeps the
+next one, then press Reconnect (r)." in the image area. It forgets which
+images you [re-checked](#re-checking-clean-images), as the next server's
+images may have the same names, but keeps the filter. The tab keeps the
 token and your name, so after the next `serve` starts on the same socket
 path and token, Reconnect (or `r`) loads it. `q` does not stop the server.
 

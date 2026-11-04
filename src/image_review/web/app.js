@@ -109,6 +109,8 @@ function takeToken() {
  * @property {string | null} landKey
  * @property {number} sourceScale
  * @property {string[][]} marked
+ * @property {Filter} filter
+ * @property {Set<string>} rechecked
  * @property {boolean} loaded
  * @property {number | null} scale
  * @property {"none" | "running" | "over"} dwell
@@ -148,6 +150,8 @@ const state = {
   landKey: null, // the key whose item a grid build lands on
   sourceScale: 1, // the shown grid's own shrink (minScale)
   marked: [], // key arrays this page marked, less those undone: what z may undo
+  filter: "todo", // which keys the list holds (f cycles it); never stored, so every load starts at todo
+  rechecked: new Set(), // keys marked under the current clean or all filter, less those undone: done there
   loaded: false, // the current item's image is on screen (else a placeholder)
   scale: null, // screen pixels per image pixel, while an image is shown
   dwell: "none", // "none", "running" (painted, under MIN_DWELL_MS) or "over"
@@ -430,6 +434,12 @@ function say(text) {
   ui.status.title = text; // the bar is one line and cuts it short, so the stage keeps its height
 }
 
+// The first todo item of the list (isItemTodo), or -1 for none: where a rebuild lands.
+// Under todo every item is todo when the list is built, so it is the first.
+function firstTodoIndex() {
+  return nextTodoIndex(state.items, state.statuses, state.items.length - 1, state.filter, state.rechecked);
+}
+
 function currentItem() {
   return state.index >= 0 ? state.items[state.index] : null;
 }
@@ -465,7 +475,7 @@ function gridMode() {
 function render() {
   const item = currentItem();
   if (state.pass !== null) {
-    const left = countTodo(state.items, state.statuses);
+    const left = countTodo(state.items, state.statuses, state.filter, state.rechecked);
     const remaining = left + " / " + state.items.length + " left";
     const batch =
       gridMode() && state.batch !== null
@@ -474,7 +484,9 @@ function render() {
     ui.progress.textContent = "Pass " + state.pass + " · " + batch + remaining;
     ui.progress.title = ui.progress.textContent;
   }
-  ui.mode.textContent = gridMode() ? "Grid · " + state.rotation : "Single";
+  const recheck = state.filter === "todo" ? "" : " · re-check: " + (state.filter === "clean" ? "CLEAN" : "all");
+  ui.mode.textContent = (gridMode() ? "Grid · " + state.rotation : "Single") + recheck;
+  ui.mode.title = ui.mode.textContent;
   if (item === null) {
     ui.where.textContent = "";
   } else if (item.kind === "grid") {
@@ -638,11 +650,16 @@ function showNotice(text) {
 }
 
 function passDone() {
-  return !state.manifest.some((row) => isTodo(state.statuses.get(row.key)));
+  return !anyTodo(state.manifest, state.statuses);
+}
+
+// Whether the filter's review is done: under todo, the pass's (see anyTodo).
+function filterDone() {
+  return !anyTodo(state.manifest, state.statuses, state.filter, state.rechecked);
 }
 
 // Where the todo left in the pass, none of it in the list, is reviewed. Grid mode's list
-// is one batch, so there b moves on while a batch has grid items and
+// is one batch, so there b moves on while a batch has todo grid items and
 // s reviews what grids leave out; single mode's list is the whole pass, unless others
 // marked meanwhile.
 /** @returns {string | null} */
@@ -650,33 +667,44 @@ function elsewhereHint() {
   if (!gridMode()) {
     return RELOAD_SINGLE;
   }
-  if (gridBatches(state.manifest, state.statuses).size > 0) {
+  if (gridTodoBatches(state.manifest, state.statuses, state.filter, state.rechecked).size > 0) {
     return NEXT_BATCH;
   }
-  return heldBackMessage(state.pass, heldBackCount(state.manifest, state.statuses, null));
+  return heldBackMessage(
+    state.pass,
+    heldBackCount(state.manifest, state.statuses, null, state.filter, state.rechecked),
+  );
 }
 
 // The end of the list, with no todo left in it. Only with no todo row left in the pass is
-// it the end of the pass, where the next serve is due and Reconnect is offered.
+// it the end of the pass, where the next serve is due and Reconnect is offered. Under clean
+// or all, with every key re-checked, the re-check is done ("All batches done", or "No
+// images to review" when the filter lists none, as the viewer said); the pass may be done too.
 function showEnd() {
-  if (passDone()) {
+  if (!filterDone()) {
+    showNotice(elsewhereHint());
+  } else if (state.filter === "todo") {
     state.atEnd = true;
     showNotice("Pass " + state.pass + ": nothing left to review. " + NEXT_SERVE);
   } else {
-    showNotice(elsewhereHint());
+    state.atEnd = passDone();
+    const listed = state.manifest.some((row) => inFilter(state.statuses.get(row.key), state.filter));
+    const done = (listed ? "All batches done" : "No images to review") + " for pass " + state.pass;
+    const filter = done + " (filter: " + state.filter + ")";
+    showNotice(filter + (state.atEnd ? ". " + NEXT_SERVE : " - press [f] to change the filter"));
   }
   render();
 }
 
 // An arrow past either end of the list: a stop sign, from which an arrow goes on
-// round: -> the first item, <- the last. With nothing left in the pass it is the
-// end-of-pass screen instead, as Reconnect is due then.
+// round: -> the first item, <- the last. With nothing left under the filter it is the
+// end screen instead (under todo the end of the pass, as Reconnect is due then).
 function showListEnd() {
-  if (passDone()) {
+  if (filterDone()) {
     showEnd();
     return;
   }
-  const left = countTodo(state.items, state.statuses);
+  const left = countTodo(state.items, state.statuses, state.filter, state.rechecked);
   const where = gridMode() ? " in this batch - [b] next batch" : " in this list";
   ui.listEndDetail.textContent = left > 0 ? left + " todo left" + where : elsewhereHint();
   ui.listEnd.hidden = false;
@@ -982,6 +1010,9 @@ async function mark(verdict) {
     if (current) {
       state.marked.push(keys); // recorded on the server, whatever the body holds
     }
+    if (state.filter !== "todo") {
+      keys.forEach((key) => state.rechecked.add(key));
+    }
     const { changed } = await replyStatuses(response);
     applyStatuses(changed);
     if (!current || build !== state.buildSeq) {
@@ -1008,7 +1039,7 @@ async function mark(verdict) {
     // No message, so the mode and progress stay in view through a run of c and d;
     // and none left from before (a refusal, say) now that the reviewer moves on
     say("");
-    showItem(nextTodoIndex(state.items, state.statuses, state.index)).catch(reportError);
+    showItem(nextTodoIndex(state.items, state.statuses, state.index, state.filter, state.rechecked)).catch(reportError);
   } finally {
     endBusy(epoch);
   }
@@ -1041,6 +1072,9 @@ async function undo() {
       return;
     }
     applyStatuses(changed);
+    for (const key of resynced ? expected : changed.keys()) {
+      state.rechecked.delete(key); // todo again under clean or all
+    }
     let index;
     const own = resynced || expected.some((key) => changed.has(key));
     if (own) {
@@ -1130,7 +1164,7 @@ async function buildGrids(landKey) {
   state.landKey = landKey;
   state.gridSize = null;
   render();
-  const keys = state.batch === null ? [] : gridKeys(state.manifest, state.statuses, state.batch);
+  const keys = state.batch === null ? [] : gridKeys(state.manifest, state.statuses, state.batch, state.filter);
   if (keys.length === 0) {
     showEnd(); // the pass's end, or what is left elsewhere in it
     return;
@@ -1168,8 +1202,10 @@ async function buildGrids(landKey) {
     state.gridCache = { key: cacheKey, plan };
   }
   state.items = orderGridItems(plan); // reshuffled on every build
+  // The grid holding landKey (a repack or Reconnect stays where the reviewer was), else the
+  // first todo item, else (all re-checked) the end screen
   const index = state.items.findIndex((item) => landKey !== null && itemKeys(item).includes(landKey));
-  await showItem(Math.max(index, 0));
+  await showItem(index >= 0 ? index : firstTodoIndex());
 }
 
 // A resize away from the size the grids were packed for: hide them at once (no
@@ -1202,12 +1238,13 @@ function canSwitch() {
   return !state.busy && !state.dead && state.pass !== null;
 }
 
-// A mode switch (m, M, s, b): reread the statuses, forget this page's marks
-// and rebuild the items for `mode`. Grid mode stays on its batch while it has grid
-// items (else takes the first that has); with `nextBatchToo` it moves to the next
-// one with any, wrapping, and drops the cached layout.
-/** @param {"single" | "grid"} mode @param {"auto" | "never"} rotation @param {boolean} [nextBatchToo] */
-async function restart(mode, rotation, nextBatchToo = false) {
+// A mode or filter switch (m, M, s, b, f): reread the statuses, forget this page's marks
+// and rebuild the items for `mode` under `filter` (a new filter starts with nothing
+// re-checked). Grid mode stays on its batch while it has grid items (else takes the
+// first that has); with `nextBatchToo` it moves to the next one with todo grid items,
+// wrapping, and drops the cached layout.
+/** @param {"single" | "grid"} mode @param {"auto" | "never"} rotation @param {boolean} [nextBatchToo] @param {Filter} [filter] */
+async function restart(mode, rotation, nextBatchToo = false, filter = state.filter) {
   if (!canSwitch()) {
     return;
   }
@@ -1222,6 +1259,10 @@ async function restart(mode, rotation, nextBatchToo = false) {
   }
   state.statuses = statuses;
   state.marked = [];
+  if (filter !== state.filter) {
+    state.filter = filter;
+    state.rechecked = new Set();
+  }
   say(""); // (with no name the name box is up, and blocks every switch)
   await rebuild(mode, rotation, nextBatchToo, null);
 }
@@ -1234,16 +1275,17 @@ async function rebuild(mode, rotation, nextBatchToo, landKey) {
     abandonItems();
     leaveGrid();
     state.mode = "single";
-    state.items = singleItems(state.manifest, state.statuses);
-    await showItem(state.items.length > 0 ? 0 : -1);
+    state.items = singleItems(state.manifest, state.statuses, state.filter);
+    await showItem(firstTodoIndex());
     return;
   }
-  const withGrids = gridBatches(state.manifest, state.statuses);
+  const withGrids = gridBatches(state.manifest, state.statuses, state.filter);
   /** @param {string | null} batch */
   const accepts = (batch) => batch !== null && withGrids.has(batch);
   if (nextBatchToo) {
     state.gridCache = null;
-    state.batch = nextBatch(state.batches, state.batch, accepts);
+    const withTodo = gridTodoBatches(state.manifest, state.statuses, state.filter, state.rechecked);
+    state.batch = nextBatch(state.batches, state.batch, (batch) => withTodo.has(batch));
   } else if (!accepts(state.batch)) {
     state.batch = nextBatch(state.batches, null, accepts);
   }
@@ -1263,6 +1305,9 @@ async function loadReview() {
   const pass = parsePass(await readBody(response, "json"));
   if (!instance) {
     throw new BadReply("instance");
+  }
+  if (instance !== state.instance) {
+    state.rechecked = new Set(); // another serve: its keys may name other images (kept for the same one)
   }
   state.instance = instance;
   const manifest = parseManifest(await getJson("/manifest"));
@@ -1341,6 +1386,7 @@ function waitForNextServer() {
   state.batchOf = new Map();
   state.statuses = new Map();
   state.marked = [];
+  state.rechecked = new Set(); // as the batch: the next server's keys may match these (the filter is kept, as the mode)
   state.gridCache = null;
   state.batch = null; // the next server starts at its first batch and item: its keys may match these
   state.landKey = null;
@@ -1515,6 +1561,8 @@ function onKey(event) {
     doRestart("single", state.rotation);
   } else if (key === "b" && gridMode()) {
     doRestart("grid", state.rotation, true);
+  } else if (key === "f") {
+    doRestart(state.mode, state.rotation, false, nextFilter(state.filter));
   } else if (key === "r" && canReconnect()) {
     doReconnect(); // only while the Reconnect button is shown
   } else if (key === "q") {

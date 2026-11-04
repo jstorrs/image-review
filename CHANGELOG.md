@@ -97,6 +97,15 @@
   missing dependency with `this command needs the preprocess extra`: that is a broken install, and fails with
   Python's own ModuleNotFoundError.
 
+### CLI
+
+- **The browser page can re-check CLEAN images.** `f` cycles the list's filter: the todo images (the default), the
+  CLEAN ones, or every image, as the viewer's `review --filter unreviewed|clean|all` does. While re-checking the bar
+  reads "re-check: CLEAN" or "re-check: all", an image is todo until you mark it, and grid mode packs the CLEAN (and,
+  under `all`, UNREVIEWED) images, holding DIRTY and FLAGGED ones back for single mode. Verdicts go to the current
+  pass. The filter is not stored: every page load starts at todo. See "Re-checking CLEAN images" in
+  `docs/commands/browser.md`.
+
 ### Fixes
 
 - A deflated ZIP entry could make preprocess inflate up to 1 GiB (2 GiB on Python 3.14) from an archive of about

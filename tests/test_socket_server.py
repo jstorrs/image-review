@@ -900,18 +900,22 @@ class TestWebFiles(unittest.TestCase):
     @requires_node
     def test_grid_eligibility_parity(self):
         # Expectations were frozen from controller.py at 8e96267; the page's behaviour is now the spec.
-        # Only the default filter with nothing marked this session is asserted here.
+        # One table per status filter (the controller's "unreviewed" is the page's "todo") and keys marked
+        # this session (the page's re-checked set)
         tables = grid_rules()["eligibility"]
+        filters = {"unreviewed": "todo", "clean": "clean", "all": "all"}
+        marked = {"none": [], "k0,k2": ["k0", "k2"]}
+        self.assertEqual(sorted(tables), sorted(filters))
         for by_marked in tables.values():
+            self.assertEqual(sorted(by_marked), sorted(marked))
             for table in by_marked.values():
                 self.assertEqual(len(table), 256)
-        expected = tables["unreviewed"]["none"]
+        runs = list(itertools.product(filters, marked))
         # Four keys; the page's manifest below interleaves two batches, so manifest order differs from batch order
         cases = [
             dict(zip(["k0", "k1", "k2", "k3"], combo, strict=True))
             for combo in itertools.product(["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"], repeat=4)
         ]
-        self.assertEqual(len(cases), len(expected))
         got = self.run_helpers(
             r"""
             const manifest = ["k0", "k1", "k2", "k3"].map((key, i) => ({ key, batch: i % 2 === 0 ? "b2" : "b1" }));
@@ -920,22 +924,30 @@ class TestWebFiles(unittest.TestCase):
             // By code point, as Python: U+FF5E before U+1F600 (UTF-16 code units would put it after)
             const astral = [{ key: "x", batch: "\u{1F600}" }, { key: "y", batch: "\uFF5E" }, { key: "z", batch: "b" }];
             assert.deepStrictEqual(plain(m.sortedBatches(astral)), ["b", "\uFF5E", "\u{1F600}"]);
-            console.log(JSON.stringify(data.map((statuses) => {
-              const map = new Map(Object.entries(statuses));
-              const withGrids = m.gridBatches(manifest, map);
-              const accepts = (batch) => withGrids.has(batch);
-              return {
-                keys: Object.fromEntries(batches.map((b) => [b, m.gridKeys(manifest, map, b)])),
-                held: Object.fromEntries([...batches, null].map((b) => [b || "all", m.heldBackCount(manifest, map, b)])),
-                message: m.heldBackMessage(3, m.heldBackCount(manifest, map, null)),
-                first: m.nextBatch(batches, null, accepts),
-                after: Object.fromEntries(batches.map((b) => [b, m.nextBatch(batches, b, accepts)])),
-              };
+            console.log(JSON.stringify(data.runs.map(({ filter, rechecked }) => {
+              const done = new Set(rechecked);
+              return data.cases.map((statuses) => {
+                const map = new Map(Object.entries(statuses));
+                const withGrids = m.gridBatches(manifest, map, filter);
+                const accepts = (batch) => withGrids.has(batch);
+                const held = (batch) => m.heldBackCount(manifest, map, batch, filter, done);
+                return {
+                  keys: Object.fromEntries(batches.map((b) => [b, m.gridKeys(manifest, map, b, filter)])),
+                  held: Object.fromEntries([...batches, null].map((b) => [b || "all", held(b)])),
+                  message: m.heldBackMessage(3, held(null)),
+                  first: m.nextBatch(batches, null, accepts),
+                  after: Object.fromEntries(batches.map((b) => [b, m.nextBatch(batches, b, accepts)])),
+                };
+              });
             })));
             """,
-            cases,
+            {"cases": cases, "runs": [{"filter": filters[f], "rechecked": marked[name]} for f, name in runs]},
         )
-        self.assertEqual(got, expected)
+        assert isinstance(got, list)
+        self.assertEqual(len(got), 6)
+        for (status_filter, name), result in zip(runs, got, strict=True):
+            with self.subTest(filter=status_filter, marked=name):
+                self.assertEqual(result, tables[status_filter][name])
 
 
 @unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
