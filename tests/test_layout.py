@@ -1,4 +1,4 @@
-"""The pure grid layout core: JPEG header sizes and grid plans. Must not import pygame."""
+"""The pure grid layout core: JPEG header sizes and grid plans. Must not import PIL."""
 
 import io
 import subprocess
@@ -205,7 +205,7 @@ class ImportTest(unittest.TestCase):
         code = (
             "import sys, image_review.cli, image_review.server, image_review.layout, image_review.tunnel, "
             "image_review.connection, image_review.signals\n"
-            "print(sorted(m for m in ('pygame', 'PIL', 'numpy', 'skimage', 'matplotlib') if m in sys.modules))"
+            "print(sorted(m for m in ('PIL', 'numpy', 'skimage', 'matplotlib') if m in sys.modules))"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), "[]")

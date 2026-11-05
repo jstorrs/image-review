@@ -983,7 +983,7 @@ class TestWebFiles(unittest.TestCase):
             """,
             cases,
         )
-        # grid_status was frozen from controller.py at 8e96267; the page's behaviour is now the spec
+        # grid_status was frozen from the Python implementation at 8e96267; the page's behaviour is now the spec
         frozen = grid_rules()["grid_status"]
         self.assertEqual(len(frozen), len(cases))
         expected = [
@@ -991,16 +991,6 @@ class TestWebFiles(unittest.TestCase):
             for status, statuses in zip(frozen, cases, strict=True)
         ]
         self.assertEqual(got, expected)
-
-    def test_verdict_message_parity(self):
-        from image_review import controller
-
-        script = web_scripts()
-        for name in ["GRID_HAS_DIRTY", "IMAGE_HAS_DIRTY", "NOTHING_TO_UNDO", "UNLOADABLE_CLEAN"]:
-            with self.subTest(name=name):
-                found = re.search(rf'^const {name} = "([^"]*)";$', script, re.MULTILINE)
-                assert found is not None, name
-                self.assertEqual(found[1], getattr(controller, name))
 
     def test_instance_header_name_matches_the_server(self):
         from image_review.server import INSTANCE_HEADER
@@ -1010,11 +1000,10 @@ class TestWebFiles(unittest.TestCase):
         self.assertEqual(found[1], INSTANCE_HEADER)
 
     def test_copied_limits_match_python(self):
-        from image_review import connection, controller, server
+        from image_review import connection, server
 
         script = web_scripts()
         for name, module in [
-            ("MIN_DWELL_MS", controller),
             ("MAX_REVIEWER_LENGTH", connection),
             ("MAX_PASS", connection),
             ("MAX_GRID_KEYS", server),
@@ -1028,8 +1017,8 @@ class TestWebFiles(unittest.TestCase):
 
     @requires_node
     def test_grid_eligibility_parity(self):
-        # Expectations were frozen from controller.py at 8e96267; the page's behaviour is now the spec.
-        # One table per status filter (the controller's "unreviewed" is the page's "todo") and keys marked
+        # Expectations were frozen from the Python implementation at 8e96267; the page's behaviour is now the spec.
+        # One table per status filter (the Python "unreviewed" is the page's "todo") and keys marked
         # this session (the page's re-checked set)
         tables = grid_rules()["eligibility"]
         filters = {"unreviewed": "todo", "clean": "clean", "all": "all"}

@@ -23,7 +23,7 @@ Put the option before the command, e.g. `image-review -q status`:
 |---|---|
 | (default) | INFO and up |
 | `-q`, `--quiet` | Only warnings and errors |
-| `-v`, `--verbose` | Debug messages too (currently few: the work directory opened, grid packing counts and rotation) |
+| `-v`, `--verbose` | Debug messages too (currently few: the work directory opened, and why a browser could not be chosen or opened) |
 
 `-q` and `-v` together are a usage error (exit 2).
 
@@ -31,12 +31,12 @@ Errors and warnings cover:
 
 - ERROR: a server request failed with a 500.
 - WARNING:
-  - an image that cannot be loaded or was left out of every grid;
   - an input skipped by `preprocess`;
   - a torn last line of `review.tsv`;
   - a world-accessible work directory;
-  - a refused verdict;
-  - a failed server connection;
+  - a new file whose directory could not be synced to disk;
+  - a server connection that failed, or that was refused because the connection
+    limit was reached;
   - `export --allow-live` overriding a held lock;
   - an `export --output` or `--report` file that could not be given the work
     directory's group.

@@ -26,16 +26,15 @@ and **export** the allowlist of files that may be released.
   0). `pylibjpeg-libjpeg` is deliberately not used (GPL-3).
 
 - The CLI imports heavy modules only in the command that needs them, so
-  `--help`, `review`, `serve`, `status` and `export` start without them, and
-  `image_review.cli` never imports pygame.
+  `--help`, `review`, `serve`, `status` and `export` start without them.
 
 ## Architecture
 
 ```
 cli.py              Command-line entry point, argument parsing
 preprocess.py       DICOM/image loading and normalization
-status.py           Status, Verdict, MarkMode, Rotation, TODO_STATUSES vocabulary; GRID_ELIGIBLE, grid_status, grid_clean_refused (stdlib only)
-store.py            ReviewStore Protocol, LocalStore, pure filter/summary functions
+status.py           Status, Verdict, MarkMode, Rotation, TODO_STATUSES vocabulary; GRID_ELIGIBLE, grid_clean_refused (stdlib only)
+store.py            ReviewStore Protocol, LocalStore, pure summary functions
 lock.py             The work directory's review.lock: acquire, release, live_writer (stdlib only)
 export.py           Export rows, the allowlist split and their TSV formats: export_rows, split_allowlist, format_allowlist, format_report (stdlib only)
 atomic.py           write_new_file: create a file atomically, never overwriting (stdlib only)
@@ -43,12 +42,8 @@ server.py           bearer-token server exposing a ReviewStore over plain HTTP, 
 connection.py       Shared limits and parsers: MAX_PASS, parse_reviewer, parse_token, is_int_at_least, package_version
 tunnel.py           parse_via, parse_ssh_host: the parts of the ssh command serve prints
 signals.py          interrupt_on / interrupt_once: signals to KeyboardInterrupt, shared by preprocess, review, export and serve
-controller.py       pygame review session orchestration and event loop (no command uses it)
-viewer.py           Fullscreen pygame display (no command uses it)
 layout.py           Pure grid layout: jpeg_size, fit_size, plan_grids (stdlib and rectpack only)
-grid_packer.py      Review-time compositing of packed grids (pygame; no command uses it)
 review_db.py        Persistent review state (review.tsv)
-util.py             Shared utilities (surface loading)
 ```
 
 All review-time data access goes through a `ReviewStore`. Both `review` and
@@ -57,8 +52,8 @@ All review-time data access goes through a `ReviewStore`. Both `review` and
 on a Unix socket. Neither the server nor the page touches the work directory
 otherwise.
 `status.py`, `store.py`, `lock.py`, `export.py`, `atomic.py`, `server.py`,
-`connection.py`, `tunnel.py`, `signals.py` and `layout.py` import without pygame,
-PIL, numpy or skimage.
+`connection.py`, `tunnel.py`, `signals.py` and `layout.py` import without PIL,
+numpy or skimage.
 
 ```
 review (this machine)                              browser (this machine)
@@ -861,7 +856,7 @@ argv is public, `/proc/*/cmdline` on Linux) when both hold:
   says a graphical session is plausible: with a display, `webbrowser` can
   still pick a terminal browser.
 - `graphical_browser()`: `webbrowser.get()`, refused (None) when it raises
-  `webbrowser.Error`, when the controller is exactly
+  `webbrowser.Error`, when the browser object is exactly
   `webbrowser.GenericBrowser` (a foreground command, as from a `$BROWSER`
   without `&`), or when its name's basename is in `CONSOLE_BROWSERS` (`lynx`,
   `w3m`, `links`, `elinks`, `www-browser`): `is_graphical`.
@@ -869,7 +864,7 @@ argv is public, `/proc/*/cmdline` on Linux) when both hold:
 Without a display it prints a hint before "Press Ctrl-C to stop.". With one,
 a daemon thread (`BROWSER_THREAD`, running `_BrowserOpener.run`), started
 after that line and just before `serve_forever`, calls `graphical_browser()`
-and then the controller's `open(path.as_uri())`. Choosing can take seconds
+and then that browser object's `open(path.as_uri())`. Choosing can take seconds
 (`webbrowser`'s registration runs `xdg-settings` and similar), and a browser
 may not return; neither holds up the server, and since the socket is already
 listening the browser's first connection waits in the backlog. The thread
@@ -910,12 +905,12 @@ Opens the store read-only (no lock; see `review`). The command fetches the manif
 statuses from the store and prints the report. The counts come from the pure
 `store.summary` and `store.batch_summary`, which are pass-aware. Then it calls
 `store.skipped()`; a `ValueError` from a malformed `skipped.tsv` becomes a
-`ClickException` (exit 1). Does not start pygame.
+`ClickException` (exit 1).
 
 What the report shows, the FLAGGED status, the Skipped line and what happens
 when `skipped.tsv` is missing or malformed are in
 [status](../commands/status.md). `status` cannot count unloadable images (see
-*Unloadable Images*): they count as UNREVIEWED until marked DIRTY.
+[Images that cannot be loaded](../commands/browser.md#images-that-cannot-be-loaded)): they count as UNREVIEWED until marked DIRTY.
 
 **Exit status**: 0, unless `--check` is given. Then it exits 1 if any image is
 UNREVIEWED or `store.skipped()` reports a `failed` row, else 0; the meaning is
@@ -1202,11 +1197,10 @@ byte offset, for a file that is not UTF-8), which the CLI shows as
 `Cannot read work directory: ...` (exit 1).
 
 **Integrity check.** When the manifest records a `jpeg_sha256`,
-`LocalStore.image_bytes` (and so `image_bytes_many`) hashes the bytes it read
+`LocalStore.image_bytes` hashes the bytes it read
 and raises `ValueError("<key> does not match its recorded hash")` on a
-mismatch. Every caller already treats that as an unloadable image: the grid
-packer leaves it out of every grid, the review session shows a placeholder that
-takes only DIRTY (see *Unloadable Images*), and the server answers `/image`
+mismatch. Every caller already treats that as an unloadable image: `/grids` leaves
+it out of every grid, and the server answers `/image`
 with 404 (`loadJpeg` in the browser page returns null for any non-OK reply,
 and the page shows "Cannot load image: KEY" instead of the image). This
 catches what Pillow's strict decode cannot: a JPG whose scan data was cut short
@@ -1409,25 +1403,22 @@ Preprocessed individual image files. Numbered sequentially within each batch.
 ### Types
 
 `Key`, `ImageId`, `Status`, `Verdict` and `TODO_STATUSES` (with `MarkMode`
-and `Rotation`) are defined in `status.py`, with the grid rules both clients
-and the server apply: `GRID_ELIGIBLE`, `grid_status(snapshot, keys)` and
-`grid_clean_refused(snapshot, keys)` (see *Grid Status Derivation*), and
+and `Rotation`) are defined in `status.py`, with the grid rules the page and
+the server apply: `GRID_ELIGIBLE`, `grid_clean_refused(snapshot, keys)` and
 `GridCleanRefused`, the exception a store raises when it refuses a grid CLEAN
-by that rule (not a `StoreUnavailable`).
+by that rule.
 
 | Name | Description |
 |------|-------------|
 | `Key` | `NewType("Key", str)`: a manifest key, the `preprocessed_path` (see *Key versus `image_id`*). A string becomes a `Key` only where it is parsed (`load_manifest`, and the server's `parse_mark`, `parse_grids` and `/image` check), so the type checker keeps keys and source paths apart |
-| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the escaped bad-name ids derived there; preprocess mints no `#icon` id), `parse_decision`, `load_manifest`, `load_skipped`, `load_notes`, and `export_rows` (a file's id with `#icon` removed, or an ambiguous `X#icon` kept as a file of its own). Server, client and controller never see one |
+| `ImageId` | `NewType("ImageId", str)`: a source image id, the source path or `<zip>::<entry>` (possibly PHI; it never leaves `LocalStore`). A string becomes an `ImageId` only where it is minted or parsed: preprocess discovery (with the escaped bad-name ids derived there; preprocess mints no `#icon` id), `parse_decision`, `load_manifest`, `load_skipped`, `load_notes`, and `export_rows` (a file's id with `#icon` removed, or an ambiguous `X#icon` kept as a file of its own). Server and client never see one |
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
-| `StatusFilter` | `Literal["unreviewed", "clean", "all"]`: the status-filter vocabulary of the pygame session, taken by `filter_rows` and `ReviewSession` |
 | `ManifestRow` | Frozen dataclass: `key` (the `preprocessed_path`) and `batch` |
 | `SkippedRow` | Frozen dataclass: one `skipped.tsv` row, `image_id`, `kind` (`SkipKind`, `Literal["failed", "ignored"]`) and `reason` |
 | `ManifestEntry` | Frozen dataclass: one `manifest.tsv` row, `batch`, `key`, `image_id`, and `source_sha256` and `jpeg_sha256` (`str \| None`; `None` in a 3-column manifest). Local only |
 | `ExportRow` | (`export.py`) Frozen dataclass: one `export` row (a source file), `image_id`, `status` (`ExportStatus`, `Literal["CLEAN", "DIRTY", "UNREVIEWED", "NOT_REVIEWED", "IGNORED"]`), `pass_number` (`int \| None`), `timestamp`, `reviewer`, `reason`, `source_sha256` (`""` when unknown) |
-| `StoreUnavailable` | Exception: the store cannot be reached (as opposed to a bad key or image) |
 
 ### Key versus `image_id`
 
@@ -1444,7 +1435,6 @@ image preprocessed more than once); they share a review status.
 |--------|-------------|
 | `manifest() -> list[ManifestRow]` | All rows, in manifest order |
 | `image_bytes(key) -> bytes` | JPG bytes; `KeyError` for an unknown key |
-| `image_bytes_many(keys) -> dict[str, bytes]` | Bytes for the keys that loaded; missing or unloadable keys are omitted with a logged warning |
 | `statuses(pass_number) -> dict[str, Status]` | Pass-aware status of every manifest key |
 | `mark(keys, status, pass_number, *, reviewer, mode) -> dict[str, Status]` | Record a verdict given by `reviewer` (an unauthenticated claim) in `mode` (`single` or `grid`); returns the new status of every key affected, including keys that share an `image_id` with a marked key. Raises `status.GridCleanRefused`, recording nothing, for a `grid` CLEAN that `grid_clean_refused` refuses against the keys' current statuses (a key DIRTY or FLAGGED, unless every key is DIRTY); `LocalStore` enforces this itself, so every writer holds to it. `LocalStore` also raises `KeyError` for an unknown key and `ValueError` for repeated keys or a `single` mark of other than one key, recording nothing |
 | `undo(pass_number, *, reviewer) -> dict[str, Status]` | Undo the latest mark not yet undone (one `mark` call: one image or a whole grid), restoring each of its images' decision from before it (see *Undo rows*); `reviewer` is checked and recorded like `mark`'s. Returns the new status, at `pass_number`, of every key affected, as `mark` does; `{}` when there is nothing to undo |
@@ -1460,8 +1450,8 @@ loads a `ReviewDB(work_dir, sources=export.manifest_hashes(entries))` and
 calls its `migrate()` (see *`review.tsv`*), releasing the lock if either fails. `close()` releases it. A `read_only` store takes no lock and its
 `mark` and `undo` raise `PermissionError` (as they do after `close()`). `image_bytes` reads the file via
 `safe_path` and checks it against its `jpeg_sha256` when the manifest has one
-(see *Integrity check*); `image_bytes_many` loops over it, catching `KeyError`,
-`ValueError` (path escape, hash mismatch) and `OSError`. `mark` translates each key to its
+(see *Integrity check*); it raises `KeyError` for an unknown key, `ValueError` (path escape, hash mismatch) and
+`OSError` when the file cannot be read. `mark` translates each key to its
 `image_id` and its own manifest batch (a grid's keys need not share one) and
 calls `ReviewDB.mark_many`, so `grid_size` is the number of keys. After a
 successful `mark_many`, the rows it wrote and each image's decision from just
@@ -1484,7 +1474,6 @@ see *`image-review export`*.
 
 | Function | Description |
 |----------|-------------|
-| `filter_rows(rows, statuses, status_filter="unreviewed", batch=None)` | Filter rows by status and optional batch: `unreviewed` selects `TODO_STATUSES` (UNREVIEWED and FLAGGED), `clean` selects CLEAN, `all` everything. `status_filter` is a `StatusFilter` (`Literal["unreviewed", "clean", "all"]`), parsed once by the CLI's `--filter` choice |
 | `summary(rows, statuses)` | A `Counter[Status]` of the rows' statuses (a missing status counts 0; `.total()` is the image count) |
 | `batch_summary(rows, statuses)` | The same per batch: `dict[str, Counter[Status]]` |
 | `skipped_counts(rows) -> SkippedCounts` | The failed/ignored split of `SkippedRow`s; the one derivation behind `skipped()`, preprocess's summary line and `preprocess.json` counts |
@@ -1504,479 +1493,6 @@ error says work directories made before 0.4.0 have none). Two IO helpers serve
 `export` (see *`image-review export`*): `atomic.write_new_file(path, file_mode,
 group, text)` creates the `--output` and `--report` files, and `lock.live_writer(work_dir) ->
 WorkDirLocked | None` checks the work dir lock.
-
-## Review Session (`controller.py`)
-
-### Initialization
-
-`ReviewSession(store, reviewer, mode, pass_number, batch, status_filter, rotation)`:
-`reviewer` comes from `review --reviewer` (already checked) and is passed, with
-the session's current display mode, to every `store.mark()`, and to every `store.undo()`.
-
-1. Fetch `store.manifest()` (a list of `ManifestRow`)
-2. Determine the pass: `store.current_pass()` if not specified (the rule is
-   in *Pass Logic*)
-3. Fetch the **status snapshot** `store.statuses(pass)` (key -> status)
-4. Auto-select batch if not specified: pick the first batch (sorted
-   alphabetically) that has rows the mode may show (the status filter's rows;
-   in grid mode, minus DIRTY and FLAGGED, see *Grid Mode*). A batch whose only
-   todo images are FLAGGED is therefore not auto-selected for grid mode
-5. Determine review items based on mode
-
-The session remembers whether the pass (`--pass`) and the batch (`--batch`)
-were given: `b` (see *Next Batch*) adopts the current pass only when the pass
-was not given, and never leaves a given batch.
-
-Every item is a `ReviewItem`, the union of two frozen dataclasses, so a grid
-without its surface, or a single image with several keys, cannot be built:
-
-- `SingleItem(key)`: one image, loaded when displayed. Its `keys` is `(key,)`
-  and its `label` (shown in the status bar) is the key.
-- `GridItem(keys, surface, source_scale)`: a grid with its composited
-  surface and its smallest image scale. Its `label` is "grid (N images)". A
-  grid's status and CLEAN refusal follow the grid rules below, even for a
-  one-image grid; the item for an image left out of the grids in grid mode is
-  a `SingleItem`, not a grid.
-
-### Status Snapshot
-
-All status decisions (filtering, item status, todo counts, grid status) read a
-local dict, not the store. It is refreshed from `store.statuses()` at init and
-on every mode restart and next-batch move, and updated after each mark from the returned
-`mark()` result (which includes other keys sharing an `image_id`). Marking
-therefore costs one store call and no re-fetch.
-
-### Store Failures
-
-`StoreUnavailable` (`LocalStore` raises none; the handling stays for a store
-that can become unreachable) while loading an
-image, marking, restarting a mode, or moving to the next batch is treated as a lost connection, not an
-unloadable image: autoplay and the pending auto-advance are cancelled, the
-status snapshot is left unchanged (a failed mark is not applied), the viewer
-shows "Lost connection to server - progress saved. Press q to quit." and the
-reason is logged (ERROR). The session is then `DISCONNECTED`: `_handle_event` passes no
-key to a screen handler, and only quitting acts, so nothing reaches the store
-again. A failed mode restart or next-batch move clears the item list. Any
-other failure to load an image is an unloadable image (see *Unloadable Images*).
-
-### Single Mode
-
-- `filter_rows()` over the manifest and snapshot for the current
-  pass/batch/filter
-- Shuffle the resulting rows
-- Each row becomes a `SingleItem`; the image is fetched with
-  `store.image_bytes(key)` and decoded with `load_surface(bytes)` on display. An
-  image that cannot be fetched or decoded is shown as a placeholder in its place
-  (see *Unloadable Images*); the cursor stays on it
-
-### Grid Mode
-
-- Display the packing message (see the pygame viewer's documentation before 1.0.0)
-  while packing, with its count updated about every 25 images (via
-  `pack_into_grids`'s `on_progress`; repainted and `pg.event.pump()`ed, which
-  does not consume key events)
-- Read screen dimensions, subtract the 50px status bar height
-- A window resize rebuilds the grids (see *Resize rebuild* below)
-- `filter_rows()` for the current pass/batch/filter, then keep only rows whose
-  status is in `status.GRID_ELIGIBLE` (UNREVIEWED or CLEAN), in every
-  filter including `all`. A grid mark applies to all its images, so one
-  keypress must never clear an image already judged DIRTY (this pass) or
-  FLAGGED (DIRTY in another pass); those are reviewed in single mode
-- Pass the keys of those rows (the cache key's keys) and the store to
-  `pack_into_grids()` with the screen dimensions.
-  The session caches the last result (only one), keyed by the review rows'
-  keys in order, the grid size and rotation policy; a rebuild with the same
-  key (e.g. `s` then `m` with nothing marked) reuses it instead of packing
-  again. A mark that changes which rows are eligible (e.g. one now DIRTY)
-  changes the key, so a cached grid never holds a key the snapshot excludes.
-  A failed pack leaves no cached result. The cache is kept across single mode
-  within a batch (so `m`, `s`, `m` packs once) and dropped by `b`, so a
-  previous batch's canvases are not kept alive. The items below are rebuilt
-  from the cached result on every build, including a fresh shuffle
-- Convert each returned `GridSpec` into a `GridItem` with its `keys`,
-  `surface` and `min_scale` (as `source_scale`)
-- Shuffle the grid items, then sort by image count (largest grids first)
-- Append one item per key `pack_into_grids()` left out of the grids
-  (unloadable, or, should it ever happen, left unpacked):
-  `SingleItem(key)`. Like a
-  single-mode item it is loaded when shown, so a placeholder is drawn only
-  then and only if loading fails, and it follows the single-image status rules,
-  not the grid rules, with one exception: it is marked with mode `grid`, so
-  over a server its CLEAN follows the grid rule once it is FLAGGED (the 409
-  below). That needs another client writing an earlier-pass DIRTY; locally it
-  cannot arise, as the work directory has a single writer and a session's own
-  marks never make a key DIRTY in another pass. No grid ever holds a key whose
-  pixels it does not show
-
-When a grid is marked CLEAN or DIRTY, `store.mark()` is called with all its
-`keys`, and every key in the result is written into the snapshot.
-
-A grid can still come to hold a DIRTY key mid-session, when a key in it shares
-an `image_id` with an image marked DIRTY elsewhere. CLEAN on a grid holding any
-DIRTY or FLAGGED key is refused (`status.grid_clean_refused`; the session
-makes no store call; the status bar shows `controller.GRID_HAS_DIRTY`, also
-logged), unless every key in the grid is DIRTY, which reverses that grid's own
-verdict. The messages are in
-[Refused CLEAN on a grid](../commands/browser.md#refused-clean-on-a-grid).
-
-The store applies the same rule to every grid mark, so the server's
-`POST /mark` answers 409 (see *Error semantics*) and a snapshot gone stale
-(e.g. another client marked a key DIRTY since it was read) cannot record such
-a CLEAN either.
-`LocalStore.mark` raises `GridCleanRefused`; it is not a lost
-connection: the session logs and shows the same refusal (for a left-out
-single, `controller.IMAGE_HAS_DIRTY`), re-reads the statuses (a `StoreUnavailable` there is a lost
-connection) and repaints the item's status. Nothing is recorded, so the undo
-count is unchanged and there is no auto-advance. `LocalStore.mark` checks the rule
-itself, against the keys' current statuses for the pass, and raises
-`GridCleanRefused` before writing; the session still refuses a grid first
-(without a store call), and a left-out single cannot become FLAGGED locally
-(see above).
-
-If grid mode has no items but the status filter selected rows it left out, the
-session says so instead of implying the review is done: `run()` prints, and a
-mode restart shows, `_held_back_message` (text in
-[Todo images](../commands/browser.md#todo-images); the terminal form was in
-the pygame viewer's documentation before 1.0.0). Its K counts the left-out
-rows that are todo as in *Todo*, over the selected batch, or all batches when
-none is selected.
-
-**Resize rebuild.** A `WINDOWRESIZED` event refits the current item. In grid
-mode, each `refresh_if_needed` (only while reviewing) compares the size held in
-the grid cache key (the size the grids were last packed for) with the current
-grid size, and repacks when they differ: one rebuild however many resize events
-a batch holds, none for a resize back to the packed size before the tick, and
-a size change that arrives without a `WINDOWRESIZED` is caught too. The repack
-stops autoplay and a pending advance, shows the packing message, and rebuilds
-the items (the changed size misses the cache, and the new cache key records the
-size it was packed for, so the next tick repacks only if the window changed
-meanwhile). Queued
-`KEYDOWN` and `CONTROLLERBUTTONDOWN` events are discarded, as on a mode restart. The repack uses the current statuses, so under the
-default filter it drops grids already marked CLEAN as well as DIRTY or FLAGGED
-ones. The cursor goes to the grid that holds the first key of the item that was
-current, or to the first item if none does (that grid was marked, or the new
-packing left the key out of the grids). The dwell restarts, so a verdict never
-lands on a re-composited grid the reviewer has not seen. Undo history is
-cleared, as on a mode switch: the repack drops grids marked DIRTY, so `z` could
-no longer show what it undoes. If nothing is left to show, the session goes to
-the end-of-list state with the held-back message or the end-of-list message,
-as a mode restart does. If the store is unavailable during the repack
-the session goes to the lost-connection screen, which is not repainted over.
-Single mode only rescales. A restart (mode switch, `b`, display change) packs
-at the current size, so it leaves nothing to repack.
-
-When either grid dimension is zero or negative (including a window no taller
-than the status bar), grid packing is suspended. The session keeps its items
-and status snapshot, stops autoplay and pending advances, and accepts only
-quit, fullscreen, and mode-switch input; in particular, verdicts and
-navigation cannot act on pixels that are no longer visible. It does not pack
-or fetch grid images while suspended. When a positive content area returns,
-the session rebuilds once, follows the current item's first key when possible,
-and restarts its dwell. Startup or a mode switch into grid mode at an unusable
-size defers the initial build the same way, so an empty deferred list is not
-treated as a genuinely empty review.
-
-### Unloadable Images
-
-An image whose bytes are missing (`KeyError`, e.g. a 404 from the server),
-do not match the manifest's `jpeg_sha256` (`ValueError`), or cannot be read or
-decoded is not an outage (see *Store Failures*). A warning
-naming the key is logged, the key is added to the session's
-`_unloadable` set, and the item is shown as a placeholder built by
-`controller._placeholder` with `viewer.placeholder_surface`: the key and a
-short reason, `KeyError` giving the "fetched" reason and any other failure
-the "read or decoded" one (text in
-Images that cannot be loaded (the pygame viewer's documentation before 1.0.0));
-the error itself goes only to the log. Navigation, `n`, todo-only and autoplay treat it
-like any other item (autoplay does not stop at it), so the cursor always points
-at a real item. A `SingleItem` (every single-mode item, and the item
-for an image left out of the grids in grid mode) is loaded each time it is shown, so the
-key joins `_unloadable` before any verdict can count, and a key that loads
-again leaves it. Placeholders are never built up front.
-
-A placeholder can be marked DIRTY but never CLEAN: CLEAN on an item holding
-any unloadable key is refused (no store call; the status bar shows
-`controller.UNLOADABLE_CLEAN`, also logged), checked before the grid rule.
-DIRTY is recorded normally, so batch auto-selection moves on and the pass can
-finish.
-
-### Grid Status Derivation
-
-A grid's aggregate status (`status.grid_status`) is derived from the snapshot
-statuses of its keys:
-
-- Any key not in `GRID_ELIGIBLE` (DIRTY or FLAGGED) -> DIRTY, so such a grid
-  is neither shown nor counted as todo
-- Otherwise any UNREVIEWED -> UNREVIEWED
-- Otherwise (all CLEAN) -> CLEAN
-
-### Todo
-
-With `--filter unreviewed`, an item is todo if its status is in `TODO_STATUSES` (UNREVIEWED or
-FLAGGED); in single mode a FLAGGED image is therefore todo, and grids are never built with one.
-With `--filter clean` or `all`, every loaded item is a re-check: it is todo while at least one of
-its keys is todo, i.e. not in the session's marked set or with a status in `TODO_STATUSES` (a key
-marked earlier that is FLAGGED in a new pass, or restored to UNREVIEWED, is todo again). A
-successful mark adds the item's keys; a successful undo removes the keys it restored. The set is in
-memory only and is kept across a pass change (see *Next Batch*). Any todo key keeps a grid todo,
-so a partly undone grid comes back.
-
-### Event Loop
-
-The session runs a pygame event loop. The keys and gamepad buttons, the
-display-select and help screens, the end-of-list screens and their messages
-were in the pygame viewer's documentation before 1.0.0. Internally:
-
-- `_handle_event` quits on `q`/Escape, the Start button or `pg.QUIT` in every
-  state. In any other state than `DISCONNECTED` it then offers a key to
-  `_handle_mode_key` (`s`, `m`, `M`), and otherwise to the current
-  `UIState`'s handler: `REVIEWING`, `SPLASH` (the help screen),
-  `DISPLAY_SELECT` (opened by `w`) or `END_MESSAGE`. `DISCONNECTED` takes no
-  other input (see *Store Failures*).
-- `M` is `pg.K_m` with `KMOD_SHIFT` in the key event's `mod`, not the live
-  keyboard state.
-- `1`-`9` (`pg.K_1`-`pg.K_9`) call `viewer.switch_display` on the
-  display-select screen only. Confirming there restarts grid mode only when
-  the display index differs from the one before `w`.
-- Gamepad buttons go through `_handle_button`: in `REVIEWING`, B, Y and the
-  D-pad map to `c`, `d`, Left and Right (`REVIEW_BUTTON_KEYS`) after stopping
-  autoplay; in every other state A is passed on as Space.
-- `WINDOWRESIZED` refits the current image; in grid mode the grids are
-  rebuilt on the next tick (see *Resize rebuild*).
-
-Gamepads go through SDL's GameController API (`pygame._sdl2.controller`,
-initialised when the session starts), so buttons are numbered by SDL's
-standard layout, with Xbox-style positions: A bottom, B right, Y top. On
-`CONTROLLERDEVICEADDED` the session opens a `Controller(event.device_index)`
-and keeps it in a dict keyed by its joystick instance id; on
-`CONTROLLERDEVICEREMOVED` it drops the one with `event.instance_id`. Both
-pass the dict's size to `viewer.set_joystick_count`. SDL also
-sends the raw `JOY*` events for these pads, but none are handled, so each pad
-is counted once and a pad's raw button indices never act. A pad with no SDL
-mapping gets no `CONTROLLER*` events and is not counted.
-
-After a mark, an `ADVANCE_EVENT` timer (200 ms) advances to the next item.
-Navigation past either end shows `_end_message` (or, in todo-only
-navigation, `_no_todo_message`) in the `END_MESSAGE` state.
-
-On the review screen every key except Space cancels autoplay (and still does
-its normal action); every gamepad button cancels it. Left/Right, the D-pad,
-`n`, mode switches, `h` and `w` cancel a
-pending post-mark advance, and so does any change of the current item: the
-advance belongs to the item that was marked, so an `ADVANCE_EVENT` already
-queued when it was cancelled is ignored (`_advance_pending`). The autoplay and
-post-mark advance timers act only while an item is being reviewed, never behind
-the help, display-select or message screens.
-
-`run()` alternates two halves: `handle_events(events) -> bool` applies one
-`pg.event.get()` batch (False means quit; events after a quit are dropped) and
-`refresh_if_needed()` repaints. The display only redraws when a dirty flag is
-set, to minimize CPU usage, and only while reviewing: the help,
-display-select and message screens are painted once
-by the viewer and stay until the state changes. When there are no items (an
-empty mode, or no batch left), `_handle_end_key` ignores navigation, so the
-message stays up.
-
-**Verdicts need a seen item.** A verdict (`c`/`d`, B/Y) applies only to
-an item that has been painted and on screen for `MIN_DWELL_MS` (200 ms);
-otherwise it is ignored (it still stops autoplay). The session records the tick
-of the first paint that shows the current item's pixels in `refresh_if_needed`
-(the viewer's `image_shown`; a window too short to fit an image, or an image
-that scales to zero size, paints only the bars and background and starts no
-dwell), compares it
-with the clock read once at the start of the event batch (so slow events earlier
-in the batch, like a resize, do not count toward the dwell), and clears it
-whenever the current item or screen changes (a new item, a mode restart, the
-help or display-select screen) or a repaint shows no pixels of it; repainting
-the same item with its pixels (resize, a mark) keeps it. So a verdict queued in the same event batch as a mode switch, an autoplay
-advance or a post-mark advance, or typed within 200 ms of the new item
-appearing, never judges an item the reviewer has not seen. All keyboard and
-gamepad button events queued during a blocking step (a grid build or mode
-restart) are also discarded with `pg.event.clear`, including `q`/Esc and the
-arrows. `_mark` itself is not gated.
-
-### Undo
-
-`z` (on the review screen, in single and grid mode, and on the end-of-list
-and other message screens, but not the lost connection screen) first cancels
-autoplay and a pending post-mark advance. The session counts its own
-successful marks since the current mode started (`_undoable`: reset by every
-mode restart, +1 per successful mark, -1 per successful undo). At 0, `z` shows
-`controller.NOTHING_TO_UNDO` without calling the store, so it only ever undoes a mark made
-on one of this mode's items. Otherwise it calls `store.undo(pass,
-reviewer=...)`; a `StoreUnavailable` is a lost connection, as for a mark, and a
-`{}` result (the store's history is gone) resets the count and shows the same
-message. The returned statuses update the snapshot and the todo count. The cursor
-moves to the first item, in this mode's item order, holding any returned key,
-the review screen is shown for it, and its dwell starts again, so `c`/`d` count
-only once the restored item has been on screen for `MIN_DWELL_MS`. Items are
-not rebuilt: grid membership is fixed when the mode starts, and an undone
-grid's keys are still in it. Only another client's mark on a shared server (out
-of scope, see *Concurrency limits*) can leave no item holding a returned key;
-the status bar then names up to three of its keys with their new status. `z`
-is not dwell-gated: it only undoes a mark on an item this mode showed, and
-shows that item again before any verdict counts. Key repeat stays off
-(pygame's default; `pg.key.set_repeat` is never called). What the reviewer
-sees is in Undo (the pygame viewer's documentation before 1.0.0).
-
-### Next Batch
-
-`b` on the end-of-list screen (not the lost connection screen) moves the
-session on to another batch without restarting. It cancels autoplay and a
-pending post-mark advance, reads `store.current_pass()` (adopted as the
-session's pass unless `--pass` was given) and re-fetches the status snapshot.
-The batch is then chosen by the pure function
-`next_batch(batches, current, has_rows, *, wrap)`, which returns the first of
-the sorted `batches` after `current` (from the first when `current` is `None`)
-that `has_rows` accepts, or `None`; with `wrap` the search goes round once,
-through the batches before `current` and finally `current` itself. `b` calls it
-with:
-
-- `batches`: the manifest's batches sorted alphabetically, or only the
-  `--batch` one when it was given, so `b` never leaves a restricted batch (it
-  reloads it while it has todo).
-- `current`: the session's batch, or `None` when the pass changed (the search
-  starts again from the first batch).
-- `has_rows(batch)`: the batch has todo rows the mode may show, i.e. rows of
-  the status filter (minus DIRTY and FLAGGED in grid mode, as in
-  auto-selection) that are todo as in *Todo*: any such row under
-  `--filter unreviewed`; under `clean`/`all`, a row whose key is not in the
-  session's marked set or whose status is UNREVIEWED or FLAGGED. The set is
-  kept across a pass change: under clean/all a re-check of a finished pass is
-  itself recorded in a new pass, and `current_pass()` then advances; a key it
-  holds that the new pass shows as FLAGGED is still todo by its status.
-- `wrap=True` under every filter, so todo left behind (e.g. skipped images or
-  batches) is found.
-
-A found batch becomes the session's batch and its items are rebuilt in the
-current mode as for a mode restart (`_undoable` reset), from the snapshot `b`
-just fetched, starting at the first item; after a pass change the info bar
-announces the new pass. When nothing is found the session drops its items
-(they may belong to an ended pass) and resets `_undoable`. If the mode holds
-back todo rows of the status filter (grid mode: FLAGGED and DIRTY; counted
-over all batches, or the `--batch` one), it shows `_held_back_message` and
-moves the session's batch to the first batch holding one (the `--batch` one
-itself when given), so `s` opens it. Otherwise it shows `_all_done_message`,
-which chooses, in this order: the pass-complete message (under `--filter
-unreviewed` when the pass has just advanced), the batch-done message (with
-`--batch`), or the all-batches-done message, and appends the current pass
-when an explicit `--pass` differs from `current_pass()`. The messages are in
-End of a batch (the pygame viewer's documentation before 1.0.0). A `StoreUnavailable`
-from any of these calls is a lost connection (see *Store Failures*).
-
-## Grid Packer (`grid_packer.py`)
-
-### `GridSpec` Dataclass (frozen)
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `surface` | `pg.Surface` | Composited grid image, ready for display |
-| `keys` | `tuple[str, ...]` | Keys (preprocessed paths) of the images drawn in this grid |
-| `min_scale` | `float` | Smallest `fit_size` / header-size ratio among the images drawn (1.0 if none was shrunk) |
-
-### `pack_into_grids(keys, store, grid_w, grid_h, *, rotation="auto", on_progress=None) -> tuple[list[GridSpec], list[Key]]`
-
-`keys` is a `Sequence[Key]`, the images to pack. Returns the grids and the keys
-left out of every grid (missing, unreadable header, failed decode, or left unpacked), in input order. A
-grid holds only keys whose pixels it shows. What to do with the left-out keys is
-left to the caller. At most one bin's decoded images are alive at a time.
-
-1. **Load**: Fetch all image bytes with `store.image_bytes_many()` (a
-   simple loop for `LocalStore`); compressed
-   JPGs are small. Read each image's dimensions from the JPEG header up to its
-   start of scan with `layout.jpeg_size(bytes)`, which decodes no pixels and
-   raises `ValueError` on an unreadable or truncated header. Images that are
-   missing (the store warns) or whose header cannot be read (warned here) are
-   left out of the packing.
-2. **Pack**: Each image is packed at `fit_size(w, h, grid_w, grid_h,
-   rotate)`: its own size if it fits the bin upright (or rotated, when
-   `rotate`), otherwise shrunk, keeping its aspect ratio, only as far
-   as the better allowed orientation requires, so nothing is larger than the
-   bin. `rotation` is `"always"` (`rotate` true), `"never"` (false) or `"auto"`.
-   The plan comes from `layout.plan_grids(sizes, grid_w, grid_h, rotation)`, a
-   pure function returning a `GridPlan` (whether rotation was used, the placed
-   rects per bin in bin order, and the ids left unpacked), so `serve` can
-   compute the same layout. It creates a `rectpack` packer with
-   `rotation=rotate` and `(grid_w, grid_h)` bins (unlimited bin count), and
-   adds each image as a rect of its fit size, in input order. Under `"auto"` the headers are packed twice, without and
-   with rotation (each at its own fit sizes; no pixels are decoded), and the
-   rotated packing is kept only if it needs strictly fewer bins. Only the
-   chosen packing is composited.
-3. **Composite**: One bin at a time: create a black `pg.Surface(grid_w,
-   grid_h)`, decode each of the bin's images with `util.load_surface(bytes)`,
-   `pg.transform.smoothscale` it to its fit size, and blit it at the packed
-   position, after `pg.transform.rotate(-90)` if rectpack rotated the rect
-   (`layout.is_rotated`: packed size differs from the fit size). The bin's decoded surfaces are
-   released before the next bin. An image that fails to decode here (a valid
-   header over a truncated body, a decoded size differing from the header's, or
-   a final size differing from its packed rectangle) is warned, its rectangle stays black, its key is left out of the grid's
-   `keys` and it is reported as left out. A bin left with no keys is dropped.
-4. **Overflow**: `fit_size` makes every image fit a bin, so the packer should
-   leave none out. Any it does is warned and reported as left out, so the
-   caller shows it as a single image loaded on display.
-
-`on_progress(i, n)`, if given, is called as each of the n images is handled
-(left out at load, composited or failed, or left unpacked), ending with `(n, n)`.
-
-`util.load_surface(buf: bytes) -> pg.Surface` decodes JPG bytes with
-Pillow (grayscale is converted to RGB). Truncated or undecodable input raises
-(Pillow is strict; `pg.image.load` would silently grey-fill missing rows).
-
-## Image Viewer (`viewer.py`)
-
-### `ImageViewer`
-
-Opens a fullscreen, resizable pygame window with hidden cursor.
-
-**Layout**: Image content fills the screen above a 50px status bar at the
-bottom edge.
-
-**Scaling**: Images are aspect-ratio-scaled to fit the available content area
-(`screen_height - 50px` by `screen_width`), centered both horizontally and
-vertically within the content area. Uses `pg.transform.smoothscale`.
-
-**Status bar**: A rectangle spanning the full width at the bottom, coloured
-by `STATUS_COLORS[status]`. `refresh()` draws the status word, then the help,
-todo-only and gamepad indicators, at the left; the info text centred; and the
-scale percent and the item's name at the right. What each part shows was in
-the pygame viewer's documentation before 1.0.0.
-
-**Scale indicator**: `resize()` applies the pure `fit_image`, which returns the
-scaled size, offset and factor (displayed size / source size) as one `Fit`, or
-`None` when no pixel would show. It never caps the factor, so an image smaller
-than the content area is enlarged and shows more than 100%. The status bar
-shows it as an integer percent (`scale_percent`, truncated, so a scale just
-under 1.0 never reads "100%"). Any scale under 1.0 draws the percent in
-`SCALE_WARNING_COLOR`, because small text such as burned-in PHI can be lost
-when an image is scaled down; at or above 1.0 it uses the normal font colour.
-In grid mode the percent is the smallest image's effective scale: `GridSpec.min_scale` (the smallest `fit_size` / header-size
-ratio among the images drawn, 1.0 if none was shrunk) is carried by
-`GridItem.source_scale` to `set_image(..., source_scale=1.0)`, and the
-percent is that times the canvas's display scale. A `SingleItem` is
-shown with `source_scale` 1.0.
-
-**Font**: DejaVu Sans 36pt bold, dark gray (`Color(64,64,64)`). Bundled in
-the `fonts/` subdirectory for cross-platform consistency. The help screen
-uses DejaVu Sans Mono 24pt.
-
-### Interface
-
-| Method | Description |
-|--------|-------------|
-| `set_image(surface, name, status, info, source_scale=1.0)` | Set new image; triggers resize/scale |
-| `set_status(status)` | Update status bar color without changing image |
-| `set_info(info)`, `set_todo_only(enabled)`, `set_joystick_count(count)` | Update the centered text, the todo-only and the gamepad indicators |
-| `resize()` | Apply `fit_image` for the current screen size: scaled image, offset and scale percent are replaced together |
-| `image_shown -> bool` | Property: whether `refresh()` paints visible image pixels. False when none is set, or it has no visible pixels (the window is too short to fit it, or it scales to zero size); `resize` replaces the scaled image with the new fit (or none), so the frame never shows one image's pixels under another's name |
-| `refresh_if_dirty() -> bool` | `refresh()` if the frame is dirty, clear the flag, return True; else False. Every method above, plus `switch_display` (through `resize`) and a new viewer, marks the frame dirty; `show_message` and `show_splash` do not |
-| `refresh()` | Render frame: background, status bar, text, scaled image |
-| `show_splash(lines, footer)` | Render centered splash/help overlay |
-| `show_message(text)` | Render centered text message (e.g. loading indicator) |
-
-The module-level `placeholder_surface(text) -> pg.Surface` renders `text`
-(one line per newline) centred on a dark 1280x720 surface (wider or taller if
-the text needs it), in the status bar font, for an image that could not be
-loaded. The font file is read once and cached.
 
 ## Review Database (`review_db.py`)
 
@@ -2694,8 +2210,8 @@ empties the rest of the stack.
   round from it too. A list with no items keeps its own screen, and the arrows do
   nothing.
 - **Re-check filter**: `state.filter` (`Filter`: `todo`, `clean` or `all`)
-  picks the keys the list holds (`inFilter`, as `store.filter_rows`): the
-  todo ones, the CLEAN ones, or every key; grid mode packs those in
+  picks the keys the list holds (`inFilter`): the todo ones (UNREVIEWED and
+  FLAGGED), the CLEAN ones, or every key; grid mode packs those in
   `GRID_ELIGIBLE` (`isGridRow`). `f` takes the next (`nextFilter`: todo,
   clean, all, todo) as a mode switch does (rereads `/statuses`, empties the
   stack of marked keys, rebuilds the list; in grid mode the current batch is
@@ -2713,7 +2229,7 @@ empties the rest of the stack.
   and `f` pass none), and in single mode, the list lands on the first todo
   item (`firstTodoIndex`), or on the end screen when no item is todo; under
   `todo` every item is todo when the list is built, so that is the first
-  item. The frozen controller tables in `tests/web/grid-rules.json`
+  item. The frozen tables in `tests/web/grid-rules.json`
   (each filter, with nothing or `k0` and `k2` re-checked) are the oracle for
   `gridKeys`, `gridBatches`, `heldBackCount` and `heldBackMessage`. While
   the filter is not `todo` the bar's mode reads "… · re-check: CLEAN" or

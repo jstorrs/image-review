@@ -39,7 +39,7 @@ nothing behind:
 
 - a `--work-dir` that does not exist;
 - a `--port` outside 0 and 1024-65535;
-- an unknown option, such as the options of the earlier pygame `review`
+- an unknown option, such as the options of earlier versions' `review`
   (`--mode`, `--pass`, `--batch`, `--filter`, `--rotate`, `--reviewer`).
 
 These exit with status 1 and leave nothing behind:

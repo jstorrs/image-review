@@ -40,7 +40,7 @@ function nextFilter(filter) {
   return FILTERS[(FILTERS.indexOf(filter) + 1) % FILTERS.length];
 }
 
-// Whether `filter` lists a key of `status`, as store.filter_rows.
+// Whether `filter` lists a key of `status`: todo lists UNREVIEWED and FLAGGED, clean only CLEAN, all every key.
 /** @param {string | undefined} status @param {Filter} filter @returns {boolean} */
 function inFilter(status, filter) {
   return filter === "all" || (filter === "clean" ? status === "CLEAN" : isTodo(status));
@@ -109,7 +109,7 @@ function itemStatus(item, statuses) {
   return item.kind === "grid" ? gridStatus(item.keys, statuses) : statuses.get(item.key);
 }
 
-// As status.grid_status: DIRTY if any image is not grid-eligible, else
+// A grid's status: DIRTY if any image is not grid-eligible, else
 // UNREVIEWED while any is todo, else CLEAN.
 /** @param {string[]} keys @param {StatusMap} statuses @returns {Status} */
 function gridStatus(keys, statuses) {

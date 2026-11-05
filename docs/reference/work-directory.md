@@ -167,7 +167,7 @@ is created by the first verdict.
 | `status` | `CLEAN` or `DIRTY`; `UNREVIEWED` only in an undo row (see [Undo rows](#undo-rows)) |
 | `pass_number` | Pass (an integer from 1 to 1000000) in which the verdict was given; in an undo row, the restored verdict's pass, or for a tombstone the undone mark's pass |
 | `timestamp` | ISO 8601 UTC time |
-| `reviewer` | Who gave the verdict: the name from the browser page's name box (rows from earlier versions may hold the old pygame `review --reviewer` name). The rules are in [Recorded verdicts](../commands/browser.md#recorded-verdicts) |
+| `reviewer` | Who gave the verdict: the name from the browser page's name box (rows from earlier versions may hold the name given to the old `review --reviewer` option). The rules are in [Recorded verdicts](../commands/browser.md#recorded-verdicts) |
 | `mode` | `single` or `grid`: the display mode the verdict was given in; `undo` for a row written by `z` |
 | `grid_size` | How many images the one keypress covered (1 in single mode); in an undo row, how many images the undo covered |
 | `tool_version` | The image-review version that wrote the row (`unknown` if not installed) |

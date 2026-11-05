@@ -2,7 +2,7 @@
 
 The operator pastes that command into a shell, so neither value may start with '-' (it would read as an ssh option)
 and each is limited to a small character set.
-Must stay importable without pygame/numpy/skimage.
+Must stay importable without numpy/skimage.
 """
 
 import re

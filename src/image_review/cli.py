@@ -393,13 +393,13 @@ CONSOLE_BROWSERS = frozenset({"lynx", "w3m", "links", "elinks", "www-browser"})
 
 
 def is_graphical(browser: webbrowser.BaseBrowser) -> bool:
-    """False for a controller that would run in this terminal: a foreground `GenericBrowser` (as from $BROWSER),
+    """False for a browser object that would run in this terminal: a foreground `GenericBrowser` (as from $BROWSER),
     or a known console browser by name."""
     return type(browser) is not webbrowser.GenericBrowser and Path(browser.name).name not in CONSOLE_BROWSERS
 
 
 def graphical_browser() -> webbrowser.BaseBrowser | None:
-    """The default browser controller, or None if there is none or it is not graphical (see `is_graphical`)."""
+    """The default browser object, or None if there is none or it is not graphical (see `is_graphical`)."""
     try:
         browser = webbrowser.get()
     except webbrowser.Error:

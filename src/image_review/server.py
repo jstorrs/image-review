@@ -1,7 +1,7 @@
 """Bearer-token server exposing a ReviewStore and the browser page over plain HTTP: on a Unix socket, for browser
 review over SSH, or on 127.0.0.1, for review on this machine.
 
-Must stay importable without pygame/numpy/skimage. Original image_ids never
+Must stay importable without numpy/skimage. Original image_ids never
 leave the store; clients only ever see keys (preprocessed paths).
 """
 
