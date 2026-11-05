@@ -99,7 +99,7 @@ class TestRemovedRemoteOptions(StoreTestCase):
                 with self.subTest(command=command, option=option):
                     result = invoke_cli(command, option, "x", "--work-dir", str(self.work_dir))
                     self.assertEqual(result.exit_code, 2, result.output)
-                    self.assertIn(f"No such option '{option}'", result.output)
+                    self.assertRegex(result.output, rf"No such option:? '?{option}'?")
 
     def test_remote_environment_is_ignored(self):
         self.store.close()
