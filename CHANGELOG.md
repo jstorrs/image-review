@@ -4,6 +4,21 @@
 
 ### Upgrading: breaking and behaviour changes
 
+- **`review` now opens the browser page on this machine; the pygame viewer is gone.** `image-review review` serves
+  the same page as `serve`, on `127.0.0.1` with a fresh token, and opens it in your browser; its options are
+  `--work-dir`, `--port` and `--no-browser`. It needs Linux or macOS (on Windows it exits 1). `--mode`, `--pass`,
+  `--batch`, `--filter`, `--rotate` and `--reviewer` are removed and now exit 2 as unknown, and
+  `$IMAGE_REVIEW_REVIEWER` is no longer read: the page asks for the reviewer name. Features with no equivalent on
+  the page are dropped: `--pass`, `--batch`, `--rotate always`, autoplay, the gamepad, and the viewer's `n`, `u` and
+  `w` keys. To re-check CLEAN images, press `f` on the page. `review` no longer needs the `viewer` extra.
+  Ctrl-C, SIGTERM and SIGHUP now stop it with exit 0 (the viewer exited 1 with "Aborted!"). Another writer changing
+  `review.tsv` no longer ends the command: the server refuses that verdict or undo and every later one (HTTP 500) and keeps
+  running, as `serve` does. A snap browser (such as Firefox on Ubuntu) cannot open the file `review` hands it, and
+  shows an access error: open the URL instead. On a host other people log in to, review from your laptop with
+  `serve`; see the security model's "Local review on loopback".
+  The page's messages now say "the server" instead of "serve" (for example "Stop the server (Ctrl-C) and start the
+  next one; then press Reconnect (r) for serve, or open review's new URL."), and the 412 body is now `the page was
+  loaded from another server; reconnect`.
 - **The Python remote client and `serve`'s HTTPS mode are removed.** `review --remote`/`--via`, `status
   --remote`/`--via`, `serve --https`/`--bind`/`--port`, export's hidden `--remote`, and the server's `GET /version`
   and `GET /skipped` are gone; the options now exit 2 as unknown. `$IMAGE_REVIEW_REMOTE` is no longer read, not

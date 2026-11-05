@@ -16,8 +16,11 @@ first**: it lists the limits of browser review (no TLS on the node, a URL
 that holds the token) and the questions to ask your HPC administrator if
 forwarding does not work.
 
-Install image-review on the cluster; a plain install has every command but
-`review`. See [Installation](../install.md) and
+To review on the machine that holds the work directory, with a browser on
+that same machine, use [`image-review review`](../commands/review.md)
+instead; see [Local review](local-review.md).
+
+Install image-review on the cluster. See [Installation](../install.md) and
 [Cluster install without root](../install.md#cluster-install-without-root).
 
 ## 1. Preprocess on the cluster
@@ -64,9 +67,8 @@ In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. See
    a password; do not paste the URL into chat or tickets.
 
 4. The page first asks "Who is reviewing?": type your name and press
-   Enter. It is recorded with every verdict, as `--reviewer` is for the
-   viewer. The page then shows the current pass's todo images one at a
-   time. Press `?` for the list of keys: `c` marks an image CLEAN, `d`
+   Enter. It is recorded with every verdict. The page then shows the
+   current pass's todo images one at a time. Press `?` for the list of keys: `c` marks an image CLEAN, `d`
    DIRTY, and `m` switches to grid mode, where one verdict covers a whole
    grid. [The browser page](../commands/browser.md) describes the keys, the
    bar, grid mode and every screen and message.

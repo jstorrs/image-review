@@ -109,9 +109,9 @@ class TestRemovedRemoteOptions(StoreTestCase):
 
 
 class TestHelpTexts(unittest.TestCase):
-    def test_workflow_lists_serve(self):
+    def test_workflow_lists_review_and_serve(self):
         out = invoke_cli("--help").output
-        self.assertRegex(out, r"\d\. serve\s+— serve the work directory for review in a browser")
+        self.assertRegex(out, r"\d\. review\s+— review in a browser on this machine \(or `serve`, ")
 
 
 if __name__ == "__main__":

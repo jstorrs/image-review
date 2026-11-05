@@ -16,8 +16,9 @@ are the people you chose.
   `preprocess` ran. What travels to a reviewer's machine is the preprocessed
   JPGs, their batch and file names (`batch_001/img_00001.jpg`), review
   statuses and pass numbers, and the reviewer name the page sends.
-- **The threats considered** are other users on shared cluster nodes and
-  network observers or impostors between the laptop and the cluster.
+- **The threats considered** are other users on shared cluster nodes (and,
+  for a local `review`, on the same machine) and network observers or
+  impostors between the laptop and the cluster.
 - **Not considered:** a malicious cluster administrator or root user, a
   compromised laptop or cluster account, and the reviewer themselves (who sees
   the images by design). Anyone who can read the work directory as your Unix
@@ -28,15 +29,17 @@ of human reviewers.
 
 ## The server (`image-review serve`)
 
-`serve` serves browser review on a Unix socket; what is particular to that
-is in [its own section](#browser-review-over-a-unix-socket).
+`serve` serves browser review on a Unix socket, and `review` serves the same
+page on 127.0.0.1; this section applies to both. What is particular to each
+is in [Browser review over a Unix socket](#browser-review-over-a-unix-socket)
+and [Local review on loopback](#local-review-on-loopback).
 
 - **Token.** Every request but those for the four public page files (see
   below) must carry the bearer token, compared in constant time before any
   routing. The token is a password: anyone holding the URL can view the
   images and record verdicts while the server runs. Do not paste it into
-  chat or tickets. Unless it comes from `$IMAGE_REVIEW_TOKEN`, a new token is
-  generated at each start, so an old URL stops working.
+  chat or tickets. Unless it comes from `$IMAGE_REVIEW_TOKEN` (`serve`
+  only), a new token is generated at each start, so an old URL stops working.
 - **Logging.** One INFO line per request: peer address, method, path without
   its query string, and status. Access tokens, `Authorization` headers, query
   strings, image keys, `image_id`s, source paths, request bodies, and the
@@ -46,8 +49,7 @@ is in [its own section](#browser-review-over-a-unix-socket).
   fields in server records are escaped, so control characters cannot reach the
   terminal. Other records are not so restricted: startup and work-directory
   messages (for example a `review.tsv` torn-line warning or a failure opening
-  the work directory) can name file paths and parse errors. Warnings from
-  `review` and `status` do name image keys, and `preprocess`
+  the work directory) can name file paths and parse errors. `preprocess`
   warnings name the failed source file (its `image_id`), on the machine where it runs. Levels
   and format are in [Commands](../commands/index.md#logging).
 - **Caching.** Every response carries `Cache-Control: no-store` (and
@@ -235,6 +237,57 @@ The points below are its limits.
 - With `job_container/tmpfs`, does an adopted ssh session see the job's
   private `/tmp`?
 
+## Local review on loopback
+
+This is what `image-review review` does: it serves the browser page on
+`127.0.0.1` on this machine, over plain TCP. Everything in
+[The server](#the-server-image-review-serve) applies.
+
+- **The token's path.** `review` writes the URL into
+  `~/.image-review/review-<short-host>-<pid>.html`, a 0600 file in a 0700
+  directory you own, and starts the browser on that file's `file://` URI, so
+  the token never appears on a command line (which other users can read, on
+  Linux in `/proc/*/cmdline`). The file redirects to the URL, whose fragment
+  holds the token; the browser never sends a fragment. The page moves it
+  into per-tab `sessionStorage`, rewrites it out of the tab's history entry
+  and sends it as a bearer `Authorization` header on every API request. On a
+  terminal `review` also prints the URL; otherwise it prints only the file's
+  path, so the token stays out of logs. The file is removed when `review`
+  stops; a hard kill leaves it behind
+  ([Stopping](../commands/review.md#stopping)). As with `serve`, the URL can
+  stay in browser history, and browser extensions that can read all sites
+  can read the token and the images.
+- **127.0.0.1, never `localhost`.** The server binds `127.0.0.1` only, and
+  the URL names it. Browsers try `::1` first for `localhost`, and the server
+  does not bind `[::1]:PORT`, so another local user could listen there and
+  receive the token with the browser's first request.
+- **Host and Origin.** The `Host` header must be exactly `127.0.0.1:PORT`,
+  with this server's port; `localhost`, `[::1]`, another port or no port get
+  400 before the token is checked. A request with an `Origin` header passes
+  only if it is `http://127.0.0.1:PORT`, the page's own origin, as on the
+  socket (see
+  [Requests that name another origin are refused](#browser-review-over-a-unix-socket)).
+- **Who else can connect.** A loopback port is open to every user on the
+  machine it is on. With `review` that is the machine holding the data; with
+  `serve`, reached from your laptop, the only TCP port is the ssh forward on
+  the laptop, and the socket on the node is 0600.
+
+  | | `review` | `serve`, browser on your laptop |
+  |---|---|---|
+  | Who can connect | any user on this machine, though only the token opens the API | users of your laptop, through the forward; on the node, only you and root |
+  | Denial of service | any user on this machine can fill the 64 connection slots and keep your browser out while `review` runs | users of your laptop can, through the forward (see [The laptop side](#browser-review-over-a-unix-socket)) |
+  | After the server stops | another user on this machine can listen on the freed port; a tab still open sends them its (now dead) token on Reconnect, and a reload runs their page at the same origin, reading anything else in that tab's `sessionStorage` | the same on your laptop if the forward ends and another laptop user takes its port |
+
+  With `review` the token dies with the server, so the after-stop case leaks a
+  token that no longer opens anything, plus the reviewer name. Close the tab
+  when you stop `review`, and open the new URL each time it starts.
+- **Use `review` on a machine only you log in to** (your own laptop or
+  workstation). **On a shared host** (a login or compute node, or any machine
+  other people log in to), **review from a browser on another machine, your
+  laptop, with `serve`.** A browser on the shared host itself is exposed to
+  the other users there either way: a local TCP forward to `serve`'s socket
+  on that host is as open to them as `review`'s port.
+
 ## Local disk
 
 A work directory holds PHI in several forms, and is never meant to be
@@ -261,7 +314,7 @@ world-readable.
     timestamps and each verdict's `source_sha256` (derived from file content,
     like the manifest's);
   - job output and stderr logs: `preprocess` logs the source paths that
-    failed and `review` logs keys it cannot load, and under `sbatch` these land
+    failed, and under `sbatch` these land
     in `slurm-*.out` (by default beside where you submitted). Keep job output
     inside the work directory or another private location with
     `#SBATCH --output`;
@@ -291,8 +344,8 @@ world-readable.
 - **JPG hash check.** `manifest.tsv` records the SHA-256 of each JPG. Viewing
   an image checks it, and the server answers 404 for a mismatch. A JPG changed
   or cut short after preprocessing is shown as an unloadable placeholder that
-  can be marked DIRTY but never CLEAN. This rule is enforced by the bundled
-  viewer, not the server: `/mark` accepts CLEAN for any known key, so a
+  can be marked DIRTY but never CLEAN. This rule is enforced by the browser
+  page, not the server: `/mark` accepts CLEAN for any known key, so a
   different client, or a hand-written request carrying the token, could mark
   such an image CLEAN. This is a current limit. (Work directories from older versions
   have no hashes in the manifest and are not checked.)
@@ -363,12 +416,12 @@ world-readable.
   noted: content it does not look for (see [Input
   notes](../commands/preprocess.md#input-notes), *Not detected*) can still
   ship unreviewed in an allowlisted file.
-- **DIRTY-only placeholders.** The viewer shows an image that cannot be
+- **DIRTY-only placeholders.** The page shows an image that cannot be
   fetched, read or verified as a placeholder that accepts DIRTY but refuses
-  CLEAN, so an image nobody could see is not cleared by the viewer (see the
+  CLEAN, so an image nobody could see is not cleared by the page (see the
   limit above).
 - **Grid CLEAN over DIRTY or FLAGGED images.** One grid verdict covers every
-  image in the grid, so both clients refuse CLEAN on a grid holding an image
+  image in the grid, so the page refuses CLEAN on a grid holding an image
   already DIRTY (this pass) or FLAGGED (DIRTY in an earlier pass), unless
   every image in it is DIRTY (reversing that grid's own verdict). The server
   refuses it too: `/mark` checks the store's current statuses under its lock

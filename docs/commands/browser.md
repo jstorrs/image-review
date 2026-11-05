@@ -1,9 +1,11 @@
 # The browser page
 
-The page that [`image-review serve`](serve.md) serves for browser review: what
-you see at `http://127.0.0.1:8080/#TOKEN` once the ssh forward is running.
-For the workflow (starting `serve`, the ssh command, moving on to the next
-batch or pass), see [Browser review over SSH](../tutorials/browser-review.md).
+The page served for browser review, by [`image-review review`](review.md) on
+this machine and by [`image-review serve`](serve.md) on a cluster: what you
+see at the URL either prints, `http://127.0.0.1:PORT/#TOKEN`. For the
+workflows, see [Local review](../tutorials/local-review.md) and
+[Browser review over SSH](../tutorials/browser-review.md) (starting `serve`,
+the ssh command, moving on to the next batch or pass).
 
 The page reviews the current pass (see [Passes](#passes)). It starts in
 single mode, showing the pass's [todo images](#todo-images) (UNREVIEWED and
@@ -49,19 +51,11 @@ Press `?` (or `h`, or click the "?" button) for the list of keys.
 `m`, `M`, `s`, `b` and `f` reread the current pass's statuses from the server
 before they rebuild the list. Letters work with Caps Lock on; `M` is Shift
 and `m`. A held key acts once, and keys pressed with Ctrl, Alt or Cmd are
-left to the browser. There is no gamepad support, and none of the
-[`review`](review.md#keys-and-gamepad) viewer's `n`, `u`, Space or `w`; `f`
-is the filter here, not the viewer's full screen.
-
-Where the keys differ from the viewer's:
-
-- Escape only closes the help or the name box; it does not quit.
-- `b` acts anywhere in grid mode, not only at the end of the list, and
-  rereads only the statuses of the same pass, not which pass is current.
-- While the grids are being computed, `q` (Done) and `s`, `m`, `M`, `b` and
-  `f` still act; the viewer drops every key then.
-- `f` replaces the viewer's `--filter` option: see
-  [Re-checking CLEAN images](#re-checking-clean-images).
+left to the browser. There is no gamepad support. Escape only closes the
+help or the name box; it does not quit. `b` acts anywhere in grid mode, not
+only at the end of the list, and rereads only the statuses of the same pass,
+not which pass is current. While the grids are being computed, `q` (Done) and
+`s`, `m`, `M`, `b` and `f` still act.
 
 While the help or the name box is open nothing can be marked or moved, and
 the review buttons, Done and Reconnect included, are disabled. Once it
@@ -207,7 +201,7 @@ move after a mark skips the images you have re-checked, and `b` goes to the
 next batch with any left. Undoing a mark makes its images todo again. The
 page remembers the images you re-checked until the filter changes or you
 press `q`: `s`, `m`, `M` and `b` keep them, and so does Reconnect when the
-same serve answers; a Reconnect to another serve forgets them, as its images
+same server answers; a Reconnect to another server forgets them, as its images
 may have the same names. `s`, `m`, `M`, `b` and `f`, and a Reconnect in
 single mode, start at the first item still to re-check, or at the end screen
 when none is left; in grid mode a resize repack or a Reconnect lands on the
@@ -223,9 +217,9 @@ you have not re-checked and every FLAGGED one.
 When every image the filter lists has been re-checked the end screen says
 "All batches done for pass N (filter: clean) - press [f] to change the
 filter", or, when nothing in the pass is left to review either, "All batches
-done for pass N (filter: all). Stop serve (Ctrl-C), start the next one, then
-press Reconnect (r)." with Reconnect. When the filter lists no image at all
-(`clean` in a pass with no CLEAN image) it says "No images to review for
+done for pass N (filter: all). Stop the server (Ctrl-C) and start the next
+one; then press Reconnect (r) for serve, or open review's new URL." with
+Reconnect. When the filter lists no image at all (`clean` in a pass with no CLEAN image) it says "No images to review for
 pass N (filter: clean)" in place of "All batches done". Past either end of
 the list the arrows then show this end screen instead of the stop sign.
 
@@ -348,14 +342,17 @@ to review, the arrows past an end show the
 [end-of-pass screen](#end-of-a-pass-or-batch) instead. While
 [re-checking](#re-checking-clean-images) they show the end screen once nothing
 the filter lists is left to re-check; it is the end-of-pass screen, in its
-"All batches done for pass N (filter: F). Stop serve…" form, only when the
+"All batches done for pass N (filter: F). Stop the server…" form, only when the
 pass is done too.
 
 ## End of a pass or batch
 
 When the whole pass is done the page shows the end-of-pass screen, "Pass
-N: nothing left to review. Stop serve (Ctrl-C), start the next one, then
-press Reconnect (r).", and offers Reconnect for the next server.
+N: nothing left to review. Stop the server (Ctrl-C) and start the next one;
+then press Reconnect (r) for serve, or open review's new URL.", and offers
+Reconnect for the next server. Reconnect works for `serve` restarted with the
+same socket path and token; each `review` run has a new token (and, unless
+`--port` is fixed, a new port), so open the URL it gives instead.
 
 When the list is done but the pass is not, an end screen says what is left
 (while re-checking, see [Re-checking CLEAN images](#re-checking-clean-images)
@@ -399,7 +396,7 @@ again: see "The laptop side" in
 Reconnect says "Reconnecting...", then reloads the pass, the image list and the
 statuses, and rebuilds the list in the mode you were in (grid mode lands on the
 grid you were on), keeping the [filter](#re-checking-clean-images), and the
-images you re-checked when the same serve answers (forgotten for another). It says
+images you re-checked when the same server run answers (forgotten for another). It says
 "Reconnected", or "Reconnected; now on pass N" when the pass changed or after
 `q`. It forgets which marks `z` could [undo](#undo) and waits the 200 ms again
 before a verdict counts. After `q` it loads whatever
@@ -408,11 +405,11 @@ grids).
 
 ## Other errors
 
-- **"No token. Open the URL printed by `image-review serve`."**: the page
+- **"No token. Open the URL that image-review printed."**: the page
   was opened without its token. The page takes the token out of the
   address bar and keeps it only in that tab, so a bookmark of the bare
   address, or the address copied into a new tab, shows this. Open the full
-  URL that `serve` printed.
+  URL that `review` or `serve` printed.
 - **"unexpected reply from the server; reload the page"**: after a mark or
   undo the server's reply could not be read, nor the statuses reread. The
   page stops; reload it.
@@ -429,8 +426,9 @@ grids).
 
 `q` (or the Done button) means done with this server. The page stops: it
 sends nothing more, frees the images and says "Done; waiting for the next
-serve", with "Done. Your marks are saved. Stop serve (Ctrl-C), start the
-next one, then press Reconnect (r)." in the image area. It forgets which
+server", with "Done. Your marks are saved. Stop the server (Ctrl-C) and
+start the next one; then press Reconnect (r) for serve, or open review's new
+URL." in the image area. It forgets which
 images you [re-checked](#re-checking-clean-images), as the next server's
 images may have the same names, but keeps the filter. The tab keeps the
 token and your name, so after the next `serve` starts on the same socket

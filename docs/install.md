@@ -3,31 +3,26 @@
 Requires Python >= 3.12.
 
 ```bash
-pip install .                 # every command but review
-pip install '.[viewer]'       # also the pygame viewer, for review
+pip install .                 # every command
 ```
 
 That installs from a source checkout. From a wheel or package index, use
-`pip install image-review` or `pip install 'image-review[viewer]'`; from a
-clone, `uv sync` installs the same as `pip install .`.
+`pip install image-review`; from a clone, `uv sync` installs the same as
+`pip install .`. `review` needs only a browser on the same machine.
 
 ## Choosing extras
 
-Only the viewer is optional, since it is the only dependency that needs a
-display:
-
 | Install | Commands | Dependencies |
 |---|---|---|
-| `pip install .` | `preprocess`, `serve`, `status`, `export`, `--help` | click, rectpack; pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
-| `pip install '.[viewer]'` | also `review` | pygame-ce |
+| `pip install .` | every command: `preprocess`, `review`, `serve`, `status`, `export`, `--help` | click, rectpack; pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
+| `pip install '.[viewer]'` | the same; no command uses pygame-ce any more | pygame-ce |
 
 `[all]` is the same as `[viewer]`, and `[preprocess]` and `[codecs]` are still
 accepted but add nothing, since their dependencies are installed by default.
 
 For [browser review](tutorials/browser-review.md) on a cluster, use a plain
 install where you preprocess and serve; the laptop needs only ssh and a
-browser. Running `review` without the viewer extra exits 1 with
-`this command needs the viewer extra: pip install 'image-review[viewer]'`.
+browser.
 
 Every install brings several hundred MB of native wheels. On Linux the
 imagecodecs wheels need glibc 2.28 or later (manylinux_2_28), and python-gdcm

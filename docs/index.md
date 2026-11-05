@@ -6,13 +6,13 @@ burned-in Protected Health Information (PHI).
 The workflow has four steps:
 
 1. **Preprocess** raw DICOM and image files into normalized JPG batches.
-2. **Review** the images interactively in a fullscreen viewer, in single or
-   grid mode.
+2. **Review** the images in a browser, in single or grid mode: on this
+   machine, or from your laptop while the images stay on a cluster.
 3. **Status** reports on review progress.
 4. **Export** writes the allowlist of files that may be released.
 
 To get started, see [Installation](install.md) and the [Quick start](quickstart.md).
-For a walk-through of a whole review on one machine, see the
+For a walk-through of a whole review on one machine, in your browser, see the
 [Local review](tutorials/local-review.md) tutorial.
 
 Each command has its own page: see the [commands overview](commands/index.md), or go

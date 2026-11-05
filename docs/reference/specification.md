@@ -5,14 +5,15 @@
 `image-review` is a CLI tool for reviewing medical (DICOM) and general images
 for burned-in Protected Health Information (PHI). It provides a four-step
 workflow: **preprocess** raw images into normalized JPGs, **review** them
-interactively in a fullscreen viewer, report **status** on review progress,
+in a browser, report **status** on review progress,
 and **export** the allowlist of files that may be released.
 
 ## Requirements
 
 - Python >= 3.12
-- Every command but `review` needs only the core dependencies; `review` needs
-  the `viewer` extra. `preprocess` and `codecs` are empty extras kept for
+- Every command needs only the core dependencies; `review` and `serve` also
+  need a browser to review in. The `viewer` extra (pygame-ce) is no longer
+  used by any command. `preprocess` and `codecs` are empty extras kept for
   existing install commands, and `all` equals `viewer`. The extras, what each
   command needs and every minimum version are in [Installation](../install.md#choosing-extras) and
   [Minimum dependency versions](../install.md#minimum-dependency-versions);
@@ -25,13 +26,8 @@ and **export** the allowlist of files that may be released.
   0). `pylibjpeg-libjpeg` is deliberately not used (GPL-3).
 
 - The CLI imports heavy modules only in the command that needs them, so
-  `--help`, `serve`, `status` and `export` start without them. `review`
-  without the viewer extra exits 1 with
-  `this command needs the viewer extra: pip install 'image-review[viewer]'`
-  (`cli.requires_extra`). Only a `ModuleNotFoundError` naming one of that
-  extra's own top-level modules is translated; any other import failure
-  surfaces unchanged (one of image-review's modules, a missing core
-  dependency, a broken install)
+  `--help`, `review`, `serve`, `status` and `export` start without them, and
+  `image_review.cli` never imports pygame.
 
 ## Architecture
 
@@ -43,31 +39,38 @@ store.py            ReviewStore Protocol, LocalStore, pure filter/summary functi
 lock.py             The work directory's review.lock: acquire, release, live_writer (stdlib only)
 export.py           Export rows, the allowlist split and their TSV formats: export_rows, split_allowlist, format_allowlist, format_report (stdlib only)
 atomic.py           write_new_file: create a file atomically, never overwriting (stdlib only)
-server.py           bearer-token server exposing a ReviewStore over plain HTTP on a Unix socket (browser review)
+server.py           bearer-token server exposing a ReviewStore over plain HTTP, on a Unix socket (serve) or 127.0.0.1 (review)
 connection.py       Shared limits and parsers: MAX_PASS, parse_reviewer, parse_token, is_int_at_least, package_version
 tunnel.py           parse_via, parse_ssh_host: the parts of the ssh command serve prints
 signals.py          interrupt_on / interrupt_once: signals to KeyboardInterrupt, shared by preprocess, review, export and serve
-controller.py       Review session orchestration and event loop
-viewer.py           Fullscreen pygame display
+controller.py       pygame review session orchestration and event loop (no command uses it)
+viewer.py           Fullscreen pygame display (no command uses it)
 layout.py           Pure grid layout: jpeg_size, fit_size, plan_grids (stdlib and rectpack only)
-grid_packer.py      Review-time compositing of packed grids (pygame)
+grid_packer.py      Review-time compositing of packed grids (pygame; no command uses it)
 review_db.py        Persistent review state (review.tsv)
 util.py             Shared utilities (surface loading)
 ```
 
-All review-time data access goes through a `ReviewStore`. The controller and
-grid packer never touch the work directory; `LocalStore` serves it to a local
-`review`, and `image-review serve` wraps a `LocalStore` for the browser page.
+All review-time data access goes through a `ReviewStore`. Both `review` and
+`serve` wrap a writable `LocalStore` in a `ReviewServer` for the browser page:
+`review` a `LoopbackReviewServer` on 127.0.0.1, `serve` a `UnixReviewServer`
+on a Unix socket. Neither the server nor the page touches the work directory
+otherwise.
 `status.py`, `store.py`, `lock.py`, `export.py`, `atomic.py`, `server.py`,
 `connection.py`, `tunnel.py`, `signals.py` and `layout.py` import without pygame,
 PIL, numpy or skimage.
 
 ```
-review (pygame, local)         serve (compute node)             browser (laptop)
-  ReviewSession                  UnixReviewServer  <--ssh -L---  web/ page
-    |                              |
-  LocalStore                     LocalStore --> ReviewDB --> review.tsv
-                                   +--> manifest.tsv, batch_NNN/*.jpg
+review (this machine)                              browser (this machine)
+  LoopbackReviewServer on 127.0.0.1:PORT  <------  web/ page
+    |
+  LocalStore --> ReviewDB --> review.tsv
+    +--> manifest.tsv, batch_NNN/*.jpg
+
+serve (compute node)                               browser (laptop)
+  UnixReviewServer on a socket  <-----ssh -L-----  web/ page
+    |
+  LocalStore (as above)
 ```
 
 ## CLI Interface
@@ -824,24 +827,78 @@ written, even when empty) and `preprocess.json`. The summary line and the exit s
 
 ### `image-review review`
 
-The synopsis, options and defaults are in
-[`image-review review`](../commands/review.md).
-`--reviewer` defaults to `getpass.getuser()` at run time and is checked by
-`connection.parse_reviewer` (1-64 characters, all `str.isprintable()`, not
-all whitespace). `--batch` is checked by `unknown_batch_message` against the
-manifest's batches once the store is open.
+```
+image-review review [--work-dir DIR] [--port PORT] [--no-browser]
+```
 
-Opens a store (see below), initializes pygame, creates a `ReviewSession`,
-runs the event loop, then shuts down pygame. pygame starts only after the
-store is open.
+The options, exit codes, what `review` prints, the redirect file and how it
+stops are in [`image-review review`](../commands/review.md); this section is
+the mechanism. `--work-dir` is declared as for `serve` (`click.Path(exists=True)`,
+default `./review_work`).
+
+On `sys.platform == "win32"` it is a `ClickException` ("review needs Linux or
+macOS", exit 1) before anything else. `--port` is checked by the click
+callback `_loopback_port`: 0 or in `server.LOOPBACK_PORTS`, else a
+`BadParameter` (exit 2) before the work directory is opened.
+
+`review` reads no image-review environment variable: it passes no token to
+`server.make_loopback_server(store, port)` (see *Loopback server*), which
+generates `token_urlsafe(16)`. An `OSError` from binding is a
+`ClickException`, "Cannot listen on 127.0.0.1:PORT: …" (exit 1).
+
+Once the server is bound and listening, `browser_url(token, server_port)`
+gives `http://127.0.0.1:PORT/#TOKEN`, and `write_private_file` (see
+`serve`) writes `redirect_page(url)` to
+`~/.image-review/review-{safe_name(short_host())}-{pid}.html`.
+`redirect_page` is a pure function: a meta refresh to the URL and a link to
+it, the URL `html.escape`d in both. On a TTY the URL is printed, else only
+the file's path. Unless `--no-browser`, the file is opened (never the URL:
+argv is public, `/proc/*/cmdline` on Linux) when both hold:
+
+- `has_display(sys.platform, os.environ)`: never with a non-empty
+  `$SSH_CONNECTION` (so `ssh -X` opens no browser on the remote host); else
+  `darwin`, or a non-empty `$DISPLAY` or `$WAYLAND_DISPLAY`. This only
+  says a graphical session is plausible: with a display, `webbrowser` can
+  still pick a terminal browser.
+- `graphical_browser()`: `webbrowser.get()`, refused (None) when it raises
+  `webbrowser.Error`, when the controller is exactly
+  `webbrowser.GenericBrowser` (a foreground command, as from a `$BROWSER`
+  without `&`), or when its name's basename is in `CONSOLE_BROWSERS` (`lynx`,
+  `w3m`, `links`, `elinks`, `www-browser`): `is_graphical`.
+
+Without a display it prints a hint before "Press Ctrl-C to stop.". With one,
+a daemon thread (`BROWSER_THREAD`, running `_BrowserOpener.run`), started
+after that line and just before `serve_forever`, calls `graphical_browser()`
+and then the controller's `open(path.as_uri())`. Choosing can take seconds
+(`webbrowser`'s registration runs `xdg-settings` and similar), and a browser
+may not return; neither holds up the server, and since the socket is already
+listening the browser's first connection waits in the backlog. The thread
+prints the result: the no-graphical-browser hint when none is found or
+choosing raises anything, success (with what to do on a sandboxed browser's
+access error), or the could-not-open hint when `open` returns False or
+raises anything; an exception is logged at DEBUG, by class name only.
+`_BrowserOpener.stop` is registered on the `ExitStack` after the redirect
+file's removal, so it runs first in cleanup: it sets an event under the
+opener's lock (waiting at most `STOP_WAIT`, 5 s, for an open or print in
+progress), and the thread checks the event under that lock before opening
+and before each print, so nothing is opened or printed once cleanup has
+started.
 
 **Store** (`cli.open_local_store`, shared by every command that opens one):
-`review` opens `LocalStore(work_dir)` writable, holding the work dir lock
-until the command exits; `status` opens it with `read_only=True` (no lock).
-Both resolve `--work-dir` with `_existing_work_dir` (default `./review_work`;
-a missing directory is a `BadParameter`, exit 2) and enter the store as a
-context manager. `WorkDirLocked` is a `ClickException` (exit 1) with its
-message.
+`review` and `serve` open `LocalStore(work_dir)` writable, holding the work
+dir lock until the command exits; `status` and `export` open it with
+`read_only=True` (no lock). `status` and `export` resolve `--work-dir` with
+`_existing_work_dir` (default `./review_work`; a missing directory is a
+`BadParameter`, exit 2). Every command enters the store as a context manager.
+`WorkDirLocked` is a `ClickException` (exit 1) with its message.
+
+**Run loop** (`cli._serve_until_stopped`, shared with `serve`): under
+`interrupt_once(SIGINT, *TERMINATION_SIGNALS)` and one `ExitStack`, it opens
+the store, calls the command's start function (which binds the server,
+registers its cleanup with `_close_with`, writes and registers the
+announced file, and prints), then calls `serve_forever` until a
+`KeyboardInterrupt`. The cleanup order is as described under `serve`: the
+file, the server, then the store.
 
 ### `image-review status`
 
@@ -1104,7 +1161,8 @@ removes a partly written one), and the printed `cat` path is quoted twice,
 as the remote shell parses it again.
 
 **Cleanup**: the option checks and parsing run first. Everything after
-them (opening the store, binding, announcing, serving) runs under
+them (opening the store, binding, announcing, serving) runs in
+`_serve_until_stopped`, under
 `interrupt_once(SIGINT, *TERMINATION_SIGNALS)`, installed before the lock is
 taken, so SIGTERM and SIGHUP unwind like Ctrl-C, and only the first signal
 counts: its handler sets all of them to `SIG_IGN` before raising, so a second
@@ -1364,7 +1422,7 @@ by that rule (not a `StoreUnavailable`).
 | `Status` | `Literal["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"]`: an image's status in a given pass (see *Pass Logic*) |
 | `Verdict` | `Literal["CLEAN", "DIRTY"]`: what a mark may record |
 | `TODO_STATUSES` | `frozenset({"UNREVIEWED", "FLAGGED"})`: statuses that still need a verdict in the current pass |
-| `StatusFilter` | `Literal["unreviewed", "clean", "all"]`: the `review --filter` vocabulary, parsed by the CLI's choice and taken by `filter_rows` and `ReviewSession` |
+| `StatusFilter` | `Literal["unreviewed", "clean", "all"]`: the status-filter vocabulary of the pygame session, taken by `filter_rows` and `ReviewSession` |
 | `ManifestRow` | Frozen dataclass: `key` (the `preprocessed_path`) and `batch` |
 | `SkippedRow` | Frozen dataclass: one `skipped.tsv` row, `image_id`, `kind` (`SkipKind`, `Literal["failed", "ignored"]`) and `reason` |
 | `ManifestEntry` | Frozen dataclass: one `manifest.tsv` row, `batch`, `key`, `image_id`, and `source_sha256` and `jpeg_sha256` (`str \| None`; `None` in a 3-column manifest). Local only |
@@ -1513,7 +1571,7 @@ other failure to load an image is an unloadable image (see *Unloadable Images*).
 
 ### Grid Mode
 
-- Display the packing message (see [`image-review review`](../commands/review.md))
+- Display the packing message (see the pygame viewer's documentation before 1.0.0)
   while packing, with its count updated about every 25 images (via
   `pack_into_grids`'s `on_progress`; repainted and `pg.event.pump()`ed, which
   does not consume key events)
@@ -1578,8 +1636,8 @@ itself, against the keys' current statuses for the pass, and raises
 If grid mode has no items but the status filter selected rows it left out, the
 session says so instead of implying the review is done: `run()` prints, and a
 mode restart shows, `_held_back_message` (text in
-[Todo images](../commands/browser.md#todo-images); the terminal form is in
-[`image-review review`](../commands/review.md#todo-images)). Its K counts the left-out
+[Todo images](../commands/browser.md#todo-images); the terminal form was in
+the pygame viewer's documentation before 1.0.0). Its K counts the left-out
 rows that are todo as in *Todo*, over the selected batch, or all batches when
 none is selected.
 
@@ -1628,7 +1686,7 @@ naming the key is logged, the key is added to the session's
 `controller._placeholder` with `viewer.placeholder_surface`: the key and a
 short reason, `KeyError` giving the "fetched" reason and any other failure
 the "read or decoded" one (text in
-[Images that cannot be loaded](../commands/review.md#images-that-cannot-be-loaded));
+Images that cannot be loaded (the pygame viewer's documentation before 1.0.0));
 the error itself goes only to the log. Navigation, `n`, todo-only and autoplay treat it
 like any other item (autoplay does not stop at it), so the cursor always points
 at a real item. A `SingleItem` (every single-mode item, and the item
@@ -1667,8 +1725,7 @@ so a partly undone grid comes back.
 
 The session runs a pygame event loop. The keys and gamepad buttons, the
 display-select and help screens, the end-of-list screens and their messages
-are in [Keys and gamepad](../commands/review.md#keys-and-gamepad) and
-[End of a batch](../commands/review.md#end-of-a-batch). Internally:
+were in the pygame viewer's documentation before 1.0.0. Internally:
 
 - `_handle_event` quits on `q`/Escape, the Start button or `pg.QUIT` in every
   state. In any other state than `DISCONNECTED` it then offers a key to
@@ -1760,7 +1817,7 @@ the status bar then names up to three of its keys with their new status. `z`
 is not dwell-gated: it only undoes a mark on an item this mode showed, and
 shows that item again before any verdict counts. Key repeat stays off
 (pygame's default; `pg.key.set_repeat` is never called). What the reviewer
-sees is in [Undo](../commands/review.md#undo).
+sees is in Undo (the pygame viewer's documentation before 1.0.0).
 
 ### Next Batch
 
@@ -1804,7 +1861,7 @@ which chooses, in this order: the pass-complete message (under `--filter
 unreviewed` when the pass has just advanced), the batch-done message (with
 `--batch`), or the all-batches-done message, and appends the current pass
 when an explicit `--pass` differs from `current_pass()`. The messages are in
-[End of a batch](../commands/review.md#end-of-a-batch). A `StoreUnavailable`
+End of a batch (the pygame viewer's documentation before 1.0.0). A `StoreUnavailable`
 from any of these calls is a lost connection (see *Store Failures*).
 
 ## Grid Packer (`grid_packer.py`)
@@ -1881,8 +1938,8 @@ vertically within the content area. Uses `pg.transform.smoothscale`.
 **Status bar**: A rectangle spanning the full width at the bottom, coloured
 by `STATUS_COLORS[status]`. `refresh()` draws the status word, then the help,
 todo-only and gamepad indicators, at the left; the info text centred; and the
-scale percent and the item's name at the right. What each part shows is in
-[`image-review review`](../commands/review.md).
+scale percent and the item's name at the right. What each part shows was in
+the pygame viewer's documentation before 1.0.0.
 
 **Scale indicator**: `resize()` applies the pure `fit_image`, which returns the
 scaled size, offset and factor (displayed size / source size) as one `Fit`, or
@@ -2074,7 +2131,7 @@ restart) is refused with 412 by the `X-Review-Instance` check (see
 | 401 | Missing or wrong token |
 | 404 | Unknown path, or HEAD/PUT/DELETE/PATCH/OPTIONS (closes the connection); other methods get the stdlib 501 before authentication; unknown or unreadable image key |
 | 409 | `POST /mark`: CLEAN with `mode: "grid"` on keys holding a DIRTY or FLAGGED status in that pass, unless every key is DIRTY (`status.grid_clean_refused`); body `{"error": "grid holds a DIRTY or FLAGGED image"}` (no keys); nothing is recorded |
-| 412 | An API request other than `GET /current_pass` without exactly one `X-Review-Instance` header equal to this server run's (see *Unix-socket server*); body `{"error": "the page was loaded from another serve; reconnect"}`; nothing is read, recorded or packed |
+| 412 | An API request other than `GET /current_pass` without exactly one `X-Review-Instance` header equal to this server run's (see *Unix-socket server*); body `{"error": "the page was loaded from another server; reconnect"}`; nothing is read, recorded or packed |
 | 500 | Any unexpected store failure; only the exception class name is logged |
 | 503 | `POST /grids` while another `/grids` request is being computed; retry later |
 
@@ -2177,13 +2234,12 @@ works as follows:
 - `close()` removes the file only if it still names this process (host,
   `boot_id` and pid) and is still the file it read (held open the same way);
   it is idempotent.
-- `serve` turns SIGINT, SIGTERM and SIGHUP into `KeyboardInterrupt` before
-  taking the lock (`interrupt_once`: the first one raises and the others are
-  ignored until the block exits, so cleanup is not cut short), and closes the
-  store last, while holding the server's store lock, so a mark in progress
-  finishes first and later ones fail (500). `review` does the same for SIGINT
-  and SIGHUP (lost terminal or ssh session) while the store is open; SDL
-  leaves both alone, and turns SIGTERM into a quit event.
+- `review` and `serve` share `cli._serve_until_stopped`: it turns SIGINT,
+  SIGTERM and SIGHUP into `KeyboardInterrupt` before taking the lock
+  (`interrupt_once`: the first one raises and the others are ignored until
+  the block exits, so cleanup is not cut short), closes the store last, while
+  holding the server's store lock, so a mark in progress finishes first and
+  later ones fail (500), and exits 0.
 
 The server additionally assumes one reviewer per server. Its undo stack is
 one, in the server's store, shared by every client: if several clients use one
@@ -2269,7 +2325,7 @@ as `X-Review-Instance`. Every API request except `GET /current_pass` (where
 the page's first load and its Reconnect start)
 must carry exactly one `X-Review-Instance` request header equal to it;
 otherwise the server answers 412 with `{"error": "the page was loaded from
-another serve; reconnect"}`, closes the connection, and reads, records and
+another server; reconnect"}`, closes the connection, and reads, records and
 packs nothing (an unknown route is 412 too, not 404). The check runs after
 the `Host` check and the token check, so a client without the token gets the
 same 400 or 401 as before and learns nothing from a 412; the public files
@@ -2596,10 +2652,11 @@ empties the rest of the stack.
   change the filter", or, when the pass is done too, "All batches done for
   pass N (filter: F)." and the end-of-pass hint and Reconnect below; when the
   filter lists no manifest row at all, "No images to review for pass N
-  (filter: F)" (the viewer's wording) in place of "All batches done". Under
+  (filter: F)" in place of "All batches done". Under
   `todo`, only when no manifest row of the pass is todo (UNREVIEWED or
   FLAGGED) is it the end of the pass: "Pass N: nothing left to review. Stop
-  serve (Ctrl-C), start the next one, then press Reconnect (r)." with the
+  the server (Ctrl-C) and start the next one; then press Reconnect (r) for
+  serve, or open review's new URL." with the
   Reconnect button, offered while no request is in flight and the page has not
   stopped (a stop takes the hint off the stage; see *Errors*). Otherwise
   (`elsewhereHint`): in grid mode (whose list is one batch) "No todo images
@@ -2630,10 +2687,10 @@ empties the rest of the stack.
   move, so it empties the status message. Once no row the filter lists is
   todo (`filterDone`; under `todo`, no todo row left in the pass), a step
   past either end shows the end screen instead of the stop sign: under
-  `todo` the end-of-pass screen (with Reconnect), since the next serve is
+  `todo` the end-of-pass screen (with Reconnect), since the next server is
   due; under `clean` or `all` the "All batches done … (filter: F)" screen
   (see *Marking*), which is the end-of-pass screen, "… (filter: F). Stop
-  serve…" with Reconnect, only when the pass is done too. Left/Right go
+  the server…" with Reconnect, only when the pass is done too. Left/Right go
   round from it too. A list with no items keeps its own screen, and the arrows do
   nothing.
 - **Re-check filter**: `state.filter` (`Filter`: `todo`, `clean` or `all`)
@@ -2645,10 +2702,10 @@ empties the rest of the stack.
   packed again while it has keys to pack) and empties `state.rechecked`, the
   keys marked under the current `clean` or `all` filter less those undone.
   That set is kept across `s`, `m`, `M`, `b` and a Reconnect that the same
-  serve answers (the same `X-Review-Instance`), forgotten when `loadReview`
+  server run answers (the same `X-Review-Instance`), forgotten when `loadReview`
   sees another instance (its keys may name other images), and dropped by
   `q`. Under `clean` or `all` a key is todo while UNREVIEWED or FLAGGED or
-  until re-checked (`isKeyTodo`, as the viewer's `_key_todo`), and an item
+  until re-checked (`isKeyTodo`), and an item
   while any of its keys is (`isItemTodo`); the progress, the move after a
   mark, the stop screen's count, `b`, the end screen and `heldBackCount`
   follow that. A grid build lands on the grid holding its landing key (a
@@ -2724,7 +2781,7 @@ empties the rest of the stack.
   reply without it is an unexpected reply); until that reload is in, every
   control is busy, so no key or button sends a request. It then rebuilds
   the current mode under the current filter, keeping its re-checked set
-  when the same serve answers and forgetting it for another (see *Re-check
+  when the same server run answers and forgetting it for another (see *Re-check
   filter*): single mode's list, reshuffled, from its first todo item (else
   the end screen); in grid mode the
   current batch and rotation (as `m` keeps the batch), laid out afresh by
@@ -2746,7 +2803,8 @@ empties the rest of the stack.
   overlay is up) means done with
   this server: the reviewer stops it with Ctrl-C (the marks are already
   saved), starts the next `serve` on the same socket path and token
-  (for the next batch or pass), and presses Reconnect in the same tab. It
+  (for the next batch or pass), and presses Reconnect in the same tab; or
+  starts the next `review` and opens its new URL. It
   stops the page as a lost connection does, so every request in flight
   turns stale and nothing more is sent. It leaves grid mode (canvas sized to
   0, hidden), revokes the image's blob URL and clears the `<img>`, and drops
@@ -2756,9 +2814,10 @@ empties the rest of the stack.
   too, since another work directory's keys and batch names usually match
   these. Every control is disabled, the Done
   button and the reviewer chip included, but Reconnect is shown; the
-  status message says "Done; waiting for the next serve" and the stage "Done.
-  Your marks are saved. Stop serve (Ctrl-C), start the next one, then press
-  Reconnect (r)." Reconnect then loads whatever the server serves (see
+  status message says "Done; waiting for the next server" and the stage "Done.
+  Your marks are saved. Stop the server (Ctrl-C) and start the next one; then
+  press Reconnect (r) for serve, or open review's new URL." Reconnect then
+  loads whatever the server serves (see
   *Errors*); a 401 shows the token-rejected message. There is no way to
   forget the token on the page: closing the tab does (`sessionStorage` is
   per tab). After a rejected token (or with none) `q` only frees the images

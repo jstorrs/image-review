@@ -406,7 +406,7 @@ class TestSocketOrigin(SocketServerTestCase):
         self.assertEqual(resp.status, 200)
 
 
-# The API routes a page loaded from another serve is refused on (ROUTES less /current_pass)
+# The API routes a page loaded from another server is refused on (ROUTES less /current_pass)
 INSTANCE_ROUTES = [
     ("GET", "/manifest"),
     ("GET", "/image?key=batch_001/a.jpg"),
@@ -420,7 +420,7 @@ INSTANCE_ROUTES = [
 MARK_A = {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
 UNDO = {"pass": 1, "reviewer": "tester"}
 GRIDS_ALL = {"keys": ["batch_001/a.jpg", "batch_001/b.jpg"], "width": 640, "height": 480, "rotation": "auto"}
-STALE_BODY = {"error": "the page was loaded from another serve; reconnect"}
+STALE_BODY = {"error": "the page was loaded from another server; reconnect"}
 
 
 class TestServerInstance(SocketServerTestCase):

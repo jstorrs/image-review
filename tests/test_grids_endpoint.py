@@ -157,7 +157,7 @@ class TestValidation(GridsTestCase):
             with self.subTest(instance=instance), mock.patch.object(store, "image_bytes") as image_bytes:
                 resp, data = self.post(b"", instance=instance)  # no body: the 412 closes before reading one
                 self.assertEqual(resp.status, 412)
-                self.assertEqual(json.loads(data), {"error": "the page was loaded from another serve; reconnect"})
+                self.assertEqual(json.loads(data), {"error": "the page was loaded from another server; reconnect"})
                 image_bytes.assert_not_called()
         self.assertEqual(self.server.image_sizes, {})
 

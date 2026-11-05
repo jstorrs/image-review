@@ -38,8 +38,7 @@ images, so one that cannot be loaded is only found when `review` tries to show
 it, and until it is marked DIRTY it counts as UNREVIEWED.
 
 `status` takes no lock, so it works while `review` or `serve` holds the work
-directory (see [`review.lock`](../reference/work-directory.md#reviewlock)). It
-does not start the viewer.
+directory (see [`review.lock`](../reference/work-directory.md#reviewlock)).
 
 If `preprocess` skipped any inputs, `status` also prints
 `Skipped during preprocess: F failed, I ignored (see skipped.tsv in the work dir)`,

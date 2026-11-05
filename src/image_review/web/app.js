@@ -16,12 +16,12 @@ const MARK_FLASH_MS = 200; // a marked item stays up this long, the bar in its n
 
 const TOKEN_REJECTED = "token rejected (server restarted?) - open the new URL";
 const LOST_CONNECTION = "Lost connection — your marks so far are saved on the server";
-// A 412: this page was loaded from an earlier serve (its keys may name another work directory's images).
+// A 412: this page was loaded from an earlier server run (its keys may name another work directory's images).
 const SERVER_CHANGED = "Server restarted or changed work directory - press Reconnect (r)";
-// With the same socket path and token, the next serve is loaded in this tab by Reconnect.
-const NEXT_SERVE = "Stop serve (Ctrl-C), start the next one, then press Reconnect (r).";
-const WAITING = "Done; waiting for the next serve";
-const WAITING_DETAIL = "Done. Your marks are saved. " + NEXT_SERVE;
+// With the same address and token, the next server is loaded in this tab by Reconnect.
+const NEXT_SERVER = "Stop the server (Ctrl-C) and start the next one; then press Reconnect (r) for serve, or open review's new URL.";
+const WAITING = "Done; waiting for the next server";
+const WAITING_DETAIL = "Done. Your marks are saved. " + NEXT_SERVER;
 // The end of a list with todo left elsewhere in the pass (see "End of a pass or batch" in docs/commands/browser.md)
 const NEXT_BATCH = "No todo images remaining - [b] next batch";
 const RELOAD_SINGLE = "No todo images remaining - press [s] to reload the list";
@@ -124,7 +124,7 @@ function takeToken() {
 /** @type {State} */
 const state = {
   token: takeToken(),
-  instance: null, // the serve run the review was loaded from (its /current_pass reply's INSTANCE_HEADER)
+  instance: null, // the server run the review was loaded from (its /current_pass reply's INSTANCE_HEADER)
   pass: null,
   manifest: [], // {key, batch} rows in manifest order
   batches: [], // the manifest's batches, sorted
@@ -238,7 +238,7 @@ function lose() {
 }
 
 // Whether a Reconnect may be tried, with a token: after a lost connection, once done with
-// this server (q), or on the end-of-pass screen while idle (the next serve may be up; a
+// this server (q), or on the end-of-pass screen while idle (the next server may be up; a
 // reply still due would be dropped, though the server has acted on it).
 function canReconnect() {
   const idleEnd = state.atEnd && !state.busy && !state.dead;
@@ -253,7 +253,7 @@ function stale() {
 }
 
 // fetch with the token and the instance the review was loaded from. A 401 or a
-// network failure stops the page, as does a 412 (another serve now answers, see
+// network failure stops the page, as does a 412 (another server now answers, see
 // SERVER_CHANGED); once stopped, nothing is sent until a Reconnect, and a request
 // sent before then changes nothing.
 /** @param {string} path @param {Omit<RequestInit, "headers"> & {headers?: Record<string, string>}} [options] (callers pass plain-object headers) @returns {Promise<Response>} */
@@ -283,7 +283,7 @@ async function call(path, options = {}) {
     throw stop(TOKEN_REJECTED);
   }
   if (response.status === 412) {
-    state.lost = true; // as a lost connection: Reconnect loads the serve now answering
+    state.lost = true; // as a lost connection: Reconnect loads the server now answering
     throw stop(SERVER_CHANGED);
   }
   return response;
@@ -677,7 +677,7 @@ function elsewhereHint() {
 }
 
 // The end of the list, with no todo left in it. Only with no todo row left in the pass is
-// it the end of the pass, where the next serve is due and Reconnect is offered. Under clean
+// it the end of the pass, where the next server is due and Reconnect is offered. Under clean
 // or all, with every key re-checked, the re-check is done ("All batches done", or "No
 // images to review" when the filter lists none, as the viewer said); the pass may be done too.
 function showEnd() {
@@ -685,13 +685,13 @@ function showEnd() {
     showNotice(elsewhereHint());
   } else if (state.filter === "todo") {
     state.atEnd = true;
-    showNotice("Pass " + state.pass + ": nothing left to review. " + NEXT_SERVE);
+    showNotice("Pass " + state.pass + ": nothing left to review. " + NEXT_SERVER);
   } else {
     state.atEnd = passDone();
     const listed = state.manifest.some((row) => inFilter(state.statuses.get(row.key), state.filter));
     const done = (listed ? "All batches done" : "No images to review") + " for pass " + state.pass;
     const filter = done + " (filter: " + state.filter + ")";
-    showNotice(filter + (state.atEnd ? ". " + NEXT_SERVE : " - press [f] to change the filter"));
+    showNotice(filter + (state.atEnd ? ". " + NEXT_SERVER : " - press [f] to change the filter"));
   }
   render();
 }
@@ -1307,7 +1307,7 @@ async function loadReview() {
     throw new BadReply("instance");
   }
   if (instance !== state.instance) {
-    state.rechecked = new Set(); // another serve: its keys may name other images (kept for the same one)
+    state.rechecked = new Set(); // another server: its keys may name other images (kept for the same one)
   }
   state.instance = instance;
   const manifest = parseManifest(await getJson("/manifest"));
@@ -1625,7 +1625,7 @@ async function start() {
   }
   if (!state.token) {
     state.dead = true;
-    say("No token. Open the URL printed by `image-review serve`.");
+    say("No token. Open the URL that image-review printed.");
     render();
     return;
   }

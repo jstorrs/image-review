@@ -4,7 +4,7 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const test = require("node:test");
-const { makePage, place, NEXT_SERVE, plain, reload } = require("./page");
+const { makePage, place, NEXT_SERVER, plain, reload } = require("./page");
 
 const tests = {};
 
@@ -176,7 +176,7 @@ tests["with every key re-checked under all the pass is done: All batches done, a
     await page.respond("/mark", page.json(200, { [key]: "CLEAN" }));
   }
   assert.strictEqual(page.state.index, -1);
-  assert.strictEqual(page.els.message.textContent, "All batches done for pass 1 (filter: all). " + NEXT_SERVE);
+  assert.strictEqual(page.els.message.textContent, "All batches done for pass 1 (filter: all). " + NEXT_SERVER);
   assert.strictEqual(page.els.reconnect.hidden, false);
 };
 
@@ -221,18 +221,18 @@ tests["the mode keeps its whole text in its title"] = async () => {
   assert.strictEqual(page.els.mode.title, "Single · re-check: CLEAN");
 };
 
-tests["Reconnect to another serve forgets the re-checked keys"] = async () => {
+tests["Reconnect to another server forgets the re-checked keys"] = async () => {
   const page = makePage({ manifest: rows.slice(0, 3), statuses: CLEAN_AC, fixedOrder: true });
   await page.boot();
   await pressF(page, CLEAN_AC);
   await recheckCurrent(page);
   assert.deepStrictEqual([...page.state.rechecked], ["a"]);
   await page.fail("/image?key=c");
-  page.instance = "B"; // serve restarted, perhaps on another work directory with the same key names
+  page.instance = "B"; // the server restarted, perhaps on another work directory with the same key names
   await page.key("r");
   await reload(page, CLEAN_AC, 1, rows.slice(0, 3));
   assert.strictEqual(page.state.filter, "clean");
-  assert.deepStrictEqual([...page.state.rechecked], [], "another serve's a may be another image");
+  assert.deepStrictEqual([...page.state.rechecked], [], "another server's a may be another image");
   assert.strictEqual(page.els.progress.textContent, "Pass 1 · 2 / 2 left");
 };
 
@@ -401,7 +401,7 @@ for (const [label, plan] of [
   };
 }
 
-tests["a Reconnect retried after a failed one to another serve still forgets the re-checked keys"] = async () => {
+tests["a Reconnect retried after a failed one to another server still forgets the re-checked keys"] = async () => {
   const page = makePage({ manifest: rows.slice(0, 3), statuses: CLEAN_AC, fixedOrder: true });
   await page.boot();
   await pressF(page, CLEAN_AC);
@@ -424,13 +424,13 @@ tests["the pass-done end messages under clean"] = async () => {
   await page.boot();
   await pressF(page, some);
   await recheckCurrent(page);
-  assert.strictEqual(page.els.message.textContent, "All batches done for pass 1 (filter: clean). " + NEXT_SERVE);
+  assert.strictEqual(page.els.message.textContent, "All batches done for pass 1 (filter: clean). " + NEXT_SERVER);
   assert.strictEqual(page.els.reconnect.hidden, false);
   const none = { a: "DIRTY", b: "DIRTY" };
   const other = makePage({ manifest: rows.slice(0, 2), statuses: none, fixedOrder: true });
   await other.boot();
   await pressF(other, none);
-  assert.strictEqual(other.els.message.textContent, "No images to review for pass 1 (filter: clean). " + NEXT_SERVE);
+  assert.strictEqual(other.els.message.textContent, "No images to review for pass 1 (filter: clean). " + NEXT_SERVER);
   assert.strictEqual(other.els.reconnect.hidden, false);
 };
 

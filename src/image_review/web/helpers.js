@@ -46,15 +46,15 @@ function inFilter(status, filter) {
   return filter === "all" || (filter === "clean" ? status === "CLEAN" : isTodo(status));
 }
 
-// As ReviewSession._key_todo: a key is todo while UNREVIEWED or FLAGGED; under clean or all,
+// A key is todo while UNREVIEWED or FLAGGED; under clean or all,
 // where every key is a re-check, also until it is re-checked (marked under that filter).
 /** @param {string} key @param {StatusMap} statuses @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {boolean} */
 function isKeyTodo(key, statuses, filter = "todo", rechecked = new Set()) {
   return isTodo(statuses.get(key)) || (filter !== "todo" && !rechecked.has(key));
 }
 
-// As ReviewSession._is_todo: under the todo filter by the item's status (a grid holding a
-// DIRTY or FLAGGED key is not todo); under clean or all while any of its keys is.
+// An item is todo under the todo filter when its own status is (a grid holding a DIRTY or
+// FLAGGED key is not todo); under clean or all, while any of its keys is (see isKeyTodo).
 /** @param {Item} item @param {StatusMap} statuses @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {boolean} */
 function isItemTodo(item, statuses, filter = "todo", rechecked = new Set()) {
   if (filter === "todo") {

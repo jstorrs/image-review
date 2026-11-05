@@ -138,7 +138,7 @@ rest; together they are enough to rebuild the tool.
 |---|---|
 | A command's options, defaults, environment variables, exit codes, messages and output | `docs/commands/<command>.md` |
 | Global options, log levels and the log format | `docs/commands/index.md` |
-| Viewer keys, gamepad and screens, and what only `review` does (`--pass`, `--filter`, `--reviewer`) | `docs/commands/review.md` |
+| `review`'s options, output, redirect file, browser opening and stopping | `docs/commands/review.md` |
 | The browser page's keys, screens and messages; passes, todo images, undo, refused CLEAN on a grid, unloadable images and recorded verdicts | `docs/commands/browser.md` |
 | Work-directory files: columns, encoding, parsing, `review.lock`, leftover files | `docs/reference/work-directory.md` |
 | Skip kinds and example reasons | `docs/commands/preprocess.md` |

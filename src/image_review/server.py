@@ -337,8 +337,10 @@ CONTENT_SECURITY_POLICY = (
 # required on every API request but this one: the page's first load and its Reconnect start there.
 INSTANCE_HEADER = "X-Review-Instance"
 INSTANCE_FREE_ROUTES = frozenset({("GET", "/current_pass")})
-# A page loaded from an earlier serve (keys collide across work dirs): nothing is read, recorded or packed
-STALE_PAGE = Reply(412, json.dumps({"error": "the page was loaded from another serve; reconnect"}).encode(), close=True)
+# A page loaded from an earlier server run (keys collide across work dirs): nothing is read, recorded or packed
+STALE_PAGE = Reply(
+    412, json.dumps({"error": "the page was loaded from another server; reconnect"}).encode(), close=True
+)
 
 
 def load_assets() -> dict[str, Reply]:

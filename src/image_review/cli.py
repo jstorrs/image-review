@@ -2,6 +2,7 @@ import contextlib
 import datetime
 import functools
 import getpass
+import html
 import logging
 import math
 import os
@@ -9,8 +10,10 @@ import shlex
 import signal
 import socket
 import sys
+import threading
+import webbrowser
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, get_args
 
@@ -18,13 +21,12 @@ import click
 
 from .access import Access, access_of, modes, world_access_warning
 from .atomic import write_new_file
-from .connection import MAX_PASS, Token, parse_reviewer, parse_token
+from .connection import Token, parse_token
 from .export import ExportRow, ExportStatus, format_allowlist, format_report, split_allowlist
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
-from .review_db import ReviewLogChanged
-from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on, interrupt_once
-from .status import MarkMode, Rotation, Status
-from .store import LocalStore, SkippedCounts, StatusFilter, batch_summary, skipped_counts, summary
+from .signals import TERMINATION_SIGNALS, interrupt_on, interrupt_once
+from .status import Status
+from .store import LocalStore, SkippedCounts, batch_summary, skipped_counts, summary
 
 if TYPE_CHECKING:
     from .server import ReviewServer
@@ -35,27 +37,6 @@ PACKAGE_LOGGER = "image_review"  # every module logs under it; the CLI configure
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 log = logging.getLogger(f"{PACKAGE_LOGGER}.cli")  # not __name__: that is "__main__" under `python -m`
-
-# The top-level modules of the optional extra that a command imports; every other dependency in pyproject.toml is
-# always installed, so a missing one is a broken install and is not translated.
-EXTRA_MODULES: dict[str, frozenset[str]] = {"viewer": frozenset({"pygame"})}
-
-
-@contextlib.contextmanager
-def requires_extra(extra: str) -> Iterator[None]:
-    """Turn a missing module of `extra`, imported in the block, into a ClickException naming the install command.
-
-    Only a ModuleNotFoundError for one of the extra's own top-level modules is translated; any other import failure
-    (one of our modules, a broken install, a missing transitive dependency) propagates unchanged.
-    """
-    try:
-        yield
-    except ModuleNotFoundError as exc:
-        if (exc.name or "").partition(".")[0] not in EXTRA_MODULES[extra]:
-            raise
-        raise click.ClickException(
-            f"this command needs the {extra} extra: pip install 'image-review[{extra}]'"
-        ) from exc
 
 
 class LogFormatter(logging.Formatter):
@@ -164,7 +145,7 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
 
     \b
       1. preprocess  — convert source DICOMs/images to JPG batches
-      2. serve       — serve the work directory for review in a browser (or `review`, to classify locally)
+      2. review      — review in a browser on this machine (or `serve`, for a browser on your laptop over SSH)
       3. status      — check review progress and counts
       4. export      — write the result: one row per source image (on the machine holding the work dir)
 
@@ -340,112 +321,196 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, j
         )
 
 
-def _reviewer(ctx: click.Context, param: click.Parameter, value: str | None) -> str:
-    """--reviewer, else $IMAGE_REVIEW_REVIEWER, else the login name, checked like the server checks it."""
-    if value is None:
-        try:
-            value = getpass.getuser()
-        except (
-            KeyError,
-            OSError,
-        ):  # no USER/LOGNAME and no passwd entry (some containers): KeyError <3.13, OSError >=3.13
-            raise click.BadParameter("cannot determine your user name; pass --reviewer NAME") from None
-    try:
-        return parse_reviewer(value)
-    except ValueError as e:
-        raise click.BadParameter(str(e)) from None
+def _loopback_port(ctx: click.Context, param: click.Parameter, value: int) -> int:
+    """--port: 0 (any free port) or one of server.LOOPBACK_PORTS, checked before the work directory is opened."""
+    from .server import LOOPBACK_PORTS
 
-
-def unknown_batch_message(batch: str, known: set[str]) -> str | None:
-    """Why `batch` cannot be reviewed, or None when it names a batch in the manifest."""
-    if batch in known:
-        return None
-    names = sorted(known)
-    listed = ", ".join(names[:5]) + (", ..." if len(names) > 5 else "")
-    return f"Unknown batch {batch!r}; known batches: {listed or '(none)'}."
+    if value != 0 and value not in LOOPBACK_PORTS:
+        raise click.BadParameter(f"{value} must be 0 (any free port) or 1024-65535.")
+    return value
 
 
 @cli.command()
 @click.option(
-    "--mode", type=click.Choice(get_args(MarkMode)), default="single", show_default=True, help="Review display mode."
-)
-@click.option(
-    "--pass",
-    "pass_number",
-    type=click.IntRange(1, MAX_PASS),
-    default=None,
-    help=f"Pass number, 1 to {MAX_PASS} (auto-detected if omitted).",
-)
-@click.option(
-    "--batch",
-    type=str,
-    default=None,
-    help="Restrict to a specific batch; [b] at the end of the list stays in it [default: the first batch with images matching the filter, and [b] moves on to the next].",
-)
-@click.option(
-    "--filter",
-    "status_filter",
-    type=click.Choice(get_args(StatusFilter)),
-    default="unreviewed",
+    "--work-dir",
+    type=click.Path(exists=True),
+    default=DEFAULT_WORK_DIR,
     show_default=True,
-    help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).",
+    help="Work directory containing preprocessed data.",
 )
 @click.option(
-    "--rotate",
-    type=click.Choice(get_args(Rotation)),
-    default="auto",
+    "--port",
+    type=int,
+    default=0,
     show_default=True,
-    help="Rotate images 90 degrees in grids: auto = only when that saves a grid.",
+    callback=_loopback_port,
+    help="The port on 127.0.0.1 to serve on: 1024-65535, or 0 for any free one.",
 )
-@click.option(
-    "--reviewer",
-    envvar="IMAGE_REVIEW_REVIEWER",
-    default=None,
-    callback=_reviewer,
-    help="Name recorded with each verdict in review.tsv, 1-64 printable characters, not all spaces [default: your login name]. "
-    "An unauthenticated claim: it is recorded as given, not verified. Also read from $IMAGE_REVIEW_REVIEWER.",
-)
-@work_dir_option
-def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir):
-    """Open an interactive review session for classifying images.
+@click.option("--no-browser", is_flag=True, help="Do not open a browser; open the URL yourself.")
+def review(work_dir, port, no_browser):
+    """Review a work directory in a browser on this machine.
 
-    \b
-    Keyboard controls:
-      c / d       — mark image CLEAN / DIRTY
-      Arrow keys  — navigate between images
-      Space       — toggle autoplay
-      q           — quit
+    This serves the browser page on 127.0.0.1 and opens it in your
+    browser. The URL contains an access token: treat it like a password.
+    When stdout is not a terminal, the URL is not printed: open the
+    private file under ~/.image-review/ that is named instead. To review
+    data on another machine, such as a cluster, use `serve`.
+    Needs Linux or macOS.
     """
-    with requires_extra("viewer"):
-        import pygame as pg
+    if sys.platform == "win32":
+        raise click.ClickException("review needs Linux or macOS")
 
-        from .controller import ReviewSession
+    def start(store: LocalStore, stack: contextlib.ExitStack) -> "ReviewServer":
+        return _serve_loopback(store, port, not no_browser, stack)
 
-    # a dropped terminal or ssh session, or Ctrl-C (SDL leaves SIGINT alone); a second signal must not cut the cleanup
-    with (
-        interrupt_once(signal.SIGINT, *HANGUP_SIGNALS),
-        open_local_store(_existing_work_dir(work_dir)) as store,
-    ):
-        if batch is not None and (problem := unknown_batch_message(batch, {row.batch for row in store.manifest()})):
-            raise click.BadParameter(problem, param_hint="'--batch'")
-        pg.init()
+    _serve_until_stopped(Path(work_dir), start)
+
+
+def redirect_page(url: str) -> str:
+    """The redirect file's HTML: a meta refresh to `url`, and a link to it for a browser that ignores the refresh."""
+    target = html.escape(url)
+    return (
+        "<!doctype html>\n"
+        '<meta charset="utf-8">\n'
+        f'<meta http-equiv="refresh" content="0; url={target}">\n'
+        "<title>image-review</title>\n"
+        f'<p><a href="{target}">Open the review page</a></p>\n'
+    )
+
+
+def has_display(platform: str, environ: Mapping[str, str]) -> bool:
+    """Whether a graphical session on this machine is plausible: never inside an ssh session ($SSH_CONNECTION, so
+    `ssh -X` to a shared node opens no browser there); else macOS, or a $DISPLAY or $WAYLAND_DISPLAY.
+
+    A display does not rule out a terminal browser as the default; `graphical_browser` refuses those.
+    """
+    if environ.get("SSH_CONNECTION"):
+        return False
+    return platform == "darwin" or bool(environ.get("DISPLAY") or environ.get("WAYLAND_DISPLAY"))
+
+
+CONSOLE_BROWSERS = frozenset({"lynx", "w3m", "links", "elinks", "www-browser"})
+
+
+def is_graphical(browser: webbrowser.BaseBrowser) -> bool:
+    """False for a controller that would run in this terminal: a foreground `GenericBrowser` (as from $BROWSER),
+    or a known console browser by name."""
+    return type(browser) is not webbrowser.GenericBrowser and Path(browser.name).name not in CONSOLE_BROWSERS
+
+
+def graphical_browser() -> webbrowser.BaseBrowser | None:
+    """The default browser controller, or None if there is none or it is not graphical (see `is_graphical`)."""
+    try:
+        browser = webbrowser.get()
+    except webbrowser.Error:
+        return None
+    return browser if is_graphical(browser) else None
+
+
+def _serve_loopback(store: LocalStore, port: int, open_browser: bool, stack: contextlib.ExitStack) -> "ReviewServer":
+    """Bind the loopback server with a fresh token, write the redirect file and announce it; returns the server.
+
+    The server's and the file's cleanup are registered on `stack`. Failures become ClickExceptions.
+    """
+    from .server import make_loopback_server, safe_name, short_host, write_private_file
+
+    try:
+        server, token = make_loopback_server(store, port)  # --port is already checked
+    except OSError as e:
+        raise click.ClickException(f"Cannot listen on 127.0.0.1:{port}: {e}")
+    _close_with(stack, server, store)
+    url = browser_url(token, server.server_port)  # the bound port: --port 0 picks one
+    try:
+        redirect = write_private_file(f"review-{safe_name(short_host())}-{os.getpid()}.html", redirect_page(url))
+    except OSError as e:
+        raise click.ClickException(f"Cannot write browser redirect file: {e}")
+    stack.callback(redirect.unlink, missing_ok=True)
+    _announce_loopback(url, redirect, open_browser, stack)
+    return server
+
+
+BROWSER_THREAD = "image-review-browser"  # names the thread that opens the browser
+
+
+def _announce_loopback(url: str, redirect: Path, open_browser: bool, stack: contextlib.ExitStack) -> None:
+    """Print the URL on a terminal, else the redirect file's path; then, if asked, open the browser on the file.
+
+    The browser gets the file's URI, so the token never appears in a process's command line. It is chosen and
+    opened from a daemon thread, so neither a slow choice nor a browser that does not return can hold up the
+    server, which is already listening. The thread's stop is registered on `stack` after the redirect file's
+    removal, so it runs first: once cleanup starts, the thread opens and prints nothing.
+    """
+    tty = sys.stdout.isatty()
+    print("Serving review data on 127.0.0.1 for browser review on this machine.")
+    if tty:
+        print("\nOpen this URL. It contains an access token; treat it like a password.\n")
+        print(url)
+    else:
+        print("\nStdout is not a terminal, so the URL (it contains an access token; treat it like a")
+        print("password) is not printed. Open this file (mode 0600) in your browser:\n")
+        print(f"  {redirect}")
+    print(flush=True)
+    display = open_browser and has_display(sys.platform, os.environ)
+    if open_browser and not display:
+        print("No display found, so no browser was opened; open it yourself.")
+    print("Press Ctrl-C to stop.", flush=True)
+    if display:
+        where = "the URL above" if tty else f"the URL from `cat {shlex.quote(str(redirect))}`"
+        opener = _BrowserOpener(redirect, where)
+        stack.callback(opener.stop)
+        threading.Thread(target=opener.run, name=BROWSER_THREAD, daemon=True).start()
+
+
+class _BrowserOpener:
+    """Choose a graphical browser and open the redirect file in it, saying how it went, until stopped.
+
+    Run in its own thread: choosing can take seconds (webbrowser runs xdg-settings and the like). Opening and
+    each print happen under `_lock` after checking `_stopped`, so none happens once `stop` has returned.
+    """
+
+    STOP_WAIT = 5.0  # seconds stop waits for an open or print in progress; it never blocks cleanup for longer
+
+    def __init__(self, redirect: Path, where: str):
+        self._redirect = redirect
+        self._where = where  # where else to find the URL
+        self._lock = threading.Lock()
+        self._stopped = threading.Event()
+
+    def stop(self) -> None:
+        acquired = self._lock.acquire(timeout=self.STOP_WAIT)
+        self._stopped.set()
+        if acquired:
+            self._lock.release()
+
+    def _say(self, *lines: str) -> None:
+        with self._lock:
+            if not self._stopped.is_set():
+                print("\n".join(lines), flush=True)
+
+    def run(self) -> None:
         try:
-            session = ReviewSession(
-                store=store,
-                reviewer=reviewer,
-                mode=mode,
-                pass_number=pass_number,
-                batch=batch,
-                status_filter=status_filter,
-                rotation=rotate,
+            browser = graphical_browser()
+        except Exception as e:  # noqa: BLE001 - whatever webbrowser raises, the server keeps running
+            log.debug("choosing a browser failed: %s", type(e).__name__)
+            browser = None
+        if browser is None:
+            self._say("No graphical browser found, so none was opened; open it yourself.")
+            return
+        with self._lock:
+            if self._stopped.is_set():
+                return
+            try:
+                opened = browser.open(self._redirect.as_uri())
+            except Exception as e:  # noqa: BLE001 - e.g. the browser's command vanished
+                log.debug("opening the browser failed: %s", type(e).__name__)
+                opened = False
+        if opened:
+            self._say(
+                "Opened it in your browser. If the browser shows an access error (a snap browser, such as",
+                f"Ubuntu's Firefox, cannot read ~/.image-review), open {self._where} instead.",
             )
-            session.run()
-        except ReviewLogChanged as e:  # review.tsv changed under this session (a mark or undo): its statuses are stale
-            raise click.ClickException(
-                f"Not recorded: {e}. Stop any other review or serve using this work directory, then run review again."
-            ) from e
-        finally:
-            pg.quit()
+        else:
+            self._say("Could not open a browser; open it yourself.")
 
 
 def status_report(
@@ -659,15 +724,27 @@ def serve(work_dir, socket_path, via, direct, ssh_host):
         except ValueError as e:  # the message never holds the value
             raise click.ClickException(f"Invalid $IMAGE_REVIEW_TOKEN: {e}")
 
+    def start(store: LocalStore, stack: contextlib.ExitStack) -> "ReviewServer":
+        server, announce = _serve_socket(store, socket_path, token, via, direct, ssh_host, stack)
+        announce(stack)
+        return server
+
+    _serve_until_stopped(Path(work_dir), start)
+
+
+def _serve_until_stopped(work_dir: Path, start: Callable[[LocalStore, contextlib.ExitStack], "ReviewServer"]) -> None:
+    """Open the work directory (taking its lock), start a server on it with `start`, and serve until stopped.
+
+    `start` binds and announces the server and registers its cleanup on the stack (see `_close_with`).
+    Ctrl-C, SIGTERM and SIGHUP stop it; every exit path closes the server and releases the lock.
+    """
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
         # Installed before the lock is taken, so every exit path releases it. Only the first signal counts: a second
         # one during cleanup would cut short the lock release or the wait for a mark in flight.
         with interrupt_once(signal.SIGINT, *TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
-            store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
-            server, announce = _serve_socket(store, socket_path, token, via, direct, ssh_host, stack)
-            announce(stack)
-            server.serve_forever()
+            store = stack.enter_context(open_local_store(work_dir))  # holds the work dir lock
+            start(store, stack).serve_forever()
     except KeyboardInterrupt:
         pass
 
@@ -719,9 +796,10 @@ BROWSER_PORT = 8080  # the laptop-side port in the printed ssh command and URL; 
 
 
 def browser_url(token: str, port: int = BROWSER_PORT) -> str:
-    """The URL to open on the laptop; the token rides in the fragment, which the browser never sends.
+    """The URL to open in the browser; the token rides in the fragment, which the browser never sends.
 
-    127.0.0.1, not localhost: the forward below binds only that address, so nothing else can answer the URL.
+    127.0.0.1, not localhost: `review`'s server and `serve`'s ssh forward bind only that address, so nothing
+    listening on ::1 can answer the URL.
     """
     return f"http://127.0.0.1:{port}/#{token}"
 
