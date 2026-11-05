@@ -12,10 +12,9 @@ and **export** the allowlist of files that may be released.
 
 - Python >= 3.12
 - Every command needs only the core dependencies; `review` and `serve` also
-  need a browser to review in. The `viewer` extra (pygame-ce) is no longer
-  used by any command. `preprocess` and `codecs` are empty extras kept for
-  existing install commands, and `all` equals `viewer`. The extras, what each
-  command needs and every minimum version are in [Installation](../install.md#choosing-extras) and
+  need a browser to review in. Every install is the same.
+  The dependencies, what each command needs and every minimum version are in
+  [Installation](../install.md#what-gets-installed) and
   [Minimum dependency versions](../install.md#minimum-dependency-versions);
   `pyproject.toml` declares them. The `dev` and `docs` extras are described in
   [CONTRIBUTING.md](https://github.com/jstorrs/image-review/blob/main/CONTRIBUTING.md).

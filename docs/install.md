@@ -10,15 +10,14 @@ That installs from a source checkout. From a wheel or package index, use
 `pip install image-review`; from a clone, `uv sync` installs the same as
 `pip install .`. `review` needs only a browser on the same machine.
 
-## Choosing extras
+## What gets installed
 
-| Install | Commands | Dependencies |
-|---|---|---|
-| `pip install .` | every command: `preprocess`, `review`, `serve`, `status`, `export`, `--help` | click, rectpack; pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg, pylibjpeg-openjpeg |
-| `pip install '.[viewer]'` | the same; no command uses pygame-ce any more | pygame-ce |
-
-`[all]` is the same as `[viewer]`, and `[preprocess]` and `[codecs]` are still
-accepted but add nothing, since their dependencies are installed by default.
+There are no optional features to choose: every install brings every
+command and these dependencies: click, rectpack; pydicom, numpy, scikit-image,
+scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm; python-gdcm, pylibjpeg,
+pylibjpeg-openjpeg. The `dev` and `docs` extras are for contributors and
+for building this site; see
+[CONTRIBUTING.md](https://github.com/jstorrs/image-review/blob/main/CONTRIBUTING.md).
 
 For [browser review](tutorials/browser-review.md) on a cluster, use a plain
 install where you preprocess and serve; the laptop needs only ssh and a
@@ -84,7 +83,7 @@ corrupt JPEG 2000 codestream instead of decoding it without an error. The
 minimums are: click >= 8.3.0, imagecodecs >= 2024.6.1, matplotlib >= 3.8.4,
 numpy >= 2.1, pydicom >= 3.0.1, Pillow >= 10.3 except 11.x (which misdecodes
 an MPO frame whose mode differs from the one before), scikit-image >= 0.23.1,
-scipy >= 1.13, tifffile >= 2024.1.30, tqdm >= 4.60, pygame-ce >= 2.3.1,
+scipy >= 1.13, tifffile >= 2024.1.30, tqdm >= 4.60,
 python-gdcm >= 3.0.25, pylibjpeg >= 2.0,
 pylibjpeg-openjpeg >= 2.3, and rectpack pinned at 0.2.2 (unmaintained; grid
 packing depends on its exact behavior).

@@ -23,6 +23,6 @@ safety net).
 
 - [Local review](tutorials/local-review.md): a walk-through of a whole review on one machine, in your browser.
 - [Browser review over SSH](tutorials/browser-review.md): the recommended way to review images that stay on the cluster, from your laptop. There is nothing to install on the laptop but ssh and a browser, and nothing to keep in sync: the page is served by `serve` itself, so it always matches the server's version.
-- [Installation](install.md): the extras, cluster installs and compressed DICOMs.
+- [Installation](install.md): the dependencies, cluster installs and compressed DICOMs.
 - [Commands overview](commands/index.md): logging and the options that go before the command.
 - [preprocess](commands/preprocess.md), [review](commands/review.md), [status](commands/status.md), [export](commands/export.md) and [serve](commands/serve.md): one page per command.

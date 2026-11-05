@@ -17,8 +17,8 @@ The documentation is at <https://jstorrs.github.io/image-review/>.
 
 Requires Python >= 3.12. `pip install .` from a clone, or `pip install
 image-review` from a wheel or a package index, installs every command;
-`review` needs only a browser. See [Installation](docs/install.md) for the
-extras, cluster installs without root, compressed DICOMs and minimum
+`review` needs only a browser. See [Installation](docs/install.md) for
+the dependencies, cluster installs without root, compressed DICOMs and minimum
 dependency versions.
 
 ## Quick start

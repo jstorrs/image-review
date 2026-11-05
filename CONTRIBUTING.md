@@ -8,8 +8,8 @@ Python 3.12 or later. From a clone, in a virtual environment:
 pip install -e '.[dev]'
 ```
 
-`dev` pulls in every extra (the tests exercise every command) plus the lint,
-type-check and coverage tools.
+`dev` adds the lint, type-check and coverage tools to the runtime
+dependencies, which every install includes.
 
 ## Tests, lint, format and type check
 
@@ -22,10 +22,6 @@ mypy --python-executable "$(which python)"
 
 `mypy` reads its settings from `pyproject.toml`; `--python-executable` points
 it at the environment that has the project's dependencies installed.
-
-CI sets `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy` so pygame needs no
-display or sound device. Set them too when running the tests on a headless
-machine.
 
 The browser-page tests run `web/helpers.js` and `web/app.js` under `node` and skip when it is not on
 `PATH`. Set `IMAGE_REVIEW_REQUIRE_NODE=1` to make them fail instead; CI sets it
@@ -44,7 +40,7 @@ node --test --test-reporter=spec tests/web/*.test.js
 coverage run -m unittest discover && coverage report
 ```
 
-Run it with the same `SDL_*` variables and with `node` on `PATH`, as above.
+Run it with `node` on `PATH`, as above.
 The report includes branch coverage, and `fail_under` in `pyproject.toml` sets
 the floor; CI enforces it in the Ubuntu / Python 3.13 job only.
 

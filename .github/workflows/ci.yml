@@ -23,8 +23,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      SDL_VIDEODRIVER: dummy
-      SDL_AUDIODRIVER: dummy
       PYTHONDONTWRITEBYTECODE: "1"
       IMAGE_REVIEW_REQUIRE_NODE: "1"
     steps:
@@ -58,8 +56,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      SDL_VIDEODRIVER: dummy
-      SDL_AUDIODRIVER: dummy
       PYTHONDONTWRITEBYTECODE: "1"
       IMAGE_REVIEW_REQUIRE_NODE: "1"
     steps:
@@ -74,7 +70,7 @@ jobs:
         run: |
           python -m pip install uv
           uv pip install --python "$(which python)" --resolution lowest-direct \
-            --only-binary :all: --no-binary rectpack -e ".[all]"
+            --only-binary :all: --no-binary rectpack -e .
       - name: Test
         run: python -m unittest discover
 

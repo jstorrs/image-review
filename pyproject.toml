@@ -25,13 +25,11 @@ dependencies = [
     # Minimums verified by running the test suite on CPython 3.12, installing wheels only (except
     # rectpack, which has only an sdist), and CI's `minimums` job repeats this. Where no comment says
     # why, the minimum is the oldest release with a CPython 3.12 wheel.
-    # Core: every command but `review` (which needs the `viewer` extra). The CLI imports the heavy packages (numpy,
-    # pydicom, matplotlib, ...) only where a command uses them, so `--help`, `serve`, `status` and `export` start
-    # without them: click and rectpack (the grid layout in layout.py, shared by the viewer and serve's browser client)
-    # are all that serve, status and export import.
+    # Every install is the same. The CLI imports the heavy packages (numpy, pydicom, matplotlib, ...) only where a
+    # command uses them, so `--help`, `serve`, `status` and `export` start without importing them: click and rectpack
+    # (the grid layout in layout.py) are all that serve, status and export import.
     "click>=8.3.0",  # tests: separate CliRunner stderr, envvar values validated (8.2.2 has both but is yanked)
     "rectpack==0.2.2",  # unmaintained, sdist only; grid packing results depend on its exact behaviour
-    # `preprocess`
     "imagecodecs>=2024.6.1",  # 16-bit colour and alpha PNGs, which Pillow truncates to their high byte
     "matplotlib>=3.8.4",  # older releases require numpy < 2
     "numpy>=2.1",  # imagecodecs 2026.5.10 and later require it; the floors are tested with it
@@ -55,17 +53,7 @@ Changelog = "https://github.com/jstorrs/image-review/blob/main/CHANGELOG.md"
 Issues = "https://github.com/jstorrs/image-review/issues"
 
 [project.optional-dependencies]
-# Kept, empty, so `pip install 'image-review[preprocess,codecs]'` and `uv sync --extra preprocess` still work
-# (uv refuses an undefined extra): their dependencies are core now. setuptools still publishes both as Provides-Extra.
-preprocess = []
-codecs = []
-# `review`, local or the deprecated --remote; Pillow, which it also uses, is a core dependency
-viewer = [
-    "pygame-ce>=2.3.1",
-]
-all = ["image-review[viewer]"]  # every extra that adds a dependency
 dev = [
-    "image-review[all]",  # the tests exercise every command
     "ruff>=0.16",
     "mypy>=1.16",  # older releases misread the numpy 2.x stubs
     "types-tqdm",
@@ -99,7 +87,7 @@ select = [
 ignore = [
     "E501",     # line length is left to the formatter
     "B904",     # click handlers re-raise as ClickException; chaining would change tracebacks
-    "PLC0415",  # imports are deferred on purpose (optional dependencies, startup time)
+    "PLC0415",  # imports are deferred on purpose (startup time)
     "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",  # complexity and magic-value heuristics
     "RET504",   # naming the value before returning it is often clearer
     "S101",     # asserts narrow Optional types for mypy
