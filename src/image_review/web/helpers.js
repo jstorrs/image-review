@@ -11,6 +11,8 @@ const MAX_REVIEWER_LENGTH = 64;
 /** @type {Set<string | undefined>} */
 const GRID_ELIGIBLE = new Set(["UNREVIEWED", "CLEAN"]);
 const MAX_PASS = 1000000; // connection.MAX_PASS
+/** @type {Filter[]} */
+const FILTERS = ["todo", "clean", "all"]; // the order f cycles through
 
 // ---- Shapes ----
 
@@ -21,6 +23,8 @@ const MAX_PASS = 1000000; // connection.MAX_PASS
 /** @typedef {{kind: "single", key: string}} SingleItem */
 /** @typedef {{kind: "grid", placements: Placement[], keys: string[]}} GridItem */
 /** @typedef {SingleItem | GridItem} Item */
+// Which keys the list holds: the todo ones (the default), the CLEAN ones or every key, to re-check
+/** @typedef {"todo" | "clean" | "all"} Filter */
 /** @typedef {{grids: Placement[][], leftOut: string[], width: number, height: number}} GridPlan */
 
 // ---- Pure helpers ----
@@ -28,6 +32,43 @@ const MAX_PASS = 1000000; // connection.MAX_PASS
 /** @param {string | undefined} status @returns {boolean} */
 function isTodo(status) {
   return TODO_STATUSES.has(status);
+}
+
+// The filter after `filter`, going round: todo, clean, all, todo.
+/** @param {Filter} filter @returns {Filter} */
+function nextFilter(filter) {
+  return FILTERS[(FILTERS.indexOf(filter) + 1) % FILTERS.length];
+}
+
+// Whether `filter` lists a key of `status`: todo lists UNREVIEWED and FLAGGED, clean only CLEAN, all every key.
+/** @param {string | undefined} status @param {Filter} filter @returns {boolean} */
+function inFilter(status, filter) {
+  return filter === "all" || (filter === "clean" ? status === "CLEAN" : isTodo(status));
+}
+
+// A key is todo while UNREVIEWED or FLAGGED; under clean or all,
+// where every key is a re-check, also until it is re-checked (marked under that filter).
+/** @param {string} key @param {StatusMap} statuses @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {boolean} */
+function isKeyTodo(key, statuses, filter = "todo", rechecked = new Set()) {
+  return isTodo(statuses.get(key)) || (filter !== "todo" && !rechecked.has(key));
+}
+
+// An item is todo under the todo filter when its own status is (a grid holding a DIRTY or
+// FLAGGED key is not todo); under clean or all, while any of its keys is (see isKeyTodo).
+/** @param {Item} item @param {StatusMap} statuses @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {boolean} */
+function isItemTodo(item, statuses, filter = "todo", rechecked = new Set()) {
+  if (filter === "todo") {
+    return isTodo(itemStatus(item, statuses));
+  }
+  return itemKeys(item).some((key) => isKeyTodo(key, statuses, filter, rechecked));
+}
+
+// Whether any manifest row the filter lists is todo: with none, the review under that filter is done.
+/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {boolean} */
+function anyTodo(manifest, statuses, filter = "todo", rechecked = new Set()) {
+  return manifest.some(
+    (row) => inFilter(statuses.get(row.key), filter) && isKeyTodo(row.key, statuses, filter, rechecked),
+  );
 }
 
 // The client's check; the server's parse_reviewer has the final say.
@@ -68,7 +109,7 @@ function itemStatus(item, statuses) {
   return item.kind === "grid" ? gridStatus(item.keys, statuses) : statuses.get(item.key);
 }
 
-// As status.grid_status: DIRTY if any image is not grid-eligible, else
+// A grid's status: DIRTY if any image is not grid-eligible, else
 // UNREVIEWED while any is todo, else CLEAN.
 /** @param {string[]} keys @param {StatusMap} statuses @returns {Status} */
 function gridStatus(keys, statuses) {
@@ -88,45 +129,61 @@ function gridCleanRefused(keys, statuses) {
   return !eligible && !(found.size === 1 && found.has("DIRTY"));
 }
 
-// The todo singles of a pass, shuffled: single mode's list.
-/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {() => number} [random] @returns {Item[]} */
-function singleItems(manifest, statuses, random = Math.random) {
+// The singles the filter lists, shuffled: single mode's list (under the todo filter, the pass's todo).
+/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {Filter} [filter] @param {() => number} [random] @returns {Item[]} */
+function singleItems(manifest, statuses, filter = "todo", random = Math.random) {
   return shuffle(
-    manifest.filter((row) => isTodo(statuses.get(row.key))).map((row) => ({ kind: "single", key: row.key })),
+    manifest.filter((row) => inFilter(statuses.get(row.key), filter)).map((row) => ({ kind: "single", key: row.key })),
     random,
   );
 }
 
-// Whether grid mode packs a key: as controller._review_rows with the todo filter,
-// todo and grid-eligible, i.e. UNREVIEWED.
-/** @param {string | undefined} status @returns {boolean} */
-function isGridTodo(status) {
-  return isTodo(status) && GRID_ELIGIBLE.has(status);
+// Whether grid mode packs a key: listed by the filter and grid-eligible (under the todo filter, UNREVIEWED).
+/** @param {string | undefined} status @param {Filter} [filter] @returns {boolean} */
+function isGridRow(status, filter = "todo") {
+  return inFilter(status, filter) && GRID_ELIGIBLE.has(status);
 }
 
 // The keys grid mode packs for `batch`, in manifest order.
-/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {string} batch @returns {string[]} */
-function gridKeys(manifest, statuses, batch) {
-  return manifest.filter((row) => row.batch === batch && isGridTodo(statuses.get(row.key))).map((row) => row.key);
+/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {string} batch @param {Filter} [filter] @returns {string[]} */
+function gridKeys(manifest, statuses, batch, filter = "todo") {
+  return manifest
+    .filter((row) => row.batch === batch && isGridRow(statuses.get(row.key), filter))
+    .map((row) => row.key);
 }
 
 // The batches holding any key grid mode packs.
-/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @returns {Set<string>} */
-function gridBatches(manifest, statuses) {
-  return new Set(manifest.filter((row) => isGridTodo(statuses.get(row.key))).map((row) => row.batch));
+/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {Filter} [filter] @returns {Set<string>} */
+function gridBatches(manifest, statuses, filter = "todo") {
+  return new Set(manifest.filter((row) => isGridRow(statuses.get(row.key), filter)).map((row) => row.batch));
 }
 
-// Todo rows of `batch` (null: every batch) that grid mode leaves out, as
-// controller._held_back_count with the todo filter: the FLAGGED ones.
-/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {string | null} batch @returns {number} */
-function heldBackCount(manifest, statuses, batch) {
+// The batches holding a key grid mode packs that is todo: where b goes. Under the todo filter, gridBatches.
+/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {Set<string>} */
+function gridTodoBatches(manifest, statuses, filter = "todo", rechecked = new Set()) {
+  return new Set(
+    manifest
+      .filter((row) => isGridRow(statuses.get(row.key), filter) && isKeyTodo(row.key, statuses, filter, rechecked))
+      .map((row) => row.batch),
+  );
+}
+
+// Todo rows (isKeyTodo) the filter lists in `batch` (null: every batch) that grid mode leaves
+// out: the DIRTY and FLAGGED ones (under the todo filter, FLAGGED).
+/** @param {ManifestRow[]} manifest @param {StatusMap} statuses @param {string | null} batch @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {number} */
+function heldBackCount(manifest, statuses, batch, filter = "todo", rechecked = new Set()) {
   return manifest.filter((row) => {
     const status = statuses.get(row.key);
-    return (batch === null || row.batch === batch) && isTodo(status) && !GRID_ELIGIBLE.has(status);
+    return (
+      (batch === null || row.batch === batch) &&
+      inFilter(status, filter) &&
+      !GRID_ELIGIBLE.has(status) &&
+      isKeyTodo(row.key, statuses, filter, rechecked)
+    );
   }).length;
 }
 
-// As controller._held_back_message (in session), or null.
+// The held-back message (see "Todo images" in docs/commands/browser.md), or null.
 /** @param {number | null} pass @param {number} held @returns {string | null} */
 function heldBackMessage(pass, held) {
   if (held === 0) {
@@ -156,7 +213,7 @@ function sortedBatches(manifest) {
   return [...new Set(manifest.map((row) => row.batch))].sort(compareCodePoints);
 }
 
-// As controller.next_batch with wrap: the first batch after `current` (null: from
+// The first batch after `current` (null: from
 // the first) that `accepts`, going round once back to `current` itself; null if none.
 /** @param {string[]} batches @param {string | null} current @param {(batch: string) => boolean} accepts @returns {string | null} */
 function nextBatch(batches, current, accepts) {
@@ -251,7 +308,7 @@ function gridItem(placements) {
   return { kind: "grid", placements, keys: placements.map((p) => p.key) };
 }
 
-// As controller._grid_items: the grids shuffled, then (stably) the fullest first,
+// The grids shuffled, then (stably) the fullest first,
 // then each left-out key as a single item.
 /** @param {GridPlan} plan @param {() => number} [random] @returns {Item[]} */
 function orderGridItems(plan, random = Math.random) {
@@ -280,8 +337,8 @@ function demoteKeys(items, index, failed) {
 }
 
 // The canvas matrix [a, b, c, d, e, f] that draws a source image (at its natural
-// size, from 0,0) into placement p. A rotated image turns clockwise, as pygame's
-// rotate(-90) in grid_packer: its top edge lands on the rect's right edge.
+// size, from 0,0) into placement p. A rotated image turns 90 degrees clockwise:
+// its top edge lands on the rect's right edge.
 /** @param {Placement} p @returns {[number, number, number, number, number, number]} */
 function placementTransform(p) {
   const [sw, sh] = p.source;
@@ -301,22 +358,22 @@ function minScale(placements) {
   }, 1);
 }
 
-// The index of the next item whose status is todo, searching forward from `from`
+// The index of the next todo item (isItemTodo), searching forward from `from`
 // and wrapping round (including `from` itself last); -1 if none.
-/** @param {Item[]} items @param {StatusMap} statuses @param {number} from @returns {number} */
-function nextTodoIndex(items, statuses, from) {
+/** @param {Item[]} items @param {StatusMap} statuses @param {number} from @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {number} */
+function nextTodoIndex(items, statuses, from, filter = "todo", rechecked = new Set()) {
   for (let step = 1; step <= items.length; step++) {
     const i = (from + step) % items.length;
-    if (isTodo(itemStatus(items[i], statuses))) {
+    if (isItemTodo(items[i], statuses, filter, rechecked)) {
       return i;
     }
   }
   return -1;
 }
 
-/** @param {Item[]} items @param {StatusMap} statuses @returns {number} */
-function countTodo(items, statuses) {
-  return items.filter((item) => isTodo(itemStatus(item, statuses))).length;
+/** @param {Item[]} items @param {StatusMap} statuses @param {Filter} [filter] @param {Set<string>} [rechecked] @returns {number} */
+function countTodo(items, statuses, filter = "todo", rechecked = new Set()) {
+  return items.filter((item) => isItemTodo(item, statuses, filter, rechecked)).length;
 }
 
 // "k1 is S1, k2 is S2, k3 is S3 and N more"

@@ -36,15 +36,6 @@ class GridCleanRefused(Exception):
     """A store refused CLEAN on a grid by grid_clean_refused, recording nothing. Not an outage."""
 
 
-def grid_status(snapshot: dict[Key, Status], keys: tuple[Key, ...]) -> Status:
-    statuses = {snapshot[key] for key in keys}
-    if not statuses <= GRID_ELIGIBLE:
-        return "DIRTY"  # e.g. a key sharing an image_id with one marked DIRTY elsewhere this session
-    if statuses & TODO_STATUSES:
-        return "UNREVIEWED"
-    return "CLEAN"
-
-
 def grid_clean_refused(snapshot: dict[Key, Status], keys: tuple[Key, ...]) -> bool:
     """CLEAN on a grid holding a DIRTY or FLAGGED image is refused, unless the whole grid is
     DIRTY (reversing that grid's own verdict)."""

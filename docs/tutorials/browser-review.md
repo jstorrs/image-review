@@ -4,9 +4,7 @@ Review images where they are, without copying them off the cluster, in a
 browser on your laptop. This is the recommended way to review remotely. There
 is nothing to install on the laptop but ssh and a browser, and nothing to keep
 in sync: the page is served by `serve` itself, so it always matches the
-server's version. (The deprecated
-[Python client](remote-review.md) must run the same version as the server,
-and a mismatch is refused.)
+server's version.
 
 `image-review serve` runs on a compute node and listens on a Unix socket, and
 your laptop forwards a local port to it with ssh. The traffic is plain HTTP
@@ -14,12 +12,15 @@ inside the ssh tunnel, with no TLS on the node. The page reviews single
 images or, in grid mode, packed grids of a batch's images.
 **Read the browser review section of
 [the security model](../reference/security-model.md#browser-review-over-a-unix-socket)
-first**: it lists the differences from the HTTPS mode (a URL that
-holds the token) and the questions to ask your HPC administrator if
+first**: it lists the limits of browser review (no TLS on the node, a URL
+that holds the token) and the questions to ask your HPC administrator if
 forwarding does not work.
 
-Install image-review on the cluster; a plain install has every command but
-`review`. See [Installation](../install.md) and
+To review on the machine that holds the work directory, with a browser on
+that same machine, use [`image-review review`](../commands/review.md)
+instead; see [Local review](local-review.md).
+
+Install image-review on the cluster. See [Installation](../install.md) and
 [Cluster install without root](../install.md#cluster-install-without-root).
 
 ## 1. Preprocess on the cluster
@@ -66,9 +67,8 @@ In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. See
    a password; do not paste the URL into chat or tickets.
 
 4. The page first asks "Who is reviewing?": type your name and press
-   Enter. It is recorded with every verdict, as `--reviewer` is for the
-   viewer. The page then shows the current pass's todo images one at a
-   time. Press `?` for the list of keys: `c` marks an image CLEAN, `d`
+   Enter. It is recorded with every verdict. The page then shows the
+   current pass's todo images one at a time. Press `?` for the list of keys: `c` marks an image CLEAN, `d`
    DIRTY, and `m` switches to grid mode, where one verdict covers a whole
    grid. [The browser page](../commands/browser.md) describes the keys, the
    bar, grid mode and every screen and message.
@@ -129,20 +129,23 @@ In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. See
    command line. After a restart, press Reconnect (or `r`) on the page: the
    forward and the URL are unchanged.
 
-**Moving on to the next batch or pass.** With the fixed socket path and
+**Moving on to the next pass.** When the page says the pass has nothing
+left to review (not just the end of a batch; see
+[End of a pass or batch](../commands/browser.md#end-of-a-pass-or-batch)),
+press Reconnect (or `r`). The same server loads the next pass; there is no
+need to restart it.
+
+**Moving on to another work directory.** With the fixed socket path and
 `$IMAGE_REVIEW_TOKEN` exported in the job's shell, one tab and one ssh
 command last the whole job:
 
-1. Finish the pass (the page says the pass has nothing left to review, not
-   just the end of a batch; see
-   [End of a pass or batch](../commands/browser.md#end-of-a-pass-or-batch))
-   or press `q` (or click Done; see [Done](../commands/browser.md#done)).
+1. Press `q` (or click Done; see [Done](../commands/browser.md#done)).
    Your marks are already saved, and the tab keeps the token and your name.
    `q` does not stop the server.
 2. Stop the server with Ctrl-C on the node.
 3. Start the next `image-review serve ...` in the same shell (same
-   `$IMAGE_REVIEW_SOCKET_PATH` and `$IMAGE_REVIEW_TOKEN`), for the next batch
-   or pass.
+   `$IMAGE_REVIEW_SOCKET_PATH` and `$IMAGE_REVIEW_TOKEN`), on the next work
+   directory.
 4. Press Reconnect (or `r`) on the page. It loads whatever the new server
    serves.
 
@@ -156,11 +159,11 @@ When you are finished for the day, stop the server with Ctrl-C, then the
 ssh command, and close the tab: closing it is what forgets the token.
 
 For how `--via`, `--direct` and `--ssh-host` shape the printed command, see
-[Socket mode](../commands/serve.md#socket-mode) on the serve page.
+[What serve prints](../commands/serve.md#what-serve-prints) on the serve page.
 
 **Batch mode.** Under `sbatch` stdout is not a terminal, so the URL is
 written to a private file instead
-([what serve prints](../commands/serve.md#socket-mode)). The job output gives
+([what serve prints](../commands/serve.md#what-serve-prints)). The job output gives
 the ssh command and the file's path; fetch the URL from your laptop (use the
 absolute path, not `~`):
 
@@ -174,6 +177,38 @@ job output gives `ssh me@node cat ...` instead, since you reach the node
 itself. Under `sbatch` the node name is only known when the job runs, so set
 it there if the default does not work from your laptop, e.g. `--ssh-host
 "$(hostname -f)"` or a site-specific name.
+
+## Multi-pass workflow
+
+The intended workflow uses repeated passes to build confidence. The page
+always reviews the current pass (see
+[Passes](../commands/browser.md#passes)); each pass needs one or more
+`serve` runs.
+
+1. **Pass 1** (grid triage): press `m` for grid mode and mark grids CLEAN
+   (`c`) or DIRTY (`d`). Err toward DIRTY.
+
+   Mark a grid CLEAN if every image in it looks clean, DIRTY if any image is
+   suspicious: every image in the grid gets that verdict. Press `b` for the
+   next batch with images to review. This is the fast pass.
+
+2. **Pass 2** (single review): once pass 1 is done, the page says so; press
+   Reconnect (`r`), as in **Moving on to the next pass** above. Only images marked DIRTY
+   in pass 1 are left, as FLAGGED (amber bar). Reconnect keeps the mode you
+   were in, so grid mode now says they need single-mode review: press `s`
+   and inspect them one at a time.
+
+   Mark obviously clean ones CLEAN and the rest DIRTY again. Grid mode
+   leaves out FLAGGED and DIRTY images, so a grid verdict cannot clear them.
+
+3. **Pass 3+**: repeat on the shrinking DIRTY pool until confident. Each
+   pass shows only the images still DIRTY from the previous pass (FLAGGED in
+   the new pass).
+
+Your marks are saved as you make them, so you can stop at any point: the
+next page load, or Reconnect, lists only what is still to review. When the
+last pass has nothing left, write the allowlist with
+[`image-review export`](../commands/export.md).
 
 ## Troubleshooting
 

@@ -4,6 +4,30 @@
 
 ### Upgrading: breaking and behaviour changes
 
+- **`review` now opens the browser page on this machine; the pygame viewer is gone.** `image-review review` serves
+  the same page as `serve`, on `127.0.0.1` with a fresh token, and opens it in your browser; its options are
+  `--work-dir`, `--port` and `--no-browser`. It needs Linux or macOS (on Windows it exits 1). `--mode`, `--pass`,
+  `--batch`, `--filter`, `--rotate` and `--reviewer` are removed and now exit 2 as unknown, and
+  `$IMAGE_REVIEW_REVIEWER` is no longer read: the page asks for the reviewer name. Features with no equivalent on
+  the page are dropped: `--pass`, `--batch`, `--rotate always`, autoplay, the gamepad, and the viewer's `n`, `u` and
+  `w` keys. To re-check CLEAN images, press `f` on the page. `review` no longer needs the `viewer` extra.
+  Ctrl-C, SIGTERM and SIGHUP now stop it with exit 0 (the viewer exited 1 with "Aborted!"). Another writer changing
+  `review.tsv` no longer ends the command: the server refuses that verdict or undo and every later one (HTTP 500) and keeps
+  running, as `serve` does. A snap browser (such as Firefox on Ubuntu) cannot open the file `review` hands it, and
+  shows an access error: open the URL instead. On a host other people log in to, review from your laptop with
+  `serve`; see the security model's "Local review on loopback".
+  The page's messages now say "the server" instead of "serve" (for example "Stop the server (Ctrl-C) and start the
+  next one; then press Reconnect (r) for serve, or open review's new URL." after Done), and the 412 body is now `the
+  page was loaded from another server; reconnect`. At the end of a pass the page now says "Press Reconnect (r) for
+  the next pass.": the same server loads the next pass, so there is no need to restart it for each pass.
+- **The Python remote client and `serve`'s HTTPS mode are removed.** `review --remote`/`--via`, `status
+  --remote`/`--via`, `serve --https`/`--bind`/`--port`, export's hidden `--remote`, and the server's `GET /version`
+  and `GET /skipped` are gone; the options now exit 2 as unknown. `$IMAGE_REVIEW_REMOTE` is no longer read, not
+  refused: unset it, since without `--work-dir`, `review` and `status` now open `./review_work`. Review remotely in a
+  browser with plain `image-review serve`, and run `status` and `export` where the work directory is (for example
+  over ssh).
+  `cryptography` is no longer a dependency. `~/.image-review/connection-*.txt` files left by killed `serve --https`
+  runs hold dead tokens and can be deleted.
 - **Grayscale rendering changed.** DICOM grayscale windowing is restored to the original method, replacing 0.4.0's
   tail compression (and the 1% range trim that preceded it): the values outside the outer 0.01% of the min-max range
   are set aside, the 1st and 99th percentiles of the rest, shrunk by 2%, are the window, and values outside it are
@@ -47,10 +71,10 @@
   reporting as if no input had failed or been ignored.
 - A `manifest.tsv` listing one `image_id` with two different `source_sha256` values is now rejected when the work
   directory is opened, instead of `export` silently using the first.
-- **Wire API v9: client and server must be upgraded together.** `/statuses`,
-  `POST /mark` and `POST /undo` now answer 400 for a pass above one million.
-  A v9 client refuses a server of any other version (0.4.0 speaks v8), and
-  older clients refuse a v9 server.
+- **`/statuses`, `POST /mark` and `POST /undo` now answer 400 for a pass above
+  one million.** The browser page served by `serve` keeps to this bound; with
+  the Python client removed (see above), there is no separately installed
+  client left to upgrade with the server.
 - A `review.tsv` already holding a `pass_number` above one million is now
   refused when the work directory is opened; edit it by hand to remove or
   correct those rows.
@@ -80,17 +104,29 @@
   3.14.8 (gh-156002). preprocess now decodes them itself, stopping exactly at the size the ZIP directory states, and
   checks their CRC-32 and size as for deflated entries, on every Python patch level. An entry compressed by any other
   method still fails, as before (`unsupported: ZIP compression method 93` for Zstandard).
-- **A plain `pip install image-review` installs the `preprocess` and `codecs` dependencies again,** as before 0.3.0.
-  pydicom, numpy, scikit-image, scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm, python-gdcm, pylibjpeg and
-  pylibjpeg-openjpeg are core dependencies, since the machine that serves a work directory is usually the one that
-  preprocessed it; a node that only runs `serve`, `status` or `export` now installs them too (several hundred MB of
-  wheels; on Linux, imagecodecs needs glibc 2.28 or later). Only the viewer is still an extra: `pip install 'image-review[viewer]'` for `review`. `[preprocess]` and
-  `[codecs]` are still accepted but add nothing, and `[all]` now means `[viewer]`. `preprocess` no longer answers a
-  missing dependency with `this command needs the preprocess extra`: that is a broken install, and fails with
-  Python's own ModuleNotFoundError.
+- **Every install is the same, and there are no extras apart from `dev` and `docs`.** pydicom, numpy, scikit-image,
+  scipy, matplotlib, Pillow, imagecodecs, tifffile, tqdm, python-gdcm, pylibjpeg and pylibjpeg-openjpeg are core
+  dependencies, since the machine that serves a work directory is usually the one that preprocessed it; a node that
+  only runs `serve`, `status` or `export` now installs them too (several hundred MB of wheels; on Linux, imagecodecs
+  needs glibc 2.28 or later). The `preprocess`, `codecs`, `viewer` and `all` extras are removed, and pygame-ce is no
+  longer a dependency. pip only warns about `pip install 'image-review[viewer]'` and the others, but `uv sync --extra
+  viewer` errors, so drop them from install commands. `preprocess` no longer answers a missing dependency with `this
+  command needs the preprocess extra`: that is a broken install, and fails with Python's own ModuleNotFoundError.
+
+### CLI
+
+- **The browser page can re-check CLEAN images.** `f` cycles the list's filter: the todo images (the default), the
+  CLEAN ones, or every image, as the viewer's `review --filter unreviewed|clean|all` does. While re-checking the bar
+  reads "re-check: CLEAN" or "re-check: all", an image is todo until you mark it, and grid mode packs the CLEAN (and,
+  under `all`, UNREVIEWED) images, holding DIRTY and FLAGGED ones back for single mode. Verdicts go to the current
+  pass. The filter is not stored: every page load starts at todo. See "Re-checking CLEAN images" in
+  `docs/commands/browser.md`.
 
 ### Fixes
 
+- `serve` now refuses with 400, before the token check, a request whose `Origin` header is not the page's own
+  (another site, another local port, `null` or `https://`). The page itself always passes; requests with no `Origin`
+  are not covered.
 - A deflated ZIP entry could make preprocess inflate up to 1 GiB (2 GiB on Python 3.14) from an archive of about
   1 MB, whatever size its directory stated: an entry stating 2 KB could decode up to that cap in one call.
   preprocess now decodes an entry no further than about its stated size (already checked against the 1 GiB
@@ -99,7 +135,7 @@
 - preprocess now syncs the work directory's files and directories before reporting success, so a power loss right
   after a run no longer leaves a missing work directory, missing batch entries, or truncated or empty TSVs. The JPGs'
   contents are not synced: a lost one fails its hash check.
-- The browser page now rejects a pass number above 1,000,000 from the server, as the other clients already did.
+- The browser page now rejects a pass number above 1,000,000 from the server.
 - The status bar's centre message no longer draws over the status word and the red scale warning on a narrow
   display. It is centred between the left and right texts, shrunk to as small as 18 px to fit, and cut with "…" if
   still too wide (the controller also logs it as a warning).

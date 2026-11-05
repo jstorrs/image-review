@@ -13,15 +13,8 @@ from collections import Counter
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-
-import numpy as np
-import pygame as pg
-import skimage as ski
-
 from image_review import review_db as review_db_module
 from image_review.connection import MAX_PASS, package_version
-from image_review.controller import ReviewSession
 from image_review.export import split_allowlist
 from image_review.lock import LOCK_NAME
 from image_review.review_db import HEADER, Decision, ReviewDB, ReviewLogChanged
@@ -34,23 +27,13 @@ from image_review.store import (
     SkippedCounts,
     SkippedRow,
     batch_summary,
-    filter_rows,
     load_manifest,
     load_notes,
     load_skipped,
     skipped_counts,
     summary,
 )
-from image_review.util import load_surface
-from tests.fixtures import ROWS, StoreTestCase, _jpeg_bytes, make_work_dir, mark, recorded_dir_fsyncs, temp_dir
-
-
-def _skimage_reference(buf: bytes) -> np.ndarray:
-    """The old skimage-based decode, as (w, h, 3) like surfarray."""
-    img = ski.io.imread(io.BytesIO(buf))
-    if img.ndim == 2:
-        img = np.stack([img, img, img], axis=-1)
-    return img.transpose(1, 0, 2)
+from tests.fixtures import ROWS, StoreTestCase, make_work_dir, mark, recorded_dir_fsyncs, temp_dir
 
 
 class TestManifestAndBytes(StoreTestCase):
@@ -68,34 +51,6 @@ class TestManifestAndBytes(StoreTestCase):
         for key in ("batch_001/nope.jpg", "../manifest.tsv", "batch_001/../../etc/passwd", "/src/patient_smith/a.dcm"):
             with self.subTest(key=key), self.assertRaises(KeyError):
                 self.store.image_bytes(key)
-
-    def test_load_surface_from_bytes(self):
-        surface = load_surface(self.store.image_bytes("batch_002/c.jpg"))
-        self.assertEqual(surface.get_size(), (20, 12))
-
-    def test_load_surface_matches_skimage_decode(self):
-        for mode in ("RGB", "L"):
-            with self.subTest(mode=mode):
-                buf = _jpeg_bytes(mode)
-                diff = np.abs(pg.surfarray.array3d(load_surface(buf)).astype(int) - _skimage_reference(buf).astype(int))
-                self.assertLessEqual(diff.max(), 1)
-
-    def test_load_surface_grayscale_is_rgb_grey(self):
-        surface = load_surface(_jpeg_bytes("L"))
-        self.assertGreaterEqual(surface.get_bitsize(), 24)
-        pixels = pg.surfarray.array3d(surface)
-        np.testing.assert_array_equal(pixels[:, :, 0], pixels[:, :, 1])
-        np.testing.assert_array_equal(pixels[:, :, 1], pixels[:, :, 2])
-
-    def test_load_surface_raises_on_truncated(self):
-        buf = _jpeg_bytes("RGB")
-        for frac in (0.5, 0.9):
-            with self.subTest(frac=frac), self.assertRaises(Exception):  # noqa: B017 - any raise means unloadable
-                load_surface(buf[: int(len(buf) * frac)])
-
-    def test_load_surface_raises_on_garbage(self):
-        with self.assertRaises(Exception):  # noqa: B017 - callers treat any raise as unloadable
-            load_surface(b"not a jpeg at all")
 
 
 class TestSkipped(StoreTestCase):
@@ -1507,14 +1462,6 @@ class TestReadOnlyTornLog(StoreTestCase):
 
 
 class TestPassMonotonic(StoreTestCase):
-    def setUp(self):
-        super().setUp()
-        pg.init()
-        self.addCleanup(pg.quit)
-        patcher = mock.patch.object(pg.display, "toggle_fullscreen", lambda: None)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def append_manifest_row(self):
         with open(self.work_dir / "manifest.tsv", "a", newline="") as f:
             csv.writer(f, delimiter="\t").writerow(["batch_002", "batch_002/e.jpg", "/src/patient_new/e.dcm"])
@@ -1562,15 +1509,6 @@ class TestPassMonotonic(StoreTestCase):
         with open(self.work_dir / "review.tsv", newline="") as f:
             *_, row = csv.DictReader(f, delimiter="\t")  # the log's last row for the image wins
         self.assertEqual((row["status"], row["pass_number"]), ("CLEAN", "3"))
-
-    def test_pass_one_grid_excludes_later_pass_dirty(self):
-        self.mark_all("DIRTY", 3, ["batch_001/a.jpg"])
-        self.append_manifest_row()
-        s = ReviewSession(self.store, reviewer="tester", mode="grid", status_filter="all")
-        self.assertEqual(s.pass_number, 1)
-        keys = {k for item in s._items for k in item.keys}
-        self.assertNotIn("batch_001/a.jpg", keys)
-        self.assertIn("batch_001/b.jpg", keys)
 
 
 class TestUndo(StoreTestCase):
@@ -1718,22 +1656,6 @@ class TestPureFunctions(StoreTestCase):
                 "batch_002/d.jpg": "UNREVIEWED",
             },
         )
-
-    def test_filter(self):
-        expected = {
-            ("unreviewed", None): ["batch_001/a.jpg", "batch_002/d.jpg"],
-            ("unreviewed", "batch_001"): ["batch_001/a.jpg"],
-            ("unreviewed", "batch_002"): ["batch_002/d.jpg"],
-            ("clean", None): ["batch_001/b.jpg"],
-            ("clean", "batch_001"): ["batch_001/b.jpg"],
-            ("clean", "batch_002"): [],
-            ("all", None): ["batch_001/a.jpg", "batch_001/b.jpg", "batch_002/c.jpg", "batch_002/d.jpg"],
-            ("all", "batch_001"): ["batch_001/a.jpg", "batch_001/b.jpg"],
-            ("all", "batch_002"): ["batch_002/c.jpg", "batch_002/d.jpg"],
-        }
-        for (status_filter, batch), keys in expected.items():
-            with self.subTest(status_filter=status_filter, batch=batch):
-                self.assertEqual([r.key for r in filter_rows(self.rows, self.statuses, status_filter, batch)], keys)
 
     def test_summaries(self):
         self.assertEqual(

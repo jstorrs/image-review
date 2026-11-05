@@ -1,11 +1,11 @@
 # Commands
 
 - [`image-review preprocess`](preprocess.md): Turn DICOM and image files into normalized JPG batches.
-- [`image-review review`](review.md): Review the images interactively, in single or grid mode.
+- [`image-review review`](review.md): Review a work directory in a browser on this machine.
 - [`image-review status`](status.md): Report on review progress.
 - [`image-review export`](export.md): Write the allowlist of files that may be released.
 - [`image-review serve`](serve.md): Serve a work directory so it can be reviewed remotely.
-- [The browser page](browser.md): Use the page that `serve` serves for browser review.
+- [The browser page](browser.md): Use the page that `review` and `serve` serve for browser review.
 
 ## Logging
 
@@ -23,29 +23,27 @@ Put the option before the command, e.g. `image-review -q status`:
 |---|---|
 | (default) | INFO and up |
 | `-q`, `--quiet` | Only warnings and errors |
-| `-v`, `--verbose` | Debug messages too (currently few: the work directory opened, the server connected to, the ssh tunnel command, grid packing counts and rotation) |
+| `-v`, `--verbose` | Debug messages too (currently few: the work directory opened, and why a browser could not be chosen or opened) |
 
 `-q` and `-v` together are a usage error (exit 2).
 
 Errors and warnings cover:
 
-- ERROR: the review session lost its server, or a server request failed with
-  a 500.
+- ERROR: a server request failed with a 500.
 - WARNING:
-  - an image that cannot be loaded or was left out of every grid;
   - an input skipped by `preprocess`;
   - a torn last line of `review.tsv`;
   - a world-accessible work directory;
-  - a refused verdict;
-  - a failed server connection;
+  - a new file whose directory could not be synced to disk;
+  - a server connection that failed, or that was refused because the connection
+    limit was reached;
   - `export --allow-live` overriding a held lock;
   - an `export --output` or `--report` file that could not be given the work
-    directory's group;
-  - a deprecated remote path (`serve` over HTTPS, `review --remote` or
-    `status --remote`).
+    directory's group.
 
-Only `serve` and `export` log at INFO. `serve` logs one line per request,
-with the peer address, method, path without its query string, and status.
+Only `review`, `serve` and `export` log at INFO. `review` and `serve` log one
+line per request, with the peer address, method, path without its query
+string, and status.
 `export` logs one line with the count of allowlisted and reported files.
 
 During `preprocess`, log lines appear above the progress bars instead of
@@ -59,6 +57,5 @@ exactly what is and is not logged.
 
 Logging is separate from command output. Command output is plain text on
 stdout: the `preprocess` summary, the `status` tables, `export`'s allowlist
-TSV, `serve`'s connection instructions, and the review session's start
-and "nothing to review" lines. Error messages of failed commands
-(`Error: ...`) go to stderr, with exit 1 or 2.
+TSV, and the connection instructions of `review` and `serve`. Error messages
+of failed commands (`Error: ...`) go to stderr, with exit 1 or 2.

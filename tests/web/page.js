@@ -220,8 +220,9 @@ async function showPlan(page) {
   for (const key of ["a", "b", "c"]) await page.image200(key, [200, 200]);
 }
 
-const NEXT_SERVE = "Stop serve (Ctrl-C), start the next one, then press Reconnect (r).";
-const END_OF_PASS = "Pass 1: nothing left to review. " + NEXT_SERVE;
+const NEXT_SERVER = "Stop the server (Ctrl-C) and start the next one; then press Reconnect (r) for serve, or open review's new URL.";
+const NEXT_PASS = "Press Reconnect (r) for the next pass.";
+const END_OF_PASS = "Pass 1: nothing left to review. " + NEXT_PASS;
 
 const plain = (value) => JSON.parse(JSON.stringify(value)); // across the vm realm
 const UNREVIEWED = (keys) => Object.fromEntries(keys.map((key) => [key, "UNREVIEWED"]));
@@ -247,7 +248,8 @@ module.exports = {
   PLAN,
   TWO_GRIDS,
   showPlan,
-  NEXT_SERVE,
+  NEXT_SERVER,
+  NEXT_PASS,
   END_OF_PASS,
   plain,
   UNREVIEWED,

@@ -23,7 +23,7 @@ from image_review.access import (
 from image_review.preprocess import run_preprocess
 from image_review.review_db import ReviewDB
 from image_review.server import ReviewServer
-from tests.fixtures import invoke_cli, make_work_dir, temp_dir, write_dicom
+from tests.fixtures import HAS_AF_UNIX, invoke_cli, make_work_dir, socket_dir, temp_dir, write_dicom
 
 ENV = {"SLURM_CPUS_PER_TASK": "1"}
 
@@ -240,11 +240,14 @@ class WarningTest(unittest.TestCase):
         return invoke_cli("status", "--work-dir", str(self.work), env=ENV)
 
     def invoke_serve(self):
+        """Plain serve, with a short HOME (the default socket lives under it) and a short host name (as
+        TestServeSocketCommand: a long one would not fit sun_path)."""
         with (
             mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt),
-            mock.patch.dict(os.environ, {"HOME": str(self.work.parent)}),
+            mock.patch.dict(os.environ, {"HOME": str(socket_dir(self))}),
+            mock.patch("image_review.server.short_host", return_value="node1"),
         ):
-            return invoke_cli("serve", "--work-dir", str(self.work), "--https", "--bind", "127.0.0.1", env=ENV)
+            return invoke_cli("serve", "--work-dir", str(self.work), env=ENV)
 
     def test_warns_for_world_readable_dir(self):
         os.chmod(self.work, 0o755)
@@ -263,10 +266,12 @@ class WarningTest(unittest.TestCase):
             f"WARNING image_review.cli: {self.work / 'manifest.tsv'} is accessible", self.invoke_status().stderr
         )
 
+    @unittest.skipUnless(HAS_AF_UNIX, "serve needs AF_UNIX")
     def test_serve_warns(self):
         os.chmod(self.work, 0o755)
         self.assertIn("is accessible to all users (mode 0755)", self.invoke_serve().stderr)
 
+    @unittest.skipUnless(HAS_AF_UNIX, "serve needs AF_UNIX")
     def test_malformed_work_dir_is_a_clean_error(self):
         (self.work / "review.tsv").write_text("image_id\tbatch\tstatus\tpass_number\ttimestamp\nx\tb\tdirty\t1\tt\n")
         for result in (self.invoke_status(), self.invoke_serve()):
@@ -276,17 +281,16 @@ class WarningTest(unittest.TestCase):
                 self.assertIn("review.tsv:2:", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
 
+    @unittest.skipUnless(HAS_AF_UNIX, "serve needs AF_UNIX")
     def test_silent_for_private_and_group(self):
         for mode in (0o700, 0o2770):
             with self.subTest(mode=oct(mode)):
                 os.chmod(self.work, mode)
                 os.chmod(self.work / "manifest.tsv", 0o600)
                 self.assertEqual(self.invoke_status().stderr, "")
-                stderr = self.invoke_serve().stderr
-                self.assertNotIn("accessible", stderr)
-                (warning,) = [line for line in stderr.splitlines() if "WARNING" in line]
-                self.assertIn("WARNING image_review.cli: serve over HTTPS", warning)
-                self.assertIn("is deprecated", warning)
+                result = self.invoke_serve()
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertNotIn("WARNING", result.stderr)
                 self.assertIsNone(world_access_warning(self.work))
 
 

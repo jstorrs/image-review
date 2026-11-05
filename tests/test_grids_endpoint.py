@@ -1,18 +1,13 @@
 import csv
 import http.client
 import json
-import os
-import ssl
 import unittest
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-
 from PIL import Image
 
 from image_review import server as server_module
-from image_review.grid_packer import pack_into_grids
 from image_review.layout import fit_size
 from image_review.server import INSTANCE_HEADER, BadRequest, parse_grids
 from image_review.status import Key
@@ -23,7 +18,6 @@ from tests.fixtures import (
     dropping_packer,
     make_work_dir,
     socket_dir,
-    start_server,
     start_unix_server,
     temp_dir,
 )
@@ -159,7 +153,7 @@ class TestValidation(GridsTestCase):
             with self.subTest(instance=instance), mock.patch.object(store, "image_bytes") as image_bytes:
                 resp, data = self.post(b"", instance=instance)  # no body: the 412 closes before reading one
                 self.assertEqual(resp.status, 412)
-                self.assertEqual(json.loads(data), {"error": "the page was loaded from another serve; reconnect"})
+                self.assertEqual(json.loads(data), {"error": "the page was loaded from another server; reconnect"})
                 image_bytes.assert_not_called()
         self.assertEqual(self.server.image_sizes, {})
 
@@ -233,7 +227,7 @@ class TestUnreadableFiles(GridsTestCase):
         self.assertEqual(sorted(p["key"] for g in result["grids"] for p in g), [KEYS[1], KEYS[3]])
 
 
-class TestParity(GridsTestCase):
+class TestPlacement(GridsTestCase):
     def make_work_dir(self) -> list[Key]:
         return make_sized_work_dir(self.work_dir, PARITY_SIZES)
 
@@ -265,14 +259,13 @@ class TestParity(GridsTestCase):
                     )
                     self.assertFalse(overlap, (a, b))
 
-    def test_matches_pack_into_grids(self):
-        (self.work_dir / self.keys[4]).unlink()  # a missing file is left out by both
+    def test_places_every_loadable_key(self):
+        (self.work_dir / self.keys[4]).unlink()  # a missing file is left out
         any_rotated = False
         for rotation in ("auto", "always", "never"):
             for width, height in [(640, 400), (256, 1024), (1920, 1080)]:
                 with self.subTest(rotation=rotation, width=width, height=height):
-                    result = self.assert_parity(width, height, rotation)
-                    self.assertIn(self.keys[4], result["left_out"])
+                    result = self.assert_grids(width, height, rotation, [self.keys[4]])
                     any_rotated |= any(p["rotated"] for g in result["grids"] for p in g)
         self.assertTrue(any_rotated, "no case rotated an image")
 
@@ -280,17 +273,15 @@ class TestParity(GridsTestCase):
         (self.work_dir / self.keys[4]).unlink()
         for rotation in ("auto", "always", "never"):
             with self.subTest(rotation=rotation), dropping_packer(2):  # the packer places every key but keys[2]
-                result = self.assert_parity(640, 400, rotation)
-                self.assertEqual(result["left_out"], [self.keys[2], self.keys[4]])
+                result = self.assert_grids(640, 400, rotation, [self.keys[2], self.keys[4]])
                 self.assertNotIn(self.keys[2], [p["key"] for g in result["grids"] for p in g])
 
-    def assert_parity(self, width: int, height: int, rotation: str) -> dict:
-        """/grids and pack_into_grids agree on the grids' keys and the keys left out; returns the /grids result."""
+    def assert_grids(self, width: int, height: int, rotation: str, left_out: list[Key]) -> dict:
+        """/grids leaves out exactly `left_out`, and places every other key once; returns the /grids result."""
         result = self.grids(self.keys, width, height, rotation)
-        with self.assertLogs("image_review", "WARNING"):  # the missing file, from the store
-            expected, left_out = pack_into_grids(self.keys, self.server.store, width, height, rotation=rotation)
-        self.assertEqual([[p["key"] for p in g] for g in result["grids"]], [list(g.keys) for g in expected])
         self.assertEqual(result["left_out"], left_out)
+        placed = [p["key"] for g in result["grids"] for p in g]
+        self.assertEqual(sorted(placed), sorted(k for k in self.keys if k not in left_out))
         self.assert_well_placed(result, width, height, rotation)
         return result
 
@@ -300,41 +291,6 @@ class TestParity(GridsTestCase):
         always = self.grids(self.keys, 640, 400, "always")
         self.assertLess(len(auto["grids"]), len(never["grids"]))
         self.assertEqual(auto, always)
-
-
-class TestOverTls(unittest.TestCase):
-    def setUp(self):
-        self.work_dir = temp_dir(self)
-        make_work_dir(self.work_dir)
-        self.server, self.target, stop = start_server(self.work_dir)
-        self.addCleanup(stop)
-        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        self.ctx.check_hostname = False
-        self.ctx.verify_mode = ssl.CERT_NONE
-
-    def post(self, body: bytes | None) -> int:
-        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
-        self.addCleanup(conn.close)
-        conn.request("POST", "/grids", body=body, headers={"Authorization": f"Bearer {self.target.token}"})
-        resp = conn.getresponse()
-        resp.read()
-        return resp.status
-
-    def test_grids_is_not_served(self):
-        self.assertEqual(self.post(None), 404)
-
-    def test_body_on_grids_is_refused(self):
-        body = json.dumps({"keys": KEYS, "width": 640, "height": 480, "rotation": "auto"}).encode()
-        self.assertEqual(self.post(body), 400)
-
-    def test_no_instance_header_sent_or_required(self):
-        conn = http.client.HTTPSConnection("127.0.0.1", self.target.port, context=self.ctx, timeout=10)
-        self.addCleanup(conn.close)
-        conn.request("GET", "/manifest", headers={"Authorization": f"Bearer {self.target.token}"})
-        resp = conn.getresponse()
-        resp.read()
-        self.assertEqual(resp.status, 200)
-        self.assertIsNone(resp.getheader(INSTANCE_HEADER))
 
 
 if __name__ == "__main__":

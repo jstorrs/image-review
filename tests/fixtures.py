@@ -39,13 +39,11 @@ ROWS = [
 
 # Every variable the CLI reads from the environment; cleared so a developer's exports cannot leak into a test
 CLEAN_ENV: dict[str, str | None] = {
-    "IMAGE_REVIEW_REMOTE": None,
     "IMAGE_REVIEW_VIA": None,
     "IMAGE_REVIEW_DIRECT": None,
     "IMAGE_REVIEW_SOCKET_PATH": None,
     "IMAGE_REVIEW_TOKEN": None,
     "IMAGE_REVIEW_ACCESS": None,
-    "IMAGE_REVIEW_REVIEWER": None,
 }
 
 
@@ -173,23 +171,25 @@ def _serve_in_thread(server, store):
     return stop
 
 
-def start_server(work_dir: Path, port: int = 0):
-    """Serve work_dir on 127.0.0.1 in a thread; returns (server, target, stop). The store holds the work dir lock until stop(), which is idempotent."""
-    from image_review.server import make_server
-    from image_review.store import LocalStore
-
-    store = LocalStore(work_dir)
-    server, target = make_server(store, "127.0.0.1", port)
-    return server, target, _serve_in_thread(server, store)
-
-
 def start_unix_server(work_dir: Path, path: Path):
-    """Serve work_dir on the Unix socket `path` in a thread; returns (server, token, stop). As start_server."""
+    """Serve work_dir on the Unix socket `path` in a thread; returns (server, token, stop). The store holds the work
+    dir lock until stop(), which is idempotent."""
     from image_review.server import make_unix_server
     from image_review.store import LocalStore
 
     store = LocalStore(work_dir)
     server, token = make_unix_server(store, path)
+    return server, token, _serve_in_thread(server, store)
+
+
+def start_loopback_server(work_dir: Path, port: int = 0):
+    """Serve work_dir on 127.0.0.1:`port` (0 picks a free one; see server.host_port) in a thread; returns
+    (server, token, stop), as start_unix_server."""
+    from image_review.server import make_loopback_server
+    from image_review.store import LocalStore
+
+    store = LocalStore(work_dir)
+    server, token = make_loopback_server(store, port)
     return server, token, _serve_in_thread(server, store)
 
 
