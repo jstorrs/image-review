@@ -5,7 +5,7 @@ this machine and by [`image-review serve`](serve.md) on a cluster: what you
 see at the URL either prints, `http://127.0.0.1:PORT/#TOKEN`. For the
 workflows, see [Local review](../tutorials/local-review.md) and
 [Browser review over SSH](../tutorials/browser-review.md) (starting `serve`,
-the ssh command, moving on to the next batch or pass).
+the ssh command, moving on to the next pass or work directory).
 
 The page reviews the current pass (see [Passes](#passes)). It starts in
 single mode, showing the pass's [todo images](#todo-images) (UNREVIEWED and
@@ -217,8 +217,7 @@ you have not re-checked and every FLAGGED one.
 When every image the filter lists has been re-checked the end screen says
 "All batches done for pass N (filter: clean) - press [f] to change the
 filter", or, when nothing in the pass is left to review either, "All batches
-done for pass N (filter: all). Stop the server (Ctrl-C) and start the next
-one; then press Reconnect (r) for serve, or open review's new URL." with
+done for pass N (filter: all). Press Reconnect (r) for the next pass." with
 Reconnect. When the filter lists no image at all (`clean` in a pass with no CLEAN image) it says "No images to review for
 pass N (filter: clean)" in place of "All batches done". Past either end of
 the list the arrows then show this end screen instead of the stop sign.
@@ -348,11 +347,11 @@ pass is done too.
 ## End of a pass or batch
 
 When the whole pass is done the page shows the end-of-pass screen, "Pass
-N: nothing left to review. Stop the server (Ctrl-C) and start the next one;
-then press Reconnect (r) for serve, or open review's new URL.", and offers
-Reconnect for the next server. Reconnect works for `serve` restarted with the
-same socket path and token; each `review` run has a new token (and, unless
-`--port` is fixed, a new port), so open the URL it gives instead.
+N: nothing left to review. Press Reconnect (r) for the next pass.", and
+offers Reconnect. The server works out the current pass on every request, so
+Reconnect loads the next pass from the same server, `serve` or `review`; there
+is no need to restart it. To move on to another work directory, press `q`
+(see [Done](#done)).
 
 When the list is done but the pass is not, an end screen says what is left
 (while re-checking, see [Re-checking CLEAN images](#re-checking-clean-images)

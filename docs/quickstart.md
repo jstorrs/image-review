@@ -5,7 +5,7 @@
 image-review preprocess /path/to/dicoms/ --work-dir ./review_work
 
 # Review in your browser: pass 1 is grid triage (press m), later passes inspect the
-# flagged (DIRTY) images one at a time; stop it with Ctrl-C and run it again for each pass
+# flagged (DIRTY) images one at a time; press r on the page for the next pass, Ctrl-C to stop
 image-review review
 
 # Check progress (--check: exit 1 until every image has a verdict)

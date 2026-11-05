@@ -221,7 +221,8 @@ async function showPlan(page) {
 }
 
 const NEXT_SERVER = "Stop the server (Ctrl-C) and start the next one; then press Reconnect (r) for serve, or open review's new URL.";
-const END_OF_PASS = "Pass 1: nothing left to review. " + NEXT_SERVER;
+const NEXT_PASS = "Press Reconnect (r) for the next pass.";
+const END_OF_PASS = "Pass 1: nothing left to review. " + NEXT_PASS;
 
 const plain = (value) => JSON.parse(JSON.stringify(value)); // across the vm realm
 const UNREVIEWED = (keys) => Object.fromEntries(keys.map((key) => [key, "UNREVIEWED"]));
@@ -248,6 +249,7 @@ module.exports = {
   TWO_GRIDS,
   showPlan,
   NEXT_SERVER,
+  NEXT_PASS,
   END_OF_PASS,
   plain,
   UNREVIEWED,

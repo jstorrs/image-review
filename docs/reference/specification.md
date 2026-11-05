@@ -2169,9 +2169,8 @@ empties the rest of the stack.
   filter lists no manifest row at all, "No images to review for pass N
   (filter: F)" in place of "All batches done". Under
   `todo`, only when no manifest row of the pass is todo (UNREVIEWED or
-  FLAGGED) is it the end of the pass: "Pass N: nothing left to review. Stop
-  the server (Ctrl-C) and start the next one; then press Reconnect (r) for
-  serve, or open review's new URL." with the
+  FLAGGED) is it the end of the pass: "Pass N: nothing left to review. Press
+  Reconnect (r) for the next pass." with the
   Reconnect button, offered while no request is in flight and the page has not
   stopped (a stop takes the hint off the stage; see *Errors*). Otherwise
   (`elsewhereHint`): in grid mode (whose list is one batch) "No todo images
@@ -2202,10 +2201,10 @@ empties the rest of the stack.
   move, so it empties the status message. Once no row the filter lists is
   todo (`filterDone`; under `todo`, no todo row left in the pass), a step
   past either end shows the end screen instead of the stop sign: under
-  `todo` the end-of-pass screen (with Reconnect), since the next server is
-  due; under `clean` or `all` the "All batches done … (filter: F)" screen
-  (see *Marking*), which is the end-of-pass screen, "… (filter: F). Stop
-  the server…" with Reconnect, only when the pass is done too. Left/Right go
+  `todo` the end-of-pass screen (with Reconnect, which loads the next pass
+  from the same server); under `clean` or `all` the "All batches done … (filter: F)" screen
+  (see *Marking*), which is the end-of-pass screen, "… (filter: F). Press
+  Reconnect (r)…" with Reconnect, only when the pass is done too. Left/Right go
   round from it too. A list with no items keeps its own screen, and the arrows do
   nothing.
 - **Re-check filter**: `state.filter` (`Filter`: `todo`, `clean` or `all`)
@@ -2318,7 +2317,7 @@ empties the rest of the stack.
   overlay is up) means done with
   this server: the reviewer stops it with Ctrl-C (the marks are already
   saved), starts the next `serve` on the same socket path and token
-  (for the next batch or pass), and presses Reconnect in the same tab; or
+  (for the next work directory), and presses Reconnect in the same tab; or
   starts the next `review` and opens its new URL. It
   stops the page as a lost connection does, so every request in flight
   turns stale and nothing more is sent. It leaves grid mode (canvas sized to

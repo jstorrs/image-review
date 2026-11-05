@@ -18,7 +18,9 @@ const TOKEN_REJECTED = "token rejected (server restarted?) - open the new URL";
 const LOST_CONNECTION = "Lost connection — your marks so far are saved on the server";
 // A 412: this page was loaded from an earlier server run (its keys may name another work directory's images).
 const SERVER_CHANGED = "Server restarted or changed work directory - press Reconnect (r)";
-// With the same address and token, the next server is loaded in this tab by Reconnect.
+// The server works out the current pass on every request, so Reconnect loads the next pass from the same server.
+const NEXT_PASS = "Press Reconnect (r) for the next pass.";
+// After Done (q): with the same address and token, the next server is loaded in this tab by Reconnect.
 const NEXT_SERVER = "Stop the server (Ctrl-C) and start the next one; then press Reconnect (r) for serve, or open review's new URL.";
 const WAITING = "Done; waiting for the next server";
 const WAITING_DETAIL = "Done. Your marks are saved. " + NEXT_SERVER;
@@ -677,7 +679,7 @@ function elsewhereHint() {
 }
 
 // The end of the list, with no todo left in it. Only with no todo row left in the pass is
-// it the end of the pass, where the next server is due and Reconnect is offered. Under clean
+// it the end of the pass, where Reconnect is offered to load the next pass. Under clean
 // or all, with every key re-checked, the re-check is done ("All batches done", or "No
 // images to review" when the filter lists none, as the viewer said); the pass may be done too.
 function showEnd() {
@@ -685,13 +687,13 @@ function showEnd() {
     showNotice(elsewhereHint());
   } else if (state.filter === "todo") {
     state.atEnd = true;
-    showNotice("Pass " + state.pass + ": nothing left to review. " + NEXT_SERVER);
+    showNotice("Pass " + state.pass + ": nothing left to review. " + NEXT_PASS);
   } else {
     state.atEnd = passDone();
     const listed = state.manifest.some((row) => inFilter(state.statuses.get(row.key), state.filter));
     const done = (listed ? "All batches done" : "No images to review") + " for pass " + state.pass;
     const filter = done + " (filter: " + state.filter + ")";
-    showNotice(filter + (state.atEnd ? ". " + NEXT_SERVER : " - press [f] to change the filter"));
+    showNotice(filter + (state.atEnd ? ". " + NEXT_PASS : " - press [f] to change the filter"));
   }
   render();
 }

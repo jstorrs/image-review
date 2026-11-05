@@ -129,20 +129,23 @@ In an `sbatch` script, use `#SBATCH --cpus-per-task=8`. See
    command line. After a restart, press Reconnect (or `r`) on the page: the
    forward and the URL are unchanged.
 
-**Moving on to the next batch or pass.** With the fixed socket path and
+**Moving on to the next pass.** When the page says the pass has nothing
+left to review (not just the end of a batch; see
+[End of a pass or batch](../commands/browser.md#end-of-a-pass-or-batch)),
+press Reconnect (or `r`). The same server loads the next pass; there is no
+need to restart it.
+
+**Moving on to another work directory.** With the fixed socket path and
 `$IMAGE_REVIEW_TOKEN` exported in the job's shell, one tab and one ssh
 command last the whole job:
 
-1. Finish the pass (the page says the pass has nothing left to review, not
-   just the end of a batch; see
-   [End of a pass or batch](../commands/browser.md#end-of-a-pass-or-batch))
-   or press `q` (or click Done; see [Done](../commands/browser.md#done)).
+1. Press `q` (or click Done; see [Done](../commands/browser.md#done)).
    Your marks are already saved, and the tab keeps the token and your name.
    `q` does not stop the server.
 2. Stop the server with Ctrl-C on the node.
 3. Start the next `image-review serve ...` in the same shell (same
-   `$IMAGE_REVIEW_SOCKET_PATH` and `$IMAGE_REVIEW_TOKEN`), for the next batch
-   or pass.
+   `$IMAGE_REVIEW_SOCKET_PATH` and `$IMAGE_REVIEW_TOKEN`), on the next work
+   directory.
 4. Press Reconnect (or `r`) on the page. It loads whatever the new server
    serves.
 
@@ -189,9 +192,8 @@ always reviews the current pass (see
    suspicious: every image in the grid gets that verdict. Press `b` for the
    next batch with images to review. This is the fast pass.
 
-2. **Pass 2** (single review): once pass 1 is done, the page says so; start
-   the next `serve` and press Reconnect (`r`), as in
-   **Moving on to the next batch or pass** above. Only images marked DIRTY
+2. **Pass 2** (single review): once pass 1 is done, the page says so; press
+   Reconnect (`r`), as in **Moving on to the next pass** above. Only images marked DIRTY
    in pass 1 are left, as FLAGGED (amber bar). Reconnect keeps the mode you
    were in, so grid mode now says they need single-mode review: press `s`
    and inspect them one at a time.

@@ -79,9 +79,8 @@ The intended workflow, grid triage in pass 1 and then single-image review of
 the images marked DIRTY, pass after pass, is in
 [Multi-pass workflow](browser-review.md#multi-pass-workflow). The page
 reviews the current pass (see [Passes](../commands/browser.md#passes)). When
-it says the pass has nothing left to review, stop `review` with Ctrl-C and
-run it again: it opens the next pass in the browser, with a new URL. Close
-the old tab.
+it says the pass has nothing left to review, press Reconnect (`r`): the
+page loads the next pass from the same `review`, with no restart.
 
 To re-check images already marked CLEAN, press `f` on the page; see
 [Re-checking CLEAN images](../commands/browser.md#re-checking-clean-images).
@@ -139,13 +138,9 @@ image-review preprocess \
 # Check initial state -- everything should be UNREVIEWED
 image-review status --work-dir ./phi_review
 
-# Pass 1: grid triage in the browser (press m); Ctrl-C once the page says the pass is done
-image-review review --work-dir ./phi_review
-
-# Check progress
-image-review status --work-dir ./phi_review
-
-# Pass 2, 3, ...: single-image review of the images flagged DIRTY in the pass before
+# Pass 1: grid triage in the browser (press m); press r once the page says the pass is done,
+# for pass 2, 3, ...: single-image review of the images flagged DIRTY in the pass before.
+# Ctrl-C once you are finished.
 image-review review --work-dir ./phi_review
 
 # Final status

@@ -4,7 +4,7 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const test = require("node:test");
-const { makePage, place, NEXT_SERVER, plain, reload } = require("./page");
+const { makePage, place, NEXT_PASS, plain, reload } = require("./page");
 
 const tests = {};
 
@@ -176,7 +176,7 @@ tests["with every key re-checked under all the pass is done: All batches done, a
     await page.respond("/mark", page.json(200, { [key]: "CLEAN" }));
   }
   assert.strictEqual(page.state.index, -1);
-  assert.strictEqual(page.els.message.textContent, "All batches done for pass 1 (filter: all). " + NEXT_SERVER);
+  assert.strictEqual(page.els.message.textContent, "All batches done for pass 1 (filter: all). " + NEXT_PASS);
   assert.strictEqual(page.els.reconnect.hidden, false);
 };
 
@@ -424,13 +424,13 @@ tests["the pass-done end messages under clean"] = async () => {
   await page.boot();
   await pressF(page, some);
   await recheckCurrent(page);
-  assert.strictEqual(page.els.message.textContent, "All batches done for pass 1 (filter: clean). " + NEXT_SERVER);
+  assert.strictEqual(page.els.message.textContent, "All batches done for pass 1 (filter: clean). " + NEXT_PASS);
   assert.strictEqual(page.els.reconnect.hidden, false);
   const none = { a: "DIRTY", b: "DIRTY" };
   const other = makePage({ manifest: rows.slice(0, 2), statuses: none, fixedOrder: true });
   await other.boot();
   await pressF(other, none);
-  assert.strictEqual(other.els.message.textContent, "No images to review for pass 1 (filter: clean). " + NEXT_SERVER);
+  assert.strictEqual(other.els.message.textContent, "No images to review for pass 1 (filter: clean). " + NEXT_PASS);
   assert.strictEqual(other.els.reconnect.hidden, false);
 };
 

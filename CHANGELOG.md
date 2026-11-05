@@ -17,8 +17,9 @@
   shows an access error: open the URL instead. On a host other people log in to, review from your laptop with
   `serve`; see the security model's "Local review on loopback".
   The page's messages now say "the server" instead of "serve" (for example "Stop the server (Ctrl-C) and start the
-  next one; then press Reconnect (r) for serve, or open review's new URL."), and the 412 body is now `the page was
-  loaded from another server; reconnect`.
+  next one; then press Reconnect (r) for serve, or open review's new URL." after Done), and the 412 body is now `the
+  page was loaded from another server; reconnect`. At the end of a pass the page now says "Press Reconnect (r) for
+  the next pass.": the same server loads the next pass, so there is no need to restart it for each pass.
 - **The Python remote client and `serve`'s HTTPS mode are removed.** `review --remote`/`--via`, `status
   --remote`/`--via`, `serve --https`/`--bind`/`--port`, export's hidden `--remote`, and the server's `GET /version`
   and `GET /skipped` are gone; the options now exit 2 as unknown. `$IMAGE_REVIEW_REMOTE` is no longer read, not

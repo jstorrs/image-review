@@ -140,7 +140,7 @@ rest; together they are enough to rebuild the tool.
 | Skip kinds and example reasons | `docs/commands/preprocess.md` |
 | Note kinds and example details | `docs/commands/preprocess.md` |
 | Allowlist and report format, export refusals | `docs/commands/export.md` |
-| Extras, minimum versions and codec limits | `docs/install.md` |
+| What gets installed, minimum versions and codec limits | `docs/install.md` |
 | The `dev` and `docs` extras, tooling | this file |
 | Security claims and limits, what is never logged | `docs/reference/security-model.md` |
 | Workflows | `docs/tutorials/` |

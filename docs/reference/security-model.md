@@ -165,7 +165,7 @@ The points below are its limits.
   [Token](../commands/serve.md#token) has the rules and where to generate it.
 - **A page belongs to one serve.** With a fixed socket path and
   `$IMAGE_REVIEW_TOKEN`, the ssh forward and the token outlive a serve
-  restarted on the next work directory, batch or pass, and keys
+  restarted on the next work directory, and keys
   (`batch_NNN/img_NNNNN.jpg`) repeat across work directories. So a tab left
   showing an image while serve is restarted elsewhere could otherwise send
   its verdict for that key to the new server, recording CLEAN for an image
