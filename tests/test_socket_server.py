@@ -246,9 +246,12 @@ class SocketServerTestCase(unittest.TestCase):
         host: str = "localhost",
         body: bytes = b"",
         instance: str | None = None,
+        origin: str | None = None,
     ) -> bytes:
         """Headers and body in one write, so a server that replies early and closes cannot cause EPIPE."""
         lines = [f"{method} {path} HTTP/1.1", f"Host: {host}", f"Content-Length: {len(body)}"]
+        if origin is not None:
+            lines.append(f"Origin: {origin}")
         if token is not None:
             lines.append(f"Authorization: Bearer {token}")
         if instance is not None:
@@ -388,9 +391,13 @@ class TestSocketOrigin(SocketServerTestCase):
                 self.assertEqual(resp.getheader("Connection"), "close")
 
     def test_foreign_origin_on_a_post_records_nothing(self):
-        resp, _ = self.request("POST", "/mark", body=json.dumps(MARK_A).encode(), origin="http://evil.example")
-        self.assertEqual(resp.status, 400)
-        resp, data = self.request("GET", "/statuses?pass=1")
+        # One write: the server refuses on the headers, before reading the body, and may close mid-send
+        body = json.dumps(MARK_A).encode()
+        reply = self.raw_request(
+            "POST", "/mark", self.token, body=body, instance=self.server.instance, origin="http://evil.example"
+        )
+        self.assertTrue(reply.startswith(b"HTTP/1.1 400 "), reply)
+        _, data = self.request("GET", "/statuses?pass=1")
         self.assertEqual(json.loads(data)["batch_001/a.jpg"], "UNREVIEWED")
 
     def test_the_pages_own_origin_is_allowed(self):
