@@ -19,7 +19,6 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 import image_review
@@ -35,6 +34,7 @@ from image_review.server import (
     clear_stale_socket,
     default_socket_path,
     is_local_host,
+    is_same_origin,
     load_assets,
     make_unix_server,
     parse_socket_path,
@@ -65,6 +65,11 @@ SCRIPT_NAMES = ["helpers.js", "app.js"]  # in the order the page loads them
 SERVER_LOGGER = f"{PACKAGE_LOGGER}.server"
 
 
+def grid_rules() -> dict:
+    """The grid rules the page is checked against (tests/web/grid-rules.json)."""
+    return json.loads((Path(__file__).parent / "web" / "grid-rules.json").read_text())
+
+
 def web_scripts() -> str:
     """Both of the page's scripts as one text."""
     return "\n".join((WEB_DIR / name).read_text() for name in SCRIPT_NAMES)
@@ -76,8 +81,6 @@ ROUTES = [
     ("GET", "/image?key=batch_001/a.jpg"),
     ("GET", "/statuses?pass=1"),
     ("GET", "/current_pass"),
-    ("GET", "/skipped"),
-    ("GET", "/version"),
     ("POST", "/mark"),
     ("POST", "/undo"),
     ("GET", "/nope"),
@@ -124,27 +127,104 @@ class IsLocalHostTest(unittest.TestCase):
         self.assertFalse(is_local_host([]))
         self.assertFalse(is_local_host(["localhost", "localhost"]))
 
+    def test_with_a_port_only_127_0_0_1_and_that_port(self):
+        for value in ["127.0.0.1:8123", " 127.0.0.1:8123\t"]:
+            with self.subTest(value=value):
+                self.assertTrue(is_local_host([value], 8123))
+        for value in [
+            "localhost:8123",  # browsers try ::1 first for localhost, where another user could listen
+            "LOCALHOST:8123",
+            "[::1]:8123",
+            "[::1]",
+            "127.0.0.1",
+            "localhost",
+            "127.0.0.1:8124",
+            "127.0.0.1:80",
+            "evil.example:8123",
+            "localhost.evil.example:8123",
+            "127.0.0.2:8123",
+            "127.0.0.1:08123",
+            "127.0.0.1:8123x",
+            "",
+        ]:
+            with self.subTest(value=value):
+                self.assertFalse(is_local_host([value], 8123))
+        self.assertFalse(is_local_host([], 8123))
+        self.assertFalse(is_local_host(["127.0.0.1:8123", "127.0.0.1:8123"], 8123))
+
+
+class IsSameOriginTest(unittest.TestCase):
+    def test_no_origin_is_allowed(self):
+        self.assertTrue(is_same_origin([], "localhost:8080"))
+
+    def test_the_request_host_is_allowed(self):
+        for host, origin in [
+            ("localhost:8080", "http://localhost:8080"),
+            ("localhost:8080", "http://LOCALHOST:8080"),
+            ("LOCALHOST:8080", "http://localhost:8080"),
+            ("localhost", "http://localhost"),
+            ("[::1]:9000", "http://[::1]:9000"),
+            ("127.0.0.1:8123", "http://127.0.0.1:8123"),
+            (" 127.0.0.1:8123", "http://127.0.0.1:8123\t"),
+        ]:
+            with self.subTest(host=host, origin=origin):
+                self.assertTrue(is_same_origin([origin], host))
+
+    def test_anything_else_is_refused(self):
+        host = "localhost:8080"
+        for origin in [
+            "http://localhost:8888",  # another local web app
+            "http://localhost",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "null",
+            "",
+            "http://evil.example",
+            "https://localhost:8080",
+            "HTTP://localhost:8080",
+            "http://localhost:8080/",
+            "http://user@localhost:8080",
+            "localhost:8080",
+            "http://locaﬀhost:8080",
+            "http://localhost:8080\u212a",  # Kelvin sign: lower() is "k"
+            "file://",
+            "chrome-extension://abc",
+        ]:
+            with self.subTest(origin=origin):
+                self.assertFalse(is_same_origin([origin], host))
+        self.assertFalse(is_same_origin(["http://localhost:8080"] * 2, host))
+
 
 @unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
 class SocketServerTestCase(unittest.TestCase):
+    PEER = "unix"  # the peer log lines name
+
     def setUp(self):
         self.work_dir = temp_dir(self)
         make_work_dir(self.work_dir)
+        self.start_server()
+
+    def start_server(self) -> None:
+        """Start the server under test; subclasses' setUp patches apply, as they run first."""
         self.path = socket_dir(self) / "ir.sock"
         self.server, self.token, stop = start_unix_server(self.work_dir, self.path)
         self.addCleanup(stop)
+        self.host = "localhost"  # the Host the direct-socket requests send
 
-    def request(self, method, path, body=None, token="default", host="localhost:8080", instance="default"):
+    def request(self, method, path, body=None, token="default", host="localhost:8080", instance="default", origin=None):
         """One request through http.client, with `host` sent exactly as given (http.client would rewrite "::1").
 
-        `instance` is the X-Review-Instance sent: this server's by default, None for none.
+        `instance` is the X-Review-Instance sent: this server's by default, None for none. `origin`, if given, is
+        sent as the Origin header.
         """
         token = self.token if token == "default" else token
         instance = self.server.instance if instance == "default" else instance
-        conn = UnixHTTPConnection(self.path)
+        conn = self.connection()
         self.addCleanup(conn.close)
         conn.putrequest(method, path, skip_host=True)
         conn.putheader("Host", host)
+        if origin is not None:
+            conn.putheader("Origin", origin)
         if token is not None:
             conn.putheader("Authorization", f"Bearer {token}")
         if instance is not None:
@@ -155,6 +235,9 @@ class SocketServerTestCase(unittest.TestCase):
         resp = conn.getresponse()
         return resp, resp.read()
 
+    def connection(self) -> http.client.HTTPConnection:
+        return UnixHTTPConnection(self.path)
+
     def raw_request(
         self,
         method: str,
@@ -163,9 +246,12 @@ class SocketServerTestCase(unittest.TestCase):
         host: str = "localhost",
         body: bytes = b"",
         instance: str | None = None,
+        origin: str | None = None,
     ) -> bytes:
         """Headers and body in one write, so a server that replies early and closes cannot cause EPIPE."""
         lines = [f"{method} {path} HTTP/1.1", f"Host: {host}", f"Content-Length: {len(body)}"]
+        if origin is not None:
+            lines.append(f"Origin: {origin}")
         if token is not None:
             lines.append(f"Authorization: Bearer {token}")
         if instance is not None:
@@ -278,18 +364,60 @@ class TestSocketRequests(SocketServerTestCase):
             self.request("GET", "/current_pass")
             self.request("GET", "/current_pass", host="evil.example")
         messages = [r.getMessage() for r in logs.records]
-        self.assertEqual(messages, ["unix GET /current_pass 200", "unix GET /current_pass 400"])
+        self.assertEqual(messages, [f"{self.PEER} GET /current_pass 200", f"{self.PEER} GET /current_pass 400"])
         for text in [*messages, *logs.output]:
             self.assertNotIn(self.token, text)
             self.assertNotIn("Error", text)
 
 
-# The API routes a page loaded from another serve is refused on (ROUTES less /version and /current_pass)
+FOREIGN_ORIGINS = [
+    "http://evil.example",
+    "null",
+    "https://localhost:8080",
+    "http://localhost.evil.example",
+    "http://localhost:8888",  # another local web app, against Host localhost:8080
+    "http://127.0.0.1:8080",
+]
+
+
+class TestSocketOrigin(SocketServerTestCase):
+    def test_foreign_origin_is_400_before_the_token(self):
+        for (method, path), origin, token in itertools.product(
+            [("GET", "/current_pass"), ("GET", "/"), ("GET", "/app.js")], FOREIGN_ORIGINS, (None, "default")
+        ):
+            with self.subTest(method=method, path=path, origin=origin, token=token):
+                resp, data = self.request(method, path, token=token, origin=origin)
+                self.assertEqual((resp.status, data), (400, b""))
+                self.assertEqual(resp.getheader("Connection"), "close")
+
+    def test_foreign_origin_on_a_post_records_nothing(self):
+        # One write: the server refuses on the headers, before reading the body, and may close mid-send
+        body = json.dumps(MARK_A).encode()
+        reply = self.raw_request(
+            "POST", "/mark", self.token, body=body, instance=self.server.instance, origin="http://evil.example"
+        )
+        self.assertTrue(reply.startswith(b"HTTP/1.1 400 "), reply)
+        _, data = self.request("GET", "/statuses?pass=1")
+        self.assertEqual(json.loads(data)["batch_001/a.jpg"], "UNREVIEWED")
+
+    def test_the_pages_own_origin_is_allowed(self):
+        # The page is reached through a forward on whatever local port the reviewer picked: its Host
+        for host in ["localhost:8080", "localhost:1234", "127.0.0.1:9", "[::1]:8080", "localhost"]:
+            with self.subTest(host=host):
+                origin = f"http://{host}"
+                resp, data = self.request("GET", "/current_pass", host=host, origin=origin)
+                self.assertEqual((resp.status, json.loads(data)), (200, {"pass": 1}))
+                resp, _ = self.request("GET", "/app.js", token=None, host=host, origin=origin)
+                self.assertEqual(resp.status, 200)
+        resp, _ = self.request("POST", "/mark", body=json.dumps(MARK_A).encode(), origin="http://localhost:8080")
+        self.assertEqual(resp.status, 200)
+
+
+# The API routes a page loaded from another server is refused on (ROUTES less /current_pass)
 INSTANCE_ROUTES = [
     ("GET", "/manifest"),
     ("GET", "/image?key=batch_001/a.jpg"),
     ("GET", "/statuses?pass=1"),
-    ("GET", "/skipped"),
     ("POST", "/mark"),
     ("POST", "/undo"),
     ("POST", "/grids"),
@@ -299,7 +427,7 @@ INSTANCE_ROUTES = [
 MARK_A = {"keys": ["batch_001/a.jpg"], "status": "CLEAN", "pass": 1, "reviewer": "tester", "mode": "single"}
 UNDO = {"pass": 1, "reviewer": "tester"}
 GRIDS_ALL = {"keys": ["batch_001/a.jpg", "batch_001/b.jpg"], "width": 640, "height": 480, "rotation": "auto"}
-STALE_BODY = {"error": "the page was loaded from another serve; reconnect"}
+STALE_BODY = {"error": "the page was loaded from another server; reconnect"}
 
 
 class TestServerInstance(SocketServerTestCase):
@@ -331,14 +459,11 @@ class TestServerInstance(SocketServerTestCase):
         self.addCleanup(stop)
         self.assertNotEqual(other.instance, self.server.instance)
 
-    def test_version_and_current_pass_need_no_instance(self):
+    def test_current_pass_needs_no_instance(self):
         for instance in (None, "stale"):
             with self.subTest(instance=instance):
                 resp, data = self.request("GET", "/current_pass", instance=instance)
                 self.assertEqual((resp.status, json.loads(data)), (200, {"pass": 1}))
-                resp, data = self.request("GET", "/version", instance=instance)
-                self.assertEqual(resp.status, 200)
-                self.assertIn("api", json.loads(data))
 
     def test_other_routes_without_the_instance_are_412(self):
         before = self.review_tsv()
@@ -383,7 +508,6 @@ class TestServerInstance(SocketServerTestCase):
         self.assertEqual(resp.status, 200)
         self.assertTrue(json.loads(data))
         self.assertEqual(self.request("GET", "/image?key=batch_001/a.jpg")[0].status, 200)
-        self.assertEqual(self.request("GET", "/skipped")[0].status, 200)
         self.assertEqual(self.request("POST", "/grids", body=json.dumps(GRIDS_ALL).encode())[0].status, 200)
         self.assertEqual(self.request("GET", "/nope")[0].status, 404)
 
@@ -407,7 +531,7 @@ class TestServerInstance(SocketServerTestCase):
             self.request("GET", "/current_pass")
             self.request("GET", "/manifest", instance="stale")
         messages = [r.getMessage() for r in logs.records]
-        self.assertEqual(messages, ["unix GET /current_pass 200", "unix GET /manifest 412"])
+        self.assertEqual(messages, [f"{self.PEER} GET /current_pass 200", f"{self.PEER} GET /manifest 412"])
         for text in logs.output:
             self.assertNotIn(self.server.instance, text)
 
@@ -570,7 +694,7 @@ class TestSocketRequestDeadline(SocketServerTestCase):
     def test_slow_grids_body_closed_without_reply_or_error_log(self):
         sock = self.connect()
         head = (
-            f"POST /grids HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {self.token}\r\n"
+            f"POST /grids HTTP/1.1\r\nHost: {self.host}\r\nAuthorization: Bearer {self.token}\r\n"
             f"{INSTANCE_HEADER}: {self.server.instance}\r\nContent-Length: 100\r\n\r\n"
         )
         with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
@@ -581,7 +705,7 @@ class TestSocketRequestDeadline(SocketServerTestCase):
 
     def test_keep_alive_requests_each_get_the_deadline(self):
         deadline = 2.0  # longer than the class's, for headroom on slow runners
-        conn = UnixHTTPConnection(self.path)
+        conn = self.connection()
         self.addCleanup(conn.close)
         headers = {"Authorization": f"Bearer {self.token}", INSTANCE_HEADER: self.server.instance}
         with mock.patch.object(ReviewHandler, "request_deadline", deadline):
@@ -595,11 +719,20 @@ class TestSocketRequestDeadline(SocketServerTestCase):
         pad = "".join(f"X-Pad-{i}: {'a' * 30000}\r\n" for i in range(3))
         with self.assertNoLogs(SERVER_LOGGER, "ERROR"):
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):  # it may close mid-send
-                sock.sendall(f"GET / HTTP/1.1\r\nHost: localhost\r\n{pad}\r\n".encode())
+                sock.sendall(f"GET / HTTP/1.1\r\nHost: {self.host}\r\n{pad}\r\n".encode())
             self.assertEqual(read_until_closed(sock, 10), b"")
 
 
 class TestWebFiles(unittest.TestCase):
+    def test_fetch_keeps_its_default_mode(self):
+        # The server's Origin check relies on fetch's default "cors" mode: in "same-origin" or "no-cors" mode a POST
+        # under the page's Referrer-Policy: no-referrer sends Origin: null, which the server refuses with 400
+        scripts = web_scripts()
+        calls = re.findall(r"\bfetch\(([^;]*)\);", scripts)
+        self.assertEqual(calls, ['path, { ...options, headers, cache: "no-store" }'])
+        self.assertNotIn("referrerPolicy", scripts)
+        self.assertNotRegex(scripts, r"""\bmode:\s*["'](cors|no-cors|same-origin|navigate)["']""")
+
     def test_load_assets(self):
         assets = load_assets()
         self.assertEqual(sorted(assets), ["/", "/app.css", "/app.js", "/helpers.js"])
@@ -839,7 +972,7 @@ class TestWebFiles(unittest.TestCase):
 
     @requires_node
     def test_grid_status_parity(self):
-        from image_review.status import grid_clean_refused, grid_status
+        from image_review.status import grid_clean_refused
 
         cases = [
             dict(zip([f"k{i}" for i in range(n)], combo, strict=True))
@@ -857,21 +990,14 @@ class TestWebFiles(unittest.TestCase):
             """,
             cases,
         )
+        # grid_status was frozen from the Python implementation at 8e96267; the page's behaviour is now the spec
+        frozen = grid_rules()["grid_status"]
+        self.assertEqual(len(frozen), len(cases))
         expected = [
-            [grid_status(statuses, tuple(statuses)), grid_clean_refused(statuses, tuple(statuses))]
-            for statuses in cases
+            [status, grid_clean_refused(statuses, tuple(statuses))]
+            for status, statuses in zip(frozen, cases, strict=True)
         ]
         self.assertEqual(got, expected)
-
-    def test_verdict_message_parity(self):
-        from image_review import controller
-
-        script = web_scripts()
-        for name in ["GRID_HAS_DIRTY", "IMAGE_HAS_DIRTY", "NOTHING_TO_UNDO", "UNLOADABLE_CLEAN"]:
-            with self.subTest(name=name):
-                found = re.search(rf'^const {name} = "([^"]*)";$', script, re.MULTILINE)
-                assert found is not None, name
-                self.assertEqual(found[1], getattr(controller, name))
 
     def test_instance_header_name_matches_the_server(self):
         from image_review.server import INSTANCE_HEADER
@@ -881,11 +1007,10 @@ class TestWebFiles(unittest.TestCase):
         self.assertEqual(found[1], INSTANCE_HEADER)
 
     def test_copied_limits_match_python(self):
-        from image_review import connection, controller, server
+        from image_review import connection, server
 
         script = web_scripts()
         for name, module in [
-            ("MIN_DWELL_MS", controller),
             ("MAX_REVIEWER_LENGTH", connection),
             ("MAX_PASS", connection),
             ("MAX_GRID_KEYS", server),
@@ -899,41 +1024,23 @@ class TestWebFiles(unittest.TestCase):
 
     @requires_node
     def test_grid_eligibility_parity(self):
-        from image_review.controller import ReviewSession, next_batch
-        from image_review.store import ManifestRow
-
-        # Two batches interleaved in the manifest, so manifest order differs from batch order
-        rows = [ManifestRow(f"k{i}", "b2" if i % 2 == 0 else "b1") for i in range(4)]
-        batches = ["b1", "b2"]
+        # Expectations were frozen from the Python implementation at 8e96267; the page's behaviour is now the spec.
+        # One table per status filter (the Python "unreviewed" is the page's "todo") and keys marked
+        # this session (the page's re-checked set)
+        tables = grid_rules()["eligibility"]
+        filters = {"unreviewed": "todo", "clean": "clean", "all": "all"}
+        marked = {"none": [], "k0,k2": ["k0", "k2"]}
+        self.assertEqual(sorted(tables), sorted(filters))
+        for by_marked in tables.values():
+            self.assertEqual(sorted(by_marked), sorted(marked))
+            for table in by_marked.values():
+                self.assertEqual(len(table), 256)
+        runs = list(itertools.product(filters, marked))
+        # Four keys; the page's manifest below interleaves two batches, so manifest order differs from batch order
         cases = [
-            dict(zip([r.key for r in rows], combo, strict=True))
-            for combo in itertools.product(["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"], repeat=len(rows))
+            dict(zip(["k0", "k1", "k2", "k3"], combo, strict=True))
+            for combo in itertools.product(["CLEAN", "DIRTY", "UNREVIEWED", "FLAGGED"], repeat=4)
         ]
-        expected = []
-        for statuses in cases:
-            session = SimpleNamespace(
-                manifest=rows,
-                _statuses=statuses,
-                status_filter="unreviewed",
-                mode="grid",
-                pass_number=3,
-                _marked_this_session=set(),
-            )
-            session._key_todo = lambda key, s=session: ReviewSession._key_todo(s, key)
-            session._held_back_count = lambda batch, s=session: ReviewSession._held_back_count(s, batch)
-
-            def has_rows(batch, s=session):
-                return bool(ReviewSession._review_rows(s, batch))
-
-            expected.append(
-                {
-                    "keys": {b: [r.key for r in ReviewSession._review_rows(session, b)] for b in batches},
-                    "held": {b or "all": ReviewSession._held_back_count(session, b) for b in [*batches, None]},
-                    "message": ReviewSession._held_back_message(session, None, in_session=True),
-                    "first": next_batch(batches, None, has_rows, wrap=False),
-                    "after": {b: next_batch(batches, b, has_rows, wrap=True) for b in batches},
-                }
-            )
         got = self.run_helpers(
             r"""
             const manifest = ["k0", "k1", "k2", "k3"].map((key, i) => ({ key, batch: i % 2 === 0 ? "b2" : "b1" }));
@@ -942,22 +1049,30 @@ class TestWebFiles(unittest.TestCase):
             // By code point, as Python: U+FF5E before U+1F600 (UTF-16 code units would put it after)
             const astral = [{ key: "x", batch: "\u{1F600}" }, { key: "y", batch: "\uFF5E" }, { key: "z", batch: "b" }];
             assert.deepStrictEqual(plain(m.sortedBatches(astral)), ["b", "\uFF5E", "\u{1F600}"]);
-            console.log(JSON.stringify(data.map((statuses) => {
-              const map = new Map(Object.entries(statuses));
-              const withGrids = m.gridBatches(manifest, map);
-              const accepts = (batch) => withGrids.has(batch);
-              return {
-                keys: Object.fromEntries(batches.map((b) => [b, m.gridKeys(manifest, map, b)])),
-                held: Object.fromEntries([...batches, null].map((b) => [b || "all", m.heldBackCount(manifest, map, b)])),
-                message: m.heldBackMessage(3, m.heldBackCount(manifest, map, null)),
-                first: m.nextBatch(batches, null, accepts),
-                after: Object.fromEntries(batches.map((b) => [b, m.nextBatch(batches, b, accepts)])),
-              };
+            console.log(JSON.stringify(data.runs.map(({ filter, rechecked }) => {
+              const done = new Set(rechecked);
+              return data.cases.map((statuses) => {
+                const map = new Map(Object.entries(statuses));
+                const withGrids = m.gridBatches(manifest, map, filter);
+                const accepts = (batch) => withGrids.has(batch);
+                const held = (batch) => m.heldBackCount(manifest, map, batch, filter, done);
+                return {
+                  keys: Object.fromEntries(batches.map((b) => [b, m.gridKeys(manifest, map, b, filter)])),
+                  held: Object.fromEntries([...batches, null].map((b) => [b || "all", held(b)])),
+                  message: m.heldBackMessage(3, held(null)),
+                  first: m.nextBatch(batches, null, accepts),
+                  after: Object.fromEntries(batches.map((b) => [b, m.nextBatch(batches, b, accepts)])),
+                };
+              });
             })));
             """,
-            cases,
+            {"cases": cases, "runs": [{"filter": filters[f], "rechecked": marked[name]} for f, name in runs]},
         )
-        self.assertEqual(got, expected)
+        assert isinstance(got, list)
+        self.assertEqual(len(got), 6)
+        for (status_filter, name), result in zip(runs, got, strict=True):
+            with self.subTest(filter=status_filter, marked=name):
+                self.assertEqual(result, tables[status_filter][name])
 
 
 @unittest.skipUnless(HAS_AF_UNIX, "needs AF_UNIX")
@@ -1157,6 +1272,29 @@ class TestPrivateFile(unittest.TestCase):
                 write_private_file("x.txt", "secret\n")
             self.assertEqual(list((home / ".image-review").iterdir()), [])
 
+    def test_loose_existing_dir_is_tightened(self):
+        home = socket_dir(self)
+        directory = home / ".image-review"
+        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            path = write_private_file("x.txt", "secret\n")
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_replaces_stale_file(self):
+        home = socket_dir(self)
+        directory = home / ".image-review"
+        directory.mkdir(mode=0o700)
+        stale = directory / "x.txt"
+        stale.write_text("old")
+        stale.chmod(0o644)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            path = write_private_file("x.txt", "new\n")
+        self.assertEqual(path, stale)
+        self.assertEqual(path.read_text(), "new\n")
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
 
 class TestParseToken(unittest.TestCase):
     def test_accepted(self):
@@ -1288,13 +1426,6 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn(shlex.quote(f"{getpass.getuser()}@{socket.getfqdn()}"), result.output)
 
-    def test_ssh_host_requires_socket_mode(self):
-        result = self.serve("--https", "--ssh-host", "node042.example.org")
-        self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("--ssh-host cannot be used in HTTPS mode (--https, --bind or --port).", result.output)
-        self.assertFalse((self.work / "review.lock").exists())
-        self.assertFalse(self.dir.exists())
-
     def test_bad_ssh_host_refused(self):
         for bad in ["", "-oProxyCommand=x", "a@b", "a b", "a;b"]:
             with self.subTest(bad=bad):
@@ -1382,29 +1513,6 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertIn(f"-L 127.0.0.1:8080:{path} ", result.output)
         self.assertFalse(path.exists())
 
-    def test_socket_path_from_environment_ignored_in_https_mode(self):
-        path = self.home / "env.sock"
-        seen = []
-
-        def fake_serve(server, *a, **k):
-            seen.append(type(server).__name__)
-            raise KeyboardInterrupt
-
-        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
-            result = invoke_cli(
-                "serve",
-                "--work-dir",
-                str(self.work),
-                "--https",
-                "--bind",
-                "127.0.0.1",
-                env={"IMAGE_REVIEW_SOCKET_PATH": str(path)},
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(seen, ["ReviewServer"])
-        self.assertFalse(path.exists())
-        self.assertNotIn("Unix socket", result.output)
-
     def test_socket_path_option_overrides_environment(self):
         env_path = self.home / "env.sock"
         path = self.home / "cli.sock"
@@ -1473,33 +1581,6 @@ class TestServeSocketCommand(unittest.TestCase):
                 self.assertFalse(self.dir.exists() and list(self.dir.iterdir()))
                 self.assertFalse((self.work / "review.lock").exists())
 
-    def test_token_from_environment_ignored_in_https_mode(self):
-        token = "0123456789abcdef0123456789abcdef"
-        seen = []
-
-        def fake_serve(server, *a, **k):
-            seen.append(type(server).__name__)
-            self.assertNotEqual(getattr(server, "token", None), token)
-            raise KeyboardInterrupt
-
-        for value in (token, "not a valid token"):  # ignored, so not even parsed
-            with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
-                result = invoke_cli(
-                    "serve",
-                    "--work-dir",
-                    str(self.work),
-                    "--https",
-                    "--bind",
-                    "127.0.0.1",
-                    env={"IMAGE_REVIEW_TOKEN": value},
-                )
-            self.assertEqual(result.exit_code, 0, result.output)
-            self.assertNotIn(value, result.output)
-            self.assertNotIn("IMAGE_REVIEW_TOKEN", result.output)
-            leftovers = [p.read_text() for p in self.dir.iterdir()] if self.dir.exists() else []
-            self.assertFalse(any(value in text for text in leftovers))
-        self.assertEqual(seen, ["ReviewServer"] * 2)
-
     def test_empty_token_from_environment_counts_as_unset(self):
         result = self.serve(env={"IMAGE_REVIEW_TOKEN": ""})
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1563,24 +1644,6 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertIn(f"-L 127.0.0.1:8080:{path} ", result.output)
         self.assertFalse(path.exists())
 
-    def test_conflicting_options_exit_2(self):
-        modes = (["--https"], ["--bind", "x"], ["--port", "0"], ["--port", "1"])
-        socket_options = (
-            ("--socket-path", [str(self.home / "a.sock")]),
-            ("--via", ["a@b"]),
-            ("--direct", []),
-            ("--ssh-host", ["n"]),
-        )
-        for mode, (option, values) in itertools.product(modes, socket_options):
-            args = [*mode, option, *values]
-            with self.subTest(args=args):
-                result = self.serve(*args)
-                self.assertEqual(result.exit_code, 2, result.output)
-                self.assertIn(f"{option} cannot be used in HTTPS mode (--https, --bind or --port).", result.stderr)
-                self.assertNotIn("WARNING", result.stderr)
-                self.assertFalse((self.work / "review.lock").exists())
-                self.assertFalse(self.dir.exists())
-
     def test_socket_flag_is_gone(self):
         result = self.serve("--socket")
         self.assertEqual(result.exit_code, 2, result.output)
@@ -1589,27 +1652,22 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertFalse((self.work / "review.lock").exists())
         self.assertFalse(self.dir.exists())
 
-    def test_via_from_environment_ignored_in_https_mode(self):
-        result = self.serve("--https", "--bind", "127.0.0.1", env={"IMAGE_REVIEW_VIA": "carol@login"})
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("image-review review --remote", result.output)
-        self.assertNotIn("Unix socket", result.output)
-
-    def test_direct_from_environment_ignored_in_https_mode(self):
-        result = self.serve("--https", "--bind", "127.0.0.1", env={"IMAGE_REVIEW_DIRECT": "1"})
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("image-review review --remote", result.output)
-        self.assertNotIn("Unix socket", result.output)
-
-    def test_invalid_direct_from_environment_refused_in_either_mode(self):
-        for args in ([], ["--https", "--bind", "127.0.0.1"]):
+    def test_https_options_are_gone(self):
+        for args in (["--https"], ["--bind", "127.0.0.1"], ["--port", "0"]):
             with self.subTest(args=args):
-                result = self.serve(*args, env={"IMAGE_REVIEW_DIRECT": "maybe"})
+                result = self.serve(*args)
                 self.assertEqual(result.exit_code, 2, result.output)
-                self.assertIn("--direct", result.stderr)
-                self.assertNotIn("WARNING", result.stderr)
+                self.assertRegex(result.stderr, rf"No such option:? '?{args[0]}'?")
                 self.assertFalse((self.work / "review.lock").exists())
                 self.assertFalse(self.dir.exists())
+
+    def test_invalid_direct_from_environment_refused(self):
+        result = self.serve(env={"IMAGE_REVIEW_DIRECT": "maybe"})
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--direct", result.stderr)
+        self.assertNotIn("WARNING", result.stderr)
+        self.assertFalse((self.work / "review.lock").exists())
+        self.assertFalse(self.dir.exists())
 
     def test_plain_serve_is_socket_mode(self):
         seen = []
@@ -1623,40 +1681,6 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(seen, [UnixReviewServer])
         self.assertNotIn("WARNING", result.stderr)
-        self.assertNotIn("ir://", result.output)
-
-    def test_https_mode_warns_once(self):
-        """--https, --bind and --port each select HTTPS mode, which logs one deprecation warning."""
-        seen = []
-
-        def fake_serve(server, *a, **k):
-            (connection_file,) = self.dir.glob("connection-*.txt")  # stdout is not a terminal
-            seen.append((type(server), connection_file.read_text()))
-            raise KeyboardInterrupt
-
-        for args in (["--https"], ["--bind", "127.0.0.1"], ["--port", "0"], ["--https", "--bind", "127.0.0.1"]):
-            seen.clear()
-            with (
-                self.subTest(args=args),
-                mock.patch("socket.getfqdn", return_value="127.0.0.1"),
-                mock.patch.object(ReviewServer, "serve_forever", fake_serve),
-            ):
-                result = invoke_cli("serve", "--work-dir", str(self.work), *args)
-                self.assertEqual(result.exit_code, 0, result.output)
-                ((server_type, connection_string),) = seen
-                self.assertIs(server_type, ReviewServer)
-                self.assertTrue(connection_string.startswith("ir://127.0.0.1:"), connection_string)
-                self.assertIn("image-review review --remote", result.stdout)
-                self.assertEqual(result.stderr.count("is deprecated"), 1, result.stderr)
-                self.assertEqual(result.stderr.count("WARNING"), 1, result.stderr)
-                self.assertIn("WARNING image_review.cli: serve over HTTPS", result.stderr)
-                self.assertFalse(self.dir.exists() and list(self.dir.glob("serve-*.sock")))
-
-    def test_https_warning_survives_quiet(self):
-        with mock.patch.object(ReviewServer, "serve_forever", side_effect=KeyboardInterrupt):
-            result = invoke_cli("-q", "serve", "--work-dir", str(self.work), "--bind", "127.0.0.1")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(result.stderr.count("is deprecated"), 1, result.stderr)
 
     def test_no_unix_sockets_exits_1(self):
         with mock.patch.object(cli, "has_unix_sockets", return_value=False):
@@ -1664,53 +1688,67 @@ class TestServeSocketCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIsInstance(result.exception, SystemExit)
         self.assertNotIn("Traceback", result.output)
-        self.assertIn(
-            "this system has no Unix sockets; browser review needs one (serve --https is deprecated)", result.stderr
-        )
+        self.assertIn("this system has no Unix sockets; browser review needs one\n", result.stderr)
         self.assertNotIn("WARNING", result.stderr)
         self.assertFalse((self.work / "review.lock").exists())
         self.assertFalse(self.dir.exists())
 
-    def test_no_unix_sockets_still_serves_https(self):
+    def test_locked_work_dir_exits_1_naming_the_holder(self):
+        lock = self.work / "review.lock"
+        lock.write_text(
+            json.dumps({"host": "node042", "user": "alice", "pid": 1234, "started": "2026-09-30T12:00:00Z"})
+        )
+        with mock.patch.object(ReviewServer, "serve_forever") as serve_forever:
+            result = invoke_cli("serve", "--work-dir", str(self.work))
+        self.assertEqual(result.exit_code, 1, result.output)
+        serve_forever.assert_not_called()
+        for part in ("alice", "node042", "pid 1234", str(lock)):
+            self.assertIn(part, result.output)
+        self.assertTrue(lock.exists())
+        self.assertFalse(self.dir.exists() and list(self.dir.iterdir()))
+
+    def test_serve_holds_lock_while_serving(self):
         seen = []
 
         def fake_serve(server, *a, **k):
-            seen.append(type(server))
+            seen.append(json.loads((self.work / "review.lock").read_text())["pid"])
             raise KeyboardInterrupt
 
-        with (
-            mock.patch.object(cli, "has_unix_sockets", return_value=False),
-            mock.patch("socket.getfqdn", return_value="127.0.0.1"),
-            mock.patch.object(ReviewServer, "serve_forever", fake_serve),
-        ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https")
+        with mock.patch.object(ReviewServer, "serve_forever", fake_serve):
+            result = invoke_cli("serve", "--work-dir", str(self.work))
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(seen, [ReviewServer])
+        self.assertEqual(seen, [os.getpid()])
+        self.assertFalse((self.work / "review.lock").exists())
 
-    def test_https_flag_drops_socket_environment(self):
-        path = self.home / "env.sock"
-        seen = []
+    def test_store_closed_under_store_lock(self):
+        servers = []
+        lock_held_at_close = []
+        real_close = LocalStore.close
 
         def fake_serve(server, *a, **k):
-            seen.append(type(server))
+            servers.append(server)
             raise KeyboardInterrupt
 
-        env = {
-            "IMAGE_REVIEW_SOCKET_PATH": str(path),
-            "IMAGE_REVIEW_VIA": "-oProxyCommand=x",  # invalid, but dropped before parsing
-            "IMAGE_REVIEW_DIRECT": "1",
-            "IMAGE_REVIEW_TOKEN": "not a valid token",
-        }
+        def close(store):
+            lock_held_at_close.append(servers[0].store_lock.locked())
+            real_close(store)
+
         with (
-            mock.patch("socket.getfqdn", return_value="127.0.0.1"),
             mock.patch.object(ReviewServer, "serve_forever", fake_serve),
+            mock.patch.object(LocalStore, "close", close),
         ):
-            result = invoke_cli("serve", "--work-dir", str(self.work), "--https", env=env)
+            result = invoke_cli("serve", "--work-dir", str(self.work))
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(seen, [ReviewServer])
-        self.assertFalse(path.exists())
-        self.assertNotIn("Unix socket", result.output)
-        self.assertNotIn("IMAGE_REVIEW", result.output)
+        self.assertTrue(lock_held_at_close[0])  # a handler thread's mark cannot interleave with the release
+        self.assertFalse((self.work / "review.lock").exists())
+
+    def test_missing_manifest(self):
+        empty = self.home / "empty"
+        empty.mkdir()
+        result = invoke_cli("serve", "--work-dir", str(empty))
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("No preprocessed data found", result.output)
+        self.assertFalse(self.dir.exists() and list(self.dir.iterdir()))
 
     def test_bad_via_from_environment_names_the_variable(self):
         result = self.serve(env={"IMAGE_REVIEW_VIA": "-oProxyCommand=x"})

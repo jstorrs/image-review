@@ -13,19 +13,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-
-import pygame as pg
-
 from image_review import atomic as atomic_module
 from image_review import lock as lock_module
 from image_review import store as store_module
 from image_review.access import policy_of_dir
-from image_review.cli import unknown_batch_message
 from image_review.lock import LOCK_NAME, WorkDirLocked, acquire_lock, boot_id, release_lock, this_process
-from image_review.review_db import ReviewDB, ReviewLogChanged
+from image_review.review_db import ReviewDB
+from image_review.server import ReviewServer
 from image_review.store import LocalStore
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, recorded_dir_fsyncs, temp_dir
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, recorded_dir_fsyncs, socket_dir, temp_dir
 
 THIS_BOOT = boot_id()
 
@@ -417,169 +413,72 @@ class TestLockCli(LockTestCase):
     def invoke(self, *args, env=None):
         return invoke_cli(*args, "--work-dir", str(self.work_dir), env=env)
 
+    def review(self, serve_forever=None):
+        """Run `review --no-browser` with a private HOME and serve_forever replaced (by default, a Ctrl-C)."""
+        fake = mock.Mock(side_effect=KeyboardInterrupt) if serve_forever is None else serve_forever
+        with (
+            mock.patch.dict(os.environ, {"HOME": str(socket_dir(self))}),
+            mock.patch.object(ReviewServer, "serve_forever", fake),
+        ):
+            return self.invoke("review", "--no-browser"), fake
+
     def test_review_on_locked_dir_exits_1(self):
         self.write_lock("node042", 1234)
-        with mock.patch("image_review.controller.ReviewSession") as session:
-            result = self.invoke("review")
+        result, serve_forever = self.review()
         self.assertEqual(result.exit_code, 1, result.output)
-        session.assert_not_called()
+        serve_forever.assert_not_called()
         for part in ("alice", "node042", "pid 1234", str(self.lock_path)):
             self.assertIn(part, result.output)
 
     def test_review_on_undecodable_lock_names_it(self):
         self.lock_path.write_bytes(b"\xff\xfe\x00")
-        with mock.patch("image_review.controller.ReviewSession") as session:
-            result = self.invoke("review")
+        result, serve_forever = self.review()
         self.assertEqual(result.exit_code, 1, result.output)
-        session.assert_not_called()
+        serve_forever.assert_not_called()
         self.assertIn(str(self.lock_path), result.output)
         self.assertNotIn("Cannot read work directory", result.output)
 
-    def test_review_holds_lock_while_running(self):
+    def test_review_holds_lock_while_serving(self):
         seen = []
-        with mock.patch("image_review.controller.ReviewSession") as session:
-            session.return_value.run.side_effect = lambda: seen.append(self.holder()["pid"])
-            result = self.invoke("review")
+
+        def fake_serve(server, *a, **k):
+            seen.append(self.holder()["pid"])
+            raise KeyboardInterrupt
+
+        result, _ = self.review(fake_serve)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(seen, [os.getpid()])
         self.assertFalse(self.lock_path.exists())
 
     def test_review_hangup_releases_lock_and_restores_handler(self):
         before = signal.getsignal(signal.SIGHUP)
-        with mock.patch("image_review.controller.ReviewSession") as session:
-            session.return_value.run.side_effect = lambda: os.kill(os.getpid(), signal.SIGHUP)
-            result = self.invoke("review")
-        self.assertNotEqual(result.exit_code, 0)
+        result, _ = self.review(lambda server, *a, **k: os.kill(os.getpid(), signal.SIGHUP))
+        self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(self.lock_path.exists())
         self.assertEqual(signal.getsignal(signal.SIGHUP), before)
 
-    def assert_rejected(self, *args):
-        with mock.patch("image_review.controller.ReviewSession") as session, mock.patch("pygame.init") as init:
-            result = self.invoke("review", *args)
-        self.assertEqual(result.exit_code, 2, result.output)
-        session.assert_not_called()
-        init.assert_not_called()
-        self.assertFalse(self.lock_path.exists())
-        return result
-
-    def test_review_rejects_out_of_range_pass(self):
-        for value in ("0", "-1", "1000001"):
-            with self.subTest(value=value):
-                self.assert_rejected("--pass", value)
-
-    def test_review_rejects_unknown_batch_listing_known(self):
-        result = self.assert_rejected("--batch", "nope")
-        self.assertIn("batch_001", result.output)
-        self.assertIn("batch_002", result.output)
-
-    def test_review_rejects_empty_batch(self):
-        self.assert_rejected("--batch", "")
-
-    def test_review_rejects_bad_reviewer(self):
-        for value in ("a\tb", "a\nb", "", "  ", "r" * 65):
-            with self.subTest(reviewer=value):
-                result = self.assert_rejected("--reviewer", value)
-                self.assertIn("--reviewer", result.output)
-                self.assertIn("printable", result.output)
-
-    def test_review_passes_reviewer_to_session(self):
-        cases = [
-            ((), {}, "login"),
-            (("--reviewer", "Dr. Lee"), {}, "Dr. Lee"),
-            ((), {"IMAGE_REVIEW_REVIEWER": "env name"}, "env name"),
-        ]
-        for args, env, expected in cases:
-            with (
-                self.subTest(args=args, env=env),
-                mock.patch("image_review.controller.ReviewSession") as session,
-                mock.patch("image_review.cli.getpass.getuser", return_value="login"),
-            ):
-                result = self.invoke("review", *args, env=env)
-            self.assertEqual(result.exit_code, 0, result.output)
-            self.assertEqual(session.call_args.kwargs["reviewer"], expected)
-
     def test_review_migration_conflict_is_a_clean_error(self):
-        with (
-            mock.patch.object(ReviewDB, "migrate", side_effect=RuntimeError("review.tsv changed since it was loaded")),
-            mock.patch("image_review.controller.ReviewSession") as session,
-        ):
-            result = self.invoke("review")
+        with mock.patch.object(ReviewDB, "migrate", side_effect=RuntimeError("review.tsv changed since it was loaded")):
+            result, serve_forever = self.review()
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("changed since it was loaded", result.output)
         self.assertNotIn("Traceback", result.output)
-        session.assert_not_called()
+        serve_forever.assert_not_called()
         self.assertFalse(self.lock_path.exists())
-
-    def test_review_log_changed_during_session_is_a_clean_error(self):
-        changed = ReviewLogChanged(f"{self.work_dir / 'review.tsv'} changed since it was loaded; not appending")
-        with mock.patch("image_review.controller.ReviewSession") as session:
-            session.return_value.run.side_effect = changed
-            result = self.invoke("review")
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("Not recorded: ", result.output)
-        self.assertIn("changed since it was loaded", result.output)
-        self.assertNotIn("Traceback", result.output)
-        self.assertFalse(self.lock_path.exists())
-
-    def test_review_without_user_name_asks_for_reviewer(self):
-        with mock.patch("image_review.cli.getpass.getuser", side_effect=OSError("no user")):
-            result = self.assert_rejected()
-        self.assertIn("--reviewer", result.output)
-
-    def test_unknown_batch_message_lists_at_most_five(self):
-        known = {f"batch_{i:03d}" for i in range(1, 9)}
-        message = unknown_batch_message("x", known)
-        self.assertIn("batch_005", message)
-        self.assertNotIn("batch_006", message)
-        self.assertIsNone(unknown_batch_message("batch_003", known))
-
-    def test_review_valid_batch_reaches_session(self):
-        with (
-            mock.patch("image_review.controller.ReviewSession") as session,
-            mock.patch("pygame.init"),
-            mock.patch("pygame.quit"),
-        ):
-            result = self.invoke("review", "--batch", "batch_002")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(session.call_args.kwargs["batch"], "batch_002")
-
-    def test_review_rotate_reaches_session(self):
-        for args, expected in (((), "auto"), (("--rotate", "never"), "never"), (("--rotate", "always"), "always")):
-            with self.subTest(args=args):
-                with (
-                    mock.patch("image_review.controller.ReviewSession") as session,
-                    mock.patch("pygame.init"),
-                    mock.patch("pygame.quit"),
-                ):
-                    result = self.invoke("review", *args)
-                self.assertEqual(result.exit_code, 0, result.output)
-                self.assertEqual(session.call_args.kwargs["rotation"], expected)
-
-    def test_review_rejects_unknown_rotate(self):
-        self.assert_rejected("--rotate", "sideways")
-
-    def test_review_rejects_unknown_filter(self):
-        self.assert_rejected("--filter", "bogus")
-        with (
-            mock.patch("image_review.controller.ReviewSession") as session,
-            mock.patch("pygame.init"),
-            mock.patch("pygame.quit"),
-        ):
-            result = self.invoke("review", "--filter", "clean")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(session.call_args.kwargs["status_filter"], "clean")
 
     def test_unwritable_work_dir_says_write(self):
         with mock.patch("os.open", side_effect=PermissionError(13, "Permission denied", str(self.lock_path) + ".x")):
-            result = self.invoke("review")
+            result, serve_forever = self.review()
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn(f"Cannot write to work directory {self.work_dir}", result.output)
+        serve_forever.assert_not_called()
 
     def test_missing_manifest_message_kept(self):
         (self.work_dir / "manifest.tsv").unlink()
-        result = self.invoke("review")
+        result, serve_forever = self.review()
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("No preprocessed data found", result.output)
+        serve_forever.assert_not_called()
         self.assertFalse(self.lock_path.exists())
 
     def test_status_counts_flagged_after_pass_one(self):
@@ -599,19 +498,6 @@ class TestLockCli(LockTestCase):
             self.assertIn(line + "\n", result.output)
         self.assertIn(f"{'Batch':<15} {'Total':>6} {'Clean':>6} {'Dirty':>6} {'Unrev':>6} {'Flag':>6}", result.output)
         self.assertIn(f"{'batch_001':<15} {2:>6} {1:>6} {0:>6} {0:>6} {1:>6}", result.output)
-
-    def test_grid_review_names_held_back_images(self):
-        with LocalStore(self.work_dir) as store:
-            mark(store, ["batch_001/a.jpg"], "DIRTY")
-            mark(store, ["batch_001/b.jpg"], "CLEAN")
-            mark(store, ["batch_002/c.jpg", "batch_002/d.jpg"], "CLEAN")
-        with mock.patch.object(pg.display, "toggle_fullscreen", lambda: None):
-            result = self.invoke("review", "--mode", "grid")
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn(
-            "No grid items for pass 2; 1 FLAGGED/DIRTY image needs single-mode review (--mode single)", result.output
-        )
-        self.assertNotIn("No images to review", result.output)
 
     def test_status_works_on_locked_dir(self):
         self.write_lock("node042", 1234)

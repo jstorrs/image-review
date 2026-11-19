@@ -56,7 +56,7 @@ tests["after a server swap a single-mode mark is refused (412) until Reconnect l
   await page.key("c");
   assert.deepStrictEqual(page.posts.at(-1), { path: "/mark", instance: "A",
     body: { keys: [shown], status: "CLEAN", pass: 1, reviewer: "Jane", mode: "single" } });
-  await page.respond("/mark", page.json(412, { error: "the page was loaded from another serve; reconnect" }));
+  await page.respond("/mark", page.json(412, { error: "the page was loaded from another server; reconnect" }));
   await assertRefused(page, before);
   await reconnectToB(page, { a: "UNREVIEWED", b: "DIRTY", c: "UNREVIEWED" });
   const next = page.state.items[page.state.index].key;

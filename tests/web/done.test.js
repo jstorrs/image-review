@@ -2,7 +2,7 @@
 // Done with this server (q) and the next server's batch, against the stub DOM. Run with `node --test tests/web/*.test.js`.
 const assert = require("assert");
 const test = require("node:test");
-const { makePage, manifest, statuses, place, PLAN, TWO_GRIDS, showPlan, NEXT_SERVE, END_OF_PASS, plain, UNREVIEWED, reload } = require("./page");
+const { makePage, manifest, statuses, place, PLAN, TWO_GRIDS, showPlan, NEXT_SERVER, END_OF_PASS, plain, UNREVIEWED, reload } = require("./page");
 
 const tests = {};
 
@@ -31,8 +31,8 @@ async function assertWaiting(page) {
   }
   assert.strictEqual(els.reconnect.hidden, false);
   assert.strictEqual(els.message.hidden, false);
-  assert.strictEqual(els.message.textContent, "Done. Your marks are saved. " + NEXT_SERVE);
-  assert.strictEqual(els.status.textContent, "Done; waiting for the next serve");
+  assert.strictEqual(els.message.textContent, "Done. Your marks are saved. " + NEXT_SERVER);
+  assert.strictEqual(els.status.textContent, "Done; waiting for the next server");
   const sent = page.pending.length;
   const posted = page.posts.length;
   await page.dwell();
@@ -41,7 +41,7 @@ async function assertWaiting(page) {
   for (const key of ["c", "d", "z", "m", "s", "b", "q", "ArrowRight"]) await page.key(key);
   assert.strictEqual(page.pending.length, sent, "nothing new is sent");
   assert.strictEqual(page.posts.length, posted, "nothing is posted");
-  assert.strictEqual(els.status.textContent, "Done; waiting for the next serve");
+  assert.strictEqual(els.status.textContent, "Done; waiting for the next server");
 }
 
 // The next server: another work directory's batch, on pass 2.
@@ -61,7 +61,7 @@ tests["q in single mode waits for the next server: stale replies change nothing,
   assert.strictEqual(page.state.statuses.size, 0);
   assert.strictEqual(page.state.marked.length, 0);
   assert.deepStrictEqual(page.pending.map((r) => r.path), []);
-  assert.strictEqual(page.els.status.textContent, "Done; waiting for the next serve");
+  assert.strictEqual(page.els.status.textContent, "Done; waiting for the next server");
   assert.strictEqual(page.els.reconnect.hidden, false);
 };
 

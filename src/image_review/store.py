@@ -1,5 +1,4 @@
 import hashlib
-import logging
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -11,7 +10,6 @@ from .export import NOTE_KINDS, ExportRow, NoteKind, export_rows, manifest_hashe
 from .lock import LockHolder, acquire_lock, release_lock
 from .review_db import Change, ReviewDB, decode_utf8, parse_sha256, tsv_rows
 from .status import (
-    TODO_STATUSES,
     GridCleanRefused,
     ImageId,
     Key,
@@ -21,8 +19,6 @@ from .status import (
     grid_clean_refused,
     parse_choice,
 )
-
-log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -55,26 +51,18 @@ class SkippedCounts:
         return self.failed > 0 or self.ignored > 0
 
 
-class StoreUnavailable(Exception):
-    """The store cannot be reached (as opposed to a key or image being bad)."""
-
-
 class ReviewStore(Protocol):
     def __enter__(self) -> Self: ...
 
     def __exit__(self, *exc_info: object) -> None: ...
 
     def close(self) -> None:
-        """Release what the store holds (connections, the work dir lock). Idempotent."""
+        """Release what the store holds (the work dir lock). Idempotent."""
         ...
 
     def manifest(self) -> list[ManifestRow]: ...
 
     def image_bytes(self, key: Key) -> bytes: ...
-
-    def image_bytes_many(self, keys: list[Key]) -> dict[Key, bytes]:
-        """Bytes for the keys that loaded; missing or unloadable keys are omitted with a logged warning."""
-        ...
 
     def statuses(self, pass_number: int) -> dict[Key, Status]:
         """Key -> status for every manifest row."""
@@ -95,7 +83,7 @@ class ReviewStore(Protocol):
         """Undo the latest mark not yet undone, restoring each image's decision from before it; `reviewer` is recorded.
 
         Returns the new status of every key affected, as mark does; {} when there is nothing to undo. The marks
-        that can be undone are the store's (the server's, for a remote store), held in memory since it was opened.
+        that can be undone are the store's, held in memory since it was opened.
         """
         ...
 
@@ -300,15 +288,6 @@ class LocalStore:
         entry = self._by_key[key]
         return check_jpeg_hash(key, safe_path(self.work_dir, key).read_bytes(), entry.jpeg_sha256)
 
-    def image_bytes_many(self, keys: list[Key]) -> dict[Key, bytes]:
-        found: dict[Key, bytes] = {}
-        for key in keys:
-            try:
-                found[key] = self.image_bytes(key)
-            except (KeyError, ValueError, OSError) as exc:
-                log.warning("cannot load %s: %s", key, exc)
-        return found
-
     def statuses(self, pass_number: int) -> dict[Key, Status]:
         return {key: self._db.get_status(e.image_id, pass_number) for key, e in self._by_key.items()}
 
@@ -329,7 +308,7 @@ class LocalStore:
         self, keys: list[Key], status: Verdict, pass_number: int, *, reviewer: str, mode: MarkMode
     ) -> dict[Key, Status]:
         """Also raises KeyError for an unknown key and ValueError for repeated keys or a `single` mark of other than
-        one key, recording nothing; a RemoteStore surfaces the server's 400 for those as RemoteError."""
+        one key, recording nothing."""
         self._require_writable()
         targets = [self._by_key[k] for k in keys]  # an unknown key raises before anything is written
         if len(set(keys)) != len(keys):
@@ -368,30 +347,6 @@ class LocalStore:
         skipped = load_skipped(self.work_dir, required=self._hashed)
         notes = load_notes(self.work_dir, required=self._hashed)
         return export_rows(self._entries, self._db.decisions(), skipped, unreviewed_content(notes))
-
-
-# The review --filter vocabulary, parsed by the CLI's click.Choice.
-StatusFilter = Literal["unreviewed", "clean", "all"]
-
-
-def filter_rows(
-    rows: list[ManifestRow],
-    statuses: dict[Key, Status],
-    status_filter: StatusFilter = "unreviewed",
-    batch: str | None = None,
-) -> list[ManifestRow]:
-    """Filter rows by status and optional batch.
-
-    "unreviewed" selects the todo statuses (UNREVIEWED and FLAGGED), "clean" selects CLEAN, "all" everything.
-    """
-    selected = [r for r in rows if not batch or r.batch == batch]
-    match status_filter:
-        case "all":
-            return selected
-        case "clean":
-            return [r for r in selected if statuses[r.key] == "CLEAN"]
-        case "unreviewed":
-            return [r for r in selected if statuses[r.key] in TODO_STATUSES]
 
 
 def batch_summary(rows: list[ManifestRow], statuses: dict[Key, Status]) -> dict[str, Counter[Status]]:

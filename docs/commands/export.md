@@ -27,8 +27,7 @@ release**, e.g. by taking "everything not DIRTY".
 | `--allow-live` | off | Export even while a writer (`review` or `serve`) has the work directory open |
 
 **Where to run it.** `image_id`s are source paths and may hold PHI, so
-export runs where the work directory is (e.g. on the cluster). It refuses
-`--remote` with a usage error (exit 2) and ignores `$IMAGE_REVIEW_REMOTE`.
+export runs where the work directory is (e.g. on the cluster).
 
 ## What is allowlisted
 
@@ -172,13 +171,6 @@ not start a field is written as is.
 ## Refusals and output files
 
 - It writes nothing in the work directory.
-- It refuses `--remote` with a usage error (exit 2); see *Where to run it*
-  above:
-
-  ```text
-  Error: export does not work with --remote: image_ids stay on the server. Run export on the machine (cluster) holding the work directory, with --work-dir.
-  ```
-
 - It refuses (exit 1) while a writer (`review` or `serve`) holds the work
   directory's [lock](../reference/work-directory.md#reviewlock), since
   verdicts may still change. It checks before reading and, if no writer was

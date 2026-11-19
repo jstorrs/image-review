@@ -29,11 +29,10 @@ from image_review.export import (
     unreviewed_content,
 )
 from image_review.lock import boot_id, this_process
-from image_review.remote import RemoteStore
 from image_review.review_db import HEADER, LEGACY_HEADERS, Decision
 from image_review.status import ImageId, Key
 from image_review.store import LocalStore, ManifestEntry, NoteRow, SkippedRow
-from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, start_server, temp_dir
+from tests.fixtures import ROWS, invoke_cli, make_work_dir, mark, temp_dir
 
 KEYS = [key for _, key, _ in ROWS]
 MANIFEST_HEADER = ["batch", "preprocessed_path", "image_id", "source_sha256", "jpeg_sha256"]
@@ -1021,16 +1020,6 @@ class TestExportCommand(ExportTestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["work"])
 
-    def test_remote_is_refused(self):
-        result = invoke("export", "--remote", "ir://127.0.0.1:1/?token=x&fp=y")
-        self.assertEqual(result.exit_code, 2)
-        self.assertIn("image_ids stay on the server", result.output)
-
-    def test_remote_environment_is_ignored(self):
-        result = self.export(env={"IMAGE_REVIEW_REMOTE": "ir://127.0.0.1:1/?x"})
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(result.stdout_bytes, EXPECTED_ALLOWLIST)
-
 
 class TestExportLiveOrTorn(ExportTestCase):
     def test_live_writer_is_refused(self):
@@ -1222,18 +1211,6 @@ class TestStatusCheck(unittest.TestCase):
             mark(store, KEYS, "CLEAN")
         (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/notes.txt\tignored\tnot an image\n")
         self.assertEqual(self.local(), 0)
-
-    def test_remote(self):
-        _, target, stop = start_server(self.work)
-        self.addCleanup(stop)
-        uri = target.to_uri()
-        self.assertEqual(self.check("--remote", uri), 1)
-        with RemoteStore(target) as store:
-            mark(store, KEYS[:1], "DIRTY")
-            store.mark(KEYS[1:], "CLEAN", 1, reviewer="tester", mode="grid")
-        self.assertEqual(self.check("--remote", uri), 0)  # pass 2, one FLAGGED: every image has a verdict
-        (self.work / "skipped.tsv").write_text("image_id\tkind\treason\n/src/x.dcm\tfailed\tbad\n")
-        self.assertEqual(self.check("--remote", uri), 1)
 
 
 if __name__ == "__main__":

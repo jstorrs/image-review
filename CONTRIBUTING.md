@@ -8,8 +8,8 @@ Python 3.12 or later. From a clone, in a virtual environment:
 pip install -e '.[dev]'
 ```
 
-`dev` pulls in every extra (the tests exercise every command) plus the lint,
-type-check and coverage tools.
+`dev` adds the lint, type-check and coverage tools to the runtime
+dependencies, which every install includes.
 
 ## Tests, lint, format and type check
 
@@ -22,10 +22,6 @@ mypy --python-executable "$(which python)"
 
 `mypy` reads its settings from `pyproject.toml`; `--python-executable` points
 it at the environment that has the project's dependencies installed.
-
-CI sets `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy` so pygame needs no
-display or sound device. Set them too when running the tests on a headless
-machine.
 
 The browser-page tests run `web/helpers.js` and `web/app.js` under `node` and skip when it is not on
 `PATH`. Set `IMAGE_REVIEW_REQUIRE_NODE=1` to make them fail instead; CI sets it
@@ -44,7 +40,7 @@ node --test --test-reporter=spec tests/web/*.test.js
 coverage run -m unittest discover && coverage report
 ```
 
-Run it with the same `SDL_*` variables and with `node` on `PATH`, as above.
+Run it with `node` on `PATH`, as above.
 The report includes branch coverage, and `fail_under` in `pyproject.toml` sets
 the floor; CI enforces it in the Ubuntu / Python 3.13 job only.
 
@@ -123,7 +119,7 @@ When writing a page:
   includes it), so it may contain no relative links.
 - Use no MyST directives or roles other than the toctrees in `docs/index.md`
   and the changelog include: `docs/` is read on GitHub too.
-- Link to a heading with GitHub's slug (`remote-review.md#4-batch-mode-sbatch`);
+- Link to a heading with GitHub's slug (`browser-review.md#2-review-in-the-browser`);
   MyST resolves it, and the strict build fails on a slug that matches no
   heading.
 
@@ -138,13 +134,13 @@ rest; together they are enough to rebuild the tool.
 |---|---|
 | A command's options, defaults, environment variables, exit codes, messages and output | `docs/commands/<command>.md` |
 | Global options, log levels and the log format | `docs/commands/index.md` |
-| Viewer keys, gamepad, screens, passes and todo images | `docs/commands/review.md` |
-| The browser page's keys, screens and messages | `docs/commands/browser.md` |
+| `review`'s options, output, redirect file, browser opening and stopping | `docs/commands/review.md` |
+| The browser page's keys, screens and messages; passes, todo images, undo, refused CLEAN on a grid, unloadable images and recorded verdicts | `docs/commands/browser.md` |
 | Work-directory files: columns, encoding, parsing, `review.lock`, leftover files | `docs/reference/work-directory.md` |
 | Skip kinds and example reasons | `docs/commands/preprocess.md` |
 | Note kinds and example details | `docs/commands/preprocess.md` |
 | Allowlist and report format, export refusals | `docs/commands/export.md` |
-| Extras, minimum versions and codec limits | `docs/install.md` |
+| What gets installed, minimum versions and codec limits | `docs/install.md` |
 | The `dev` and `docs` extras, tooling | this file |
 | Security claims and limits, what is never logged | `docs/reference/security-model.md` |
 | Workflows | `docs/tutorials/` |
@@ -172,11 +168,6 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
   function contracts), and other pages only where their summary or link
   becomes wrong. Before committing, grep `docs/` and the README for the old
   wording.
-- **Wire changes bump `API_VERSION`.** Any change to the server's request or
-  response shapes, or to the `Status` vocabulary, bumps `API_VERSION` in
-  `src/image_review/connection.py`, so a client and server of different
-  versions fail with a clear message. See the API version rule in
-  [the specification](docs/reference/specification.md#endpoints).
 - **Changelog.** Add user-visible changes to [CHANGELOG.md](CHANGELOG.md),
   and put anything that needs action from people sharing work directories
   under its *Upgrading* heading.

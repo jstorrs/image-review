@@ -1,7 +1,7 @@
 """Turn termination signals into KeyboardInterrupt so `finally` cleanup runs.
 
 Slurm stops jobs with SIGTERM (scancel, time limit) and a dropped terminal or ssh session sends SIGHUP; without
-this, the work dir lock or an ssh tunnel would be left behind. Must stay importable without pygame/numpy/skimage.
+this, the work dir lock would be left behind. Must stay importable without numpy/skimage.
 """
 
 import signal

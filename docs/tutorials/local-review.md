@@ -1,11 +1,12 @@
 # Local review
 
-A walk-through of a whole review on one machine: **preprocess**, **review**,
-**status** and **export**. Each command's options, keys and file formats are
-on its own page; this tutorial links to them.
+A walk-through of a whole review on one machine: **preprocess**, **review**
+in your browser, **status** and **export**. Each command's options, keys and
+file formats are on its own page; this tutorial links to them.
 
-On one machine you also need the `viewer` extra, for `review`:
-`pip install 'image-review[viewer]'` (see [Installation](../install.md)).
+On one machine you need only a plain install and a browser (see
+[Installation](../install.md)). To review images that stay on a cluster from
+your laptop, see [Browser review over SSH](browser-review.md) instead.
 
 ## Step 1: Preprocess
 
@@ -34,125 +35,60 @@ failed, `preprocess` exits with status 1 so scripts notice. Inspect
 
 ## Step 2: Review
 
-Open an interactive fullscreen viewer to classify images.
+Start the review server and open the page:
 
 ```bash
-image-review review [options]
+image-review review --work-dir ./review_work
 ```
 
-The options are in [`image-review review`](../commands/review.md).
+`review` serves the browser page on `127.0.0.1` and opens it in your browser.
+It prints the URL, which holds an access token: treat it like a password.
+Leave `review` running while you review, and stop it with Ctrl-C. If the
+browser shows an access error (as Ubuntu's snap Firefox does), open the
+printed URL instead.
 
-### Review modes
+- On a machine without a display, `review` opens nothing: open the printed
+  URL in a browser on that machine yourself.
+- Over ssh, stop `review` and use [`serve`](../commands/serve.md) from your
+  laptop instead. The URL is on the remote machine's loopback, and the server
+  refuses requests through an ssh forward from another port, whose `Host`
+  names your laptop's port.
 
-**Single mode** shows one preprocessed image at a time, filling the screen.
-Best for careful inspection of flagged images.
+The options, the output and why the browser is opened through a file are in
+[`image-review review`](../commands/review.md).
 
-```bash
-image-review review --mode single
-```
+Use `review` on a machine only you log in to. On a shared host, review from a
+browser on your laptop with `serve` instead: a browser on the shared host is
+exposed to its other users either way. See
+[Local review on loopback](../reference/security-model.md#local-review-on-loopback).
 
-**Grid mode** packs images into grid canvases at review time, sized to your
-screen resolution. Each grid contains many images. Best for rapid first-pass
-scanning -- you can review hundreds of images per minute. By default, images
-may be rotated 90° when that needs fewer grids (`--rotate auto`, the default);
-use `--rotate always` or `--rotate never` to force it either way, or press `M`
-during review to switch to grid mode without rotation.
+### The page
 
-```bash
-image-review review --mode grid
-```
-
-### Controls
-
-Press `c` to mark the image or grid on screen CLEAN and `d` to mark it DIRTY,
-Left/Right to move, `z` to undo your last mark and `q` (or Escape) to quit;
-progress is saved automatically. The status bar colour shows each image's
-status; FLAGGED means marked DIRTY in an earlier pass and awaiting a verdict
-in this one. Every key, the status colours, the gamepad buttons, undo and the
-end-of-batch screen are described in
-[Keys and gamepad](../commands/review.md#keys-and-gamepad).
+The page first asks "Who is reviewing?": type your name and press Enter. It
+is recorded with every verdict. The page then shows the current pass's todo
+images one at a time. `c` marks an image CLEAN, `d` DIRTY, Left/Right move,
+`z` undoes your latest mark and `?` lists every key. `m` switches to grid
+mode, where one verdict covers a whole grid, `s` back to single mode, and `b`
+moves to the next batch in grid mode. Your marks are saved as you make them.
+[The browser page](../commands/browser.md) describes the keys, the bar, grid
+mode and every screen and message.
 
 ### Multi-pass workflow
 
-The intended workflow uses repeated passes to build confidence:
+The intended workflow, grid triage in pass 1 and then single-image review of
+the images marked DIRTY, pass after pass, is in
+[Multi-pass workflow](browser-review.md#multi-pass-workflow). The page
+reviews the current pass (see [Passes](../commands/browser.md#passes)). When
+it says the pass has nothing left to review, press Reconnect (`r`): the
+page loads the next pass from the same `review`, with no restart.
 
-1. **Pass 1** (grid triage): mark grids CLEAN or DIRTY. Err toward DIRTY.
+To re-check images already marked CLEAN, press `f` on the page; see
+[Re-checking CLEAN images](../commands/browser.md#re-checking-clean-images).
 
-   ```bash
-   image-review review --mode grid
-   ```
+### Resuming
 
-   Mark grids as CLEAN if every image in the grid looks clean. Mark DIRTY if
-   any image is suspicious. When you mark a grid, all constituent images get
-   that status. This is the fast pass.
-
-2. **Pass 2** (single review): only images marked DIRTY in pass 1 are shown,
-   as FLAGGED (orange status bar). Inspect them individually.
-
-   ```bash
-   image-review review --mode single --pass 2
-   ```
-
-   Mark obviously clean ones as CLEAN, mark the rest DIRTY again. Grid mode
-   skips FLAGGED and DIRTY images, so a grid keypress cannot clear them.
-   Review flagged images in single mode.
-
-3. **Pass 3+**: repeat on the shrinking DIRTY pool until confident.
-
-   ```bash
-   image-review review --mode single
-   ```
-
-   Each subsequent pass shows only the images still DIRTY from the previous
-   pass (FLAGGED in the new pass).
-
-The batch and the [pass number](../commands/review.md#passes) are
-auto-detected when not specified. Press `b` at
-the end of a batch to move on to the next one, and into the next pass once
-this one is done (not with `--batch`, which keeps you in that batch); see
-[End of a batch](../commands/review.md#end-of-a-batch).
-
-### Resuming a session
-
-Sessions are resumable: if you quit mid-session (`q`/`Esc`), your progress is
-saved immediately. Re-running the same command picks up where you left off --
-already-reviewed images are skipped.
-
-```bash
-# Quit partway through pass 1
-image-review review --mode grid
-# ... review some, press q ...
-
-# Resume -- only unreviewed images are shown
-image-review review --mode grid
-```
-
-### Reviewing a specific batch
-
-To focus on a single batch:
-
-```bash
-image-review review --mode single --batch batch_003
-```
-
-`--batch` restricts the whole session to that batch: pressing `b` at the end
-of the list reloads it while it has todo images, and never moves on to another.
-
-### Filtering by status
-
-By default, only images still to do are shown (UNREVIEWED, plus FLAGGED in
-pass 2 and later). Use `--filter` to change this:
-
-```bash
-# Re-examine images previously marked CLEAN (e.g., to re-mark as DIRTY)
-image-review review --filter clean
-
-# Show all images regardless of status
-image-review review --filter all
-```
-
-What counts as todo under each filter is described in
-[Todo images](../commands/review.md#todo-images).
+Your marks are saved as you make them, so you can stop at any point. Running
+`review` again shows only what is still to review.
 
 ## Step 3: Status
 
@@ -202,17 +138,10 @@ image-review preprocess \
 # Check initial state -- everything should be UNREVIEWED
 image-review status --work-dir ./phi_review
 
-# Pass 1: rapid grid triage
-image-review review --mode grid --work-dir ./phi_review
-
-# Check progress
-image-review status --work-dir ./phi_review
-
-# Pass 2: single-image review of the images flagged DIRTY in pass 1
-image-review review --mode single --work-dir ./phi_review
-
-# Pass 3: final review of stubborn cases
-image-review review --mode single --work-dir ./phi_review
+# Pass 1: grid triage in the browser (press m); press r once the page says the pass is done,
+# for pass 2, 3, ...: single-image review of the images flagged DIRTY in the pass before.
+# Ctrl-C once you are finished.
+image-review review --work-dir ./phi_review
 
 # Final status
 image-review status --work-dir ./phi_review
@@ -223,16 +152,10 @@ image-review export --work-dir ./phi_review --output ./phi_review_allowlist.tsv 
 
 ## Tips
 
-- **Grid mode first**: Grids are packed at review time to fit your screen,
-  so each grid contains as many images as possible. Marking a grid CLEAN
-  clears all of them at once. Reserve single mode for the DIRTY remainder
-  (grid mode skips DIRTY and FLAGGED images).
-- **Autoplay**: `Space` auto-advances through images, which is useful for a
-  quick visual scan.
-- **Gamepad**: A game controller makes long review sessions more
-  comfortable.
-  Both are described in
-  [Keys and gamepad](../commands/review.md#keys-and-gamepad).
+- **Grid mode first**: Grids are packed to fit the page's image area, so each
+  grid contains as many images as possible. Marking a grid CLEAN clears all
+  of them at once. Reserve single mode for the DIRTY remainder (grid mode
+  skips DIRTY and FLAGGED images).
 - **Batch size**: Larger batches mean fewer but denser grids. Reduce
   `--batch-size` for very large images.
 - **Colormap**: Try `--colormap gray` for a more traditional radiological

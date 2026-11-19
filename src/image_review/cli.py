@@ -1,8 +1,8 @@
 import contextlib
-import dataclasses
 import datetime
 import functools
 import getpass
+import html
 import logging
 import math
 import os
@@ -10,8 +10,10 @@ import shlex
 import signal
 import socket
 import sys
+import threading
+import webbrowser
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, get_args
 
@@ -19,18 +21,15 @@ import click
 
 from .access import Access, access_of, modes, world_access_warning
 from .atomic import write_new_file
-from .connection import MAX_PASS, RemoteTarget, Token, parse_reviewer, parse_token
+from .connection import Token, parse_token
 from .export import ExportRow, ExportStatus, format_allowlist, format_report, split_allowlist
 from .lock import LOCK_NAME, WorkDirLocked, live_writer
-from .review_db import ReviewLogChanged
-from .signals import HANGUP_SIGNALS, TERMINATION_SIGNALS, interrupt_on, interrupt_once
-from .status import MarkMode, Rotation, Status
-from .store import LocalStore, ReviewStore, SkippedCounts, StatusFilter, batch_summary, skipped_counts, summary
+from .signals import TERMINATION_SIGNALS, interrupt_on, interrupt_once
+from .status import Status
+from .store import LocalStore, SkippedCounts, batch_summary, skipped_counts, summary
 
 if TYPE_CHECKING:
-    from .remote import RemoteError, RemoteStore
     from .server import ReviewServer
-    from .tunnel import TunnelError
 
 DEFAULT_WORK_DIR = "./review_work"
 
@@ -38,48 +37,6 @@ PACKAGE_LOGGER = "image_review"  # every module logs under it; the CLI configure
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 log = logging.getLogger(f"{PACKAGE_LOGGER}.cli")  # not __name__: that is "__main__" under `python -m`
-
-BROWSER_REVIEW_DOCS = "https://jstorrs.github.io/image-review/tutorials/browser-review.html"
-# Deprecation warnings, each logged once per run; {command} is the command's name as invoked.
-SERVE_HTTPS_DEPRECATED = (
-    "{command} over HTTPS (--https, --bind or --port) is deprecated and will be removed in a future release, "
-    "along with review --remote and status --remote: that client must run the same image-review version as the "
-    "server. Plain `image-review {command}` serves browser review instead; its page comes from the server itself, "
-    "so it always matches. See {url}"
-)
-# {source} is " (from $IMAGE_REVIEW_REMOTE)" when the connection string came from the environment, else empty.
-REMOTE_DEPRECATED = (
-    "{command} --remote{source} is deprecated and will be removed in a future release: it must run the same "
-    "image-review version as the server. Use browser review instead: plain `image-review serve` where the work "
-    "directory is, then a browser through ssh -L; the page comes from the server itself, so it always matches. "
-    "See {url}"
-)
-STATUS_REMOTE_DEPRECATED = (
-    "{command} --remote{source} is deprecated and will be removed in a future release: it must run the same "
-    "image-review version as the server. Run `image-review status --work-dir DIR` on the machine holding the work "
-    "directory instead, e.g. over ssh."
-)
-
-# The top-level modules of the optional extra that a command imports; every other dependency in pyproject.toml is
-# always installed, so a missing one is a broken install and is not translated.
-EXTRA_MODULES: dict[str, frozenset[str]] = {"viewer": frozenset({"pygame"})}
-
-
-@contextlib.contextmanager
-def requires_extra(extra: str) -> Iterator[None]:
-    """Turn a missing module of `extra`, imported in the block, into a ClickException naming the install command.
-
-    Only a ModuleNotFoundError for one of the extra's own top-level modules is translated; any other import failure
-    (one of our modules, a broken install, a missing transitive dependency) propagates unchanged.
-    """
-    try:
-        yield
-    except ModuleNotFoundError as exc:
-        if (exc.name or "").partition(".")[0] not in EXTRA_MODULES[extra]:
-            raise
-        raise click.ClickException(
-            f"this command needs the {extra} extra: pip install 'image-review[{extra}]'"
-        ) from exc
 
 
 class LogFormatter(logging.Formatter):
@@ -113,29 +70,6 @@ def work_dir_option(f):
         type=click.Path(exists=True),
         default=None,
         help=f"Work directory containing preprocessed data [default: {DEFAULT_WORK_DIR}].",
-    )(f)
-
-
-def remote_option(help: str):
-    return click.option("--remote", envvar="IMAGE_REVIEW_REMOTE", default=None, help=help)
-
-
-REVIEW_REMOTE_HELP = (
-    "Deprecated: review a server started with `image-review serve --https` "
-    "(ir:// connection string; also read from $IMAGE_REVIEW_REMOTE)."
-)
-STATUS_REMOTE_HELP = (
-    "Deprecated: report on a server started with `image-review serve --https` "
-    "(ir:// connection string; also read from $IMAGE_REVIEW_REMOTE)."
-)
-
-
-def via_option(f):
-    return click.option(
-        "--via",
-        envvar="IMAGE_REVIEW_VIA",
-        default=None,
-        help="Deprecated. With --remote: reach the server through an SSH tunnel via this login node, e.g. user@login.cluster (also read from $IMAGE_REVIEW_VIA).",
     )(f)
 
 
@@ -180,112 +114,6 @@ def _existing_work_dir(work_dir: str | None) -> Path:
     return path
 
 
-def warn_remote_deprecated() -> None:
-    """Log the one deprecation WARNING for the remote client, naming `$IMAGE_REVIEW_REMOTE` when it selected it."""
-    ctx = click.get_current_context()
-    from_env = ctx.get_parameter_source("remote") is click.core.ParameterSource.ENVIRONMENT
-    template = STATUS_REMOTE_DEPRECATED if ctx.info_name == "status" else REMOTE_DEPRECATED
-    source = " (from $IMAGE_REVIEW_REMOTE)" if from_env else ""
-    log.warning(template.format(command=ctx.info_name, source=source, url=BROWSER_REVIEW_DOCS))
-
-
-@contextlib.contextmanager
-def open_store(
-    work_dir: str | None, remote: str | None, via: str | None = None, read_only: bool = False
-) -> Iterator[ReviewStore]:
-    """Open the local or remote store, translating startup failures into ClickExceptions.
-
-    `read_only` applies to a local store: it takes no lock and refuses marks.
-    """
-    if remote is None:
-        if (
-            via is not None
-            and click.get_current_context().get_parameter_source("via") is not click.core.ParameterSource.ENVIRONMENT
-        ):
-            raise click.UsageError("--via requires --remote.")
-        with open_local_store(_existing_work_dir(work_dir), read_only=read_only) as local:
-            yield local
-        return
-
-    if work_dir is not None:
-        if click.get_current_context().get_parameter_source("remote") is click.core.ParameterSource.ENVIRONMENT:
-            raise click.UsageError("IMAGE_REVIEW_REMOTE is set; unset it to use --work-dir.")
-        raise click.UsageError("--remote and --work-dir are mutually exclusive.")
-    from .remote import RemoteError
-    from .tunnel import TunnelError, parse_via
-
-    warn_remote_deprecated()
-    try:
-        target = RemoteTarget.parse(remote)
-    except ValueError as e:
-        raise click.ClickException(f"Invalid --remote connection string: {e}")
-    if via is not None:
-        try:
-            via = parse_via(via)
-        except ValueError as e:
-            from_env = click.get_current_context().get_parameter_source("via") is click.core.ParameterSource.ENVIRONMENT
-            source = "$IMAGE_REVIEW_VIA" if from_env else "--via"
-            raise click.ClickException(f"Invalid {source}: {e}")
-    where = f"{target.host}:{target.port}" + (f" (via {via})" if via else "")
-    log.debug("connecting to server at %s", where)
-    try:
-        with _remote_store(target, via) as store:
-            yield store
-    except (TunnelError, RemoteError) as e:
-        raise _remote_failure(e, where, via)
-
-
-@contextlib.contextmanager
-def _remote_store(target: RemoteTarget, via: str | None) -> Iterator["RemoteStore"]:
-    """Open a RemoteStore (through an ssh tunnel when `via` is given) and check its API version.
-
-    With a tunnel, the store gets a copy of `target` aimed at the forwarded local port; its pin and token are kept.
-    """
-    from .remote import RemoteStore
-    from .tunnel import ssh_tunnel
-
-    with contextlib.ExitStack() as stack:
-        if via is not None:
-            port = stack.enter_context(ssh_tunnel(via, target.host, target.port))
-            target = dataclasses.replace(target, host="127.0.0.1", port=port)
-        store = stack.enter_context(RemoteStore(target))  # closed before the tunnel
-        store.check_api()
-        yield store
-
-
-def _remote_failure(e: "TunnelError | RemoteError", where: str, via: str | None) -> click.ClickException:
-    """The user-facing error for a tunnel or remote-store failure at `where`."""
-    from .remote import ApiMismatch, FingerprintMismatch
-    from .tunnel import TunnelError
-
-    if isinstance(e, (TunnelError, ApiMismatch)):
-        return click.ClickException(str(e))
-    if isinstance(e, FingerprintMismatch):
-        return click.ClickException(
-            f"The certificate presented by {where} does NOT match the connection string. "
-            "The connection was aborted before any credentials were sent. "
-            "Do not continue unless you know why the server's identity changed."
-            + (
-                " With --via, this can also happen if another local process grabbed the forwarded port; retry."
-                if via
-                else ""
-            )
-        )
-    if e.status == 401:
-        return click.ClickException(
-            f"Server at {where} rejected the access token (connection string from a different or restarted server?)"
-        )
-    if e.status is not None:
-        return click.ClickException(f"Server at {where} returned HTTP {e.status}")
-    transport_failure = isinstance(e.__cause__, OSError)
-    hint = (
-        " (the login node may not be able to reach the server; see the ssh output above)"
-        if via and transport_failure
-        else ""
-    )
-    return click.ClickException(f"Cannot reach server at {where}: {e}{hint}")
-
-
 class FullHelpGroup(click.Group):
     """A click Group that shows all subcommand help in the top-level --help."""
 
@@ -317,7 +145,7 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
 
     \b
       1. preprocess  — convert source DICOMs/images to JPG batches
-      2. serve       — serve the work directory for review in a browser (or `review`, to classify locally)
+      2. review      — review in a browser on this machine (or `serve`, for a browser on your laptop over SSH)
       3. status      — check review progress and counts
       4. export      — write the result: one row per source image (on the machine holding the work dir)
 
@@ -493,112 +321,196 @@ def preprocess(sources, batch_size, work_dir, colormap, access, allow_skipped, j
         )
 
 
-def _reviewer(ctx: click.Context, param: click.Parameter, value: str | None) -> str:
-    """--reviewer, else $IMAGE_REVIEW_REVIEWER, else the login name, checked like the server checks it."""
-    if value is None:
-        try:
-            value = getpass.getuser()
-        except (
-            KeyError,
-            OSError,
-        ):  # no USER/LOGNAME and no passwd entry (some containers): KeyError <3.13, OSError >=3.13
-            raise click.BadParameter("cannot determine your user name; pass --reviewer NAME") from None
-    try:
-        return parse_reviewer(value)
-    except ValueError as e:
-        raise click.BadParameter(str(e)) from None
+def _loopback_port(ctx: click.Context, param: click.Parameter, value: int) -> int:
+    """--port: 0 (any free port) or one of server.LOOPBACK_PORTS, checked before the work directory is opened."""
+    from .server import LOOPBACK_PORTS
 
-
-def unknown_batch_message(batch: str, known: set[str]) -> str | None:
-    """Why `batch` cannot be reviewed, or None when it names a batch in the manifest."""
-    if batch in known:
-        return None
-    names = sorted(known)
-    listed = ", ".join(names[:5]) + (", ..." if len(names) > 5 else "")
-    return f"Unknown batch {batch!r}; known batches: {listed or '(none)'}."
+    if value != 0 and value not in LOOPBACK_PORTS:
+        raise click.BadParameter(f"{value} must be 0 (any free port) or 1024-65535.")
+    return value
 
 
 @cli.command()
 @click.option(
-    "--mode", type=click.Choice(get_args(MarkMode)), default="single", show_default=True, help="Review display mode."
-)
-@click.option(
-    "--pass",
-    "pass_number",
-    type=click.IntRange(1, MAX_PASS),
-    default=None,
-    help=f"Pass number, 1 to {MAX_PASS} (auto-detected if omitted).",
-)
-@click.option(
-    "--batch",
-    type=str,
-    default=None,
-    help="Restrict to a specific batch; [b] at the end of the list stays in it [default: the first batch with images matching the filter, and [b] moves on to the next].",
-)
-@click.option(
-    "--filter",
-    "status_filter",
-    type=click.Choice(get_args(StatusFilter)),
-    default="unreviewed",
+    "--work-dir",
+    type=click.Path(exists=True),
+    default=DEFAULT_WORK_DIR,
     show_default=True,
-    help="Which images to show: unreviewed = images still to do (UNREVIEWED and FLAGGED).",
+    help="Work directory containing preprocessed data.",
 )
 @click.option(
-    "--rotate",
-    type=click.Choice(get_args(Rotation)),
-    default="auto",
+    "--port",
+    type=int,
+    default=0,
     show_default=True,
-    help="Rotate images 90 degrees in grids: auto = only when that saves a grid.",
+    callback=_loopback_port,
+    help="The port on 127.0.0.1 to serve on: 1024-65535, or 0 for any free one.",
 )
-@click.option(
-    "--reviewer",
-    envvar="IMAGE_REVIEW_REVIEWER",
-    default=None,
-    callback=_reviewer,
-    help="Name recorded with each verdict in review.tsv, 1-64 printable characters, not all spaces [default: your login name]. "
-    "An unauthenticated claim: it is recorded as given, not verified. Also read from $IMAGE_REVIEW_REVIEWER.",
-)
-@work_dir_option
-@remote_option(REVIEW_REMOTE_HELP)
-@via_option
-def review(mode, pass_number, batch, status_filter, rotate, reviewer, work_dir, remote, via):
-    """Open an interactive review session for classifying images.
+@click.option("--no-browser", is_flag=True, help="Do not open a browser; open the URL yourself.")
+def review(work_dir, port, no_browser):
+    """Review a work directory in a browser on this machine.
 
-    \b
-    Keyboard controls:
-      c / d       — mark image CLEAN / DIRTY
-      Arrow keys  — navigate between images
-      Space       — toggle autoplay
-      q           — quit
+    This serves the browser page on 127.0.0.1 and opens it in your
+    browser. The URL contains an access token: treat it like a password.
+    When stdout is not a terminal, the URL is not printed: open the
+    private file under ~/.image-review/ that is named instead. To review
+    data on another machine, such as a cluster, use `serve`.
+    Needs Linux or macOS.
     """
-    with requires_extra("viewer"):
-        import pygame as pg
+    if sys.platform == "win32":
+        raise click.ClickException("review needs Linux or macOS")
 
-        from .controller import ReviewSession
+    def start(store: LocalStore, stack: contextlib.ExitStack) -> "ReviewServer":
+        return _serve_loopback(store, port, not no_browser, stack)
 
-    # a dropped terminal or ssh session, or Ctrl-C (SDL leaves SIGINT alone); a second signal must not cut the cleanup
-    with interrupt_once(signal.SIGINT, *HANGUP_SIGNALS), open_store(work_dir, remote, via) as store:
-        if batch is not None and (problem := unknown_batch_message(batch, {row.batch for row in store.manifest()})):
-            raise click.BadParameter(problem, param_hint="'--batch'")
-        # after the store: SDL must not steal terminal focus during ssh password/MFA prompts
-        pg.init()
+    _serve_until_stopped(Path(work_dir), start)
+
+
+def redirect_page(url: str) -> str:
+    """The redirect file's HTML: a meta refresh to `url`, and a link to it for a browser that ignores the refresh."""
+    target = html.escape(url)
+    return (
+        "<!doctype html>\n"
+        '<meta charset="utf-8">\n'
+        f'<meta http-equiv="refresh" content="0; url={target}">\n'
+        "<title>image-review</title>\n"
+        f'<p><a href="{target}">Open the review page</a></p>\n'
+    )
+
+
+def has_display(platform: str, environ: Mapping[str, str]) -> bool:
+    """Whether a graphical session on this machine is plausible: never inside an ssh session ($SSH_CONNECTION, so
+    `ssh -X` to a shared node opens no browser there); else macOS, or a $DISPLAY or $WAYLAND_DISPLAY.
+
+    A display does not rule out a terminal browser as the default; `graphical_browser` refuses those.
+    """
+    if environ.get("SSH_CONNECTION"):
+        return False
+    return platform == "darwin" or bool(environ.get("DISPLAY") or environ.get("WAYLAND_DISPLAY"))
+
+
+CONSOLE_BROWSERS = frozenset({"lynx", "w3m", "links", "elinks", "www-browser"})
+
+
+def is_graphical(browser: webbrowser.BaseBrowser) -> bool:
+    """False for a browser object that would run in this terminal: a foreground `GenericBrowser` (as from $BROWSER),
+    or a known console browser by name."""
+    return type(browser) is not webbrowser.GenericBrowser and Path(browser.name).name not in CONSOLE_BROWSERS
+
+
+def graphical_browser() -> webbrowser.BaseBrowser | None:
+    """The default browser object, or None if there is none or it is not graphical (see `is_graphical`)."""
+    try:
+        browser = webbrowser.get()
+    except webbrowser.Error:
+        return None
+    return browser if is_graphical(browser) else None
+
+
+def _serve_loopback(store: LocalStore, port: int, open_browser: bool, stack: contextlib.ExitStack) -> "ReviewServer":
+    """Bind the loopback server with a fresh token, write the redirect file and announce it; returns the server.
+
+    The server's and the file's cleanup are registered on `stack`. Failures become ClickExceptions.
+    """
+    from .server import make_loopback_server, safe_name, short_host, write_private_file
+
+    try:
+        server, token = make_loopback_server(store, port)  # --port is already checked
+    except OSError as e:
+        raise click.ClickException(f"Cannot listen on 127.0.0.1:{port}: {e}")
+    _close_with(stack, server, store)
+    url = browser_url(token, server.server_port)  # the bound port: --port 0 picks one
+    try:
+        redirect = write_private_file(f"review-{safe_name(short_host())}-{os.getpid()}.html", redirect_page(url))
+    except OSError as e:
+        raise click.ClickException(f"Cannot write browser redirect file: {e}")
+    stack.callback(redirect.unlink, missing_ok=True)
+    _announce_loopback(url, redirect, open_browser, stack)
+    return server
+
+
+BROWSER_THREAD = "image-review-browser"  # names the thread that opens the browser
+
+
+def _announce_loopback(url: str, redirect: Path, open_browser: bool, stack: contextlib.ExitStack) -> None:
+    """Print the URL on a terminal, else the redirect file's path; then, if asked, open the browser on the file.
+
+    The browser gets the file's URI, so the token never appears in a process's command line. It is chosen and
+    opened from a daemon thread, so neither a slow choice nor a browser that does not return can hold up the
+    server, which is already listening. The thread's stop is registered on `stack` after the redirect file's
+    removal, so it runs first: once cleanup starts, the thread opens and prints nothing.
+    """
+    tty = sys.stdout.isatty()
+    print("Serving review data on 127.0.0.1 for browser review on this machine.")
+    if tty:
+        print("\nOpen this URL. It contains an access token; treat it like a password.\n")
+        print(url)
+    else:
+        print("\nStdout is not a terminal, so the URL (it contains an access token; treat it like a")
+        print("password) is not printed. Open this file (mode 0600) in your browser:\n")
+        print(f"  {redirect}")
+    print(flush=True)
+    display = open_browser and has_display(sys.platform, os.environ)
+    if open_browser and not display:
+        print("No display found, so no browser was opened; open it yourself.")
+    print("Press Ctrl-C to stop.", flush=True)
+    if display:
+        where = "the URL above" if tty else f"the URL from `cat {shlex.quote(str(redirect))}`"
+        opener = _BrowserOpener(redirect, where)
+        stack.callback(opener.stop)
+        threading.Thread(target=opener.run, name=BROWSER_THREAD, daemon=True).start()
+
+
+class _BrowserOpener:
+    """Choose a graphical browser and open the redirect file in it, saying how it went, until stopped.
+
+    Run in its own thread: choosing can take seconds (webbrowser runs xdg-settings and the like). Opening and
+    each print happen under `_lock` after checking `_stopped`, so none happens once `stop` has returned.
+    """
+
+    STOP_WAIT = 5.0  # seconds stop waits for an open or print in progress; it never blocks cleanup for longer
+
+    def __init__(self, redirect: Path, where: str):
+        self._redirect = redirect
+        self._where = where  # where else to find the URL
+        self._lock = threading.Lock()
+        self._stopped = threading.Event()
+
+    def stop(self) -> None:
+        acquired = self._lock.acquire(timeout=self.STOP_WAIT)
+        self._stopped.set()
+        if acquired:
+            self._lock.release()
+
+    def _say(self, *lines: str) -> None:
+        with self._lock:
+            if not self._stopped.is_set():
+                print("\n".join(lines), flush=True)
+
+    def run(self) -> None:
         try:
-            session = ReviewSession(
-                store=store,
-                reviewer=reviewer,
-                mode=mode,
-                pass_number=pass_number,
-                batch=batch,
-                status_filter=status_filter,
-                rotation=rotate,
+            browser = graphical_browser()
+        except Exception as e:  # noqa: BLE001 - whatever webbrowser raises, the server keeps running
+            log.debug("choosing a browser failed: %s", type(e).__name__)
+            browser = None
+        if browser is None:
+            self._say("No graphical browser found, so none was opened; open it yourself.")
+            return
+        with self._lock:
+            if self._stopped.is_set():
+                return
+            try:
+                opened = browser.open(self._redirect.as_uri())
+            except Exception as e:  # noqa: BLE001 - e.g. the browser's command vanished
+                log.debug("opening the browser failed: %s", type(e).__name__)
+                opened = False
+        if opened:
+            self._say(
+                "Opened it in your browser. If the browser shows an access error (a snap browser, such as",
+                f"Ubuntu's Firefox, cannot read ~/.image-review), open {self._where} instead.",
             )
-            session.run()
-        except ReviewLogChanged as e:  # review.tsv changed under this session (a mark or undo): its statuses are stale
-            raise click.ClickException(
-                f"Not recorded: {e}. Stop any other review or serve using this work directory, then run review again."
-            ) from e
-        finally:
-            pg.quit()
+        else:
+            self._say("Could not open a browser; open it yourself.")
 
 
 def status_report(
@@ -624,8 +536,6 @@ def status_report(
 
 @cli.command()
 @work_dir_option
-@remote_option(STATUS_REMOTE_HELP)
-@via_option
 @click.option(
     "--check",
     is_flag=True,
@@ -633,12 +543,12 @@ def status_report(
     help="Exit 1 if any image is UNREVIEWED (has no verdict) or any input failed to preprocess; else 0. "
     "FLAGGED images have a DIRTY verdict, so they count as decided.",
 )
-def status(work_dir, remote, via, check):
+def status(work_dir, check):
     """Report overall and per-batch review progress (CLEAN / DIRTY / UNREVIEWED / FLAGGED counts).
 
     With --check, the exit status also says whether the review is finished: every image has a verdict.
     """
-    with open_store(work_dir, remote, via, read_only=True) as store:
+    with open_local_store(_existing_work_dir(work_dir), read_only=True) as store:
         manifest = store.manifest()
         current = store.current_pass()
         statuses = store.statuses(current)
@@ -683,8 +593,7 @@ def _report_counts(rows: list[ExportRow]) -> str:
     default=False,
     help="Export even while a writer (review or serve) has the work directory open; verdicts recorded later are missed.",
 )
-@click.option("--remote", default=None, hidden=True)  # declared only to refuse it; $IMAGE_REVIEW_REMOTE is not read
-def export(work_dir, output, report, allow_live, remote):
+def export(work_dir, output, report, allow_live):
     """Write the allowlist of releasable files as TSV: source_sha256, image_id, pass_number, timestamp, reviewer.
 
     Default deny: release a file only if both its path (image_id; a ZIP entry is `<zip>::<entry>`) and its SHA-256
@@ -694,14 +603,7 @@ def export(work_dir, output, report, allow_live, remote):
     reviewer, reason, source_sha256): DIRTY (a FLAGGED image is DIRTY), UNREVIEWED, NOT_REVIEWED when preprocess
     failed on it or notes.tsv lists content its review image does not show (an icon, thumbnail, overlay or trailing
     data), IGNORED when preprocess did not take it for an image, and CLEAN ones not allowlisted, with why.
-    image_ids are source paths and may hold PHI, so export runs only where the work directory is, never with
-    --remote; $IMAGE_REVIEW_REMOTE is ignored.
     """
-    if remote is not None:
-        raise click.UsageError(
-            "export does not work with --remote: image_ids stay on the server. Run export on the machine (cluster) "
-            "holding the work directory, with --work-dir."
-        )
     if report is not None and output is not None and os.path.realpath(report) == os.path.realpath(output):
         raise click.UsageError("--report and --output name the same file.")
     path = _existing_work_dir(work_dir)
@@ -754,49 +656,32 @@ def export(work_dir, output, report, allow_live, remote):
     help="Work directory containing preprocessed data.",
 )
 @click.option(
-    "--https",
-    "https_mode",
-    is_flag=True,
-    help="Deprecated: serve HTTPS over TCP for the `review --remote` client, instead of browser review.",
-)
-@click.option(
-    "--bind",
-    default=None,
-    help="HTTPS mode, deprecated; implies --https. Hostname/IPv4 address to bind and advertise [default: this machine's FQDN].",
-)
-@click.option(
-    "--port",
-    type=click.IntRange(0, 65535),
-    default=0,
-    help="HTTPS mode, deprecated; implies --https. Port to listen on (0 picks a free port).",
-)
-@click.option(
     "--socket-path",
     envvar="IMAGE_REVIEW_SOCKET_PATH",
     default=None,
-    help="The socket to serve on [default: ~/.image-review/serve-HOST-PID.sock]; also read from $IMAGE_REVIEW_SOCKET_PATH, which is ignored with --https.",
+    help="The socket to serve on [default: ~/.image-review/serve-HOST-PID.sock]; also read from $IMAGE_REVIEW_SOCKET_PATH.",
 )
 @click.option(
     "--via",
     envvar="IMAGE_REVIEW_VIA",
     default=None,
-    help="The login node (e.g. user@login.cluster) to put in the printed ssh command; not with --https (also read from $IMAGE_REVIEW_VIA, which is ignored with --https).",
+    help="The login node (e.g. user@login.cluster) to put in the printed ssh command (also read from $IMAGE_REVIEW_VIA).",
 )
 @click.option(
     "--direct",
     envvar="IMAGE_REVIEW_DIRECT",
     is_flag=True,
-    help="Your laptop reaches compute nodes without a jump host; the printed ssh command omits -J. Not with --https (also read from $IMAGE_REVIEW_DIRECT, which is ignored with --https).",
+    help="Your laptop reaches compute nodes without a jump host; the printed ssh command omits -J (also read from $IMAGE_REVIEW_DIRECT).",
 )
 @click.option(
     "--ssh-host",
     default=None,
-    help="The node name to put in the printed ssh command, if its own FQDN does not work from your laptop [default: this machine's FQDN]. Not with --https.",
+    help="The node name to put in the printed ssh command, if its own FQDN does not work from your laptop [default: this machine's FQDN].",
 )
-def serve(work_dir, https_mode, bind, port, socket_path, via, direct, ssh_host):
+def serve(work_dir, socket_path, via, direct, ssh_host):
     """Serve a work directory for browser review over SSH.
 
-    By default this serves plain HTTP on a Unix socket, for a browser on your
+    This serves plain HTTP on a Unix socket, for a browser on your
     laptop reached through `ssh -L`. Images never leave this machine except
     to a client holding the URL, which contains an access token: treat it
     like a password. When stdout is not a terminal (e.g. sbatch), the URL is
@@ -805,12 +690,6 @@ def serve(work_dir, https_mode, bind, port, socket_path, via, direct, ssh_host):
     A-Za-z0-9_-) is used instead of a fresh one, so the URL stays the same
     across restarts: generate it inside the job, e.g.
     export IMAGE_REVIEW_TOKEN=$(openssl rand -hex 16).
-
-    --https (deprecated; also implied by --bind or --port) serves HTTPS over
-    TCP for the `review --remote` client instead, and prints an ir://
-    connection string, handled the same way. $IMAGE_REVIEW_TOKEN,
-    $IMAGE_REVIEW_SOCKET_PATH, $IMAGE_REVIEW_VIA and $IMAGE_REVIEW_DIRECT are
-    ignored in HTTPS mode.
     """
     from .tunnel import parse_ssh_host, parse_via
 
@@ -819,23 +698,14 @@ def serve(work_dir, https_mode, bind, port, socket_path, via, direct, ssh_host):
     def given(name: str) -> bool:
         return ctx.get_parameter_source(name) is click.core.ParameterSource.COMMANDLINE
 
-    https_mode = https_mode or bind is not None or given("port")
     if socket_path == "":  # e.g. --socket-path "$UNSET"; Path("") would quietly mean the current directory
         raise click.UsageError("--socket-path must not be empty.")
-    if https_mode:
-        for name in ("socket_path", "via", "direct", "ssh_host"):
-            if given(name):
-                option = "--" + name.replace("_", "-")
-                raise click.UsageError(f"{option} cannot be used in HTTPS mode (--https, --bind or --port).")
-        socket_path, via, direct = None, None, False  # from the environment, which only means something in socket mode
     if direct and via is not None:
         if given("via"):
             raise click.UsageError("--direct and --via are mutually exclusive.")
-        via = None  # from $IMAGE_REVIEW_VIA, which is meant for `review`
-    if not https_mode and not has_unix_sockets():
-        raise click.ClickException(
-            "this system has no Unix sockets; browser review needs one (serve --https is deprecated)"
-        )
+        via = None  # --direct, from either source, drops a $IMAGE_REVIEW_VIA
+    if not has_unix_sockets():
+        raise click.ClickException("this system has no Unix sockets; browser review needs one")
     if via is not None:
         try:
             via = parse_via(via)
@@ -848,26 +718,33 @@ def serve(work_dir, https_mode, bind, port, socket_path, via, direct, ssh_host):
         except ValueError as e:
             raise click.ClickException(f"Invalid --ssh-host: {e}")
     token: Token | None = None
-    if not https_mode and (raw_token := os.environ.get("IMAGE_REVIEW_TOKEN")):  # empty counts as unset
+    if raw_token := os.environ.get("IMAGE_REVIEW_TOKEN"):  # empty counts as unset
         try:
             token = parse_token(raw_token)
         except ValueError as e:  # the message never holds the value
             raise click.ClickException(f"Invalid $IMAGE_REVIEW_TOKEN: {e}")
-    if https_mode:
-        log.warning(SERVE_HTTPS_DEPRECATED.format(command=ctx.info_name, url=BROWSER_REVIEW_DOCS))
 
+    def start(store: LocalStore, stack: contextlib.ExitStack) -> "ReviewServer":
+        server, announce = _serve_socket(store, socket_path, token, via, direct, ssh_host, stack)
+        announce(stack)
+        return server
+
+    _serve_until_stopped(Path(work_dir), start)
+
+
+def _serve_until_stopped(work_dir: Path, start: Callable[[LocalStore, contextlib.ExitStack], "ReviewServer"]) -> None:
+    """Open the work directory (taking its lock), start a server on it with `start`, and serve until stopped.
+
+    `start` binds and announces the server and registers its cleanup on the stack (see `_close_with`).
+    Ctrl-C, SIGTERM and SIGHUP stop it; every exit path closes the server and releases the lock.
+    """
     try:
         # Slurm stops jobs with SIGTERM (scancel, time limit): shut down like Ctrl-C so cleanup runs.
         # Installed before the lock is taken, so every exit path releases it. Only the first signal counts: a second
         # one during cleanup would cut short the lock release or the wait for a mark in flight.
         with interrupt_once(signal.SIGINT, *TERMINATION_SIGNALS), contextlib.ExitStack() as stack:
-            store = stack.enter_context(open_local_store(Path(work_dir)))  # holds the work dir lock
-            if not https_mode:
-                server, announce = _serve_socket(store, socket_path, token, via, direct, ssh_host, stack)
-            else:
-                server, announce = _serve_tls(store, bind, port, stack)
-            announce(stack)
-            server.serve_forever()
+            store = stack.enter_context(open_local_store(work_dir))  # holds the work dir lock
+            start(store, stack).serve_forever()
     except KeyboardInterrupt:
         pass
 
@@ -875,28 +752,11 @@ def serve(work_dir, https_mode, bind, port, socket_path, via, direct, ssh_host):
 def _close_with(stack: contextlib.ExitStack, server: "ReviewServer", store: LocalStore) -> None:
     """Register the server's shutdown on `stack` as soon as it exists.
 
-    Exit order (LIFO): the announced file, the socket (which, for a Unix socket, also removes the socket file),
+    Exit order (LIFO): the announced file, the socket (which also removes the socket file),
     then the store; a handler thread may still be marking.
     """
     stack.callback(_close_store_after_marks, server, store)
     stack.callback(server.server_close)
-
-
-def _serve_tls(
-    store: LocalStore, bind: str | None, port: int, stack: contextlib.ExitStack
-) -> tuple["ReviewServer", Callable[[contextlib.ExitStack], None]]:
-    """Bind the HTTPS server; returns it and the function that announces how to connect."""
-    from .server import make_server
-
-    host = socket.getfqdn() if bind is None else bind
-    try:
-        server, target = make_server(store, host, port)
-    except ValueError as e:  # wildcard bind or unadvertisable host; make_server closed its socket
-        raise click.ClickException(str(e))
-    except OSError as e:
-        raise click.ClickException(f"Cannot listen on {host}:{port} (IPv4 hostnames/addresses only): {e}")
-    _close_with(stack, server, store)
-    return server, functools.partial(_announce, target)
 
 
 def _serve_socket(
@@ -932,42 +792,14 @@ def _serve_socket(
     return server, announce
 
 
-def _announce(target: RemoteTarget, stack: contextlib.ExitStack) -> None:
-    """Tell the operator how to connect: print the connection string on a terminal, else write it to a private file.
-
-    The file's removal is registered on `stack`.
-    """
-    from .server import write_connection_file
-
-    uri = target.to_uri()
-    if sys.stdout.isatty():
-        print("Serving review data. The connection string grants access; treat it like a password.\n")
-        print(uri)
-        remote_arg = f"'{uri}'"
-    else:
-        try:
-            connection_file = write_connection_file(target)
-        except OSError as e:
-            raise click.ClickException(f"Cannot write connection file: {e}")
-        stack.callback(connection_file.unlink, missing_ok=True)
-        print("Serving review data. Stdout is not a terminal, so the connection string (an access token;")
-        print(f"treat it like a password) was written to {connection_file} (mode 0600) on this node.")
-        print("Home directories are usually shared with the login node, so on your laptop use:")
-        remote_arg = f'"$(ssh <user>@<login-node> cat {connection_file})"'
-    print("\nOn your laptop, directly:")
-    print(f"  image-review review --remote {remote_arg}")
-    print("or through an SSH tunnel via the login node:")
-    print(f"  image-review review --remote {remote_arg} --via <user>@<login-node>")
-    print("\nPress Ctrl-C to stop.", flush=True)
-
-
 BROWSER_PORT = 8080  # the laptop-side port in the printed ssh command and URL; changeable if busy
 
 
 def browser_url(token: str, port: int = BROWSER_PORT) -> str:
-    """The URL to open on the laptop; the token rides in the fragment, which the browser never sends.
+    """The URL to open in the browser; the token rides in the fragment, which the browser never sends.
 
-    127.0.0.1, not localhost: the forward below binds only that address, so nothing else can answer the URL.
+    127.0.0.1, not localhost: `review`'s server and `serve`'s ssh forward bind only that address, so nothing
+    listening on ::1 can answer the URL.
     """
     return f"http://127.0.0.1:{port}/#{token}"
 

@@ -1,7 +1,7 @@
 """Grid layout: image sizes from JPEG headers and their bin-packing into grids.
 
-Pure functions over plain data (stdlib and rectpack only), so both the pygame viewer and `serve` compute the same
-layouts; this module must not import pygame or PIL.
+Pure functions over plain data (stdlib and rectpack only), which `serve` uses to plan the grids the page draws;
+this module must not import PIL.
 """
 
 from collections.abc import Mapping
