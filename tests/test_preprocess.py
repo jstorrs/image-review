@@ -81,6 +81,7 @@ from image_review.preprocess import (
     _jpeg_frame_size,
     _mpo_unrendered,
     _png_end,
+    _png_pixels_end,
     _rle_decoded_length,
     _to_uint8,
     _trailing_data_notes,
@@ -3448,6 +3449,24 @@ class ImageEndTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(_png_end(data), end)
 
+    def test_png_pixels_end_is_after_the_idat_run(self):
+        png = _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8))
+        with_chunk = _png_with_exif_after_pixels(png, _exif_ifd1([]))
+        bad = struct.pack(">I4s", 1, b"XXXX") + b"a" + bytes(4)  # a critical chunk with a wrong CRC
+        for name, data, end in (
+            ("whole", png, len(png) - 12),
+            ("IEND's CRC cut", png[:-1], len(png) - 12),
+            ("an IEND with data", png[:-12] + _png_chunk(b"IEND", b"secret"), len(png) - 12),
+            ("no IEND", png[:-12], len(png) - 12),
+            ("a chunk after the pixels", with_chunk, len(png) - 12),
+            ("a bad chunk after the pixels", png[:-12] + bad + png[-12:], len(png) - 12),
+            ("text instead of IEND", png[:-12] + b"Patient: DOE^JANE " * 3, len(png) - 12),
+            ("signature only", png[:8], 8),
+        ):
+            with self.subTest(name):
+                self.assertEqual(_png_pixels_end(data), end)
+                self.assertLessEqual(_png_pixels_end(data), _png_end(data))
+
     def test_jpeg_end_spends_its_budget(self):
         data = _gradient_jpeg(progressive=True)
         budget = _WalkBudget(markers=10**6, search_bytes=10**9)
@@ -3564,26 +3583,41 @@ class TrailingDataTest(unittest.TestCase):
                 self.assert_noted(png, PNG_MAGIC, "8 bytes after the PNG end; they begin with a PNG signature")
 
     def test_bytes_where_pillow_stops_reading_a_png(self):
-        png, jpeg = _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8)), _gradient_jpeg()
+        jpeg = _gradient_jpeg()
         text = b"Patient: DOE^JANE MRN 12345 " * 3
-        for name, data, detail in (
-            ("text instead of IEND", png[:-12] + text, f"{len(text)} bytes after the PNG end"),
-            (
-                "a JPEG before IEND",
-                png[:-12] + jpeg + png[-12:],
-                f"{len(jpeg) + 12} bytes after the PNG end; they begin with a JPEG signature",
-            ),
-            (
-                "a JPEG instead of IEND",
-                png[:-12] + jpeg,
-                f"{len(jpeg)} bytes after the PNG end; they begin with a JPEG signature",
-            ),
+        for depth, png in (
+            ("8-bit", _png_bytes(np.zeros((40, 60, 3), dtype=np.uint8))),
+            # Decoded by libpng, which reads IEND (imagecodecs 2026.11.11 and later), not by Pillow
+            ("16-bit", imagecodecs.png_encode(np.full((40, 60, 3), 4000, dtype=np.uint16))),
         ):
-            with self.subTest(name):
-                self.assert_renders_as(data, png, detail)
-        for name, data in (("no IEND", png[:-12]), ("IEND's CRC cut", png[:-2])):
-            with self.subTest(name):
-                self.assertEqual(decode_raster(data)[1], ())
+            for name, data, detail in (
+                ("text instead of IEND", png[:-12] + text, f"{len(text)} bytes after the PNG end"),
+                (
+                    "a JPEG before IEND",
+                    png[:-12] + jpeg + png[-12:],
+                    f"{len(jpeg) + 12} bytes after the PNG end; they begin with a JPEG signature",
+                ),
+                (
+                    "a JPEG instead of IEND",
+                    png[:-12] + jpeg,
+                    f"{len(jpeg)} bytes after the PNG end; they begin with a JPEG signature",
+                ),
+            ):
+                with self.subTest(depth, case=name):
+                    self.assert_renders_as(data, png, detail)
+            bad = struct.pack(">I4s", 1, b"XXXX") + b"a" + bytes(4)  # a critical chunk with a wrong CRC
+            for name, data in (
+                ("no IEND", png[:-12]),
+                ("IEND's CRC cut", png[:-2]),
+                ("a chunk after the pixels and no IEND", _png_with_exif_after_pixels(png, _exif_ifd1([]))[:-12]),
+                ("a bad chunk after the pixels", png[:-12] + bad + png[-12:]),
+                ("a second IHDR after the pixels", png[:-12] + png[8:33] + png[-12:]),
+            ):
+                with self.subTest(depth, case=name):
+                    views, notes = decode_raster(data)
+                    self.assertEqual(notes, ())
+                    for view, expected in zip(views, decode_raster(png)[0], strict=True):
+                        np.testing.assert_array_equal(view, expected)
 
     def test_data_inside_iend_is_noted(self):
         jpeg = _gradient_jpeg()

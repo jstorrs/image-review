@@ -764,11 +764,18 @@ at a set bit.
   decoded at full depth instead, chosen from the header before any pixels
   are decoded. A PNG whose Pillow raw mode is `RGB;16B`, `LA;16B` or
   `RGBA;16B` (bit depth 16, colour type 2, 4 or 6) is decoded with
-  imagecodecs (`png_decode`, which turns a `tRNS` colour key into alpha;
-  libpng refuses a non-conformant file that Pillow would read, such as one
-  with a chunk before IHDR, so it is `failed` as `cannot decode 16-bit PNG:
-  <ExceptionClass>`, without libpng's message, which can be garbled). A TIFF whose BitsPerSample
-  is 16 and SampleFormat unsigned, with PhotometricInterpretation RGB and at
+  imagecodecs (`png_decode`, which turns a `tRNS` colour key into alpha).
+  libpng is given the file only up to the chunk after the run of IDAT chunks,
+  where Pillow's decoder stops (or an earlier point where `_png_end` stops),
+  closed with an empty IEND (`_png_pixels_end`, `_png_as_pillow_reads`). So a
+  missing IEND, one with its CRC cut or a length past the end, and any chunk
+  between the pixels and IEND do not fail the decode, as they don't in
+  Pillow; none of them changes the pixels. Trailing data is still found in the
+  whole file from `_png_end`, as for any PNG. libpng still
+  refuses other non-conformant files that Pillow would read, such as one with
+  a chunk before IHDR, so they are `failed` as `cannot decode 16-bit PNG:
+  <ExceptionClass>`, without libpng's message, which can be garbled. A TIFF
+  whose BitsPerSample is 16 and SampleFormat unsigned, with PhotometricInterpretation RGB and at
   least 3 samples or CMYK (separated) and exactly 4, is decoded with
   tifffile (first page; planar data is interleaved). In an RGB TIFF the
   first extra sample is alpha when ExtraSamples marks it unassociated
