@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "image-review"
-version = "0.4.0"
+version = "0.5.0"
 description = "A command-line tool for reviewing medical (DICOM) and general images for burned-in Protected Health Information (PHI)."
 readme = "README.md"
 license = "MIT"
