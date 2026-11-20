@@ -124,6 +124,11 @@
 
 ### Fixes
 
+- With imagecodecs 2026.11.11 or later, a 16-bit colour or alpha PNG whose IEND was missing, cut short, or declared
+  more data than the file holds (data hidden after the image, say), or with a malformed chunk after its pixels, failed
+  preprocess with
+  `cannot decode 16-bit PNG: PngError`, where an 8-bit PNG decodes. It now decodes like the 8-bit one, and the
+  extra bytes are still noted as trailing data.
 - `serve` now refuses with 400, before the token check, a request whose `Origin` header is not the page's own
   (another site, another local port, `null` or `https://`). The page itself always passes; requests with no `Origin`
   are not covered.

@@ -142,6 +142,7 @@ _HIGH_BIT_GRAY_MODES = {"I", "F", "I;16", "I;16L", "I;16B", "I;16N"}
 # Pillow's raw modes for 16-bit RGB, gray+alpha and RGBA PNGs, of which it keeps only the high byte
 _PNG_TRUNCATED_RAWMODES = {"RGB;16B", "LA;16B", "RGBA;16B"}
 _PNG_CHUNK_TYPE = re.compile(rb"[A-Za-z0-9_]{4}")  # Pillow stops reading at a chunk type that is not this
+_PNG_EMPTY_IEND = struct.pack(">I4sI", 0, b"IEND", zlib.crc32(b"IEND"))
 # One input's trailing-data check, all its JPEG walks together, steps over at most this many markers and searches at
 # most FACTOR x its size + SLACK bytes; past either it is not checked, and says so. Real files use a few hundred
 # markers at most (tens, in practice) and search each byte about once. A compressed DICOM frame's walk to its JPEG
@@ -1132,7 +1133,8 @@ def _as_tuple(value: object) -> tuple[object, ...]:
 def _png_samples(data: bytes) -> tuple[np.ndarray, np.ndarray | None]:
     """A 16-bit PNG's colour, (H, W) gray or (H, W, 3) RGB, and its alpha, if any, as integers."""
     try:
-        samples = imagecodecs.png_decode(data)  # (H, W, 2 | 3 | 4); a tRNS colour key becomes an alpha channel
+        # (H, W, 2 | 3 | 4); a tRNS colour key becomes an alpha channel
+        samples = imagecodecs.png_decode(_png_as_pillow_reads(data))
     except Exception as exc:
         # The class only: libpng's message can arrive as undecodable stack bytes, which differ from run to run
         raise DecodeError(f"cannot decode 16-bit PNG: {type(exc).__name__}") from exc
@@ -1222,6 +1224,29 @@ def _png_end(data: bytes) -> int:
             return start - 8
         pos = end + 4
     return pos
+
+
+def _png_pixels_end(data: bytes) -> int:
+    """The offset in PNG `data` of the first chunk after its run of IDAT chunks, which is where Pillow's decoder stops,
+    or of an earlier chunk where `_png_end` stops (an invalid type, or data and CRC that run past the end), else where
+    the walk ends. Never past `_png_end`."""
+    pos, in_pixels = 8, False  # after the signature
+    for kind, start, end in _png_chunks(data):
+        if in_pixels and kind != b"IDAT":
+            return start - 8
+        if kind == b"IEND" or not _PNG_CHUNK_TYPE.fullmatch(kind) or end + 4 > len(data):
+            return start - 8
+        in_pixels = kind == b"IDAT"
+        pos = end + 4
+    return pos
+
+
+def _png_as_pillow_reads(data: bytes) -> bytes:
+    """PNG `data` up to `_png_pixels_end`, closed with an empty IEND, for libpng. libpng reads every chunk through
+    IEND (imagecodecs 2026.11.11 and later) and fails on a missing or cut IEND, one whose length runs past the end, or
+    a bad chunk after the pixels, all of which Pillow ignores; none of those chunks changes the pixels, and the
+    trailing-data check still reads `data` itself, from `_png_end`."""
+    return data[: _png_pixels_end(data)] + _PNG_EMPTY_IEND
 
 
 class _OverBudget(Exception):
