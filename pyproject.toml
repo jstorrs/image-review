@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]  # 77: PEP 639 license expressions
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "image-review"
 version = "0.4.0"
 description = "A command-line tool for reviewing medical (DICOM) and general images for burned-in Protected Health Information (PHI)."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Judd Storrs"}]
 classifiers = [
     "Programming Language :: Python :: 3",
