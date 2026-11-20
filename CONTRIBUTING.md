@@ -147,6 +147,20 @@ rest; together they are enough to rebuild the tool.
 | Algorithms, invariants, the wire API, function contracts | `docs/reference/specification.md` |
 | The quick-start block | `docs/quickstart.md`, mirrored word for word in the README |
 
+## Releasing
+
+`.github/workflows/release.yml` publishes to [PyPI](https://pypi.org/project/image-review/)
+through Trusted Publishing; there is no API token. To release:
+
+1. On `main`, set `version` in `pyproject.toml` and turn `## Unreleased` in
+   `CHANGELOG.md` into the version's heading, in one commit.
+2. Tag that commit `v<version>` (for example `v0.5.0`) and push the tag.
+
+The workflow refuses a tag that doesn't match `pyproject.toml`, builds the
+sdist and wheel, and uploads them from the `pypi` environment. It also refuses a
+tag on a commit that isn't on `main`. PyPI never accepts the same version
+twice: to replace a broken release, yank it on PyPI and release a new version.
+
 ## `git blame`
 
 The one-off `ruff format` reformat is listed in `.git-blame-ignore-revs`. To

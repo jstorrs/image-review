@@ -3,12 +3,12 @@
 Requires Python >= 3.12.
 
 ```bash
-pip install .                 # every command
+pip install image-review      # every command, from PyPI
 ```
 
-That installs from a source checkout. From a wheel or package index, use
-`pip install image-review`; from a clone, `uv sync` installs the same as
-`pip install .`. `review` needs only a browser on the same machine.
+`pipx install image-review` or `uv tool install image-review` does the same in
+an environment of its own. From a clone, `pip install .` or `uv sync` installs
+the same. `review` needs only a browser on the same machine.
 
 ## What gets installed
 
@@ -38,13 +38,13 @@ module names vary by site) or from your own interpreter or `uv`, then:
 module load python/3.12                  # or skip if python3.12 is already on PATH
 python3.12 -m venv ~/venvs/image-review  # or: uv venv --seed --python 3.12 ~/venvs/image-review
 source ~/venvs/image-review/bin/activate
+pip install image-review
+# or an unreleased branch or tag from GitHub:
 pip install 'image-review @ git+https://github.com/jstorrs/image-review@<branch-or-tag>'
 # or, from a clone of the repository:
 pip install -e .
 ```
 
-If the repository is private, the https URL needs credentials (or use an
-`ssh://git@github.com/jstorrs/image-review` URL with a key on the cluster).
 Activate the same environment in your `sbatch` scripts.
 
 ## Compressed DICOMs
